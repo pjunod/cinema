@@ -961,6 +961,18 @@ async fn build_inner(
     )
     .ok_or("finite rendition metadata projection overflowed or is unsupported")?;
     let object_version = finite_profile::source_version(&recipe)?;
+    // The frozen version must still name the live object before any S is
+    // reused or any R admitted: a different file at the same path (even with
+    // the same size and mtime) refuses here with "source changed", exactly
+    // as a legacy build does, instead of failing later in the producer. A
+    // refusal leaves any recovered S protected and unchanged.
+    drop(
+        crate::fragment_index_cluster::open_source_fence(
+            &recipe.file,
+            Some(object_version.as_str()),
+        )
+        .await?,
+    );
     let segment_count = u32::try_from(plan.len())
         .map_err(|_| "finite software segment count overflows".to_owned())?;
     let media_file_id = recipe.file.id.to_string();
@@ -970,20 +982,6 @@ async fn build_inner(
         .map_err(|error| format!("recovered finite software output is unresolved: {error}"))?;
     if application_owner_bytes.is_some() && recovered.is_some() {
         return Err("adaptive attempt requires a fresh finite producer owner".into());
-    }
-    if recovered.is_some() {
-        // A recovered S stands for the exact source object its claim names.
-        // A different object at the same path (even with the same size and
-        // mtime) must not attach to it: fence the live source against that
-        // version first, as a legacy build does. A refusal leaves the
-        // recovered S protected and unchanged.
-        drop(
-            crate::fragment_index_cluster::open_source_fence(
-                &recipe.file,
-                Some(object_version.as_str()),
-            )
-            .await?,
-        );
     }
     if let Some(output) = recovered {
         let projected_metadata = projected_metadata
