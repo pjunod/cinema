@@ -43,7 +43,7 @@ decoder change.
 | Platform | Retained evidence | Remaining physical evidence |
 |---|---|---|
 | Web | Safari fitted handoff, 60 ms seek and natural 206.864 s completion | Optical mapping and wider browser coverage |
-| Apple | Physical tvOS fitted handoff and 65 ms seek; physical iPhone fitted handoff, 69 ms seek and natural 206.864 s completion | Optical mapping; native macOS coverage; unresolved tvOS cold-entry failure |
+| Apple | Physical tvOS fitted handoff and 65 ms seek, physical iPhone fitted handoff and 69 ms seek, and the Lab308 Designed for iPad app's fitted handoff and 193 ms seek on Mac | Optical mapping, independent AppKit client coverage, and the earlier unclassified tvOS cold-entry timeout |
 | Android | Physical Lenovo corrected fitted handoff, 911 ms seek and natural 206.864 s completion, zero interruptions and dropped frames | Optical mapping and wider device coverage |
 | Linux player | Installed Player native P7 control and retained fitted P8.1 renderer control both reach natural EOF with zero drops | Bind same-run native FEL composition evidence; optical mapping |
 
@@ -135,6 +135,13 @@ five dropped of 1,399 total video frames at the terminal observation.
 Display output was unverified. This is a scoped browser playback witness,
 not optical mapping proof or native macOS/iOS client coverage. Its earlier
 quality-change decline is retained separately from the successful successor.
+
+The Lab308 Designed for iPad app on Mac also committed a prepared handoff
+from a 1080p VideoToolbox rendition to fitted Original in Profile 8.1. It
+presented a frame 193 ms after the backward seek and persisted natural end at
+206.864 seconds. Eighteen complete served fragments matched the fitted cache.
+The playback receipt records the app variant and the unmeasured optical output
+under effort evidence `EV-4d3ee58a6b`.
 
 The Lenovo client completed the identity control with zero dropped frames,
 but its fitted handoff retained the predecessor. A separate diagnostic build
@@ -399,7 +406,7 @@ retains its own source and protocol identities.
 |---|---|---|
 | Original native M6 | Pass retained | No repeat of the 48-point M3 experiment |
 | M5 migration | Source and exact helper/master binding retained | Preserve source/device identities |
-| Physical matrix | Fitted transport qualified on Mac, Safari, iPhone, tvOS and Android. Linux retained native Profile 7 FEL and a separate Profile 8.1 renderer control. | Optical display output remains unmeasured. |
+| Physical matrix | The Mac Designed for iPad app, Safari, iPhone, tvOS and Android recorded fitted handoffs. Linux retained native Profile 7 FEL and a separate Profile 8.1 renderer control. | Device and display limitations are listed in the platform matrix. |
 | M7 baseline | Two calibration windows and frozen evaluation192–239 bound and scored once in all four models | Retain source-bound scores |
 | Numeric margin | Frozen at 0.05 with strict shadow-tail limits before candidate work | Apply unchanged to paired outputs |
 | NP1 trials/integration | Michael and Eclipse retain separate sealed refusals. The Eclipse runtime published its held-out four-model report. | Runtime landing gate and Linux encoder packaging. |

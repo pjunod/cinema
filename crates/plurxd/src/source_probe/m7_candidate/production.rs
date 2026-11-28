@@ -771,12 +771,7 @@ pub(in crate::source_probe) async fn verify_legacy_rate_stop(
         .collect();
     let attempts = blocking(move || {
         let journal =
-            Journal::open_existing(&path, source, protocol).map_err(|error| match error {
-                journal::Error::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
-                    PrepareError::MissingLegacyProof
-                }
-                error => journal_error(error),
-            })?;
+            Journal::open_existing(&path, source, protocol).map_err(legacy_journal_error)?;
         journal
             .observe_rate_only(&bindings, |recovered| {
                 let proof = recovered.proof;
@@ -793,13 +788,16 @@ pub(in crate::source_probe) async fn verify_legacy_rate_stop(
                     encoded_video_packet_bytes: packets.payload_bytes,
                 })
             })
-            .map_err(journal_error)
+            .map_err(legacy_journal_error)
     })
     .await?;
-    let new_target = u32::try_from(refused_target).map_err(execution)?;
-    if legacy.rate_decision(&attempts).map_err(execution)?
+    let malformed_history = |_| PrepareError::Authority("valid historical NP1 rate history");
+    let new_target = u32::try_from(refused_target)
+        .map_err(|_| PrepareError::Authority("valid historical NP1 refused target"))?;
+    if legacy.rate_decision(&attempts).map_err(malformed_history)?
         != RateDecision::Inconclusive(RateStop::OutsideTargetBounds(refused_target))
-        || recipe.rate_decision(&attempts).map_err(execution)? != RateDecision::Encode(new_target)
+        || recipe.rate_decision(&attempts).map_err(malformed_history)?
+            != RateDecision::Encode(new_target)
     {
         return Err(PrepareError::Authority(
             "legacy-only rate admission refusal",
@@ -893,6 +891,20 @@ fn journal_error(error: journal::Error) -> PrepareError {
             PrepareError::Cancelled
         }
         error => execution(error),
+    }
+}
+
+fn legacy_journal_error(error: journal::Error) -> PrepareError {
+    use std::io::ErrorKind;
+
+    match error {
+        journal::Error::Io(io) if io.kind() == ErrorKind::NotFound => {
+            PrepareError::MissingLegacyProof
+        }
+        journal::Error::Io(io) if io.kind() == ErrorKind::InvalidData => {
+            PrepareError::Authority("valid historical NP1 journal")
+        }
+        error => journal_error(error),
     }
 }
 
@@ -1899,6 +1911,28 @@ fn execution(error: impl std::fmt::Display) -> PrepareError {
 mod durable_attempt_tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn legacy_journal_distinguishes_invalid_proof_from_busy_storage() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(matches!(
+            legacy_journal_error(Error::from(ErrorKind::InvalidData).into()),
+            PrepareError::Authority(_)
+        ));
+        assert!(matches!(
+            legacy_journal_error(Error::from(ErrorKind::NotFound).into()),
+            PrepareError::MissingLegacyProof
+        ));
+        assert!(matches!(
+            legacy_journal_error(journal::Error::Busy),
+            PrepareError::Execution(_)
+        ));
+        assert!(matches!(
+            legacy_journal_error(Error::from(ErrorKind::PermissionDenied).into()),
+            PrepareError::Execution(_)
+        ));
+    }
 
     fn proposal(slot: u8) -> M7CandidateIntent {
         M7CandidateIntent {
