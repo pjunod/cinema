@@ -1,6 +1,5 @@
 use super::shared::AttachmentPurpose;
 use super::*;
-use crate::fragment_index_cluster::HeldSource as _;
 
 /// In-process preparation provenance, never a native/refund capability.
 #[cfg(target_os = "linux")]
@@ -3251,7 +3250,7 @@ impl ReservedSourceVodRendition {
             if let Some(cause) = self.rendition.failure_cause() {
                 return Err(cause);
             }
-            if self.rendition.source.as_ref().missing_or_changed().await {
+            if self.rendition.source_unverified().await {
                 return Err("Source physical identity changed before readiness".into());
             }
             if let Some(verdict) = demand.expired_verdict().await {

@@ -356,6 +356,19 @@ impl Rendition {
         None
     }
 
+    /// Whether this incarnation can no longer vouch for its exact source. A
+    /// legacy rendition answers through its fence. A finite one holds no
+    /// fence: core opens its source natively (refusing a changed object) and
+    /// the incarnation is bound to the frozen version it was admitted under.
+    pub(super) async fn source_unverified(&self) -> bool {
+        use crate::fragment_index_cluster::HeldSource as _;
+        #[cfg(unix)]
+        if self.source.is_none() && self.dir.is_finite() {
+            return self.source_object_version().is_none();
+        }
+        self.source.as_ref().missing_or_changed().await
+    }
+
     pub(super) fn prepare_client_reader(
         &self,
         key: &str,

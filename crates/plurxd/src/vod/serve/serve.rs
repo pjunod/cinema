@@ -146,7 +146,7 @@ impl VodServe {
                     .ok_or("reserved rendition is not locally attached")?;
                 if rendition.closed.load(Relaxed)
                     || rendition.failure().is_some()
-                    || rendition.source.as_ref().missing_or_changed().await
+                    || rendition.source_unverified().await
                     || rendition.recipe.encoding.as_ref().is_none_or(|encoding| {
                         encoding.shared_audio.is_some()
                             || encoding.source_object_version != rung.source_object_version()
@@ -188,7 +188,7 @@ impl VodServe {
                 )
                 .await?;
                 verify_cached_quality_interval(&init, &media, rung, interval)?;
-                if rendition.source.as_ref().missing_or_changed().await {
+                if rendition.source_unverified().await {
                     return Err("reservation source changed during artifact verification".into());
                 }
                 if let Some(audio) = family.audio() {
@@ -399,7 +399,7 @@ impl VodServe {
             let (rendition, _, _) = publication.result.ok()?;
             if rendition.closed.load(Relaxed)
                 || rendition.failure().is_some()
-                || rendition.source.as_ref().missing_or_changed().await
+                || rendition.source_unverified().await
             {
                 return None;
             }
