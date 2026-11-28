@@ -2677,11 +2677,11 @@ Discovery does not grant producer authority or override the saved enable choice.
 | GET, PUT | `/api/v1/subtitle-translation` | admin bearer | Saved enable/model/profile/language preferences with opaque revision CAS. Readiness never rejects Save. |
 | GET | `/api/v1/subtitle-translation/models` | admin bearer | The two immutable Small task profiles, bounds, saved-choice hint and independent speech-task qualification. |
 | GET | `/api/v1/files/{id}/subtitle-translation/options` | bearer | Current source revision, supported profile and bounded cached asset list; no work. |
-| POST | `/api/v1/files/{id}/subtitle-translation` | bearer; `who` (see AI subtitles) | Durable operation and expiring playback demand before source hashing; exact request replay. |
+| POST | `/api/v1/files/{id}/subtitle-translation` | bearer; `who` (see AI subtitles) | Durable operation, finish demand and expiring playback demand before source hashing. Repeating the same request replays its result. |
 | GET | `/api/v1/files/{id}/subtitle-translation/assets` | bearer | Explicit cursor page of cached assets. |
 | GET | `/api/v1/subtitle-translation/operations/{id}` | bearer | Closed live operation, source-check and current-job observation. |
 | PUT, DELETE | `/api/v1/subtitle-translation/operations/{id}/demands/{demand}` | bearer; `who` (see AI subtitles) | Renew or release one viewer's versioned interest. |
-| POST | `/api/v1/subtitle-translation/operations/{id}/stop` | bearer; `who` (see AI subtitles) | Durable global Stop advances the epoch and fences preparation, ranges and publication. |
+| POST | `/api/v1/subtitle-translation/operations/{id}/stop` | bearer | Release this account’s playback demands. Other viewers retain their demands and the track can finish in the background. |
 | POST | `/api/v1/subtitle-translation/operations/{id}/retry` | bearer; `who` (see AI subtitles) | Explicit observed-state/epoch or failed-range revision CAS; heartbeats cannot undo Stop. |
 | GET | `/api/v1/subtitle-translation/operations/{id}/failed-ranges` | bearer | Bounded current-view failures under a read lease and scoped cursor. |
 | GET | `/api/v1/subtitle-translation/assets/{id}/manifest` | bearer | Windowed coverage/segment descriptors and a 30-second read lease. |
@@ -2695,10 +2695,11 @@ ordinary clock advancement, pause/rate changes and continuous attachment
 handoffs; an actual seek/discontinuous traversal replaces it. Range claims
 capture at most16 currently authorizing demand identities. A running range
 may finish while one captured live traversal continues, even after its core
-leaves the scheduling window. A new seek, expired/released demand, Stop,
-source/producer replacement or lost claim/resource authority revokes that
-support. New queued claims still require useful current-window demand.
-Omitted continuity uses the legacy current-window-only lifetime. Exact replay
+leaves the scheduling window. A seek or a released or expired playback demand
+revokes that traversal. A separate finish demand lets the operation complete
+at maintenance priority once no viewer needs the range. Source or producer
+replacement and lost claim or resource authority still fence publication.
+Exact replay
 includes the original UUID; a client resolves an uncertain renewal before
 sending the next generation with its new traversal identity.
 

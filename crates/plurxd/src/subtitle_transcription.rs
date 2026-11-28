@@ -342,26 +342,6 @@ fn selected_audio(tracks: &[plurx_core::domain::AudioStream], language: &str) ->
     best(false).or_else(|| best(true))
 }
 #[cfg(test)]
-fn missing_language(file: &MediaFile, language: &str) -> bool {
-    !file.subtitle_streams.iter().any(|track| {
-        track
-            .language
-            .as_deref()
-            .is_some_and(|existing| language_matches(existing, language))
-    })
-}
-#[cfg(test)]
-fn enqueue_request(
-    file: &MediaFile,
-    config: &Settings,
-    model: &Model,
-    command: &Path,
-) -> Result<EnqueueJob, StoreError> {
-    let audio_index = selected_audio(&file.audio_streams, &config.language)
-        .ok_or_else(|| StoreError::Task("no matching spoken-language audio track".into()))?;
-    enqueue_request_selected(file, config, model, command, audio_index)
-}
-#[cfg(test)]
 fn enqueue_request_selected(
     file: &MediaFile,
     config: &Settings,
@@ -1991,64 +1971,6 @@ async fn watch_capacity_until(available: impl Fn() -> bool) {
             return;
         }
     }
-}
-
-#[cfg(test)]
-async fn automatic_page(
-    state: &AppState,
-    config: &Settings,
-    model: &Model,
-    command: &Path,
-    lease: &crate::job_lease::ActiveJobLease,
-) -> Result<(), StoreError> {
-    let now = crate::state::clock_ms();
-    let next = state
-        .store
-        .get_setting(&format!("{PREFIX}next_run"))
-        .await?
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(0);
-    if next > now {
-        return Ok(());
-    }
-    let cursor = state
-        .store
-        .get_setting(&format!("{PREFIX}cursor"))
-        .await?
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(0);
-    let publisher = lease.publisher(state.store.as_ref());
-    publisher
-        .put_setting(
-            &format!("{PREFIX}next_run"),
-            &(now + i64::from(config.interval_mins) * 60_000).to_string(),
-        )
-        .await?;
-    let ids = state.store.subtitle_candidate_file_ids(cursor, 8).await?;
-    for id in &ids {
-        if !read_settings(state).await?.enabled {
-            break;
-        }
-        if let Some(file) = state.store.get_file(*id).await? {
-            if eligible(&file)
-                && selected_audio(&file.audio_streams, &config.language).is_some()
-                && missing_language(&file, &config.language)
-            {
-                let _ = publisher
-                    .enqueue_transcription(enqueue_request(&file, config, model, command)?)
-                    .await?;
-            }
-        }
-        publisher
-            .put_setting(&format!("{PREFIX}cursor"), &id.to_string())
-            .await?;
-    }
-    if ids.is_empty() {
-        publisher
-            .put_setting(&format!("{PREFIX}cursor"), "0")
-            .await?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
