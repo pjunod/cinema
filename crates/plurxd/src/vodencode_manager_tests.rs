@@ -3820,6 +3820,37 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         .expect("attested");
     assert_eq!(file.audio_streams.len(), 4, "{:?}", file.audio_streams);
     let actual_file = file.clone();
+    let identity = crate::source_custody::SourceIdentity {
+        node_id: "split-packet-probe".into(),
+        boot_id: uuid::Uuid::new_v4(),
+    };
+    let held = std::fs::File::open(&source).expect("held soundtrack source");
+    let probe_packets = |file: &plurx_core::domain::MediaFile| {
+        let request = identity.request(
+            Arc::clone(&store),
+            file,
+            "split-packet-probe",
+            uuid::Uuid::new_v4(),
+            plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer,
+        );
+        crate::source_custody::with_request(
+            Some(request),
+            crate::ffmpeg::held_source_audio_packets(&held, 1, Duration::from_secs(10), 1024 * 1024),
+        )
+    };
+    let mut stale = actual_file.clone();
+    stale.mtime += 1;
+    assert!(
+        matches!(
+            probe_packets(&stale).await,
+            Err(crate::ffmpeg::HeldPacketProbeError::Source(reason))
+                if reason.contains("registration lost authority")
+        ),
+        "audio packet evidence requires live source registration"
+    );
+    let packets = probe_packets(&actual_file).await.expect("authorized audio packets");
+    let packets: serde_json::Value = serde_json::from_slice(&packets).expect("packet JSON");
+    assert!(packets["packets"][0]["data_hash"].is_string());
     let mut file = file;
     file.audio_streams.truncate(2);
     let manager = TranscodeManager::new(

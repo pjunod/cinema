@@ -623,6 +623,12 @@ async fn title_demand_and_manual_cancel_suppression_survive_store_reopen() {
 async fn title_priority_observation_requires_live_higher_priority_same_node_work() {
     use plurx_core::store::background_jobs_probe::{generation, ProbeCoordinator};
     for_each_backend(|store, backend| async move {
+        // One background reader per node beside the live slot: the numbers this
+        // contract was written against.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
+            .await
+            .expect("source readers per root");
         let scanner = "a".repeat(64);
         let file = seed(&store, "title-priority").await;
         let (_, title) = active(&store, file.id, &scanner, 1_000).await;
@@ -1684,7 +1690,7 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
             .await
             .expect("retain recipe with no active viewer"));
         use plurx_core::store::background_jobs_resources::{
-            BackgroundSourceOwner, BackgroundSourceRegistration, SOURCE_AUTHORITY_REAP_GRACE_MS,
+            BackgroundSourceOwner, BackgroundSourceRegistration, SOURCE_LEASE_GRACE_MS,
         };
         let token = old.token.clone().expect("claim");
         let expiry = token.lease_expires_ms;
@@ -1693,12 +1699,8 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
             .await
             .expect("register source")
         else {
-            panic!("expected charged source custody on {backend}")
+            panic!("expected charged source lease on {backend}")
         };
-        assert!(store
-            .activate_background_source_custody(custody.clone(), uuid::Uuid::new_v4().to_string())
-            .await
-            .expect("activate reader"));
         for (now, expired) in [(expiry - 1, false), (expiry, true)] {
             let counts = store.job_counts(now).await.expect("counts");
             let row = counts
@@ -1722,7 +1724,10 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
                 "{backend}"
             );
         }
-        let contend = store
+        // The replacement takes the job over at a new fence at once; the old
+        // fence's lease is not deleted and keeps charging every other reader
+        // through its grace, and the old worker loses publication by fence.
+        let takeover = store
             .claim_job(ClaimJob {
                 job_id: old.id.clone(),
                 expected_revision: old.revision,
@@ -1735,23 +1740,24 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
                 dispatched_at_ms: expiry,
             })
             .await
-            .expect("attempt replacement while physical reader is still charged");
-        assert!(
-            matches!(contend, ClaimOutcome::Contended),
-            "{backend}: {contend:?}"
-        );
-        // The expired-lease sweep honours the same charged reader.
+            .expect("replacement claim at expiry");
+        let ClaimOutcome::Claimed { job: current } = takeover else {
+            panic!("{backend}: replacement takes the expired attempt over: {takeover:?}")
+        };
+        // The expired-lease sweep does not revoke the replacement: it reaches
+        // only a lease expired by its grace, and the old fence's lease is no
+        // longer the job's.
         store
-            .requeue_expired_running_jobs(expiry)
+            .requeue_expired_running_jobs(expiry + SOURCE_LEASE_GRACE_MS)
             .await
-            .expect("sweep while the reader is charged");
-        let waiting = store
+            .expect("sweep after the takeover");
+        let live = store
             .background_job(&old.id)
             .await
             .expect("job")
             .expect("job");
-        assert_eq!(waiting.state, JobState::Running, "{backend}");
-        assert_eq!(waiting.revision, old.revision, "{backend}");
+        assert_eq!(live.state, JobState::Running, "{backend}");
+        assert_eq!(live.revision, current.revision, "{backend}");
         assert!(store
             .resolve_background_source_custody(custody.clone())
             .await
@@ -1796,11 +1802,23 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
         };
         assert!(
             claim_analysis(expiry).await.is_none(),
-            "{backend}: analysis must leave the second reader to playback"
+            "{backend}: the old reader stays charged, so analysis leaves the live slot to playback"
         );
-        let recovered_at = expiry + SOURCE_AUTHORITY_REAP_GRACE_MS;
+        assert!(store
+            .settle_job(SettleJob {
+                token: current.token.expect("new token"),
+                settlement: JobSettlement::Yield {
+                    error_code: Some("title_interrupted".into()),
+                    not_before_ms: expiry + 2,
+                    checkpoint: None,
+                },
+                now_ms: expiry + 1,
+            })
+            .await
+            .expect("new owner can settle"));
+        let recovered_at = expiry + SOURCE_LEASE_GRACE_MS;
         store
-            .reap_settled_source_custody(recovered_at)
+            .reap_expired_source_leases(recovered_at)
             .await
             .expect("normal bounded sweep");
         assert!(store
@@ -1808,7 +1826,6 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
             .await
             .expect("observe release")
             .is_none());
-        let current = claim(&store, &old.id, recovered_at).await;
         assert!(current.fence > old.fence, "{backend}");
         let attempts = store.job_attempts(&old.id).await.expect("attempts");
         assert_eq!(attempts.len(), 2, "{backend}");
@@ -1822,18 +1839,6 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
                 .expect("late publication"),
             JobPublishOutcome::LostOwnership
         ));
-        assert!(store
-            .settle_job(SettleJob {
-                token: current.token.expect("new token"),
-                settlement: JobSettlement::Yield {
-                    error_code: Some("title_interrupted".into()),
-                    not_before_ms: recovered_at + 2,
-                    checkpoint: None,
-                },
-                now_ms: recovered_at + 1,
-            })
-            .await
-            .expect("new owner can settle"));
         assert_eq!(
             claim_analysis(recovered_at + 2)
                 .await
@@ -2291,6 +2296,10 @@ async fn maintenance_revisits_the_oldest_released_source_while_new_titles_arrive
     use plurx_core::store::background_jobs_resources::StorageDomainMapping;
 
     for_each_backend(|store, backend| async move {
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
+            .await
+            .expect("one maintenance reader per root");
         let scanner = "a".repeat(64);
         let old = seed(&store, "title-oldest").await;
         let (_, independent_id) = seed_file(&store, "title-independent").await;
@@ -2739,6 +2748,10 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
     use plurx_core::store::NewAnalysisRequest;
 
     for_each_backend(|store, backend| async move {
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
+            .await
+            .expect("one maintenance reader per root");
         let scanner = "a".repeat(64);
         let mut domains = Vec::new();
         let mut libraries = Vec::new();
@@ -2800,6 +2813,14 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
             keys
         };
 
+        let root_key = |path: &str| {
+            format!(
+                "source_io:root/{}/{}",
+                libraries[0],
+                hex::encode_upper(path)
+            )
+        };
+
         // Analysis hashes only its own file, on disk-a of the same library.
         let analysis = store
             .enqueue_analysis_request(&NewAnalysisRequest {
@@ -2829,7 +2850,7 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
         let holders = store.source_io_holders(1_001).await.expect("holders");
         assert_eq!(
             held(&holders, &analysis.request_id),
-            ["source_io:disk-a"],
+            ["source_io:disk-a".to_owned(), root_key("/scope-a")],
             "{backend}: analysis reserves only the disk holding its file"
         );
 
@@ -2880,30 +2901,29 @@ async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
         let holders = store.source_io_holders(1_002).await.expect("holders");
         assert_eq!(
             held(&holders, &busy.id),
-            ["source_io:disk-b"],
+            ["source_io:disk-b".to_owned(), root_key("/scope-b")],
             "{backend}: a title scan reserves only the disk holding its file"
         );
-        // A file under no root still needs every root, so disk-b blocks it.
+        // The unmapped file uses the node-local fallback and shares the title node's budget.
         let nowhere = queued("/scope-x/z.mkv", 1_003).await;
         assert_eq!(
             admission(nowhere, 1_003).await,
             Some(ClaimBlock::MaintenanceReader),
-            "{backend}: a file under no root keeps every root"
+            "{backend}: a file under no root respects the node-local budget"
         );
-        // Disk-a's analysis is its one maintenance reader, so a title scan
-        // there waits.
+        // The reader on scope-a fills its root budget across nodes.
         let analysis_disk = queued("/scope-a/a.mkv", 1_004).await;
         assert_eq!(
             admission(analysis_disk, 1_004).await,
             Some(ClaimBlock::MaintenanceReader),
-            "{backend}: disk-a keeps one maintenance reader"
+            "{backend}: scope-a keeps one maintenance reader"
         );
         // A second reader on disk-b is still refused.
         let same_disk = queued("/scope-b/c.mkv", 1_005).await;
         assert_eq!(
             admission(same_disk, 1_005).await,
             Some(ClaimBlock::MaintenanceReader),
-            "{backend}: disk-b keeps one maintenance reader"
+            "{backend}: scope-b keeps one maintenance reader"
         );
     })
     .await;

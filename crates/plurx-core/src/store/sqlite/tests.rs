@@ -874,8 +874,9 @@ async fn v6_rebuild_preserves_everything() {
     // v137 the managed v7 view and v138 the analysis view, where a per-file
     // reader reserves only the library root holding its file. v139 records
     // ordered title scanner authority and provenance for aggregate reuse.
+    // v140/v141 expand and contract the source-lease catalog.
     assert_eq!(
-        version, 139,
+        version, 141,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );

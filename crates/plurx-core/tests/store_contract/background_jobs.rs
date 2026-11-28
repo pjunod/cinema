@@ -1706,6 +1706,13 @@ async fn background_jobs_v70_backup_import_seals_legacy_work() {
 async fn background_library_publication_requires_both_live_owners() {
     use super::{acquired, publication_successor};
     for_each_backend(|store, backend| async move {
+        // Every scenario claims on one node and each earlier scenario's lease
+        // still charges its 60 s grace; this contract is about publication
+        // ownership, not source capacity.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "16")
+            .await
+            .expect("source readers per root");
         for scenario in ["live", "cancelled", "expired", "taken_over", "roots_changed"] {
             let (_, file_id) = seed_file(&store, &format!("dual-owner-{scenario}")).await;
             let file = store
@@ -2064,6 +2071,19 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             });
             files.push(file_id);
         }
+        for domain in ["nas", "other"] {
+            store
+                .put_setting(
+                    &format!(
+                        "{}{}",
+                        plurx_core::store::keys::JOB_DOMAIN_SOURCE_READERS_PREFIX,
+                        domain,
+                    ),
+                    "1",
+                )
+                .await
+                .expect("explicit storage-domain reader cap");
+        }
         assert!(
             store
                 .save_storage_domains(mappings.clone(), None, 1_000)
@@ -2183,7 +2203,9 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             ),
             "{backend}"
         );
-        assert!(matches!(store.apply_pending_storage_domains(100_000).await.expect("expired owners no longer block remap"),
+        // The last claim's lease expires at 61_001 and charges the domain for
+        // the 60 s lease grace after that.
+        assert!(matches!(store.apply_pending_storage_domains(121_002).await.expect("expired owners no longer block remap"),
             plurx_core::store::background_jobs_resources::StorageDomainApply::Applied { .. }), "{backend}");
         assert!(store.storage_domains().await.expect("cleared").is_empty());
     })
@@ -2272,10 +2294,22 @@ async fn storage_domain_bare_to_named_applies_while_a_foreground_reader_holds_ba
         let item = store.get_item(file.item_id).await.expect("item").expect("item");
         let library = store.get_library(item.library_id).await.expect("library").expect("library");
         let root = library.paths[0].display().to_string();
+        // Keep the foreground owner outside the configured library root. Mapping
+        // the different root leaves this file's generic source_io identity unchanged.
+        let unrooted_file_id = store
+            .upsert_file(
+                file.item_id,
+                "/unconfigured-originals/bare-reader.mkv",
+                file.size,
+                file.mtime,
+                &Default::default(),
+            )
+            .await
+            .expect("seed unmatched foreground source");
         let token = store.register_foreground_source(ForegroundSourceOwner {
             owner_id: uuid::Uuid::new_v4().to_string(), lifetime_id: "bare-reader".into(),
             session_incarnation: uuid::Uuid::new_v4().to_string(), producer_attempt: "producer-1".into(),
-            node_id: "node-a".into(), boot_id: uuid::Uuid::new_v4().to_string(), file_id,
+            node_id: "node-a".into(), boot_id: uuid::Uuid::new_v4().to_string(), file_id: unrooted_file_id,
             source_size: file.size, source_mtime: file.mtime, source_generation: "bare-source".into(),
             policy: ForegroundSourcePolicy::Rolling,
         }, 1_000, 20_000).await.expect("foreground registration").expect("reader");
@@ -2396,6 +2430,10 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
             libraries.push(library_id);
             files.push(file_id);
         }
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
+            .await
+            .expect("one maintenance reader per root");
         assert!(set_storage_domains(store.as_ref(), mappings, 1_000)
             .await
             .expect("map"));
@@ -4736,8 +4774,20 @@ async fn background_subtitles_source_changes_cancel_selected_candidates() {
 // with their published triggers and remove the newer extension's claim.
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn pre_v63_retention_rewind(client: &hiqlite::Client) -> Vec<(String, hiqlite::Params)> {
-    let mut statements: Vec<_> = super::replicated_custody_retention_rewind(client)
-        .await
+    let mut rewind = Vec::new();
+    if let Some(lease_rewind) = super::replicated_source_lease_rewind(client).await {
+        // The exact lease catalogue check covers the overlaid custody-retention
+        // definitions. The same transaction restores their frozen v1 shape.
+        super::require_replicated_fixture_marker(client, "background_custody_retention_schema", 1)
+            .await;
+        rewind.extend(lease_rewind);
+        rewind.extend(
+            super::queue_fixture::source_extensions_fixture::custody_retention_rewind_plan(),
+        );
+    } else {
+        rewind.extend(super::replicated_custody_retention_rewind(client).await);
+    }
+    let mut statements: Vec<_> = rewind
         .into_iter()
         .map(|sql| (sql, hiqlite::params!()))
         .collect();
@@ -5046,6 +5096,19 @@ async fn probe_batches_respect_scan_parent_and_shared_domain_reservations() {
             mappings.push(StorageDomainMapping { library_id: item.library_id,
                 root_path: format!("/{prefix}"), domain_id: domain.into() });
             files.push(file_id);
+        }
+        for domain in ["nas", "other"] {
+            store
+                .put_setting(
+                    &format!(
+                        "{}{}",
+                        plurx_core::store::keys::JOB_DOMAIN_SOURCE_READERS_PREFIX,
+                        domain,
+                    ),
+                    "1",
+                )
+                .await
+                .expect("explicit storage-domain reader cap");
         }
         assert!(set_storage_domains(store.as_ref(), mappings.clone(), 1_000).await.expect("map"));
         let mut payloads = vec![JobPayload::LibraryScan {
@@ -6033,6 +6096,12 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
     for_each_backend(|store, backend| async move {
         let boot = uuid::Uuid::new_v4().to_string();
         let (_, id) = seed_file(&store, "progressive-translation").await;
+        // One background reader per node beside the live slot: the numbers
+        // this contract was written against.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
+            .await
+            .expect("one background reader");
         let user = store
             .create_user("translation-admin", "hash", true)
             .await

@@ -262,6 +262,7 @@ mod placeholder_census;
 #[cfg(all(test, feature = "hiqlite-store"))]
 mod consistent_read_census;
 
+#[macro_use]
 pub mod background_jobs;
 pub use background_jobs::{AnalysisViewerInterest, ArtifactViewerInterest, BackgroundJobStore};
 mod background_job_turns;
@@ -305,6 +306,9 @@ pub mod offline_claim;
 pub mod offline_expiry;
 pub mod replicated;
 pub mod scan_request_v2;
+mod source_leases;
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod source_leases_tests;
 mod storage_domain_pending;
 pub(crate) mod storage_domain_pending_api;
 mod subtitle_managed_schema;
@@ -315,6 +319,16 @@ pub mod watched_drain;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 pub use dv_conversion::validation_pre_provenance_admission_trigger;
+
+/// Canonical expanded generation and its generated contract for owned fixtures.
+#[cfg(feature = "hiqlite-contract-tests")]
+pub fn validation_expanded_source_lease_fixture(
+) -> Result<(rusqlite::Connection, Vec<String>), crate::error::StoreError> {
+    let conn = sqlite::SqliteStore::open_migrated_through(source_leases::EXPANDED_VERSION)?;
+    fragment_publication::install_sqlite(&conn)?;
+    Ok((conn, source_leases::statements(source_leases::CONTRACT)))
+}
+
 pub use dv_conversion::{
     DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
     DvConversionProgressSnapshot, DvConversionQueueBatch, DvConversionState, DvConversionStore,
@@ -2530,6 +2544,15 @@ pub mod keys {
     /// right number is a property of the silicon: a discrete card with two
     /// NVENC chips is not a NUC.
     pub const MAX_HW_SESSIONS: &str = "transcode.max_hw_sessions";
+    /// Background readers per configured source root, default 2 (1-16).
+    /// One additional slot is reserved for live demand. The replicated
+    /// writer applies lower limits to new admissions without stopping readers.
+    pub const JOB_SOURCE_READERS_PER_ROOT: &str = "jobs.source_readers_per_root";
+    /// Per-root override, suffixed with library-id/uppercase-hex-root-path.
+    /// An empty value restores the root default.
+    pub const JOB_ROOT_SOURCE_READERS_PREFIX: &str = "jobs.root_source_readers.";
+    /// Explicit optional aggregate-domain cap (1-16). Empty means unlimited.
+    pub const JOB_DOMAIN_SOURCE_READERS_PREFIX: &str = "jobs.domain_source_readers.";
     /// Threads the software-encoder CPU pool may hand out at once. Defaults
     /// to every core but one (plurxd derives it from the machine); an admin
     /// sets it lower on a box whose CPU has other jobs, or higher at their

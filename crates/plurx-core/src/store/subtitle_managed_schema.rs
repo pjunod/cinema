@@ -362,7 +362,9 @@ pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreEr
         Ok(Some(5))
     } else if canonical(shape) == canonical(&SHAPES.7) {
         Ok(Some(6))
-    } else if canonical(shape) == canonical(&SHAPES.8) {
+    } else if super::source_leases::accepts_extension_shape(shape, &SHAPES.8) {
+        // Source leases replace the resource view after managed v7. Recognize
+        // only the exact expanded or contracted catalogue projection.
         Ok(Some(7))
     } else {
         Err(StoreError::Migration(
@@ -383,6 +385,14 @@ mod tests {
         use rusqlite::OptionalExtension;
         conn.execute_batch(super::super::background_jobs_resources::SOURCE_ARBITRATION_SCHEMA)
             .expect("current source authority for current claim query");
+        super::super::source_leases::install_for_fixture(conn);
+        // These contracts were written against one maintenance source reader
+        // (plus the live slot); keep that number on the one node they use.
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key,value) VALUES('jobs.source_readers_per_root','1')",
+            [],
+        )
+        .expect("one maintenance reader");
         let body = serde_json::json!({"job_id":id,"expected_revision":0,"node_id":"node-a","boot_id":"boot","claim_id":format!("claim-{id}"),"kind":kind,"payload_version":1,"now_ms":1001,"dispatched_at_ms":1001});
         conn.query_row(
             &format!("{} RETURNING id", super::super::background_jobs::CLAIM_SQL),
@@ -1227,7 +1237,13 @@ mod tests {
     #[test]
     fn file_root_v7_lets_a_reader_on_one_disk_claim_while_another_disk_is_busy() {
         let conn = rusqlite::Connection::open_in_memory().expect("SQLite");
-        SqliteStore::apply_migrations_for_test(&conn, 137).expect("deployed v7 resources");
+        // The source-lease expand (v140) carries v7's per-file root narrowing
+        // into its root-keyed view, so claim against that current shape.
+        SqliteStore::apply_migrations_for_test(
+            &conn,
+            super::super::source_leases::EXPANDED_VERSION as i64,
+        )
+        .expect("expanded v7 resources");
         two_root_library(&conn);
         for (id, file) in [("busy-b", 2), ("next-a", 1), ("next-b", 5)] {
             queued(

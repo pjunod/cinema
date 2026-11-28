@@ -92,6 +92,33 @@ pub(crate) fn assert_title_fixture_generation(connection: &rusqlite::Connection,
     require_fixture_marker(connection, "dv_title_jobs_schema", version);
 }
 
+/// Restore v2 title authority and keep the demand rows and sequence.
+pub(crate) fn published_title_v2_restore_plan() -> Vec<String> {
+    let source = title_fixture_shape(2);
+    let mut plan = vec![
+        "DROP TRIGGER dv_title_jobs_bind_authority;".to_owned(),
+        "DROP TRIGGER dv_title_jobs_scanner_authority;".to_owned(),
+        "DROP TRIGGER dv_title_jobs_bind;".to_owned(),
+        "DROP TRIGGER dv_title_jobs_publish;".to_owned(),
+        "ALTER TABLE dv_title_jobs_demand DROP COLUMN aggregate_revision;".to_owned(),
+        "ALTER TABLE dv_title_jobs_demand DROP COLUMN scanner_generation;".to_owned(),
+        "DROP TABLE dv_title_jobs_schema;".to_owned(),
+    ];
+    for name in [
+        "dv_title_jobs_bind",
+        "dv_title_jobs_publish",
+        "dv_title_jobs_schema",
+    ] {
+        let (_, sql) = source
+            .iter()
+            .find(|(object, _)| object == name)
+            .expect("v2 witness");
+        plan.push(format!("{};", sql.trim_end_matches(';')));
+    }
+    plan.push("INSERT INTO dv_title_jobs_schema VALUES(1,2);".into());
+    plan
+}
+
 /// Restore only v132's replaced objects from the immutable v114 witness.
 /// Demand rows and their AUTOINCREMENT history are never dropped or reseeded.
 pub(crate) fn published_title_v1_restore_plan() -> String {
