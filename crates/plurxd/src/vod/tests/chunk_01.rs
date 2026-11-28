@@ -2385,9 +2385,12 @@ async fn create(
 }
 
 async fn fetch(serve: &Arc<VodServe>, session: &str, name: &str) -> SegmentReady {
-    // A blocking GET may answer a typed Pending under a slow generation;
-    // that is the protocol working, so retry the way a client would.
-    for _ in 0..20 {
+    // A blocking GET may answer a typed Pending under a slow generation or
+    // while a successor generation replaces its producer; that is the
+    // protocol working, so retry the way a client would, for one producer
+    // deadline.
+    let retry_until = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < retry_until {
         match serve.segment(session, name).await {
             Some(VodPublication {
                 result: Ok(Some(ready)),

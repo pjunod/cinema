@@ -1171,6 +1171,10 @@ impl VodServe {
         // Admission comes before any persistent demand or deadline state. A
         // refused GET is not work owed by this rendition.
         rendition.kick();
+        // A finite producer cannot reposition itself; this registered demand
+        // may need a successor generation where its producer cannot reach.
+        #[cfg(target_os = "linux")]
+        self.shared.consider_finite_succession(rendition).await;
         // Register before rechecking bytes/failure to close the lost-wakeup
         // window. The registration stays alive through open_materialized,
         // protecting a just-published target from concurrent eviction.

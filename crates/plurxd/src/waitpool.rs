@@ -929,6 +929,23 @@ impl WaitPool {
     /// `Gone` is the same answer their own disconnect would have produced, and
     /// each response dropping its guard is what returns the cap slots.
     pub fn retire_session(&self, rendition: &str, session: &str) {
+        for waiter in self.drain_session(rendition, session) {
+            let _ = waiter.tx.send(WaitOutcome::Gone);
+        }
+    }
+
+    /// Wake one reader's waits on `rendition` with the retryable pending
+    /// answer: its session is live but parked while a successor generation
+    /// replaces the incarnation it waited on. Each request then re-resolves
+    /// through its session, and none keeps the old incarnation alive.
+    #[cfg(target_os = "linux")]
+    pub fn defer_session(&self, rendition: &str, session: &str) {
+        for waiter in self.drain_session(rendition, session) {
+            let _ = waiter.tx.send(WaitOutcome::Deadline);
+        }
+    }
+
+    fn drain_session(&self, rendition: &str, session: &str) -> Vec<Waiter> {
         let mut drained = Vec::new();
         {
             let mut state = self.lock();
@@ -957,9 +974,7 @@ impl WaitPool {
                 }
             }
         }
-        for waiter in drained {
-            let _ = waiter.tx.send(WaitOutcome::Gone);
-        }
+        drained
     }
 
     fn wake_rendition(&self, rendition: &str, outcome: WaitOutcome) {

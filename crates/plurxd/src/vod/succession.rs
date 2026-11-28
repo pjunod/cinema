@@ -159,6 +159,19 @@ impl Shared {
             .remove(key)
     }
 
+    /// A finite rendition has no scheduler pass: its driver is the producer
+    /// and ends with it. A blocked GET that just registered its demand asks
+    /// here whether the producer can reach what its readers owe; if not, a
+    /// successor generation is requested at the legacy placement.
+    pub(super) async fn consider_finite_succession(self: &Arc<Self>, rendition: &Arc<Rendition>) {
+        let Some(producer) = rendition.dir.finite_producer() else {
+            return;
+        };
+        if let Some(entry) = super::driver::finite_reposition(self, rendition, &producer).await {
+            self.request_finite_succession(rendition, entry);
+        }
+    }
+
     /// Begin replacing `old` with a generation that starts at `entry`,
     /// unless a succession of this key is already in flight.
     pub(super) fn request_finite_succession(self: &Arc<Self>, old: &Arc<Rendition>, entry: u32) {
@@ -398,7 +411,7 @@ impl Shared {
             // Blocked GETs of these readers wake now and re-resolve through
             // the parked session, which answers Pending.
             for reader_id in retired {
-                self.pool.retire_session(&old.key, &reader_id);
+                self.pool.defer_session(&old.key, &reader_id);
             }
         }
         old.kick();

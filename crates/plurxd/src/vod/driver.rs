@@ -1022,10 +1022,7 @@ async fn drive_resume_preparation(shared: &Arc<Shared>, rendition: &Arc<Renditio
 pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
     #[cfg(target_os = "linux")]
     if rendition.dir.is_finite() {
-        if let Some(producer) = rendition.dir.finite_producer() {
-            if let Some(entry) = finite_reposition(shared, rendition, &producer).await {
-                shared.request_finite_succession(rendition, entry);
-            }
+        if rendition.dir.finite_producer().is_some() {
             rendition.kick();
         }
         return;
@@ -1554,7 +1551,7 @@ pub(super) fn reader_admission_priority(
 /// scheduler (`prodsched::decide`), with the producer positioned at its own
 /// start entry whether or not it has started.
 #[cfg(target_os = "linux")]
-async fn finite_reposition(
+pub(super) async fn finite_reposition(
     shared: &Arc<Shared>,
     rendition: &Arc<Rendition>,
     producer: &super::finite_software::FiniteSoftwareProducer,
