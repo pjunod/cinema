@@ -273,7 +273,7 @@ async fn title(fx: &Fixture, name: &str, profile: i64, fel: bool) -> MediaFile {
         .find(|d| d.file_id == id)
         .expect("title demand for the file");
     let revision = store
-        .bind_dv_title_demand(demand.probe_revision, &scanner)
+        .bind_dv_title_demand(demand.probe_revision, &scanner, 1)
         .await
         .expect("bind")
         .expect("bound");
@@ -390,6 +390,7 @@ pub(crate) async fn seed_preparation_refit(store: &Arc<dyn Store>, file: &MediaF
                 source_size: file.size,
                 source_mtime: file.mtime,
                 scanner_digest: "a".repeat(64),
+                scanner_generation: 1,
                 stats: complete_title_stats(true),
             })
             .await

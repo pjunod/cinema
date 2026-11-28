@@ -109,7 +109,7 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
         .expect("demand")[0]
         .probe_revision;
     let revision = store
-        .bind_dv_title_demand(revision, &scanner)
+        .bind_dv_title_demand(revision, &scanner, 1)
         .await
         .expect("bind")
         .expect("current");
@@ -353,6 +353,7 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
             viewer: viewer_id.clone(),
             request: recipe.clone(),
             scanner_digest: task.scanner.clone(),
+            scanner_generation: 1,
             deadline_ms: now_ms().saturating_add(60_000),
             now_ms: now_ms(),
         })
@@ -399,6 +400,7 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
             viewer: "peer-viewer".into(),
             request: peer_recipe,
             scanner_digest: task.scanner.clone(),
+            scanner_generation: 1,
             deadline_ms: now_ms().saturating_add(60_000),
             now_ms: now_ms(),
         })
@@ -714,7 +716,7 @@ async fn physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict() {
         .find(|demand| demand.file_id == id)
         .expect("demand");
     demand.probe_revision = store
-        .bind_dv_title_demand(demand.probe_revision, &scanner)
+        .bind_dv_title_demand(demand.probe_revision, &scanner, 1)
         .await
         .expect("bind")
         .expect("bound");
@@ -842,6 +844,8 @@ fn stored_title() -> TitleDemand {
         fel_head_recipe: None,
         playback_requested: false,
         scanner_digest: None,
+        scanner_generation: 1,
+        aggregate_current: true,
         playback_recipes: Vec::new(),
         file_id: 9,
         probe_revision: 7,
@@ -864,6 +868,11 @@ fn a_moved_generation_reuses_no_stored_aggregate() {
     assert_eq!(reused.decoded_frames, 3);
     assert_eq!(reused.max_l1_pq, Some(3000));
     assert_eq!(reusable_aggregate(&demand, 8), None);
+    let retained = TitleDemand {
+        aggregate_current: false,
+        ..stored_title()
+    };
+    assert_eq!(reusable_aggregate(&retained, 7), None);
     let unscanned = TitleDemand {
         probe_json: r#"{"streams":[]}"#.into(),
         ..stored_title()
@@ -881,7 +890,7 @@ fn title_discovery_waits_for_the_pass_then_reuses_by_generation() {
         .find("state.jobs.title_scan_awaits_index_pass(file.id)")
         .expect("discovery waits for the index pass");
     let bind = source
-        .find(".bind_dv_title_demand(demand.probe_revision, &scanner)")
+        .find(".bind_dv_title_demand(demand.probe_revision, &scanner, generation)")
         .expect("bind");
     let reuse = source
         .find("let reused = reusable_aggregate(&demand, revision);")

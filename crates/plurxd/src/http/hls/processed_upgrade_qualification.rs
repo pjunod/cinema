@@ -77,6 +77,7 @@ pub(in crate::http::hls) fn hold_viewer_demand(
                 viewer,
                 request,
                 scanner_digest: tools.title_scanner_digest(),
+                scanner_generation: crate::dv_tools::TITLE_SCANNER_GENERATION,
                 deadline_ms: now.saturating_add(VIEWER_DEMAND_MS),
                 now_ms: now,
             })

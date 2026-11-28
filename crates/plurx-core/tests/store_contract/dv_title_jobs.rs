@@ -67,7 +67,7 @@ async fn demand(store: &Arc<dyn Store>, file: i64, scanner: &str) -> TitleDemand
 async fn bound(store: &Arc<dyn Store>, file: i64, scanner: &str) -> TitleDemand {
     let current = demand(store, file, scanner).await;
     store
-        .bind_dv_title_demand(current.probe_revision, scanner)
+        .bind_dv_title_demand(current.probe_revision, scanner, 1)
         .await
         .expect("bind installed scanner");
     demand(store, file, scanner).await
@@ -291,7 +291,7 @@ async fn title_manual_cancel_wins_publication_and_does_not_become_scheduler_yiel
         );
         assert_eq!(
             store
-                .bind_dv_title_demand(demand.probe_revision, &scanner)
+                .bind_dv_title_demand(demand.probe_revision, &scanner, 1)
                 .await
                 .expect("idempotent scanner binding"),
             Some(demand.probe_revision),
@@ -590,7 +590,7 @@ async fn title_demand_and_manual_cancel_suppression_survive_store_reopen() {
         .is_empty());
     assert_eq!(
         store
-            .bind_dv_title_demand(current.probe_revision, &scanner)
+            .bind_dv_title_demand(current.probe_revision, &scanner, 1)
             .await
             .expect("same scanner"),
         Some(current.probe_revision)
@@ -947,7 +947,7 @@ async fn a_fel_verdict_lives_with_the_title_facts_and_requalification_reruns_the
             .is_empty());
         assert!(
             store
-                .request_dv_fel_requalification(file.id, &q::requalify_binding(&scanner, &identity))
+                .request_dv_fel_requalification(file.id, &scanner, 1)
                 .await
                 .expect("requalify"),
             "{backend}"
@@ -959,7 +959,7 @@ async fn a_fel_verdict_lives_with_the_title_facts_and_requalification_reruns_the
         let (attempt, attempt_job) = active(&store, file.id, &scanner, 3_000).await;
         assert!(
             !store
-                .request_dv_fel_requalification(file.id, &q::requalify_binding(&scanner, &identity))
+                .request_dv_fel_requalification(file.id, &scanner, 1)
                 .await
                 .expect("requalify during a scan"),
             "{backend}"
@@ -1001,6 +1001,7 @@ fn analysis(file: &MediaFile, scanner: &str) -> AnalysisTitleOutput {
         source_size: file.size,
         source_mtime: file.mtime,
         scanner_digest: scanner.into(),
+        scanner_generation: 1,
         stats: stats(),
     }
 }
@@ -1062,7 +1063,7 @@ async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
         );
         assert_eq!(
             store
-                .bind_dv_title_demand(open.probe_revision, &scanner)
+                .bind_dv_title_demand(open.probe_revision, &scanner, 1)
                 .await
                 .expect("rebind"),
             Some(open.probe_revision),
@@ -1074,49 +1075,86 @@ async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
             "{backend}"
         );
 
-        // Another scanner rotates the generation away with its aggregate.
+        // Equal generations cannot select different scanner digests.
         let other = "b".repeat(64);
+        assert_eq!(
+            store
+                .bind_dv_title_demand(open.probe_revision, &other, 1)
+                .await
+                .expect("conflicting bind"),
+            None,
+            "{backend}"
+        );
+
+        // The successor rotates demand while retaining the published aggregate.
         let rotated = store
-            .bind_dv_title_demand(open.probe_revision, &other)
+            .bind_dv_title_demand(open.probe_revision, &other, 2)
             .await
             .expect("rotate")
             .expect("rotated");
         assert_ne!(rotated, open.probe_revision, "{backend}");
-        assert_eq!(stored_aggregate(&store, file.id).await, None, "{backend}");
+        assert_eq!(
+            stored_aggregate(&store, file.id).await,
+            Some(stats()),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .bind_dv_title_demand(rotated, &scanner, 1)
+                .await
+                .expect("old worker"),
+            None,
+            "{backend}"
+        );
+        assert!(!demand(&store, file.id, &other).await.aggregate_current);
+        assert_eq!(
+            store
+                .publish_dv_title_from_analysis(analysis(&file, &scanner))
+                .await
+                .expect("old analysis worker"),
+            AnalysisTitleOutcome::NoDemand,
+            "{backend}"
+        );
 
         // That scanner's queued job keeps its generation: the pass does not
         // rotate it away, and the job publishes its own answer.
         let other_demand = demand(&store, file.id, &other).await;
-        assert!(matches!(
-            enqueue(&store, &other_demand, &other, 4_000).await,
-            EnqueueOutcome::Accepted { .. }
-        ));
+        let EnqueueOutcome::Accepted { job_id, .. } =
+            enqueue(&store, &other_demand, &other, 4_000).await
+        else {
+            panic!("successor demand must enqueue");
+        };
         assert_eq!(
             store
-                .publish_dv_title_from_analysis(analysis(&file, &scanner))
+                .publish_dv_title_from_analysis(AnalysisTitleOutput {
+                    scanner_generation: 3,
+                    ..analysis(&file, &scanner)
+                })
                 .await
                 .expect("busy"),
             AnalysisTitleOutcome::Busy,
             "{backend}"
         );
         assert_eq!(
-            demand(&store, file.id, &scanner).await.probe_revision,
-            rotated,
-            "{backend}: not rotated"
+            demand(&store, file.id, &other).await.probe_revision,
+            rotated
         );
 
-        // A job's completed answer for this scanner is not replaced.
-        let (job_demand, job) = active(&store, file.id, &scanner, 5_000).await;
+        // The successor replaces the retained aggregate and settles the demand.
+        let job = claim(&store, &job_id, 4_001).await;
         assert!(matches!(
             store
-                .publish_dv_title_job(publication(&job_demand, &job, &scanner, 5_001))
+                .publish_dv_title_job(publication(&other_demand, &job, &other, 4_002))
                 .await
                 .expect("job publication"),
             JobPublishOutcome::Published { .. }
         ));
         assert_eq!(
             store
-                .publish_dv_title_from_analysis(analysis(&file, &scanner))
+                .publish_dv_title_from_analysis(AnalysisTitleOutput {
+                    scanner_generation: 2,
+                    ..analysis(&file, &other)
+                })
                 .await
                 .expect("settled"),
             AnalysisTitleOutcome::Current,
@@ -1241,7 +1279,7 @@ async fn fel_recipe_variants_preserve_peers_and_late_requests_reopen_the_title_o
             q::VerdictState::Current(_)
         ));
         assert!(store.attach_dv_title_viewer(TitleViewerRequest {
-            file_id:id,viewer:"late-exact-viewer".into(),request:second.clone(),scanner_digest:scanner.clone(),
+            file_id:id,viewer:"late-exact-viewer".into(),request:second.clone(),scanner_digest:scanner.clone(),scanner_generation:1,
             deadline_ms:60_000,now_ms:1007,
         }).await.expect("late exact viewer"));
         assert!(matches!(
@@ -1498,7 +1536,7 @@ async fn title_expired_unbounded_cancelled_and_stale_playback_do_not_promote() {
                 }
                 "scanner" => {
                     store
-                        .bind_dv_title_demand(requested.probe_revision, &"c".repeat(64))
+                        .bind_dv_title_demand(requested.probe_revision, &"c".repeat(64), 2)
                         .await
                         .expect("replace scanner generation");
                 }
@@ -2046,6 +2084,7 @@ async fn title_viewer_bootstraps_current_work_and_keeps_recipe_interest_exact() 
             viewer: "viewer".into(),
             request,
             scanner_digest: scanner.clone(),
+            scanner_generation: 1,
             deadline_ms: now + 60_000,
             now_ms: now,
         };
@@ -2316,7 +2355,7 @@ async fn maintenance_revisits_the_oldest_released_source_while_new_titles_arrive
         assert_eq!(free.file_id, independent.id, "{backend}");
         *after = free.probe_revision;
         store
-            .bind_dv_title_demand(free.probe_revision, &scanner)
+            .bind_dv_title_demand(free.probe_revision, &scanner, 1)
             .await
             .expect("bind independent");
         let EnqueueOutcome::Accepted {
@@ -2395,7 +2434,7 @@ async fn title_live_paging_reaches_after_full_page_and_direct_own_interest() {
                 .find(|demand| demand.file_id == id)
                 .expect("new source follows the setup cursor");
             store
-                .bind_dv_title_demand(current.probe_revision, &scanner)
+                .bind_dv_title_demand(current.probe_revision, &scanner, 1)
                 .await
                 .expect("bind fixture scanner")
                 .expect("current fixture generation");
@@ -2528,6 +2567,7 @@ async fn title_terminal_episode_new_recipe_bootstraps_a_new_job() {
             viewer: "viewer".into(),
             request,
             scanner_digest: scanner.clone(),
+            scanner_generation: 1,
             deadline_ms: now + 60_000,
             now_ms: now,
         };
@@ -2598,6 +2638,7 @@ async fn title_manual_cancellation_suppresses_same_viewer_renewal_until_new_inte
             viewer: name.into(),
             request: recipe.clone(),
             scanner_digest: scanner.clone(),
+            scanner_generation: 1,
             deadline_ms: now + 60_000,
             now_ms: now,
         };
@@ -2925,7 +2966,7 @@ async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them()
 
         assert_eq!(
             store
-                .carry_forward_dv_title_verdicts(&successor, &predecessors)
+                .carry_forward_dv_title_verdicts(&successor, 2, &predecessors)
                 .await
                 .expect("carry"),
             2,
@@ -2933,7 +2974,7 @@ async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them()
         );
         assert_eq!(
             store
-                .carry_forward_dv_title_verdicts(&successor, &predecessors)
+                .carry_forward_dv_title_verdicts(&successor, 2, &predecessors)
                 .await
                 .expect("carry again"),
             0,
@@ -2980,7 +3021,7 @@ async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them()
         // and it still reopens when the source changes.
         assert_eq!(
             store
-                .bind_dv_title_demand(carried, &successor)
+                .bind_dv_title_demand(carried, &successor, 2)
                 .await
                 .expect("bind carried"),
             Some(carried),
@@ -2996,7 +3037,7 @@ async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them()
         for invalid in [vec!["not a digest".to_owned()], vec![successor.clone()]] {
             assert!(
                 store
-                    .carry_forward_dv_title_verdicts(&successor, &invalid)
+                    .carry_forward_dv_title_verdicts(&successor, 2, &invalid)
                     .await
                     .is_err(),
                 "{backend}: {invalid:?}"
@@ -3004,7 +3045,7 @@ async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them()
         }
         assert_eq!(
             store
-                .carry_forward_dv_title_verdicts(&successor, &[])
+                .carry_forward_dv_title_verdicts(&successor, 2, &[])
                 .await
                 .expect("no predecessors"),
             0

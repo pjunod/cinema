@@ -3170,7 +3170,8 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn request_dv_fel_requalification(
         &self,
         file_id: i64,
-        binding: &str,
+        scanner: &str,
+        generation: i64,
     ) -> Result<bool, StoreError>;
     async fn request_dv_fel_head(
         &self,
@@ -3208,12 +3209,14 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         revision: i64,
         scanner: &str,
+        generation: i64,
     ) -> Result<Option<i64>, StoreError>;
     /// Re-point settled title verdicts `scanner` reproduces from its named
     /// predecessors, keeping their aggregates; see `dv_title_jobs::carry_forward`.
     async fn carry_forward_dv_title_verdicts(
         &self,
         scanner: &str,
+        generation: i64,
         predecessors: &[String],
     ) -> Result<u64, StoreError>;
     async fn publish_dv_title_job(
@@ -4364,9 +4367,10 @@ LIMIT 1
     async fn request_dv_fel_requalification(
         &self,
         file_id: i64,
-        binding: &str,
+        scanner: &str,
+        generation: i64,
     ) -> Result<bool, StoreError> {
-        super::dv_title_jobs::request_requalification(self, file_id, binding).await
+        super::dv_title_jobs::request_requalification(self, file_id, scanner, generation).await
     }
     async fn request_dv_fel_head(
         &self,
@@ -4409,15 +4413,17 @@ LIMIT 1
         &self,
         revision: i64,
         scanner: &str,
+        generation: i64,
     ) -> Result<Option<i64>, StoreError> {
-        super::dv_title_jobs::bind(self, revision, scanner).await
+        super::dv_title_jobs::bind(self, revision, scanner, generation).await
     }
     async fn carry_forward_dv_title_verdicts(
         &self,
         scanner: &str,
+        generation: i64,
         predecessors: &[String],
     ) -> Result<u64, StoreError> {
-        super::dv_title_jobs::carry_forward(self, scanner, predecessors).await
+        super::dv_title_jobs::carry_forward(self, scanner, generation, predecessors).await
     }
     async fn publish_dv_title_job(
         &self,

@@ -353,7 +353,11 @@ pub(crate) async fn publish_title_with_tools_for_control(
         return Err("title control source does not match ordinary probe demand".into());
     }
     demand.probe_revision = store
-        .bind_dv_title_demand(demand.probe_revision, &scanner)
+        .bind_dv_title_demand(
+            demand.probe_revision,
+            &scanner,
+            crate::dv_tools::TITLE_SCANNER_GENERATION,
+        )
         .await
         .map_err(|e| e.to_string())?
         .ok_or("title demand changed before scanner binding")?;

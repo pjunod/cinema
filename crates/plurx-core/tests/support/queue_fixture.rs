@@ -886,13 +886,13 @@ fn historical_title_rewind_refuses_partial_schema_without_mutation() {
 }
 
 #[test]
-fn historical_title_rewind_refuses_v2_at_v114_without_mutation() {
+fn historical_title_rewind_refuses_v3_at_v114_without_mutation() {
     use source_extensions_fixture::title_extension_fixture as title;
     let dir = tempfile::tempdir().expect("mislabeled title fixture");
     let path = dir.path().join("title-v114.db");
     drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture"));
     let connection = rusqlite::Connection::open(path).expect("fixture connection");
-    title::assert_title_fixture_generation(&connection, 2);
+    title::assert_title_fixture_generation(&connection, 3);
     connection
         .execute_batch("PRAGMA user_version=114;")
         .expect("mislabeled ordinal");
@@ -902,7 +902,7 @@ fn historical_title_rewind_refuses_v2_at_v114_without_mutation() {
     }))
     .is_err());
     assert_eq!(title::title_fixture_objects(&connection), before);
-    title::assert_title_fixture_generation(&connection, 2);
+    title::assert_title_fixture_generation(&connection, 3);
 }
 
 #[test]
@@ -912,7 +912,7 @@ fn historical_title_rewind_restores_published_v1_topology_and_sequence_before_re
     let path = dir.path().join("title-v131.db");
     drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture"));
     let connection = rusqlite::Connection::open(&path).expect("fixture connection");
-    title::assert_title_fixture_generation(&connection, 2);
+    title::assert_title_fixture_generation(&connection, 3);
     connection.execute("INSERT INTO sqlite_sequence(name,seq) SELECT 'dv_title_jobs_demand',41 WHERE NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='dv_title_jobs_demand')",[]).expect("owned demand sequence");
     connection
         .execute(
@@ -943,7 +943,7 @@ fn historical_title_rewind_restores_published_v1_topology_and_sequence_before_re
     drop(connection);
     drop(plurx_core::store::SqliteStore::open(&path).expect("reopen genuine v131 topology"));
     let connection = rusqlite::Connection::open(&path).expect("upgraded fixture");
-    title::assert_title_fixture_generation(&connection, 2);
+    title::assert_title_fixture_generation(&connection, 3);
     assert_eq!(
         connection
             .query_row(

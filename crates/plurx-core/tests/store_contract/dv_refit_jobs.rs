@@ -113,7 +113,7 @@ async fn title_with(store: &Arc<dyn Store>, name: &str, profile: i64, fel: bool)
         .find(|d| d.file_id == id)
         .expect("title demand");
     let revision = store
-        .bind_dv_title_demand(demand.probe_revision, &scanner)
+        .bind_dv_title_demand(demand.probe_revision, &scanner, 1)
         .await
         .expect("bind")
         .expect("bound");

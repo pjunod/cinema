@@ -5,8 +5,23 @@ Affected qualification, the required lane, merge and operator deployment remain 
 
 Companion to [the display-targeted DV build ledger](DISPLAY-TARGETED-DV-BUILD.md)
 (target selection and rendering) — this is how the title scanner reads and
-stores the facts that select a target. Paul deploys plurxd, which rebuilds the
-DV bundle; avoid mixed-version nodes during rollout.
+stores the facts that select a target.
+
+## Roll out scanner changes in order
+
+The replicated store records a scanner generation alongside each bound
+digest. A lower generation cannot replace it. If two workers report
+different digests at the same generation, the store keeps the existing
+binding. Compatible complete aggregates can advance with the binding.
+Other published aggregates stay available for the same source until a
+new scan replaces them. Jobs can reuse an aggregate only for the revision
+that produced it or carried it forward.
+
+Deploy the store guard with the existing scanner first. Verify that every
+eligible title worker runs the guard before deploying a scanner change.
+Advance `TITLE_SCANNER_GENERATION` when changing scanner releases and verify
+that the eligible workers for that release report the same title scanner
+digest. Existing jobs can drain against their exact bound revisions.
 
 ## The scanner follows the renderer’s picture rules
 
