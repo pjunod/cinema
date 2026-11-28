@@ -2190,7 +2190,7 @@ jobs:
       cancel-in-progress: false
     needs: [scope, preflight]
     if: github.server_url != 'https://github.com' && (needs.scope.outputs.release_build == 'true' || needs.scope.outputs.container == 'true')
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       matrix:
@@ -2199,11 +2199,14 @@ jobs:
             target: x86_64-unknown-linux-gnu
             kernel_machine: x86_64
             docker_machine: x86_64
+            timeout_minutes: 90
             runs_on: '["ci-nonvoter-heavy-amd64"]'
           - arch: arm64
             target: aarch64-unknown-linux-gnu
             kernel_machine: aarch64
             docker_machine: aarch64
+            # Cold native builds have hit the old deadline during the daemon compile.
+            timeout_minutes: 150
             runs_on: '["self-hosted","Linux","ARM64","lab","ci-arm64"]'
     steps:
       - name: Verify effective nonvoter resource bounds
