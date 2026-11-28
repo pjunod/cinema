@@ -318,13 +318,17 @@ def register_command(control, record, identity, tray, update_mode, image_referen
     return register
 
 
-def ensure_login_entry(control, record, autostart, *, default_on):
-    """The login entry is the recorded preference: the controller writes it
-    for On and, with Hidden=true, for Off, and never deletes it. An absent
-    entry was therefore lost, not chosen, and is restored to the default."""
+def ensure_login_entry(control, record, autostart, *, default_on, registered):
+    """Only an install the user runs creates a missing login entry. The
+    controller writes Off as Hidden=true, but desktop autostart settings
+    (GNOME Tweaks, KDE) turn a user-only entry off by deleting it, so an
+    unattended redeploy never recreates it: running the installer again is
+    the user asking for the tray, and it says so when it restores the entry."""
     if autostart.exists():
         return
     run([control, "--installation", record, "startup", "set", "tray", "on" if default_on else "off"])
+    if registered and default_on:
+        print("compose tray: the tray login entry was missing; it is on again (turn it off from the tray's menu)")
 
 
 def registered_checkout(record):
@@ -340,7 +344,8 @@ def refresh_registration(args):
     """Re-pin a registered tray to the containers a redeploy just created.
 
     Deploy targets run this after `docker compose up`. It needs no graphical
-    session and replaces no tray files; the controller's same-deployment
+    session, replaces no tray files and leaves the login entry alone; the
+    controller's same-deployment
     refresh refuses any other engine, project, services or checkout."""
     if sys.platform != "linux":
         return
@@ -354,10 +359,9 @@ def refresh_registration(args):
     if not paths["record"].exists():
         raise ValueError("the registered tray names another Docker engine or project than this deployment; rerun the installer")
     update_mode, image_reference = deployment_mode(args, paths["record"])
-    check_login_entry(paths["autostart"], paths["record"])
+    # The login entry is the user's; a redeploy only re-pins the containers.
     run(register_command(paths["control"], paths["record"], identity, paths["tray"], update_mode, image_reference, refresh=True),
         stdout=subprocess.DEVNULL)
-    ensure_login_entry(paths["control"], paths["record"], paths["autostart"], default_on=True)
     print(f"compose tray: refreshed the host tray for Compose project {identity['project']}")
 
 
@@ -371,6 +375,7 @@ def install(args):
     paths = layout(checkout, identity)
     key, data, state, cohort, config = (paths[k] for k in ("key", "data", "state", "cohort", "config"))
     record, tray, control, autostart = (paths[k] for k in ("record", "tray", "control", "autostart"))
+    was_registered = record.exists()
     update_mode, image_reference = deployment_mode(args, record)
     for path in [state, cohort, config, autostart, data / "applications",
                  data / "icons/hicolor/scalable/apps", data / "icons/hicolor/symbolic/apps"]:
@@ -421,7 +426,7 @@ def install(args):
         atomic_text(destination, icon.read_text(), mode=0o644)
     # The controller writes its installation ownership marker and the same
     # startup format it uses for every later explicit On/Off choice.
-    ensure_login_entry(control, record, autostart, default_on=not args.no_autostart)
+    ensure_login_entry(control, record, autostart, default_on=not args.no_autostart, registered=was_registered)
     subprocess.Popen([str(tray), "--window", "--control", str(control), "--installation", str(record)],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     print(f"Installed host tray for Compose project {identity['project']}; server stays in its container.")
@@ -450,7 +455,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("compose tray: native tray build interrupted; build descendants stopped", file=sys.stderr)
         return 130
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"compose tray: {error}", file=sys.stderr)
         return 1
 

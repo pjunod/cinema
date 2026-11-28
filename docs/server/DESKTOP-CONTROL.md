@@ -49,8 +49,9 @@ Root and headless installs print a later-install command. `make docker-up` and
 `make docker-image-up` re-pin a registered tray to the containers they recreate
 (`install-compose-tray --refresh-registration`, the same-deployment refresh,
 with no tray rebuild or desktop session); a refusal warns without failing the
-deployment. The tray's login entry is its recorded preference: Off is an entry
-with `Hidden=true`, so a missing entry is restored as On. Custom Pi
+deployment; it never touches the login entry. Rerunning the installer restores
+a missing login entry as On (desktop autostart settings delete it to turn it
+off) and keeps an entry turned off. Custom Pi
 setup ownership and remote Docker engines are not supported by this adapter.
 
 If the host reboots or an operation worker dies before completion, the private

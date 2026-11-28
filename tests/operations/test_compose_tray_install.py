@@ -380,11 +380,20 @@ class ComposeTrayRefreshTests(unittest.TestCase):
             launch.assert_not_called()
             self.assertIn("Hidden=true", paths["autostart"].read_text())  # explicit Off kept
 
-    def test_redeploy_restores_a_lost_login_entry(self):
+    def test_redeploy_never_recreates_a_deleted_login_entry(self):
+        # GNOME Tweaks and KDE turn a user-only autostart entry off by deleting it.
         with tempfile.TemporaryDirectory() as work:
-            home, identity, environment, _ = self.fixture(work, entry=False)
+            home, identity, environment, paths = self.fixture(work, entry=False)
             calls, *_ = self.refresh(home, identity, environment)
-            self.assertEqual(calls[-1][-4:], ["startup", "set", "tray", "on"])
+            self.assertEqual([call for call in calls if "startup" in call], [])
+            self.assertFalse(paths["autostart"].exists())
+
+    def test_redeploy_repins_even_when_a_desktop_tool_rewrote_the_entry(self):
+        with tempfile.TemporaryDirectory() as work:
+            home, identity, environment, paths = self.fixture(work)
+            paths["autostart"].write_text("[Desktop Entry]\nX-GNOME-Autostart-enabled=false\n")
+            calls, *_ = self.refresh(home, identity, environment)
+            self.assertTrue(any("--refresh" in call for call in calls))
 
     def test_host_without_a_tray_for_this_checkout_is_a_quiet_no_op(self):
         with tempfile.TemporaryDirectory() as work:
