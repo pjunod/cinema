@@ -2097,6 +2097,52 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
     }
 
     #[tokio::test]
+    async fn vod_working_set_pressure_can_reclaim_a_departed_requester_in_the_same_batch() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let mut donor = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut donor).expect("unshared").key = "first".to_owned();
+        donor
+            .dir
+            .materialize(&mut *donor.manifest.lock().await, 0, &[0; 160], now_ms())
+            .await
+            .expect("sole working-set donor");
+        *donor.dormant_since.lock().expect("dormant lock") =
+            Some(Instant::now() - Duration::from_secs(1));
+        serve.shared.renditions.lock().await.insert(donor.key.clone(), donor);
+        serve.shared.working_set.store(160, Relaxed);
+
+        let waiting = |key: &str| {
+            serve.shared.pool.register(
+                WaitKey {
+                    rendition: key.to_owned(),
+                    index: 1,
+                },
+                key,
+            ).expect("blocked playback")
+        };
+        let first = waiting("first");
+        let second = waiting("second");
+        let gate = serve.shared.working_set_reclaim.lock().await;
+        serve.shared.reclaim_working_set("first", 64);
+        serve.shared.reclaim_working_set("second", 64);
+        drop(first);
+        drop(gate);
+        serve.shared.reclaim_working_set("second", 64);
+
+        let _settled = tokio::time::timeout(
+            Duration::from_secs(4),
+            serve.shared.working_set_reclaim.lock(),
+        )
+        .await
+        .expect("coalesced requests settle");
+        assert_eq!(serve.shared.pool.blocked_on("second"), Some(1));
+        assert_eq!(serve.shared.working_set.load(Relaxed), 0);
+        assert!(serve.shared.renditions.lock().await.is_empty());
+        drop(second);
+    }
+
+    #[tokio::test]
     async fn a_zero_progress_eviction_does_not_self_schedule_a_hot_loop() {
         use futures_util::FutureExt;
         let base = crate::test_tempdir().expect("base");

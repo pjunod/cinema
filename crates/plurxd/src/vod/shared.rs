@@ -1398,9 +1398,7 @@ impl Shared {
             renditions
                 .values()
                 .filter(|rendition| {
-                    !requests.contains_key(&rendition.key)
-                        && !rendition.ephemeral_processing
-                        && rendition.private_storage.is_none()
+                    !rendition.ephemeral_processing && rendition.private_storage.is_none()
                 })
                 .map(|rendition| {
                     let since = *rendition.dormant_since.lock().expect("dormant lock");
@@ -1410,12 +1408,17 @@ impl Shared {
         };
         donors.sort_unstable_by_key(|(since, _)| (since.is_none(), *since));
         let before = self.working_set.load(Relaxed);
+        let waiting_requester = |donor: &Rendition| {
+            requests.contains_key(&donor.key) && self.pool.blocked_on(&donor.key).is_some()
+        };
         for (_, donor) in donors.iter().take_while(|(since, _)| since.is_some()) {
             if !release_limit().is_some_and(|limit| self.working_set.load(Relaxed) > limit) {
                 break;
             }
-            self.purge_dormant(&donor.key, Duration::ZERO, Some(donor))
-                .await;
+            if !waiting_requester(donor) {
+                self.purge_dormant(&donor.key, Duration::ZERO, Some(donor))
+                    .await;
+            }
         }
         let mut donors = donors
             .into_iter()
@@ -1434,6 +1437,11 @@ impl Shared {
                 let wanted = self.working_set.load(Relaxed).saturating_sub(limit);
                 if wanted == 0 {
                     break;
+                }
+                // An earlier requester can become a safe donor after its
+                // wait and readers are gone, even within the same batch.
+                if waiting_requester(&donor) {
+                    continue;
                 }
                 match self.trim_working_set_donor(&donor, wanted).await {
                     Some(bytes) => trimmed += bytes,
