@@ -996,7 +996,7 @@ node does not hold, `409` while a session is reading the published artifact.
 | GET | `/api/v1/items/{id}` | bearer | Item detail: item, ancestors, children, files, editions, reading. Each video file carries its Dolby Vision record (`dv_profile`, `dv_level`, `dv_bl_compat_id`, `dv_el_present`, and `dv_el_kind` `fel`/`mel` once the complete-title scan found it), `dv_facts` (those facts as the one line every client shows as sent, e.g. "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base") and `plays_on[{id, device, client, label, method, el_dropped, full_quality}]`: how it plays on each of the caller's signed-in devices with no track chosen, from the same verdict function `POST /files/{id}/decision` uses (transport-narrowed conversion, learned limits still in force, decoder geometry, the language policy's audio track) |
 | PATCH | `/api/v1/items/{id}` | admin | Hand-edits metadata — **home libraries only** |
 | POST | `/api/v1/items/{id}/reanalyze` | admin | Re-runs ffprobe over every file on the item |
-| POST | `/api/v1/items/{id}/m7/reevaluate` | admin | Forgets the item's recorded M7 outcomes so the idle title sweep evaluates them again; 409 when M7 is not configured |
+| POST | `/api/v1/items/{id}/m7/reevaluate` | admin | Clears eligible settled M7 outcomes for the idle sweep. Returns 409 without M7 configuration. |
 | POST | `/api/v1/items/{id}/refresh-artwork` | admin | Forces an artwork re-fetch for the item and its ancestors |
 | GET | `/api/v1/items/{id}/photo` | bearer | Original photo bytes with range support, or the thumbnail |
 | GET | `/api/v1/hubs` | bearer | Home rows: continue watching, next up, recently added |
@@ -1394,12 +1394,12 @@ cluster-wide leases can run the pass. Each refusal is a typed 503 with a
 | `probe_repair_interrupted` | 5 | This node lost the lease mid-pass. Files already re-probed stay published, so re-read the item before retrying. |
 | `probe_repair_not_eligible` | 5 | This node cannot take cluster-wide leases right now: it is entering maintenance, cannot read committed membership, or has just been demoted. Retry, or send the request to another voter. A learner is refused earlier with `learner_route_ineligible`. |
 
-`POST /items/{id}/m7/reevaluate` forgets the M7 outcome recorded for each of
-the item's Dolby Vision title generations and returns `{cleared}`, how many it
-forgot. It does not run M7: the idle title sweep reopens those titles (and any
-title with no record yet) under the running M7 identity while no other title
-work waits. A server without an M7 experiment directory answers 409 with "M7
-is not configured on this server".
+`POST /items/{id}/m7/reevaluate` clears eligible settled M7 outcomes for the
+item and returns the number cleared in `cleared`. Active evaluations and
+legacy rate stops retain the evidence the idle title sweep needs. The sweep
+reopens eligible titles under the running M7 identity while no other title work
+waits. A server without an M7 experiment directory answers 409 with "M7 is not
+configured on this server".
 
 ### 6.7 Images
 

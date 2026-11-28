@@ -16,7 +16,7 @@ use plurx_core::{
     store::{
         background_jobs::{
             CandidateCursor, CandidateQuery, ClaimJob, ClaimVerdict, EnqueueJob, EnqueueOutcome,
-            JobKind, JobPayload, JobRequest, JobSettlement,
+            JobKind, JobPayload, JobPublishOutcome, JobRequest, JobSettlement,
         },
         dv_m7_outcomes::M7TitleOutcome,
         dv_title_jobs::{TitleDemand, TitleMaintenanceCursor, TitleOutput},
@@ -841,23 +841,36 @@ async fn complete_title<E, P>(
     retry_at: impl FnOnce() -> i64,
 ) -> Result<(), JobSettlement>
 where
-    E: Future<Output = super::m7_title::Evaluation>,
-    P: Future<Output = Result<bool, StoreError>>,
+    E: Future<Output = (super::m7_title::Evaluation, Option<String>)>,
+    P: Future<Output = Result<JobPublishOutcome, StoreError>>,
 {
     // The native_fel_head waiter reopens an already-settled title only to
     // rebuild that node's local prefix: M7 does not run, and the
     // generation's recorded outcome stays as it was.
-    let evaluation = if demand.fel_head_target.is_some() {
-        Ok(super::m7_title::Evaluated::Skipped)
+    let (evaluation, observed_fit) = if demand.fel_head_target.is_some() {
+        (Ok(super::m7_title::Evaluated::Skipped), None)
     } else {
         evaluate.await
     };
-    let m7 = m7_settlement(&output, evaluation, identity, interrupted(), now_ms())?;
-    match publish(output, m7).await {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(JobSettlement::Stop {
-            error_code: "title_publication_fenced".into(),
+    let m7 =
+        m7_settlement(&output, evaluation, identity, interrupted(), now_ms())?.map(|mut m7| {
+            m7.observed_fit_table = observed_fit;
+            m7
+        });
+    match publish(output.clone(), m7).await {
+        Ok(JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }) => {
+            Ok(())
+        }
+        Ok(JobPublishOutcome::ArtifactConflict) => Err(JobSettlement::Yield {
+            error_code: Some("m7_fit_changed".into()),
+            not_before_ms: now_ms().saturating_add(5_000),
+            checkpoint: Some(serde_json::json!({"fel_title_aggregate": output})),
         }),
+        Ok(JobPublishOutcome::LostOwnership | JobPublishOutcome::SourceChanged) => {
+            Err(JobSettlement::Stop {
+                error_code: "title_publication_fenced".into(),
+            })
+        }
         Err(error) => {
             tracing::warn!(%error, "title publication unavailable");
             Err(JobSettlement::Retry {

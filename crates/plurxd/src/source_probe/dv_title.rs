@@ -627,7 +627,7 @@ pub(crate) async fn publish_title_with_tools_for_control(
         {
             return Err("title scanner or source changed before control publication".into());
         }
-        if !fence
+        let publication = fence
             .publish_dv_title(
                 TitleOutput {
                     file_id: file.id,
@@ -640,8 +640,12 @@ pub(crate) async fn publish_title_with_tools_for_control(
                 None,
             )
             .await
-            .map_err(|e| e.to_string())?
-        {
+            .map_err(|e| e.to_string())?;
+        use plurx_core::store::background_jobs::JobPublishOutcome;
+        if !matches!(
+            publication,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        ) {
             return Err("title control publication fenced".into());
         }
         let stored = store

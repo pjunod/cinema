@@ -365,6 +365,18 @@ pub const M7_LEGACY_MIN_TARGET_KBPS: u32 = 83_334;
 pub(super) const LEGACY_GATE_PREFIX: &str =
     "NP1 did not land a rate-only candidate: OutsideTargetBounds(";
 
+/// SQL counterpart to `M7LegacyRateStop::refused_target`. The caller supplies
+/// the qualified gate column from its own query.
+pub(super) fn legacy_rate_gate_sql(gate: &str) -> String {
+    let first_digit = LEGACY_GATE_PREFIX.len() + 1;
+    let target =
+        format!("CAST(substr({gate},{first_digit},length({gate})-{first_digit}) AS INTEGER)");
+    format!(
+        "({target}>0 AND {target}<{M7_LEGACY_MIN_TARGET_KBPS}
+ AND {gate}='{LEGACY_GATE_PREFIX}' || printf('%lld',{target}) || ')')"
+    )
+}
+
 impl M7LegacyRateStop {
     pub fn refused_target(&self) -> Option<i64> {
         let digits = self

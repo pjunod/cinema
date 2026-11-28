@@ -112,6 +112,7 @@ pub(super) fn outcome_record(
     Some(M7TitleOutcome {
         identity: identity.to_owned(),
         fit_version: plurx_core::transcode::dv_refit::FIT_VERSION.to_owned(),
+        observed_fit_table: None,
         outcome,
         // A gate is never empty; the store refuses one.
         gate: gate.map(|gate| match M7TitleOutcome::bounded_gate(gate) {
@@ -162,16 +163,21 @@ fn digest_text(value: &str) -> bool {
 }
 
 fn load_json(path: &Path, expected: Option<&str>) -> Result<Vec<u8>, String> {
-    let file = plurx_core::fs_secure::open_read_nofollow_blocking(path)
-        .map_err(|error| error.to_string())?;
+    load_evidence(path, expected).map_err(string)
+}
+
+fn load_evidence(path: &Path, expected: Option<&str>) -> std::io::Result<Vec<u8>> {
+    let file = plurx_core::fs_secure::open_read_nofollow_blocking(path)?;
     let mut bytes = Vec::new();
     file.take(MAX_HISTORICAL_JSON_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
+        .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_HISTORICAL_JSON_BYTES
         || expected.is_some_and(|hash| hex::encode(Sha256::digest(&bytes)) != hash)
     {
-        return Err("M7 experiment evidence length or digest changed".into());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "M7 experiment evidence length or digest changed",
+        ));
     }
     Ok(bytes)
 }
@@ -347,6 +353,16 @@ async fn raw_sha256(context: &TitleContext<'_>, source: &SourceFence) -> Result<
 pub(super) async fn evaluate(
     context: &TitleContext<'_>,
     stats: &plurx_core::scan::dv_title::DvTitleStats,
+) -> (Evaluation, Option<String>) {
+    let mut observed_fit = None;
+    let result = evaluate_title(context, stats, &mut observed_fit).await;
+    (result, observed_fit)
+}
+
+async fn evaluate_title(
+    context: &TitleContext<'_>,
+    stats: &plurx_core::scan::dv_title::DvTitleStats,
+    observed_fit: &mut Option<String>,
 ) -> Evaluation {
     if context.demand.playback_requested || context.admission.is_probe_only() {
         return Ok(Evaluated::Skipped);
@@ -396,9 +412,15 @@ pub(super) async fn evaluate(
     }
     // The new-title measurement is a ~110 KB future in debug builds; nested by
     // value under title work it overflowed a 2 MiB runtime worker stack.
-    Box::pin(measure_new_title(context, title, &root, stats))
-        .await
-        .map(|()| Evaluated::Result)
+    Box::pin(measure_new_title(
+        context,
+        title,
+        &root,
+        stats,
+        observed_fit,
+    ))
+    .await
+    .map(|()| Evaluated::Result)
 }
 
 #[derive(Deserialize)]
@@ -502,11 +524,22 @@ async fn measure_new_title(
     mut title: HeldTitle,
     root: &Path,
     stats: &plurx_core::scan::dv_title::DvTitleStats,
+    observed_fit: &mut Option<String>,
 ) -> EvaluationResult {
     // A sealed source experiment remains terminal even if its current
     // catalogue receipt was interrupted or its original helper is retired.
     if let Some(completion) = recovery::find(root, title.content_sha256).await? {
         return completion.reconcile(context, &title).await;
+    }
+    if context.tools.m7_encoder().is_none() {
+        return Err(EvaluationError::Unsupported(
+            "M7 requires the verified independent encoder CLI and closure".into(),
+        ));
+    }
+    if context.tools.muxer().is_none() {
+        return Err(EvaluationError::Unsupported(
+            "M7 requires the verified ROI muxer".into(),
+        ));
     }
     let source_probe =
         M7SourceProbe::from_probe_json(&context.demand.probe_json).map_err(string)?;
@@ -543,7 +576,7 @@ async fn measure_new_title(
                     .await.is_ok_and(|version| version == expected_version)
         },
         async {
-            let fitted = FittedPublication::load(context).await?;
+            let fitted = FittedPublication::load(context, observed_fit).await?;
             // Inside the admitted, version-checked source run: the frame
             // observation is of the same held object the census reads.
             let st2086_frames = undeclared_st2086_frames(context, &title).await?;
@@ -617,18 +650,22 @@ async fn measure_new_title(
                 let raw = tokio::task::spawn_blocking({
                     let old_dir = old_dir.clone();
                     let old_protocol = old_protocol.clone();
-                    move || load_json(&old_dir.join("native-protocol.json"), Some(&old_protocol))
-                }).await.map_err(string)??;
-                let original: serde_json::Value = serde_json::from_slice(&raw).map_err(string)?;
+                    move || load_evidence(&old_dir.join("native-protocol.json"), Some(&old_protocol))
+                }).await.map_err(string)?.map_err(legacy_protocol_error)?;
+                let original: serde_json::Value = serde_json::from_slice(&raw)
+                    .map_err(|error| EvaluationError::Inconclusive(format!("invalid M7 legacy protocol: {error}")))?;
                 if original["recipe_sha256"] != hex::encode(legacy.ledger.recipe_sha256)
                     || legacy.ledger.recipe_sha256 != recipe.recipe_v1_sha256()
                 {
-                    return Err(EvaluationError::Deferred("M7 legacy recipe differs".into()));
+                    return Err(EvaluationError::Inconclusive("M7 legacy recipe differs".into()));
                 }
-                let refused = legacy.refused_target().ok_or("M7 legacy rate stop is invalid")?;
+                let refused = legacy.refused_target().ok_or_else(|| {
+                    EvaluationError::Inconclusive("M7 legacy rate stop is invalid".into())
+                })?;
                 verify_legacy_rate_stop(&old_dir, &legacy.ledger, &recipe, source.layout.raster, refused)
-                    .await.map_err(string)?;
-                let calibration = legacy_calibration(&original, &freeze, source.layout, &baseline)?;
+                    .await.map_err(legacy_proof_error)?;
+                let calibration = legacy_calibration(&original, &freeze, source.layout, &baseline)
+                    .map_err(EvaluationError::Inconclusive)?;
                 freeze["supersedes_protocol_sha256"] = serde_json::json!(old_protocol);
                 // Carry the authenticated calibration records into the new freeze.
                 freeze["calibration"] = original["calibration"].clone();
@@ -732,6 +769,26 @@ fn candidate_error(error: PrepareError) -> EvaluationError {
         | PrepareError::IncompleteAttempt { .. } => {
             EvaluationError::Inconclusive(error.to_string())
         }
+        _ => EvaluationError::Deferred(error.to_string()),
+    }
+}
+
+fn legacy_protocol_error(error: std::io::Error) -> EvaluationError {
+    match error.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData => {
+            EvaluationError::Inconclusive(format!(
+                "M7 legacy protocol unavailable locally: {error}"
+            ))
+        }
+        _ => EvaluationError::Deferred(error.to_string()),
+    }
+}
+
+fn legacy_proof_error(error: PrepareError) -> EvaluationError {
+    match error {
+        PrepareError::IncompleteAttempt { .. }
+        | PrepareError::MissingLegacyProof
+        | PrepareError::Authority(_) => EvaluationError::Inconclusive(error.to_string()),
         _ => EvaluationError::Deferred(error.to_string()),
     }
 }
@@ -1645,6 +1702,35 @@ mod tests {
             whole_readback: [2; 32],
             seek_readback: [3; 32],
         }
+    }
+
+    #[test]
+    fn legacy_proof_unavailability_preserves_transient_retry() {
+        use std::io::{Error, ErrorKind};
+
+        for error in [ErrorKind::NotFound, ErrorKind::InvalidData] {
+            assert!(matches!(
+                legacy_protocol_error(Error::from(error)),
+                EvaluationError::Inconclusive(_)
+            ));
+        }
+        assert!(matches!(
+            legacy_protocol_error(Error::from(ErrorKind::PermissionDenied)),
+            EvaluationError::Deferred(_)
+        ));
+        for error in [
+            PrepareError::MissingLegacyProof,
+            PrepareError::IncompleteAttempt { slot: 0 },
+        ] {
+            assert!(matches!(
+                legacy_proof_error(error),
+                EvaluationError::Inconclusive(_)
+            ));
+        }
+        assert!(matches!(
+            legacy_proof_error(PrepareError::Execution("journal busy".into())),
+            EvaluationError::Deferred(_)
+        ));
     }
 
     #[test]

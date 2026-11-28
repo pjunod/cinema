@@ -845,6 +845,7 @@ fn outcome(identity: &str, kind: M7OutcomeKind, gate: Option<&str>) -> M7TitleOu
     M7TitleOutcome {
         identity: identity.into(),
         fit_version: FIT_VERSION.into(),
+        observed_fit_table: None,
         outcome: kind,
         gate: gate.map(str::to_owned),
     }
@@ -899,7 +900,12 @@ async fn an_unrecorded_settled_title_reopens_once_per_m7_identity() {
         }
         // No record: the title reopens at its own generation, with its stored
         // aggregate, and the reopen is marked as this identity's.
-        assert_eq!(sweep(&store, &a).await, vec![file.id], "{backend}");
+        let (first, second) = tokio::join!(sweep(&store, &a), sweep(&store, &a));
+        assert_eq!(
+            first.into_iter().chain(second).collect::<Vec<_>>(),
+            vec![file.id],
+            "{backend}: concurrent sweeps admit one job"
+        );
         let reopened = store
             .dv_title_demands(&"a".repeat(64), 0, now())
             .await
@@ -1081,6 +1087,7 @@ async fn results_and_terminal_outcomes_are_never_swept_until_an_administrator_cl
 async fn an_m7_record_is_published_with_its_title_and_dies_with_its_generation() {
     for_each_backend(|store, backend| async move {
         let file = title(&store, "m7-generation", true).await;
+        let fit = land_fit(&store, &file, &helper(), 0).await;
         let a = m7('a');
         assert_eq!(sweep(&store, &a).await, vec![file.id], "{backend}");
         // A publication that lost its claim stores neither the aggregate nor
@@ -1106,7 +1113,8 @@ async fn an_m7_record_is_published_with_its_title_and_dies_with_its_generation()
             scanner_digest: scanner.clone(),
             stats,
         };
-        let result = outcome(&a, M7OutcomeKind::Result, None);
+        let mut result = outcome(&a, M7OutcomeKind::Result, None);
+        result.observed_fit_table = Some(fit.clone());
         let fenced = store
             .publish_dv_title_job(PublishTitleJob {
                 token,
@@ -1132,16 +1140,38 @@ async fn an_m7_record_is_published_with_its_title_and_dies_with_its_generation()
             })
             .await
             .is_err());
-        let published = store
+        let mut stale = outcome(&a, M7OutcomeKind::Unsupported, Some("no fitted scenes"));
+        stale.observed_fit_table = Some(String::new());
+        let changed_fit = store
             .publish_dv_title_job(PublishTitleJob {
                 token: job.token.clone().expect("token"),
-                output,
-                m7: Some(result),
+                output: output.clone(),
+                m7: Some(stale),
                 now_ms: now(),
             })
             .await
+            .expect("fit changed verdict");
+        assert!(matches!(changed_fit, JobPublishOutcome::ArtifactConflict));
+        assert_eq!(
+            record(&store, file.id).await.map(|r| r.2),
+            Some(M7OutcomeKind::Pending)
+        );
+        let request = PublishTitleJob {
+            token: job.token.clone().expect("token"),
+            output,
+            m7: Some(result),
+            now_ms: now(),
+        };
+        let published = store
+            .publish_dv_title_job(request.clone())
+            .await
             .expect("publication");
         assert!(matches!(published, JobPublishOutcome::Published { .. }));
+        let repeat = store
+            .publish_dv_title_job(request)
+            .await
+            .expect("repeat publication");
+        assert!(matches!(repeat, JobPublishOutcome::AlreadyPublished { .. }));
         let settled = store
             .background_job(&job_id)
             .await
@@ -1150,7 +1180,7 @@ async fn an_m7_record_is_published_with_its_title_and_dies_with_its_generation()
         assert_eq!(settled.state, JobState::Succeeded, "{backend}");
         assert_eq!(
             record(&store, file.id).await,
-            Some((a.clone(), String::new(), M7OutcomeKind::Result)),
+            Some((a.clone(), fit, M7OutcomeKind::Result)),
             "{backend}: recorded with the aggregate"
         );
         // A reprobe replaces the generation; its record goes with it, so the
@@ -1294,9 +1324,25 @@ async fn legacy_m7_rate_stop_can_archive_and_replace_the_fenced_source_ledger_on
             .await
             .expect("legacy stop");
         assert!(matches!(published, JobPublishOutcome::Published { .. }));
+        assert_eq!(
+            store
+                .clear_dv_m7_title_outcomes(file.item_id)
+                .await
+                .expect("reevaluation"),
+            0,
+            "{backend}: the original rate stop must remain available to archive"
+        );
         assert!(sweep(&store, &original).await.is_empty());
         assert_eq!(sweep(&store, &successor).await, vec![file.id], "{backend}");
         assert!(sweep(&store, &successor).await.is_empty());
+        assert_eq!(
+            store
+                .clear_dv_m7_title_outcomes(file.item_id)
+                .await
+                .expect("reevaluation"),
+            0,
+            "{backend}: an open successor needs its pending outcome"
+        );
 
         let renewed_demand = store
             .dv_title_demands(&scanner, 0, now())

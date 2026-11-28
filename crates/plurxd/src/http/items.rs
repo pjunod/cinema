@@ -192,15 +192,15 @@ pub struct M7ReevaluateReport {
     pub cleared: u64,
 }
 
-/// POST /api/v1/items/:id/m7/reevaluate (admin) — forget the M7 outcome of
-/// this item's Dolby Vision titles so M7 evaluates them again.
+/// POST /api/v1/items/:id/m7/reevaluate (admin) — forget eligible settled
+/// M7 outcomes so the idle sweep can evaluate those titles again.
 ///
 /// A settled title's M7 outcome is recorded under the M7 build and tools
 /// that produced it, and the idle sweep re-evaluates refused titles when
 /// those change. A change the identity cannot see (an experiment-directory
 /// repair, a ruling that a terminal `inconclusive` deserves another look) has
-/// no other way back; this is it. The work itself happens in the background:
-/// the sweep reopens the titles while no other title work waits.
+/// no other way back. Active evaluations and legacy rate stops remain
+/// available to the sweep that owns their transitions.
 pub async fn reevaluate_m7(
     _admin: AdminUser,
     State(state): State<AppState>,

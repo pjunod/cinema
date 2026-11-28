@@ -75,6 +75,8 @@ pub(in crate::source_probe) enum PrepareError {
     ActualRate,
     #[error("NP1 candidate slot {slot} was consumed without a recoverable verified result")]
     IncompleteAttempt { slot: u8 },
+    #[error("NP1 legacy journal is unavailable on this node")]
+    MissingLegacyProof,
 }
 
 type Result<T> = std::result::Result<T, PrepareError>;
@@ -768,7 +770,13 @@ pub(in crate::source_probe) async fn verify_legacy_rate_stop(
         .map(|slot| (slot.slot, slot.target_kbps, slot.binding_sha256))
         .collect();
     let attempts = blocking(move || {
-        let journal = Journal::open_existing(&path, source, protocol).map_err(journal_error)?;
+        let journal =
+            Journal::open_existing(&path, source, protocol).map_err(|error| match error {
+                journal::Error::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+                    PrepareError::MissingLegacyProof
+                }
+                error => journal_error(error),
+            })?;
         journal
             .observe_rate_only(&bindings, |recovered| {
                 let proof = recovered.proof;

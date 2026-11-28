@@ -1,4 +1,6 @@
-use super::{complete_title, m7_settlement, JobSettlement, TitleDemand, TitleOutput};
+use super::{
+    complete_title, m7_settlement, JobPublishOutcome, JobSettlement, TitleDemand, TitleOutput,
+};
 use crate::source_probe::m7_title::Evaluated;
 use plurx_core::store::dv_m7_outcomes::M7OutcomeKind;
 
@@ -157,7 +159,14 @@ async fn retained_fel_head_rebuild_skips_m7_and_preserves_fenced_title_settlemen
                     assert_eq!(m7, None, "a head rebuild keeps the recorded outcome");
                     assert_eq!(output.probe_revision, expected.probe_revision);
                     assert_eq!(output.stats, expected.stats);
-                    Ok(fence_accepts)
+                    Ok(if fence_accepts {
+                        JobPublishOutcome::Published {
+                            job_id: "fixture".into(),
+                            result_ref: "fixture".into(),
+                        }
+                    } else {
+                        JobPublishOutcome::LostOwnership
+                    })
                 }
             },
             || panic!("no publication failure was injected"),
@@ -186,9 +195,12 @@ async fn retained_fel_head_rebuild_skips_m7_and_preserves_fenced_title_settlemen
         aggregate.clone(),
         IDENTITY,
         async {
-            Err(EvaluationError::Deferred(
-                "fixture refused busy scratch".into(),
-            ))
+            (
+                Err(EvaluationError::Deferred(
+                    "fixture refused busy scratch".into(),
+                )),
+                None,
+            )
         },
         || false,
         |_, _| async { panic!("deferred M7 must yield before fenced publication") },
@@ -217,9 +229,12 @@ async fn retained_fel_head_rebuild_skips_m7_and_preserves_fenced_title_settlemen
         aggregate.clone(),
         IDENTITY,
         async {
-            Err(EvaluationError::Unsupported(
-                "current F+ outcome has no fitted scenes".into(),
-            ))
+            (
+                Err(EvaluationError::Unsupported(
+                    "current F+ outcome has no fitted scenes".into(),
+                )),
+                Some(String::new()),
+            )
         },
         || false,
         |output, m7| {
@@ -230,11 +245,15 @@ async fn retained_fel_head_rebuild_skips_m7_and_preserves_fenced_title_settlemen
                 let m7 = m7.expect("the refusal is recorded");
                 assert_eq!(m7.outcome, M7OutcomeKind::Unsupported);
                 assert_eq!(m7.identity, IDENTITY);
+                assert_eq!(m7.observed_fit_table.as_deref(), Some(""));
                 assert_eq!(
                     m7.gate.as_deref(),
                     Some("current F+ outcome has no fitted scenes")
                 );
-                Ok(true)
+                Ok(JobPublishOutcome::Published {
+                    job_id: "fixture".into(),
+                    result_ref: "fixture".into(),
+                })
             }
         },
         || panic!("no publication failure was injected"),
@@ -242,4 +261,28 @@ async fn retained_fel_head_rebuild_skips_m7_and_preserves_fenced_title_settlemen
     .await;
     assert!(published.get());
     assert!(outcome.is_ok());
+
+    let outcome = complete_title(
+        &ordinary,
+        aggregate.clone(),
+        IDENTITY,
+        async { (Ok(Evaluated::Result), Some("b".repeat(64))) },
+        || false,
+        |_, _| async { Ok(JobPublishOutcome::ArtifactConflict) },
+        || panic!("fit churn yields with the existing aggregate"),
+    )
+    .await;
+    let Err(JobSettlement::Yield {
+        error_code,
+        checkpoint,
+        ..
+    }) = outcome
+    else {
+        panic!("fit churn must leave the title eligible to retry");
+    };
+    assert_eq!(error_code.as_deref(), Some("m7_fit_changed"));
+    let restored: TitleOutput =
+        serde_json::from_value(checkpoint.unwrap()["fel_title_aggregate"].clone()).unwrap();
+    assert_eq!(restored.probe_revision, aggregate.probe_revision);
+    assert_eq!(restored.stats, aggregate.stats);
 }

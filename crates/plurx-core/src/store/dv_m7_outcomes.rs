@@ -167,6 +167,10 @@ pub struct M7TitleOutcome {
     pub identity: String,
     /// The fit version whose fitted table the record names.
     pub fit_version: String,
+    /// Table observed during a fit-dependent evaluation. An empty digest
+    /// means that no current fitted table existed. None is fit-independent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_fit_table: Option<String>,
     pub outcome: M7OutcomeKind,
     /// Why an `unsupported` or `inconclusive` evaluation ended.
     pub gate: Option<String>,
@@ -189,6 +193,10 @@ impl M7TitleOutcome {
         );
         if !digest(&self.identity)
             || !super::dv_refit_jobs::valid_fit_version(&self.fit_version)
+            || self
+                .observed_fit_table
+                .as_ref()
+                .is_some_and(|table| !table.is_empty() && !digest(table))
             || self.outcome == M7OutcomeKind::Pending
             || gated != self.gate.is_some()
             || self
@@ -237,18 +245,22 @@ WHERE d.file_id=json_extract($1,'$.file')"
     rows.first().map(|row| decode(row)).transpose()
 }
 
-/// Forget the M7 outcomes of `item_id`'s files' current title generations,
-/// so the idle sweep reopens them. Returns how many were forgotten.
+/// Forget settled M7 outcomes the idle sweep can reevaluate. Keep active
+/// evaluations and the legacy gate the normal supersession transaction archives.
 pub(super) async fn clear_item<T: QueueSql>(store: &T, item_id: i64) -> Result<u64, StoreError> {
     if item_id <= 0 {
         return Err(StoreError::Task("invalid M7 re-evaluation".into()));
     }
+    let legacy = super::dv_m7_attempts::legacy_rate_gate_sql("gate");
     let rows = store
         .queue_sql(
-            "DELETE FROM dv_m7_title_outcomes_v1 WHERE revision IN (SELECT d.revision
- FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id WHERE f.item_id=json_extract($1,'$.item'))
+            format!(
+                "DELETE FROM dv_m7_title_outcomes_v1 WHERE revision IN (SELECT d.revision
+ FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+ WHERE d.terminal=1 AND f.item_id=json_extract($1,'$.item'))
+ AND NOT COALESCE(outcome='inconclusive' AND {legacy},0)
 RETURNING 'true' AS result_json"
-                .into(),
+            ),
             encode(&serde_json::json!({"item": item_id}))?,
             true,
             true,
@@ -298,6 +310,7 @@ mod tests {
         let outcome = |kind, gate: Option<&str>| M7TitleOutcome {
             identity: "a".repeat(64),
             fit_version: "fit-v1".into(),
+            observed_fit_table: None,
             outcome: kind,
             gate: gate.map(str::to_owned),
         };

@@ -1,8 +1,8 @@
 # F+ graduation and NP1 trials — remaining acceptance
 
-**Status:** open — isolated fit and served baseline acquisition complete;
-the first frozen M7 candidate was rejected; physical graduation and runtime
-comparison integration remain open. **Owner:** Codex. **Updated:** 2026-11-20.
+**Status:** open — physical playback observations and the Eclipse M7 comparison
+are recorded. The runtime continuation awaits its landing gate.
+**Owner:** Codex. **Updated:** 2026-11-28.
 
 Companion to [the build ledger](FEL-RPU-REFIT-BUILD.md): that records the
 merged implementation; this records physical graduation and the next trial.
@@ -385,12 +385,13 @@ the decoder-only path; managed candidate encoding there remains unsupported
 until its own encoder closure is packaged and qualified. No result is
 extrapolated from the macOS controls to Linux.
 
-The next runtime check uses the intended integrated source and the isolated
-instance. It must read back the imported historical rejection and repeated
-fixture bindings without another Michael encode or score. New-title native
-orchestration, complete report publication and source-bound recovery still
-require integrated evidence. The frozen rejected candidate remains rejected;
-passing the new implementation tests supplies no new picture-quality gain.
+The isolated macOS daemon at `08d7fbc56` published Eclipse's recipe-v2 result.
+Two calibration windows fixed a margin of 0.06 ΔE ITP before the 48-frame
+evaluation. Pooled mean gains for models A through D were −1.6811, −1.7234,
+−1.7238 and −1.7238 ΔE ITP. All five held-out checks failed in every model.
+The sealed result refused the candidate. The source, the older rate refusal
+and the candidate evidence were preserved. The historical Michael result
+retains its own source and protocol identities.
 
 ## Execution ledger
 
@@ -398,10 +399,10 @@ passing the new implementation tests supplies no new picture-quality gain.
 |---|---|---|
 | Original native M6 | Pass retained | No repeat of the 48-point M3 experiment |
 | M5 migration | Source and exact helper/master binding retained | Preserve source/device identities |
-| Physical matrix | tvOS fitted handoff and seek retained; earlier 52-second completion retained; full matrix open | Unresolved cold timeout, mapping, drops and remaining client/device scopes |
+| Physical matrix | Fitted transport qualified on Mac, Safari, iPhone, tvOS and Android. Linux retained native Profile 7 FEL and a separate Profile 8.1 renderer control. | Optical display output remains unmeasured. |
 | M7 baseline | Two calibration windows and frozen evaluation192–239 bound and scored once in all four models | Retain source-bound scores |
 | Numeric margin | Frozen at 0.05 with strict shadow-tail limits before candidate work | Apply unchanged to paired outputs |
-| NP1 trials/integration | Frozen candidate rejected in four models; author/readback/rate admitted; 35 focused managed checks and finite macOS encoder controls pass | Intended-base native daemon, historical receipt reuse and new-title runtime qualification; Linux encoder packaging remains open |
+| NP1 trials/integration | Michael and Eclipse retain separate sealed refusals. The Eclipse runtime published its held-out four-model report. | Runtime landing gate and Linux encoder packaging. |
 
 Adversarial review happens when the change is ready to merge. Afterwards run
 only the remaining required fast-lane checks, preserving every valid pass.

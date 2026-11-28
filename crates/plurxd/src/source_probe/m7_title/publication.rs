@@ -57,7 +57,10 @@ pub(super) struct FittedPublication {
 }
 
 impl FittedPublication {
-    pub(super) async fn load(context: &TitleContext<'_>) -> Result<Self, EvaluationError> {
+    pub(super) async fn load(
+        context: &TitleContext<'_>,
+        observed_fit: &mut Option<String>,
+    ) -> Result<Self, EvaluationError> {
         let current = context
             .state
             .store
@@ -67,6 +70,14 @@ impl FittedPublication {
         let current_method = current.as_ref().filter(|curves| {
             curves.title.fit_version == plurx_core::transcode::dv_refit::FIT_VERSION
         });
+        *observed_fit = Some(
+            current_method
+                .filter(|curves| {
+                    curves.title.verdict == plurx_core::store::dv_refit_jobs::RefitVerdict::Fitted
+                })
+                .map(|curves| curves.title.curve_digest.clone())
+                .unwrap_or_default(),
+        );
         let Some(curves) = current_method else {
             return if super::super::refit_work::enabled(context.state)
                 .await

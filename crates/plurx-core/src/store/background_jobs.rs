@@ -433,6 +433,9 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
       AND d.scanner_digest=json_extract(body,'$.payload.scanner_digest')
       AND f.size=json_extract(body,'$.payload.source_size') AND f.mtime=json_extract(body,'$.payload.source_mtime')
       AND CASE
+        WHEN json_extract(body,'$.m7_reopen')=1 THEN d.terminal=1
+          AND prior_job IS NULL AND active_job IS NULL
+          AND json_extract(body,'$.request.scope')='dv-title'
         WHEN json_type(body,'$.native_fel_head_reopen') IS NULL THEN d.terminal=0
         ELSE json_extract(body,'$.native_fel_head_reopen')=1 AND d.terminal=1 AND prior_job IS NULL
           AND json_extract(body,'$.request.scope')='dv-native-fel-head'

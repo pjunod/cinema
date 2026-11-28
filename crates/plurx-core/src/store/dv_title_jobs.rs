@@ -485,7 +485,13 @@ pub(super) async fn publish<T: QueueSql>(
     let body = serde_json::to_value(input).map_err(|e| StoreError::Task(e.to_string()))?;
     let rows = store
         .queue_sql(
-            PUBLISH_SQL.replace("__TITLE_JOB_OWNS__", TITLE_JOB_OWNERSHIP),
+            PUBLISH_SQL
+                .replace("__TITLE_JOB_OWNS__", TITLE_JOB_OWNERSHIP)
+                .replace(
+                    "__CURRENT_FIT_TABLE__",
+                    &super::dv_m7_outcomes::CURRENT_FIT_TABLE
+                        .replace("$1", "json_extract(body,'$.m7')"),
+                ),
             encode(&body)?,
             true,
             true,
@@ -678,7 +684,11 @@ WITH input AS (SELECT json($1) AS body), observation AS (
  FROM input LEFT JOIN background_jobs job ON job.id=json_extract(body,'$.token.job_id')
 ), verdict AS (
  SELECT *,CASE WHEN state='succeeded' AND same_attempt AND result_ref=output THEN 'already_published'
- WHEN NOT COALESCE(owns,0) THEN 'lost_ownership' ELSE 'published' END AS outcome FROM observation
+ WHEN NOT COALESCE(owns,0) THEN 'lost_ownership'
+ WHEN json_extract(body,'$.m7.observed_fit_table') IS NOT NULL
+  AND json_extract(body,'$.m7.observed_fit_table') IS NOT
+   (SELECT __CURRENT_FIT_TABLE__ FROM files f WHERE f.id=json_extract(body,'$.output.file_id'))
+ THEN 'artifact_conflict' ELSE 'published' END AS outcome FROM observation
 )
 INSERT INTO background_job_commands(id,operation,request_json,result_json)
 SELECT json_extract(body,'$.token.claim_id'),'publish_dv_title',body,
@@ -1043,16 +1053,11 @@ pub(super) async fn reopen_stale_m7<T: QueueSql>(
         source_mtime: i64,
     }
     let current = super::dv_m7_outcomes::CURRENT_FIT_TABLE;
-    let prefix = super::dv_m7_attempts::LEGACY_GATE_PREFIX;
-    let old_floor = super::dv_m7_attempts::M7_LEGACY_MIN_TARGET_KBPS;
-    let first_digit = prefix.len() + 1;
-    let refused_target =
-        format!("CAST(substr(o.gate,{first_digit},length(o.gate)-{first_digit}) AS INTEGER)");
+    let rate_gate = super::dv_m7_attempts::legacy_rate_gate_sql("o.gate");
     let legacy_stop = format!(
         "(o.outcome='inconclusive' AND o.fit_table<>'' AND o.fit_table={current}
  AND o.identity IS NOT json_extract($1,'$.identity')
- AND {refused_target}>0 AND {refused_target}<{old_floor}
- AND o.gate='{prefix}' || printf('%lld',{refused_target}) || ')'
+ AND {rate_gate}
  AND NOT EXISTS(SELECT 1 FROM dv_m7_rate_supersessions_v1 history WHERE history.revision=d.revision))"
     );
     let candidates = format!(
@@ -1086,6 +1091,15 @@ ORDER BY d.revision LIMIT json_extract($1,'$.limit')"
         .iter()
         .map(|row| decode::<Title>(row))
         .collect::<Result<Vec<_>, _>>()?;
+    let provided = format!(
+        "WITH provided AS (SELECT json($1) AS body WHERE EXISTS(SELECT 1 {candidates}
+ AND d.file_id=json_extract($1,'$.payload.file_id') AND d.revision=json_extract($1,'$.payload.probe_revision'))), input AS MATERIALIZED ("
+    );
+    let guarded_enqueue = ENQUEUE_SQL.replacen(
+        "WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (",
+        &provided,
+        1,
+    );
     let mut reopened = Vec::new();
     for title in titles {
         // The title's own request identity still names the settled job, whose
@@ -1124,7 +1138,11 @@ ORDER BY d.revision LIMIT json_extract($1,'$.limit')"
             },
         };
         enqueue.validate()?;
-        let body = encode(&enqueue_body(store, &enqueue).await?)?;
+        let mut body = enqueue_body(store, &enqueue).await?;
+        body["m7_reopen"] = 1.into();
+        body["identity"] = identity.into();
+        body["fit_version"] = fit_version.into();
+        let body = encode(&body)?;
         let guard = encode(&serde_json::json!({
             "identity": identity,
             "fit_version": fit_version,
@@ -1133,21 +1151,19 @@ ORDER BY d.revision LIMIT json_extract($1,'$.limit')"
             "job": enqueue.id,
             "now": now_ms,
         }))?;
-        // Reopen under the same conditions as the read (a title claimed,
-        // changed or re-evaluated since then stays settled), admit the
-        // attempt, mark the reopen as this identity's and table's, and settle
-        // the title again if the attempt was not admitted.
+        // Admit only a title that still meets the sweep conditions. The
+        // newly queued job authorizes reopening and marking its generation.
         store
             .queue_transaction(vec![
+                (guarded_enqueue.clone(), body),
                 (
-                    format!(
-                        "UPDATE dv_title_jobs_demand SET terminal=0
-WHERE revision IN (SELECT d.revision {candidates}
- AND d.file_id=json_extract($1,'$.file') AND d.revision=json_extract($1,'$.revision'))"
-                    ),
+                    "UPDATE dv_title_jobs_demand SET terminal=0
+WHERE revision=json_extract($1,'$.revision') AND file_id=json_extract($1,'$.file') AND terminal=1
+ AND EXISTS(SELECT 1 FROM background_jobs j WHERE j.id=json_extract($1,'$.job')
+  AND j.kind='dv_title_scan' AND j.state='queued')"
+                        .to_owned(),
                     guard.clone(),
                 ),
-                (ENQUEUE_SQL.to_owned(), body),
                 (
                     format!(
                         "INSERT INTO dv_m7_rate_supersessions_v1(revision,file_id,old_identity,new_identity,fit_table,gate,at_ms)
@@ -1171,14 +1187,6 @@ WHERE d.revision=json_extract($1,'$.revision') AND d.file_id=json_extract($1,'$.
 ON CONFLICT(revision) DO UPDATE SET identity=excluded.identity,fit_table=excluded.fit_table,
  outcome='pending',gate=NULL,at_ms=excluded.at_ms"
                     ),
-                    guard.clone(),
-                ),
-                (
-                    "UPDATE dv_title_jobs_demand SET terminal=1
-WHERE revision=json_extract($1,'$.revision') AND terminal=0
- AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.id=json_extract($1,'$.job')
-  AND j.kind='dv_title_scan' AND j.state='queued')"
-                        .to_owned(),
                     guard,
                 ),
             ])

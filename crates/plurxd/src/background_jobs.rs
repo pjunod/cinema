@@ -1628,13 +1628,13 @@ impl JobFence {
         &self,
         output: plurx_core::store::dv_title_jobs::TitleOutput,
         m7: Option<plurx_core::store::dv_m7_outcomes::M7TitleOutcome>,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<JobPublishOutcome, StoreError> {
         let mut state = self.0.state.lock().await;
         if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
-            return Ok(false);
+            return Ok(JobPublishOutcome::LostOwnership);
         }
         let Some(token) = state.token.clone() else {
-            return Ok(false);
+            return Ok(JobPublishOutcome::LostOwnership);
         };
         let mut request = plurx_core::store::dv_title_jobs::PublishTitleJob {
             token,
@@ -1667,7 +1667,7 @@ impl JobFence {
         if published {
             state.token = None;
         }
-        Ok(published)
+        Ok(result)
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
