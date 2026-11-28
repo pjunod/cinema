@@ -77,6 +77,9 @@ pub(super) struct Reader {
     /// A parent authority, cold controlled child or verified retained-output
     /// attachment keeps control identity without producing or an eviction window.
     pub(super) authority_only: bool,
+    /// An alternate soundtrack answers player requests without prefetching
+    /// while another soundtrack is selected by default.
+    pub(super) on_demand_only: bool,
     /// A durable prepared commit has moved playback to another incarnation.
     /// Keep cached bytes and admitted GETs protected while this reader drains,
     /// but do not encode ahead for its obsolete playback anchor.
@@ -119,6 +122,7 @@ impl Reader {
             admission_priority,
             nonpreemptive_trial: false,
             authority_only: false,
+            on_demand_only: false,
             draining_after_prepared_commit: false,
             frontier,
             preparation_frontier: None,

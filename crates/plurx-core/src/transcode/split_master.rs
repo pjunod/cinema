@@ -377,18 +377,27 @@ impl SplitPresentation {
         if self.independent_segments {
             out.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
         }
+        let default_language = audio
+            .iter()
+            .find(|track| track.default)
+            .map(|track| language(track.language.as_deref()));
+        let mut autoselect_languages = BTreeSet::new();
+        autoselect_languages.extend(default_language);
         for (track, name) in audio.iter().zip(&names) {
             let _ = write!(
                 out,
                 "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{name}\""
             );
-            if let Some(language) = language(track.language.as_deref()) {
+            let track_language = language(track.language.as_deref());
+            if let Some(language) = &track_language {
                 let _ = write!(out, ",LANGUAGE=\"{language}\"");
             }
+            let autoselect = track.default || autoselect_languages.insert(track_language);
             let _ = write!(
                 out,
-                ",DEFAULT={},AUTOSELECT=YES",
-                if track.default { "YES" } else { "NO" }
+                ",DEFAULT={},AUTOSELECT={}",
+                if track.default { "YES" } else { "NO" },
+                if autoselect { "YES" } else { "NO" },
             );
             if let Some(channels) = track.channels {
                 let _ = write!(out, ",CHANNELS=\"{channels}\"");
@@ -518,7 +527,7 @@ video/{b}/index.m3u8\n",
         ];
         let master = p.master_text().expect("master");
         assert!(master.contains("NAME=\"eng\",LANGUAGE=\"en\""));
-        assert!(master.contains("NAME=\"eng (2)\",LANGUAGE=\"en\""));
+        assert!(master.contains("NAME=\"eng (2)\",LANGUAGE=\"en\",DEFAULT=NO,AUTOSELECT=NO"));
         assert!(master.contains("NAME=\"Track 3\",DEFAULT=NO"));
         let titled = SplitAudio {
             title: Some("Commentary \"Dir\"".into()),
@@ -529,6 +538,22 @@ video/{b}/index.m3u8\n",
             .master_text()
             .expect("master")
             .contains("NAME=\"Commentary 'Dir'\""));
+    }
+
+    #[test]
+    fn split_master_autoselects_the_default_over_an_earlier_track_in_the_same_language() {
+        let mut p = presentation();
+        p.audio = vec![
+            audio('c', 1, "eng", false),
+            audio('d', 2, "en", true),
+            audio('e', 3, "fre", false),
+            audio('f', 4, "fr", false),
+        ];
+        let master = p.master_text().expect("valid alternate soundtrack master");
+        assert!(master.contains("NAME=\"eng\",LANGUAGE=\"en\",DEFAULT=NO,AUTOSELECT=NO"));
+        assert!(master.contains("NAME=\"en\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES"));
+        assert!(master.contains("NAME=\"fre\",LANGUAGE=\"fr\",DEFAULT=NO,AUTOSELECT=YES"));
+        assert!(master.contains("NAME=\"fr\",LANGUAGE=\"fr\",DEFAULT=NO,AUTOSELECT=NO"));
     }
 
     #[test]

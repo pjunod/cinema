@@ -1442,10 +1442,9 @@ pub(super) fn reader_admission_priority(
             priority = Some(purpose);
         }
     };
-    for reader in readers
-        .values()
-        .filter(|reader| !reader.authority_only && !reader.draining_after_prepared_commit)
-    {
+    for reader in readers.values().filter(|reader| {
+        !reader.authority_only && !reader.on_demand_only && !reader.draining_after_prepared_commit
+    }) {
         include(reader.admission_priority);
     }
     for request in pool.demands(&rendition.key) {
@@ -1529,7 +1528,11 @@ pub(super) fn playback_demands(
     demands.extend(
         readers
             .values()
-            .filter(|reader| !reader.authority_only && !reader.draining_after_prepared_commit)
+            .filter(|reader| {
+                !reader.authority_only
+                    && !reader.on_demand_only
+                    && !reader.draining_after_prepared_commit
+            })
             .map(|reader| match reader.preparation_frontier {
                 Some(frontier) => {
                     // Admission records an actual bounded Prepare request,

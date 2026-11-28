@@ -932,7 +932,6 @@ impl Admissions {
         priority: Priority,
     ) -> Option<(u64, Vec<TranscodePermit>)> {
         if estimates.is_empty()
-            || estimates.len() > 3
             || estimates.len() != retained.len()
             || estimates
                 .iter()
@@ -2258,6 +2257,23 @@ mod tests {
             cpu_threads,
             decoder_threads: None,
         }
+    }
+
+    #[test]
+    fn split_copy_can_reserve_more_than_three_audio_roles_atomically() {
+        let admissions = Admissions::default();
+        let roles = [TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads: 3,
+            decoder_threads: Some(1),
+        }; 4];
+        let (_, permits) = admissions
+            .try_admit_family(0, 12, &roles, &[None; 4], Priority::Live)
+            .expect("four audio encoders fit within the configured budget");
+        assert_eq!(permits.len(), 4);
+        assert_eq!(admissions.software_in_use(), 12);
+        drop(permits);
+        assert_eq!(admissions.software_in_use(), 0);
     }
 
     #[test]

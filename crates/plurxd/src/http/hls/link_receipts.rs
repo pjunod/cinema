@@ -328,6 +328,24 @@ impl SourceLinkIdentity {
             && self.source_mtime == file.mtime
     }
 
+    pub(super) fn recovery_scope(
+        self,
+        playback_id: &str,
+        recovery_epoch: &str,
+    ) -> plurx_core::store::CandidateRecoveryScope {
+        plurx_core::store::CandidateRecoveryScope {
+            user_id: self.user_id,
+            playback_id: playback_id.to_owned(),
+            recovery_epoch: recovery_epoch.to_owned(),
+            file_id: self.file_id,
+            source_size: self.source_size,
+            source_mtime: self.source_mtime,
+            source_object_version: self.source_object_version,
+            credential_generation: self.credential_generation,
+            client_class: self.client_class,
+        }
+    }
+
     pub(crate) fn candidate(
         &self,
         recipe_digest: [u8; 32],
@@ -1857,6 +1875,7 @@ mod tests {
         ));
         let mut request = SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,

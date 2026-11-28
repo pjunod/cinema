@@ -112,6 +112,39 @@ fn shared_audio_publication_preserves_every_sample_across_fragment_and_restart_b
 }
 
 #[test]
+fn copied_audio_rejects_wrong_seek_landing_before_publishing_immutable_bytes() {
+    use sha2::{Digest, Sha256};
+
+    let hashes = (0u32..96)
+        .map(|packet| (Sha256::digest(packet.to_be_bytes()).into(), 4))
+        .collect();
+    let proof = crate::transcode::VodSourceAudio::new("aac", 2, 48, hashes).expect("source proof");
+    let init = shared_audio_init();
+    let plan = crate::transcode::vod_shared_audio_plan(2_048, 160);
+    let mut full =
+        PlannedAudioSegmenter::with_source_copy(init.clone(), plan.clone(), 0, Some(proof.clone()))
+            .expect("full soundtrack");
+    let original = full
+        .push(shared_audio_fragment(0, 96, None))
+        .expect("complete source packets");
+    assert_eq!(original.len(), 2);
+
+    let mut restart =
+        PlannedAudioSegmenter::with_source_copy(init, plan, 1, Some(proof)).expect("restart");
+    let mut misplaced = shared_audio_fragment(93, 2, None);
+    misplaced.tracks[0].base_decode_time = 94 * 1_024;
+    assert!(restart.push(misplaced).is_err());
+    assert_eq!(restart.next_tick, 94 * 1_024);
+    let mut quantized = shared_audio_fragment(94, 2, None);
+    quantized.tracks[0].runs[0].samples[0].duration += 8;
+    quantized.tracks[0].runs[0].samples[1].duration -= 16;
+    let regenerated = restart
+        .push(quantized)
+        .expect("byte-exact replay on a quantized source clock");
+    assert_eq!(regenerated[0].segment.bytes, original[1].segment.bytes);
+}
+
+#[test]
 fn shared_audio_gap_overlap_and_partial_packets_cannot_change_the_publication_frontier() {
     let mut cutter = PlannedAudioSegmenter::new(
         shared_audio_init(),
@@ -201,6 +234,61 @@ fn shared_soundtrack_facts_verify_actual_aac_configuration() {
         let mut input = bytes;
         assert!(read_audio_descriptor(&mut input).is_err());
     }
+}
+
+#[test]
+fn dolby_soundtrack_facts_verify_actual_ac3_and_ec3_configuration() {
+    crate::testfixtures::require_ffmpeg();
+    for (encoder, codec, channels, layout) in [
+        ("ac3", "ac-3", 6, "5.1"),
+        ("eac3", "ec-3", 6, "5.1"),
+        ("eac3", "ec-3", 2, "stereo"),
+    ] {
+        let bytes = run(Command::new(ffmpeg()).args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("anullsrc=r=48000:cl={layout}"),
+            "-t",
+            "0.2",
+            "-c:a",
+            encoder,
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]));
+        let (mut init, _, _) = read_all(&bytes);
+        assert_eq!(
+            dolby_audio_sample_entry_facts(&init).expect("Dolby decoder configuration"),
+            DolbyAudioSampleEntryFacts {
+                codec,
+                channels,
+                joc: false,
+            }
+        );
+        init.tracks.push(init.tracks[0].clone());
+        assert!(dolby_audio_sample_entry_facts(&init).is_err());
+    }
+}
+
+#[test]
+fn ec3_soundtrack_facts_include_dependent_channels_and_joc() {
+    // One independent 5.1 service, with its dependent rear surround pair.
+    let mut config = vec![0, 0, 0x20, 0x0f, 0x02, 0x02];
+    let facts = ec3_config_facts(&config).expect("dependent-channel configuration");
+    assert_eq!(facts.channels, 8);
+    assert!(!facts.joc);
+    config.extend([1, 16]);
+    assert!(ec3_config_facts(&config).expect("JOC configuration").joc);
+    assert!(ec3_config_facts(&config[..5]).is_err());
+    assert!(ec3_config_facts(&config[..7]).is_err());
+    config[1] = 1;
+    assert!(ec3_config_facts(&config).is_err());
 }
 
 #[test]

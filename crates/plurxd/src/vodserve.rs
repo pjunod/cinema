@@ -553,6 +553,7 @@ pub struct ReopenFacts {
 /// subtitle master without pretending it is a live transcode session.
 #[derive(Debug, Clone)]
 pub struct VodHlsFacts {
+    pub(crate) vod_copy_layout: Option<crate::transcode::VodCopyLayout>,
     pub file: MediaFile,
     pub audio_index: Option<i64>,
     pub aac: bool,
@@ -973,6 +974,8 @@ pub struct VodDeliveryInfo {
 pub struct VodStart {
     pub session_id: String,
     pub duration_ms: i64,
+    pub(crate) split: bool,
+    pub(crate) vod_copy_layout: Option<crate::transcode::VodCopyLayout>,
 }
 
 /// Actual init-verified media and exact catalog provenance for one parent.
