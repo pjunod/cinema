@@ -336,7 +336,7 @@ impl Operation {
 /// unsigned 503 between members), so the stage is written down here, once,
 /// at the handler's single exit. A handler names each step before taking it.
 /// The receiver-facing route shape, logged instead of the caller's own path.
-const INGRESS_ROUTE: &str = "/sharing/v1/items/{item}/files/{file}/sessions";
+pub(super) const INGRESS_ROUTE: &str = "/sharing/v1/items/{item}/files/{file}/sessions";
 struct RefusalTrace {
     stage: &'static str,
     operation: Option<Operation>,
@@ -1178,8 +1178,46 @@ fn decode_control(body: &[u8]) -> Result<Response, ApiError> {
     if bytes.len() > 24 * 1024 || reply.headers.len() > 64 {
         return Err(unavailable());
     }
+    let code = if status.is_client_error() || status.is_server_error() {
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|body| {
+                let code = body.get("code")?.as_str()?;
+                // The remote reply body is authenticated but does not define
+                // the local metric's label vocabulary.
+                super::SOURCE_START_REFUSAL_CODES
+                    .iter()
+                    .copied()
+                    .chain([
+                        "copy_hevc_inspection_failed",
+                        "copy_init_contract_changed",
+                        "sharing_authority_unavailable",
+                        "sharing_body_authority_unavailable",
+                        "sharing_body_capacity",
+                        "sharing_source_not_prepared",
+                        "sharing_source_retry",
+                        "sharing_start_capacity",
+                        "sharing_start_conflict",
+                        "sharing_start_deadline",
+                        "sharing_start_relocate_unassigned",
+                        "sharing_start_unavailable",
+                        "sharing_start_unresolved",
+                        "sharing_transport_authority_unavailable",
+                        "source_rescan_required",
+                        "startup_timeout",
+                    ])
+                    .find(|known| *known == code)
+            })
+    } else {
+        None
+    };
     let mut response = Response::new(Body::from(bytes));
     *response.status_mut() = status;
+    if let Some(code) = code {
+        response
+            .extensions_mut()
+            .insert(crate::http::error::ApiErrorCode(code));
+    }
     for (name, value) in reply.headers {
         let name = axum::http::HeaderName::try_from(name).map_err(|_| unavailable())?;
         let value = axum::http::HeaderValue::try_from(value).map_err(|_| unavailable())?;
@@ -1247,10 +1285,23 @@ pub(super) async fn route_to_owner(
         return next.run(request).await;
     }
     let mut trace = RefusalTrace::new("ingress.request");
-    match route(state, request, next, &mut trace).await {
+    let result = route(state, request, next, &mut trace).await;
+    let stage = trace.stage;
+    let mut response = match result {
         Ok(response) => response,
         Err(error) => trace.refuse(INGRESS_ROUTE, error),
+    };
+    if (response.status().is_client_error() || response.status().is_server_error())
+        && response
+            .extensions()
+            .get::<super::SourceStartStage>()
+            .is_none()
+    {
+        response
+            .extensions_mut()
+            .insert(super::SourceStartStage(stage));
     }
+    response
 }
 async fn route(
     state: AppState,
@@ -1333,12 +1384,27 @@ async fn route(
                 .run(Request::from_parts(local, Body::from(bytes.clone())))
                 .await;
             if op == Operation::Start && response.status() == StatusCode::CONFLICT {
+                let stage = response
+                    .extensions()
+                    .get::<super::SourceStartStage>()
+                    .copied();
+                let code = response
+                    .extensions()
+                    .get::<crate::http::error::ApiErrorCode>()
+                    .copied();
                 let control = pack_control(response, deadline).await?;
                 if is_unassigned_retarget(&control) {
                     remaining(deadline)?;
                     continue;
                 }
-                return decode_control(&control);
+                let mut response = decode_control(&control)?;
+                if let Some(stage) = stage {
+                    response.extensions_mut().insert(stage);
+                }
+                if let Some(code) = code {
+                    response.extensions_mut().insert(code);
+                }
+                return Ok(response);
             }
             return Ok(response);
         }
@@ -2034,6 +2100,35 @@ async fn custody_inner(
 mod tests {
     use super::*;
     use axum::http::header;
+
+    #[test]
+    fn forwarded_start_refusals_restore_only_known_metric_codes() {
+        for (code, expected) in [
+            (
+                "copy_hevc_inspection_failed",
+                Some("copy_hevc_inspection_failed"),
+            ),
+            ("unrecognized_refusal", None),
+        ] {
+            let reply = serde_json::to_vec(&ControlReply {
+                status: 503,
+                headers: Vec::new(),
+                body_hex: hex::encode(
+                    serde_json::json!({"code": code, "message": "refused"}).to_string(),
+                ),
+            })
+            .expect("control reply");
+            let response = decode_control(&reply).expect("forwarded reply");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                response
+                    .extensions()
+                    .get::<crate::http::error::ApiErrorCode>()
+                    .map(|code| code.0),
+                expected
+            );
+        }
+    }
     /// The owner's task is started by the fresh preparation, before any
     /// forwarded envelope exists. It must still know its Start came through
     /// an ingress, or it reads the receiver's absent headers as a receiver

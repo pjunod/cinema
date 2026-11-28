@@ -23,32 +23,25 @@ struct ReadBank {
     high_ms: u64,
     held: bool,
 }
-/// A generation that ended before its seek landing was verified read only its
-/// bounded bootstrap allowance: report the unverified landing, never a later
-/// symptom of that ceiling. Refusals that name their own cause keep it.
+/// Classify premature EOF caused by the seek bootstrap ceiling. Before a
+/// read is refused at that ceiling, an unverified landing says nothing about
+/// why the producer ended.
 pub(super) fn landing_failure(
     seek_bootstrap: &crate::source_input::SourceSeekBootstrap,
     error: String,
 ) -> String {
-    landing_failure_code(seek_bootstrap.is_verified(), error)
+    landing_failure_code(seek_bootstrap.refused_read(), error)
 }
-/// [`landing_failure`]'s decision. `copy_range_input_limit` names its own
-/// cause: the observed mux's in-memory hold for pairing whole canonical and
-/// AV fragments ran out. That is a fact about the copy's output, read from
-/// the child, not a symptom of the bootstrap allowance on source reads, so a
-/// high-bitrate source refused by it is never reported as an unverified
-/// landing.
-fn landing_failure_code(verified: bool, error: String) -> String {
-    if !verified
-        && !matches!(
+fn landing_failure_code(bootstrap_refused_read: bool, error: String) -> String {
+    if bootstrap_refused_read
+        && matches!(
             error.as_str(),
-            "copy_target_exceeded"
-                | "copy_init_contract_changed"
-                | "copy_clock_unknown"
-                | "copy_range_cancelled"
-                | "copy_range_input_limit"
-                | "copy_observation_skew"
-                | "hevc_configuration_unsupported"
+            "copy_child_failed"
+                | "copy_av_truncated"
+                | "copy_output_incomplete"
+                | "copy_pair_incomplete"
+                | "copy_init_missing"
+                | "copy_inspection_incomplete"
         )
     {
         "copy_sync_unverified".to_owned()
@@ -63,30 +56,43 @@ mod landing_failure_tests {
 
     /// Avatar 6751 (2026-11-23): a restart's range ran out of the mux's
     /// input hold on 70 MB 4K fragments and was reported to the viewer as
-    /// an unverified landing. A failure that names its own cause keeps it
-    /// before the landing is verified; any other is the unverified landing.
+    /// an unverified landing. A specific copy refusal keeps its cause even
+    /// when an input read also hit the ceiling.
     #[test]
     fn an_input_limit_is_never_reported_as_an_unverified_landing() {
         assert_eq!(
-            landing_failure_code(false, "copy_range_input_limit".into()),
+            landing_failure_code(true, "copy_range_input_limit".into()),
             "copy_range_input_limit"
         );
         assert_eq!(
-            landing_failure_code(false, "copy_observation_skew".into()),
+            landing_failure_code(true, "copy_observation_skew".into()),
             "copy_observation_skew"
         );
         assert_eq!(
-            landing_failure_code(false, "hevc_configuration_unsupported".into()),
+            landing_failure_code(true, "hevc_configuration_unsupported".into()),
             "hevc_configuration_unsupported"
         );
-        assert_eq!(
-            landing_failure_code(false, "copy_output_readers_lost".into()),
-            "copy_sync_unverified"
-        );
-        assert_eq!(
-            landing_failure_code(true, "copy_output_readers_lost".into()),
-            "copy_output_readers_lost"
-        );
+    }
+
+    #[test]
+    fn a_failed_hevc_inspection_keeps_its_cause_before_landing() {
+        for refused_read in [false, true] {
+            assert_eq!(
+                landing_failure_code(refused_read, "copy_hevc_inspection_failed".into()),
+                "copy_hevc_inspection_failed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_copy_needs_a_refused_bootstrap_read_to_report_unverified_landing() {
+        for code in ["copy_child_failed", "copy_av_truncated"] {
+            assert_eq!(landing_failure_code(false, code.into()), code);
+            assert_eq!(
+                landing_failure_code(true, code.into()),
+                "copy_sync_unverified"
+            );
+        }
     }
 }
 
