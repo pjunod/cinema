@@ -1477,10 +1477,17 @@ impl Drop for SourceReadFile {
     }
 }
 
+struct SourceMediaPins {
+    _retained: Option<std::sync::Arc<crate::vodserve::retained::RetainedVodArtifact>>,
+    _cache: Option<crate::playback_cache::CachePin>,
+    _projection: Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
+}
+
 // An owned read job retains its actual Source barrier independently of the
 // waiting Body future. File drops before guard when the last owner goes away.
 struct SourceFileReader {
     file: std::sync::Mutex<SourceReadFile>,
+    _pins: Option<SourceMediaPins>,
     guard: std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>,
     _source_custody: Option<crate::source_custody::SourceCustody>,
 }
@@ -1491,6 +1498,7 @@ async fn source_file_body(
     guard: std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>,
     len: u64,
     start: Option<u64>,
+    pins: Option<SourceMediaPins>,
     #[cfg(test)] gate: Option<std::sync::Arc<SourceReadJobGate>>,
 ) -> Result<axum::body::Body, ApiError> {
     let source_custody = match &guard.source_request {
@@ -1519,6 +1527,7 @@ async fn source_file_body(
                 #[cfg(test)]
                 gate,
             }),
+            _pins: pins,
             guard: conversion_guard,
             _source_custody: source_custody,
         }))
@@ -1785,10 +1794,22 @@ async fn resources(
             (axum::body::Body::from(bytes), len, None, "text/vtt")
         }
         crate::transcode::source_actor::SourceResourcePayload::File(ready) => {
-            let mime = if input.resource.kind() == SharingHlsResourceKind::Init {
-                "video/mp4"
-            } else {
-                "video/iso.segment"
+            let mime = match input.resource.kind() {
+                SharingHlsResourceKind::ChildInit {
+                    role: plurx_core::sharing_resources::SharingHlsRole::Audio,
+                } => "audio/mp4",
+                SharingHlsResourceKind::ChildSegment {
+                    role: plurx_core::sharing_resources::SharingHlsRole::Audio,
+                } => "audio/iso.segment",
+                SharingHlsResourceKind::Init | SharingHlsResourceKind::ChildInit { .. } => {
+                    "video/mp4"
+                }
+                _ => "video/iso.segment",
+            };
+            let pins = SourceMediaPins {
+                _retained: ready.retained_lease,
+                _cache: ready.cache_pin,
+                _projection: ready.projection_scratch,
             };
             (
                 source_file_body(
@@ -1796,6 +1817,7 @@ async fn resources(
                     std::sync::Arc::clone(&guard),
                     ready.len,
                     None,
+                    Some(pins),
                     #[cfg(test)]
                     read_gate.map(|gate| gate.0),
                 )
@@ -2723,6 +2745,8 @@ pub(crate) enum SourceFixtureMode {
     /// index scan, where a test can park it.
     ColdCopy,
     Encoded,
+    SplitCopy,
+    SplitEncoded,
     NativeCopy,
     NativeEncoded,
     /// The Copy fixture's MP4 started as direct play.
@@ -2769,6 +2793,7 @@ pub(crate) enum SourceFixtureMode {
     /// carries the scan's profile, started through a receiver that affirms
     /// bounded ranges, so the Source runs its growing copy owner.
     RangeCopy,
+    RangeSplitCopy,
     /// [`Self::RangeCopy`] in Matroska with two embedded SubRip tracks,
     /// started with native subtitles and the first track selected.
     RangeNativeCopy,
@@ -3077,6 +3102,7 @@ async fn build_real_source_start_fixture(
     let range_copy = matches!(
         mode,
         SourceFixtureMode::RangeCopy
+            | SourceFixtureMode::RangeSplitCopy
             | SourceFixtureMode::RangeNativeCopy
             | SourceFixtureMode::RangeAudioCopy
             | SourceFixtureMode::RangeDolbyVisionConverted
@@ -3085,7 +3111,16 @@ async fn build_real_source_start_fixture(
     );
     // The scanned remux modes' audio: the codec FFmpeg encodes, its scanned
     // name and channel count.
+    let split = matches!(
+        mode,
+        SourceFixtureMode::SplitCopy
+            | SourceFixtureMode::SplitEncoded
+            | SourceFixtureMode::RangeSplitCopy
+    );
     let audio = match mode {
+        SourceFixtureMode::SplitCopy
+        | SourceFixtureMode::SplitEncoded
+        | SourceFixtureMode::RangeSplitCopy => Some(("aac", 2)),
         SourceFixtureMode::RangeAudioCopy | SourceFixtureMode::RangeWebNativeAudioCopy => {
             Some(("eac3", 6))
         }
@@ -3125,6 +3160,7 @@ async fn build_real_source_start_fixture(
     let encoded = matches!(
         mode,
         SourceFixtureMode::Encoded
+            | SourceFixtureMode::SplitEncoded
             | SourceFixtureMode::NativeEncoded
             | SourceFixtureMode::BurnText
             | SourceFixtureMode::BurnBitmap
@@ -3183,6 +3219,30 @@ async fn build_real_source_start_fixture(
             generate.args(["-tag:v", "hvc1"]);
         }
         generate.arg("-y");
+    } else if split {
+        generate.arg("testsrc2=s=320x180:r=24").args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            if range_copy { "4" } else { "2" },
+            "-vf",
+            "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+            "-profile:v",
+            "high",
+            "-c:v",
+            "libx264",
+            "-g",
+            "24",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ac",
+            "2",
+            "-y",
+        ]);
     } else if range_copy {
         // BT.709 signalled in the frames and the bitstream, as a scanned
         // library title carries it: the growing copy checks its head's
@@ -3268,7 +3328,7 @@ async fn build_real_source_start_fixture(
         }
         None => {}
     }
-    if let Some((codec, channels)) = audio {
+    if let Some((codec, channels)) = audio.filter(|_| !split) {
         // A remux's audio beside the video built above, in Matroska.
         let muxed = directory.path().join("remux.mkv");
         let result = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
@@ -3555,8 +3615,8 @@ async fn build_real_source_start_fixture(
         let streams = serde_json::json!([{"index":0,"codec":codec,"channels":channels,"sample_rate":48000,"language":"eng","title":null,"default":true}]);
         client
             .execute(
-                "UPDATE files SET container='mkv',audio_streams=$1 WHERE id=1",
-                hiqlite::params!(streams.to_string()),
+                "UPDATE files SET container=$1,audio_streams=$2 WHERE id=1",
+                hiqlite::params!(if split { "mp4" } else { "mkv" }, streams.to_string()),
             )
             .await
             .expect("scanned audio facts");
@@ -3827,6 +3887,18 @@ async fn build_real_source_start_fixture(
                 "learned_limits":[]});
             recipe["session"]["aac"] = serde_json::json!(true);
         }
+    }
+    if split {
+        headers.insert(
+            receiver_presentation::SPLIT_RECEIVER_HEADER,
+            receiver_presentation::SPLIT_RECEIVER_HEADER_VALUE
+                .parse()
+                .expect("split receiver affirmation"),
+        );
+        recipe["session"]["caps"]["transports"]
+            .as_array_mut()
+            .expect("fixture transports")
+            .push(serde_json::json!("hls-split-av-v1"));
     }
     if matches!(mode, SourceFixtureMode::Direct) {
         let session = recipe["session"].as_object_mut().expect("session");

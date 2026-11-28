@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-24, plurx has 446 routes declared by the ordinary listener's
+As of 2026-11-24, plurx has 448 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 446 routes across the registered routers.
+plurx has 448 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -3412,8 +3412,10 @@ process-local.
 | GET | `/api/v1/live-tv/guide/readiness` | admin | Advisory: what has to be true for the configured source to work, and whether it is |
 | POST | `/api/v1/live-tv/channels/{channel}/intents` | bearer | Persist a protocol 5 start intent before tuner admission; returns its ID, expiry and configuration generation |
 | POST | `/api/v1/live-tv/channels/{channel}/sessions` | bearer | Two-phase start; issues the capability |
-| GET | `/api/v1/live-tv/sessions/{capability}/master.m3u8` | **capability** | Caption-advertising master playlist returned by start and resume |
-| GET | `/api/v1/live-tv/sessions/{capability}/index.m3u8` | **capability** | Live media playlist referenced by the master |
+| GET | `/api/v1/live-tv/sessions/{capability}/master.m3u8` | **capability** | Live master returned for split audio and video or native captions |
+| GET | `/api/v1/live-tv/sessions/{capability}/index.m3u8` | **capability** | Muxed live media playlist |
+| GET | `/api/v1/live-tv/sessions/{capability}/{role}/{rendition}/index.m3u8` | **capability** | Issued live video or audio rendition playlist |
+| GET | `/api/v1/live-tv/sessions/{capability}/{role}/{rendition}/{kind}/{object}` | **capability** | Issued rendition init or media fragment |
 | GET | `/api/v1/live-tv/sessions/{capability}/{segment}` | **capability** | One MPEG-TS segment |
 | GET | `/api/v1/live-tv/sessions/{capability}/status` | **capability** | Session state |
 | PUT | `/api/v1/live-tv/sessions/{capability}/keepalive` | **capability** | 204; renews the idle timer and nothing else |

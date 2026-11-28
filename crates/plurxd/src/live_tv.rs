@@ -33,6 +33,7 @@ use crate::state::SystemInfo;
 
 pub(crate) mod dvr;
 mod resource;
+pub(crate) mod split;
 pub(crate) use resource::now_ms as resource_now_ms;
 pub(crate) mod guide;
 
@@ -1080,12 +1081,42 @@ pub(crate) struct LiveTvActivateRequest {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum LiveTvResourceRequest {
-    Playlist { capability: String },
-    Segment { capability: String, sequence: u64 },
-    Init { capability: String },
-    Fragment { capability: String, sequence: u64 },
-    Status { capability: String },
-    Keepalive { capability: String },
+    Playlist {
+        capability: String,
+    },
+    Segment {
+        capability: String,
+        sequence: u64,
+    },
+    Init {
+        capability: String,
+    },
+    Fragment {
+        capability: String,
+        sequence: u64,
+    },
+    SplitPlaylist {
+        capability: String,
+        role: split::Role,
+        rendition: String,
+    },
+    SplitInit {
+        capability: String,
+        role: split::Role,
+        rendition: String,
+    },
+    SplitFragment {
+        capability: String,
+        role: split::Role,
+        rendition: String,
+        sequence: u64,
+    },
+    Status {
+        capability: String,
+    },
+    Keepalive {
+        capability: String,
+    },
 }
 
 impl LiveTvResourceRequest {
@@ -1095,6 +1126,9 @@ impl LiveTvResourceRequest {
             | Self::Segment { capability, .. }
             | Self::Init { capability }
             | Self::Fragment { capability, .. }
+            | Self::SplitPlaylist { capability, .. }
+            | Self::SplitInit { capability, .. }
+            | Self::SplitFragment { capability, .. }
             | Self::Status { capability }
             | Self::Keepalive { capability } => capability,
         }
@@ -1166,6 +1200,8 @@ pub(crate) struct LiveTvSessionStatus {
     pub(crate) output_height: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) delivery: Option<LiveDeliveryPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) split_master: Option<String>,
     pub(crate) media_sequence: u64,
     pub(crate) age_seconds: u64,
     pub(crate) idle_seconds: u64,
@@ -1355,6 +1391,7 @@ struct LiveTvSession {
     /// worker that reaches the same publication boundary.
     codec_qualification_counted: AtomicBool,
     resource_admission: Arc<tokio::sync::Semaphore>,
+    split_projection: tokio::sync::Mutex<split::Projection>,
     signal_cache: tokio::sync::Mutex<Option<(tokio::time::Instant, Option<LiveTvSignalStatus>)>>,
     state: StdMutex<LiveTvSessionState>,
     /// The shared tuner connection this viewer reads, fixed at admission
@@ -1689,6 +1726,11 @@ impl LiveTvSession {
             encoder: state.encoder.clone(),
             output_height: self.output().height,
             delivery: self.delivery(),
+            split_master: state
+                .publication
+                .as_ref()
+                .and_then(|published| published.split.as_ref())
+                .map(split::Window::master),
             media_sequence: state.media_sequence,
             age_seconds: now.duration_since(self.started).as_secs(),
             idle_seconds: now.duration_since(state.last_touch).as_secs(),
@@ -4333,6 +4375,7 @@ impl LiveTvManager {
             source_format_expires_at,
             tuner_bytes: Arc::new(AtomicU64::new(0)),
             codec_qualification_counted: AtomicBool::new(false),
+            split_projection: tokio::sync::Mutex::new(split::Projection::default()),
             resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
             signal_cache: tokio::sync::Mutex::new(None),
             state: StdMutex::new(LiveTvSessionState {
@@ -4612,7 +4655,7 @@ impl LiveTvManager {
         // No Store read here (plan L-03): the observer's polled ledger verdict
         // ends a refused session, and the checks below see that end.
         self.resource_serving_fence(&session)?;
-        {
+        let split = {
             let mut state = session
                 .state
                 .lock()
@@ -4629,8 +4672,57 @@ impl LiveTvManager {
                 ));
             }
             state.last_touch = tokio::time::Instant::now();
-        }
+            state
+                .publication
+                .as_ref()
+                .and_then(|published| published.split.clone())
+        };
+        let unavailable_child = || {
+            LiveTvError::CapabilityExpired("the requested live-TV rendition is unavailable".into())
+        };
         match request {
+            LiveTvResourceRequest::Playlist { .. }
+            | LiveTvResourceRequest::Segment { .. }
+            | LiveTvResourceRequest::Fragment { .. }
+            | LiveTvResourceRequest::Init { .. }
+                if split.is_some() =>
+            {
+                Err(unavailable_child())
+            }
+            LiveTvResourceRequest::SplitPlaylist {
+                role, rendition, ..
+            } => {
+                let bytes = split
+                    .as_ref()
+                    .and_then(|window| window.playlist(role, &rendition))
+                    .ok_or_else(unavailable_child)?;
+                Response::builder()
+                    .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+                    .header(header::CACHE_CONTROL, "no-store")
+                    .body(Body::from(bytes))
+                    .map_err(|error| LiveTvError::StreamFailed(error.to_string()))
+            }
+            LiveTvResourceRequest::SplitInit {
+                role, rendition, ..
+            } => {
+                let bytes = split
+                    .as_ref()
+                    .and_then(|window| window.object(role, &rendition, None))
+                    .ok_or_else(unavailable_child)?;
+                split_media_response(&session, role, bytes)
+            }
+            LiveTvResourceRequest::SplitFragment {
+                role,
+                rendition,
+                sequence,
+                ..
+            } => {
+                let bytes = split
+                    .as_ref()
+                    .and_then(|window| window.object(role, &rendition, Some(sequence)))
+                    .ok_or_else(unavailable_child)?;
+                split_media_response(&session, role, bytes)
+            }
             LiveTvResourceRequest::Playlist { .. } => {
                 let bytes = session
                     .state
@@ -6575,6 +6667,7 @@ impl Drop for LiveTvManager {
 #[derive(Clone, Debug)]
 struct ScratchInventory {
     playlist: Vec<u8>,
+    split: Option<split::Window>,
     media_sequence: u64,
     /// How many segments the playlist lists, and how much playable media that
     /// list contains. `segments` includes every final file on disk, including
@@ -7156,6 +7249,12 @@ async fn run_live_session_inner(
                 .as_ref()
                 .and_then(crate::transcode::LiveAdmission::software_threads),
         )?;
+        transcode_plan.split_av = session
+            .request
+            .playback
+            .as_ref()
+            .and_then(|playback| playback.validate().ok())
+            .is_some_and(|caps| caps.plays_split_av());
         let macos_context = owner
             .transcode
             .macos_video_report()
@@ -7408,8 +7507,8 @@ async fn run_live_session_inner(
                     }
                 }
 
-                let scan = inventory_scan
-                    .get_or_insert_with(|| spawn_scratch_scan(manager, &session.directory));
+                let scan =
+                    inventory_scan.get_or_insert_with(|| spawn_scratch_scan(manager, &session));
                 let scanned = match tokio::time::timeout(SESSION_TICK, &mut *scan).await {
                     Ok(joined) => {
                         inventory_scan = None;
@@ -8211,6 +8310,7 @@ struct LiveTvTranscodePlan {
     software_threads: Option<u32>,
     video_map: &'static str,
     force_idr: bool,
+    split_av: bool,
     macos_upload: Option<LiveMacosUpload>,
 }
 
@@ -8247,6 +8347,7 @@ impl LiveTvTranscodePlan {
             encoder,
             software_threads,
             video_map: "0:v:0",
+            split_av: false,
             macos_upload: None,
             force_idr: encoder.is_some_and(|encoder| system.encoders.forced_idr.wanted_by(encoder)),
         })
@@ -8578,6 +8679,9 @@ fn live_ffmpeg_command_for_output(
             "-hls_fmp4_init_filename",
             "init.mp4",
         ]);
+        if plan.split_av {
+            command.args(["-hls_segment_options", "use_editlist=0"]);
+        }
     }
     command
         .arg("-hls_segment_filename")
@@ -9178,7 +9282,10 @@ fn spawn_session_ledger_fence(
 
 /// Start one inventory scan of a session's scratch on its own task, so the
 /// session's tick can stop waiting for it without abandoning it.
-fn spawn_scratch_scan(manager: &Weak<LiveTvManager>, directory: &Path) -> ScratchScanTask {
+fn spawn_scratch_scan(
+    manager: &Weak<LiveTvManager>,
+    session: &Arc<LiveTvSession>,
+) -> ScratchScanTask {
     #[cfg(test)]
     if let Some(manager) = manager.upgrade() {
         manager.scratch_scans_started.fetch_add(1, Ordering::AcqRel);
@@ -9188,8 +9295,32 @@ fn spawn_scratch_scan(manager: &Weak<LiveTvManager>, directory: &Path) -> Scratc
     }
     #[cfg(not(test))]
     let _ = manager;
-    let directory = directory.to_owned();
-    tokio::spawn(async move { inspect_scratch(&directory).await })
+    let session = Arc::clone(session);
+    tokio::spawn(async move {
+        let Some(mut inventory) = inspect_scratch(&session.directory).await? else {
+            return Ok(None);
+        };
+        if let Some(delivery) = session.delivery() {
+            let eligible = delivery.packaging == LivePackaging::Fmp4
+                && !delivery
+                    .reasons
+                    .iter()
+                    .any(|reason| reason.code == "captions_advertised")
+                && session
+                    .request
+                    .playback
+                    .as_ref()
+                    .and_then(|playback| playback.validate().ok())
+                    .is_some_and(|caps| caps.plays_split_av());
+            inventory.split = session
+                .split_projection
+                .lock()
+                .await
+                .observe(&session.directory, &delivery, &inventory, eligible)
+                .await?;
+        }
+        Ok(Some(inventory))
+    })
 }
 
 /// What one walk of a session's scratch directory found: the final segments
@@ -9287,6 +9418,44 @@ fn scan_scratch_directory(directory: &Path) -> Result<Option<ScratchScan>, LiveT
     }))
 }
 
+fn split_media_response(
+    session: &LiveTvSession,
+    role: split::Role,
+    bytes: bytes::Bytes,
+) -> Result<Response<Body>, LiveTvError> {
+    let permit = Arc::clone(&session.resource_admission)
+        .try_acquire_owned()
+        .map_err(|_| {
+            LiveTvError::StreamFailed(
+                "too many concurrent live-TV media responses; retry shortly".into(),
+            )
+        })?;
+    let length = bytes.len();
+    let cancel = session.cancel.clone();
+    let stream = futures_util::stream::once(async move {
+        let _permit = permit;
+        if cancel.is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "live-TV session stopped",
+            ));
+        }
+        Ok(bytes)
+    });
+    Response::builder()
+        .header(
+            header::CONTENT_TYPE,
+            match role {
+                split::Role::Video => "video/mp4",
+                split::Role::Audio => "audio/mp4",
+            },
+        )
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CONTENT_LENGTH, length)
+        .body(Body::from_stream(stream))
+        .map_err(|error| LiveTvError::StreamFailed(error.to_string()))
+}
+
 async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, LiveTvError> {
     let walked = directory.to_owned();
     let scan = tokio::task::spawn_blocking(move || scan_scratch_directory(&walked))
@@ -9338,6 +9507,7 @@ async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, L
     }
     Ok(Some(ScratchInventory {
         playlist,
+        split: None,
         media_sequence: parsed.media_sequence,
         listed: parsed.segments.len(),
         listed_seconds: parsed.listed_seconds,

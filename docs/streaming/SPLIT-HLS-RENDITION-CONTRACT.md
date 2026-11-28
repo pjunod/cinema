@@ -226,3 +226,29 @@ projection deadline refusals keep the encoded muxed media URL. The owner
 retains the selected layout, producer identity, and both child identities
 under media-pool protocol 15. Recovery verifies those identities before
 serving the issued child URLs.
+
+### Live TV, sharing, and Jellyfin
+
+Live TV projects the selected fMP4 audio and video from the tuner session's
+existing writer. Before the first ready manifest, the owner reserves the
+retained window and verifies both tracks. The owner keeps muxed delivery for
+an unproved opening or for the existing caption presentation. Both split
+children preserve the producer's sequence and discontinuity positions.
+Recently advertised fragments retain their read authority after they leave
+the sliding playlist.
+
+For finite shared VOD, the Source may project its admitted fMP4 pair before
+the durable publication fence. The Receiver affirms the contract with
+`x-plurx-receiver-hls: hls-split-av-v1`, and the client sends the corresponding
+transport capability. The Source and Receiver validate the role and rendition
+on every child resource, including relative playlist links. The original
+Source owner serves the issued presentation. A bounded growing Source
+range may project a verified AVC/AAC pair from its committed range objects.
+Each row must pass the pair proof before either child advertises it. The
+issued range and payload digests bind projected reads throughout the
+owner's response lease. Refused openings publish the muxed route.
+
+Jellyfin negotiates this layout with a device profile whose
+`PlurxHlsTransports` contains `hls-split-av-v1`. It rewrites the master and
+split child paths through the established authenticated Jellyfin session.
+Clients without that claim use the existing muxed paths.

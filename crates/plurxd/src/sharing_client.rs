@@ -510,6 +510,10 @@ impl PeerConnection {
                     crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE,
                 )
                 .header(
+                    crate::http::shared_source_playback::receiver_presentation::SPLIT_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::SPLIT_RECEIVER_HEADER_VALUE,
+                )
+                .header(
                     crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
                     crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
                 );
@@ -747,6 +751,10 @@ impl PeerConnection {
                 .header(
                     crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,
                     crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE,
+                )
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::SPLIT_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::SPLIT_RECEIVER_HEADER_VALUE,
                 )
                 .header(
                     crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,

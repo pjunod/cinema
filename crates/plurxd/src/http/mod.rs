@@ -631,6 +631,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/live-tv/guide/refresh"
         | "/api/v1/live-tv/sessions/{capability}/master.m3u8"
         | "/api/v1/live-tv/sessions/{capability}/index.m3u8"
+        | "/api/v1/live-tv/sessions/{capability}/{role}/{rendition}/index.m3u8"
+        | "/api/v1/live-tv/sessions/{capability}/{role}/{rendition}/{kind}/{object}"
         | "/api/v1/live-tv/sessions/{capability}/status"
         | "/api/v1/live-tv/sessions/{capability}/keepalive"
         | "/api/v1/live-tv/sessions/{capability}/{segment}"
@@ -2273,6 +2275,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/live-tv/sessions/{capability}/index.m3u8",
             get(live_tv::playlist),
+        )
+        .route(
+            "/live-tv/sessions/{capability}/{role}/{rendition}/index.m3u8",
+            get(live_tv::split_playlist),
+        )
+        .route(
+            "/live-tv/sessions/{capability}/{role}/{rendition}/{kind}/{object}",
+            get(live_tv::split_object),
         )
         .route(
             "/live-tv/sessions/{capability}/status",

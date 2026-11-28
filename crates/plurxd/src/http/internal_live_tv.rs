@@ -193,8 +193,12 @@ pub(crate) async fn resource(
     let content_type = match &request {
         LiveTvResourceRequest::Segment { .. }
         | LiveTvResourceRequest::Fragment { .. }
-        | LiveTvResourceRequest::Init { .. } => None,
-        LiveTvResourceRequest::Playlist { .. } => Some("application/vnd.apple.mpegurl"),
+        | LiveTvResourceRequest::Init { .. }
+        | LiveTvResourceRequest::SplitInit { .. }
+        | LiveTvResourceRequest::SplitFragment { .. } => None,
+        LiveTvResourceRequest::Playlist { .. } | LiveTvResourceRequest::SplitPlaylist { .. } => {
+            Some("application/vnd.apple.mpegurl")
+        }
         _ => Some("application/json"),
     };
     let response = state.live_tv.resource_local(request).await;

@@ -276,6 +276,7 @@ pub(super) async fn receiver_effective_body(
         current.is_ok() && receiver_presentation::authenticated_receiver_dolby_vision(headers);
     let processed_upgrade =
         current.is_ok() && receiver_presentation::authenticated_receiver_processed_upgrade(headers);
+    let split = current.is_ok() && receiver_presentation::authenticated_receiver_split(headers);
     let route = state
         .store
         .lookup_source_ingress_route(
@@ -311,14 +312,18 @@ pub(super) async fn receiver_effective_body(
         if !cleanup {
             current?;
         }
-        receiver_presentation::normalize_wire_with_upgrade(
+        receiver_presentation::normalize_wire_for_receiver(
             &input.canonical_recipe,
             ready,
             dolby_vision,
             processed_upgrade,
+            split,
         )?
     };
-    if !cleanup && receiver_presentation::internal_range(&selected)? && !ready {
+    if !cleanup
+        && (receiver_presentation::internal_range(&selected)? && !ready
+            || receiver_presentation::recipe_uses_split(&selected) && !split)
+    {
         return Err(receiver_presentation::unavailable());
     }
     receiver_presentation::operation_body(path, bytes, &selected)

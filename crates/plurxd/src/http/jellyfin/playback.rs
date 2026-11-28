@@ -1023,7 +1023,7 @@ async fn info(
     if !direct && vod.is_none() {
         return Ok(not_supported());
     }
-    let selection=json!({"audio":request.audio_stream_index,"subtitle":request.subtitle_stream_index,"source":{"size":file.size,"mtime":file.mtime,"probe":snapshot.probe_json},"vod":vod.as_ref().map(|v| json!({"body":v.body,"bitrate":v.bitrate,"inline_init":v.inline_init}))}).to_string();
+    let selection=json!({"audio":request.audio_stream_index,"subtitle":request.subtitle_stream_index,"source":{"size":file.size,"mtime":file.mtime,"probe":snapshot.probe_json},"vod":vod.as_ref().map(|v| json!({"body":v.body,"bitrate":v.bitrate,"inline_init":v.inline_init,"split_av":v.split_av}))}).to_string();
     let profile_json = serde_json::to_string(&request.device_profile)
         .map_err(|_| ApiError::BadRequest("invalid device profile".into()))?;
     let fresh = state
