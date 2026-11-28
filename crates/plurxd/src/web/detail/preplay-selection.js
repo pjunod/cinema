@@ -99,19 +99,14 @@ function prePlayPickers(f){
   if(!f.available) return "";
   const context=playbackFileContextForFile(f);
   if(context.source_ref.kind!=="local") playbackFileReject();
-  const id=context.source_ref.file_id;
-  const ai=typeof aiCaptionItemMarkup==="function"&&aiCaptionLocal(f);
-  if(ai)return `<div data-ai-caption-preplay="${esc(id)}">${prePlayPickerFields(f, aiCaptionItemMarkup(f))}</div>`;
-  return prePlayPickerFields(f);
-}
-function prePlayPickerFields(f,ai=""){
-  const context=playbackFileContextForFile(f);
-  const {file_id:id}=context.source_ref, idArg=esc(JSON.stringify(id));
+  const id=context.source_ref.file_id, idArg=esc(JSON.stringify(id));
+  const ai=typeof aiCaptionItemMarkup==="function"?aiCaptionItemMarkup(f):"";
+  const wrap=fields=>ai?`<div data-ai-caption-preplay="${esc(id)}">${fields}</div>`:fields;
   const auds=f.audio_streams||[], subs=f.subtitle_streams||[];
   const find=!ai&&f.subtitle_search_enabled?`<button class="ghost sm" onclick="findSubtitles(${idArg})">Find subtitles</button><div id="subtitle-search-${id}"></div>`:"";
   const generate=!ai&&typeof ME!=="undefined"&&ME&&ME.is_admin&&f.video_codec?`<button class="ghost sm" onclick="generateSubtitles(${idArg},this)">Generate subtitles</button><div id="subtitle-generate-${id}" role="status" aria-live="polite"></div>`:"";
   // Nothing to choose between: one audio track and no subtitles at all.
-  if(auds.length<2 && !subs.length) return (generate?`<div id="pp-sub-field-${id}"></div>`:"")+find+generate+ai;
+  if(auds.length<2 && !subs.length) return wrap((generate?`<div id="pp-sub-field-${id}"></div>`:"")+find+generate+ai);
   const pd=f.playback_defaults||{}, ad=pd.audio||{}, sd=pd.subtitle||{};
   const sel=prePlaySelection(context)||{audio:null,subtitle:null};
   const defAudio=auds.find(a=>a.index===ad.selected_index);
@@ -130,9 +125,9 @@ function prePlayPickerFields(f,ai=""){
         ${opt(-1,"Off",sel.subtitle===-1)}
         ${subs.map(s=>opt(s.index,subFactLabel(s),sel.subtitle===s.index)).join("")}
       </select></div>`:""}</div>`;
-  return `<div class="preplay">
+  return wrap(`<div class="preplay">
     <div class="pprow">${audioField}${subField}</div>${find}${generate}${ai}
-    <div class="ppnote" id="pp-n-${id}" role="status">${esc(PREPLAY_SCOPE_NOTE)}</div></div>`;
+    <div class="ppnote" id="pp-n-${id}" role="status">${esc(PREPLAY_SCOPE_NOTE)}</div></div>`);
 }
 // Criterion 7, said out loud rather than merely implemented: this is one
 // playback's choice, and Settings → Playback defaults is untouched by it.
@@ -163,12 +158,13 @@ async function searchSubtitles(fileId){
   }catch(e){if(results.isConnected&&results._request===request)results.textContent=e.message||"Subtitle search failed.";}
 }
 
-async function downloadSubtitle(fileId,providerId,language,button){
+async function downloadSubtitle(fileId,providerId,language,button,onComplete=null){
   const route=location.hash;
   button.disabled=true;button.textContent="Downloading…";
   try{
     const data=await api(`/files/${fileId}/subtitles/download`,{method:"POST",body:{language,provider_file_id:providerId}});
     if(location.hash!==route)return;
+    if(onComplete){await onComplete(data);return;}
     await viewItem(ITEM_FOR_FILE[fileId]);
     if(location.hash!==route)return;
     const select=document.getElementById(`pp-s-${fileId}`);

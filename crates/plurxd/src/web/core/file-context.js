@@ -80,10 +80,11 @@ function playbackFileSuffix(suffix){
     ||new RegExp(`^chapters/${index}/thumb$`).test(suffix)) return suffix;
   playbackFileReject();
 }
-// Local text translation reads choices or creates an administrative job. These
-// exact routes never enter the Shared grammar or inherit a media session.
+// Only local files may start AI work or change their stored subtitle tracks.
+// These routes never inherit a media session.
 function localPlaybackFileWorkSuffix(suffix){
-  if(suffix==="subtitle-text-translation/options")return true;
+  if(["ai-subtitles","subtitles/search","subtitle-text-translation/options"].includes(suffix))return true;
+  if(typeof suffix==="string"&&/^subtitles\/(0|[1-9][0-9]{0,5})(?:\/timing)?$/.test(suffix))return true;
   // JobPayload::SubtitleTextTranslate validates this source index at 0..=1023.
   const match=typeof suffix==="string"&&/^subtitles\/(0|[1-9][0-9]{0,3})\/translation$/.exec(suffix);
   return !!match&&Number(match[1])<=1023;
@@ -120,11 +121,18 @@ function playbackFileQuery(suffix,query){
   const allowed=suffix==="decision"?capabilities.concat(["force","audio","subtitle","audio_offset_ms",
     "achannels","capver","hdrtypes","dvdecoders","dvraw","dvstatus"])
     :suffix==="stream.mp4"?capabilities.concat(["force","audio","audio_offset_ms","start","stream"])
-      :suffix.startsWith("chapters/")?["v"]:[];
+      :suffix.startsWith("chapters/")?["v"]
+        :suffix==="ai-subtitles"?["target","audio_index"]
+          :suffix==="subtitles/search"?["language"]
+            :/^subtitles\/[0-9]+(?:\/timing)?$/.test(suffix)?["track_id"]:[];
   return Object.entries(query).map(([key,value])=>{
     if(!allowed.includes(key)) playbackFileReject();
     const text=String(value);
-    if(["hdr","dv","dvhls","hdr10t"].includes(key)){
+    if(key==="target"||key==="language"){
+      if(!/^[a-zA-Z]{2,8}(?:[-_][a-zA-Z0-9]{1,8}){0,3}$/.test(text))playbackFileReject();
+    }else if(key==="track_id"){
+      if(!/^[a-f0-9]{64}$/.test(text))playbackFileReject();
+    }else if(["hdr","dv","dvhls","hdr10t"].includes(key)){
       if(!/^[01]$/.test(text)) playbackFileReject();
     }else if(["vcodec","acodec","container"].includes(key)){
       // Profile data and native decoders are not limited to browser codecs.

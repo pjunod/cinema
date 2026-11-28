@@ -1044,7 +1044,8 @@ test("analysis controls are first-class settings separate from playback mode con
   const saveDefaults = shippedSource("savePlaybackDefaults");
   const analysisPanel = shippedSource("analysisSettingsPanel");
   assert.match(saveDefaults, /default_audio_lang:/);
-  assert.match(saveDefaults, /sub_mode:/);
+  assert.doesNotMatch(saveDefaults, /default_sub_lang:|sub_mode:/);
+  assert.match(shippedSource("saveAiSubtitlePreferences"), /"\/ai-subtitles\/preferences"/);
   assert.doesNotMatch(saveDefaults, /vod_presentation:|hls_readrate:|stream_readrate:/,
     "the defaults card never writes a streaming field");
   assert.doesNotMatch(save, /default_audio_lang:|default_sub_lang:|sub_mode:/,

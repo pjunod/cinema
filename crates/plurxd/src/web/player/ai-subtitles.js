@@ -5,7 +5,7 @@ const AI_CAPTION_OPTIONS=new WeakMap();
 const AI_CAPTION_ITEM=new WeakMap();
 const AI_CAPTION_PLAYER_FILES=new WeakMap();
 
-function aiCaptionPath(file){return `/files/${encodeURIComponent(file.id)}/ai-subtitles`;}
+function aiCaptionPath(file,query={}){return playbackFileApiPath(playbackFileContextForFile(file),"ai-subtitles",query);}
 function aiCaptionOperationPath(id){return `/ai-subtitles/operations/${encodeURIComponent(id)}`;}
 function aiCaptionLocal(file){return !!file?.available&&!!file.video_codec&&playbackFileContextForFile(file).source_ref.kind==="local";}
 function aiCaptionActive(operation){return operation?.state==="queued"||operation?.state==="working";}
@@ -30,9 +30,7 @@ function aiCaptionReadOptions(file,audio=null,target="en"){
   const auth=AUTH_GENERATION;
   const cached=AI_CAPTION_OPTIONS.get(file);
   if(cached?.auth===auth&&cached.audio===audio&&cached.target===target&&Date.now()-cached.at<15000)return cached.request;
-  const query=new URLSearchParams({target});
-  if(audio!=null)query.set("audio_index",String(audio));
-  const request=api(aiCaptionPath(file)+`?${query}`).catch(error=>{
+  const request=api(aiCaptionPath(file,audio==null?{target}:{target,audio_index:audio})).catch(error=>{
     if(AI_CAPTION_OPTIONS.get(file)?.request===request)AI_CAPTION_OPTIONS.delete(file);
     throw error;
   });
@@ -327,16 +325,16 @@ function aiCaptionItemMarkup(file){
     ${stored.map(track=>`<button type="button" class="ghost sm" data-ai-caption-track="${track.index}" aria-label="Manage English AI subtitle">English · AI ⋯</button>`).join("")}
     <span data-ai-caption-actions></span><span data-ai-caption-status role="status"></span></span>`;
 }
-async function aiCaptionSearch(file,panel,language){
+async function aiCaptionSearch(file,panel,language,refreshTracks){
   panel.textContent="Searching OpenSubtitles…";
   try{
-    const data=await api(`/files/${file.id}/subtitles/search?language=${encodeURIComponent(language)}`);
+    const data=await api(playbackFileApiPath(playbackFileContextForFile(file),"subtitles/search",{language}));
     if(!panel.isConnected)return;
     panel.replaceChildren();
     for(const match of (data.results||[]).slice(0,20)){
       const button=document.createElement("button");
       button.type="button";button.className="ghost sm";button.textContent=match.release||"Subtitle match";
-      button.addEventListener("click",()=>void downloadSubtitle(file.id,match.file_id,match.language,button));
+      button.addEventListener("click",()=>void downloadSubtitle(file.id,match.file_id,match.language,button,refreshTracks));
       panel.appendChild(button);
     }
     if(!panel.childElementCount)panel.textContent="No subtitle matches found.";
@@ -367,7 +365,7 @@ function aiCaptionBindItem(node,file,preplay=null){
     const item=await api(`/items/${encodeURIComponent((preplay||owner.page).id)}`);
     if(!ownsFile())return;
     const updated=item.files?.find(row=>String(row.id)===String(file.id));
-    if(!updated)return;
+    if(!updated||updated.size!==file.size||updated.mtime!==file.mtime)return;
     const tracks=updated.subtitle_streams||[];
     file.subtitle_streams=tracks;
     AI_CAPTION_OPTIONS.delete(file);
@@ -410,25 +408,29 @@ function aiCaptionBindItem(node,file,preplay=null){
       if(options.operation?.state==="complete")await refreshTracks();
     }catch(error){if(current())status.textContent=error.message;}
     finally{
-      if(ownsFile()&&aiCaptionActive(itemState.operation)){
-        setTimeout(()=>{itemState.polling=false;void poll();},4000);
+      if(aiCaptionActive(itemState.operation)){
+        setTimeout(()=>{itemState.polling=false;void itemState.poll();},4000);
       }else itemState.polling=false;
     }
   };
+  itemState.poll=poll;
   const start=async(route,quality)=>{
+    if(itemState.starting||aiCaptionActive(itemState.operation))return;
+    itemState.starting=true;
     panel.replaceChildren();
     status.textContent="Preparing English subtitles…";
     try{
       const body={request_id:translationUuid(),route,target:"en"};
       if(quality)body.quality=quality;
       const operation=await api(aiCaptionPath(file),{method:"POST",body});
-      if(!ownsFile())return;
+      if(auth!==AUTH_GENERATION)return;
       itemState.operation=operation;
       AI_CAPTION_OPTIONS.delete(file);
       show();
-      if(aiCaptionActive(operation))void poll();
+      if(aiCaptionActive(operation))void itemState.poll();
       if(operation.state==="complete")await refreshTracks();
     }catch(error){if(current())status.textContent=error.message;}
+    finally{itemState.starting=false;}
   };
   const button=(text,action)=>{
     const control=document.createElement("button");
@@ -442,11 +444,17 @@ function aiCaptionBindItem(node,file,preplay=null){
       const preferred=file.playback_defaults?.subtitle?.preferred_language||"en";
       const options=await aiCaptionReadOptions(file,null,preferred);
       if(!current())return;
+      if(aiCaptionActive(options?.operation)){
+        itemState.operation=options.operation;
+        show();
+        void itemState.poll();
+        return;
+      }
       if(options?.allowed&&options.route){
         button(options.label||"AI subtitles",()=>void start("auto"));
         for(const choice of options.alternatives||[])button(choice.label,()=>void start(choice.route));
       }
-      if(options?.search_online&&file.subtitle_search_enabled)button("Search online",()=>aiCaptionSearch(file,panel,options.target||preferred));
+      if(options?.search_online&&file.subtitle_search_enabled)button("Search online",()=>aiCaptionSearch(file,panel,options.target||preferred,refreshTracks));
       if(!panel.childElementCount)status.textContent=options?.blocked?.message||"No subtitle sources are available.";
     }catch(error){if(current())status.textContent=error.message;}
   });
@@ -454,7 +462,8 @@ function aiCaptionBindItem(node,file,preplay=null){
     panel.replaceChildren();
     const track=(file.subtitle_streams||[]).find(track=>track.index===Number(control.dataset.aiCaptionTrack));
     if(!track)return;
-    const timing=`/files/${file.id}/subtitles/${track.index}/timing?track_id=${encodeURIComponent(track.track_id)}`;
+    const context=playbackFileContextForFile(file),query={track_id:track.track_id};
+    const timing=playbackFileApiPath(context,`subtitles/${track.index}/timing`,query);
     button("Redo at Best quality",()=>void start("audio","best"));
     const shift=async(delta)=>{
       try{
@@ -469,7 +478,7 @@ function aiCaptionBindItem(node,file,preplay=null){
     button("Later by 250 ms",()=>void shift(250));
     button("Delete",async()=>{
       try{
-        await api(`/files/${file.id}/subtitles/${track.index}?track_id=${encodeURIComponent(track.track_id)}`,{method:"DELETE"});
+        await api(playbackFileApiPath(context,`subtitles/${track.index}`,query),{method:"DELETE"});
         if(ownsFile())await refreshTracks();
       }catch(error){if(current())status.textContent=error.message;}
     });

@@ -11,7 +11,7 @@ const output=process.env.WATCH_SCREENSHOTS;
 if(output)fs.mkdirSync(output,{recursive:true});
 const movie={id:'20',title:'English speech with existing French captions',kind:'movie',library_id:'1',year:2026,runtime_ms:120000,watch:{position_ms:0,watched:false}};
 const file=id=>({id:String(100+Number(id)),filename:'Speech.mp4',available:true,duration_ms:120000,size:media.length,video_codec:'h264',width:640,height:360});
-const stored={index:2,language:"en",title:"English",codec:"webvtt",text:true,source:"downloaded",ai:true,track_id:"completed-ai",downloaded_subtitle_id:"completed-ai"};
+const stored={index:2,language:"en",title:"English",codec:"webvtt",text:true,source:"downloaded",ai:true,track_id:"a".repeat(64),downloaded_subtitle_id:"a".repeat(64)};
 const existing=[{index:0,language:'fra',title:'Existing French captions',text:true,codec:'webvtt'}];
 const data=id=>({item:{...movie,id},files:[file(id)],children:[],ancestors:[]});
 test('AI item action publishes a stable stored track without reopening playback',{timeout:35000},async()=>{

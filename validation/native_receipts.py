@@ -111,7 +111,8 @@ BUILD_SPECS = {
     # P62 S1 adds only `node --test tests/playback/server-metrics.test.js`
     # to the web-unit-check recipe (a Node playback-lab test); no native
     # recipe changes.
-    'Makefile': '9394e64e6bec4d6291d15a3aed5386f0e7e0a62d8e84ee00e7e1efc1e5ffd34f',
+    # AI subtitles adds its Node regression to web-unit-check. Native recipes are unchanged.
+    'Makefile': '1187c1c880a4d4c97a3396e9bafc6a3741617d8795e3fa3a2fa583735135df6e',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,

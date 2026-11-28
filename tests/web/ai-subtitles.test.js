@@ -7,7 +7,7 @@ const { shellSource } = require("./shell-source.js");
 
 function source(name) {
   const html = shellSource().bodyScript;
-  const start = html.indexOf(`async function ${name}(`);
+  const start = html.search(new RegExp(`(?:async )?function ${name}\\(`));
   assert.ok(start >= 0, `missing shipped ${name}`);
   return html.slice(start, html.indexOf("\n}", start) + 2);
 }
@@ -47,4 +47,25 @@ test("AI completion drops a decision that returns after playback changes", async
   finish({ subtitles: [{ index: 4, downloaded_subtitle_id: "completed" }] });
   assert.equal(await pending, false);
   assert.equal(session.player.subs, undefined);
+});
+
+
+test("item subtitle actions follow the account's chosen language", () => {
+  const context = vm.createContext({
+    aiCaptionLocal: () => true,
+    langName: language => ({ en: "English", fr: "French", fra: "French" })[language],
+    esc: String,
+  });
+  vm.runInContext(source("aiCaptionItemMarkup"), context);
+  const file = {
+    id: 3,
+    playback_defaults: { subtitle: { preferred_language: "fr" } },
+    subtitle_streams: [{ language: "en", forced: false }],
+  };
+  assert.match(context.aiCaptionItemMarkup(file), /\+ French/);
+  assert.doesNotMatch(context.aiCaptionItemMarkup(file), /\+ English/);
+  file.subtitle_streams.push({ language: "fra", forced: true });
+  assert.match(context.aiCaptionItemMarkup(file), /\+ French/);
+  file.subtitle_streams.push({ language: "fra", forced: false });
+  assert.doesNotMatch(context.aiCaptionItemMarkup(file), /data-ai-caption-open/);
 });
