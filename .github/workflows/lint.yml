@@ -1,8 +1,8 @@
 name: lint
 
+# Manual only: a release tag's code passed rustfmt and Clippy in its fast
+# lane, so tagging it does not rerun them (release-tag.yml).
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 env:
@@ -12,10 +12,11 @@ concurrency:
   group: lint-${{ github.ref }}
   cancel-in-progress: false
 
-# Release-tag and manual badge workflow. Ready main pull requests run workspace
+# Manual badge workflow. Ready main pull requests run workspace
 # Clippy in main-fast-lane.yml (`make lint`) after the one adversarial review.
 jobs:
   lint:
+    if: github.server_url != 'https://github.com'
     name: rustfmt + clippy
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:

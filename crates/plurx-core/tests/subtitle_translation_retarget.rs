@@ -192,6 +192,8 @@ fn canonical_fixture_rows(rows: Vec<(String, String)>) -> Vec<(String, String)> 
 #[tokio::test]
 async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receipt_rows() {
     let (dir, store, conn) = fixture();
+    // A complete upgrade reapplies the lease overlay atop managed v7.
+    let expected_current = fixture_schema_rows(&conn, MANAGED_SHAPE);
     let request = create();
     let created = store
         .mutate_subtitle_translation(request.clone())
@@ -305,9 +307,7 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
         rusqlite::Connection::open(dir.path().join("store.db")).expect("upgraded fixture");
     assert_eq!(
         fixture_schema_rows(&current, MANAGED_SHAPE),
-        source_extensions_fixture::managed_fixture_rows(
-            &source_extensions_fixture::managed_fixture_connection(6)
-        )
+        expected_current
     );
     assert_eq!(
         current
@@ -316,8 +316,8 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
                 [],
                 |row| row.get::<_, i64>(0)
             )
-            .expect("upgraded v6 marker"),
-        6
+            .expect("upgraded v7 marker"),
+        7
     );
     assert_eq!(current.query_row("SELECT receipt_json FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'", [], |row| row.get::<_, String>(0)).expect("retained managed model receipt"), "{}");
     assert_eq!(

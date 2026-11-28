@@ -1096,7 +1096,7 @@ fn store_sql_helper_call(expression: &str) -> Option<String> {
         | "analysis_cross_node_clause" => {
             static CALL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
             let call = CALL.get_or_init(|| {
-                regex::Regex::new(r#"^(?:[A-Za-z_][A-Za-z0-9_]*::)*(analysis_source_capacity_clause|analysis_live_viewer_clause|analysis_cross_node_clause)\(\s*"([?$][1-9][0-9]*)"\s*\)$"#)
+                regex::Regex::new(r#"^(?:[A-Za-z_][A-Za-z0-9_]*::)*(analysis_source_capacity_clause|analysis_live_viewer_clause|analysis_cross_node_clause)\(\s*"([?$][1-9][0-9]*)"\s*(?:,\s*"([?$][1-9][0-9]*)"\s*)?\)$"#)
                     .expect("analysis claim predicate helper grammar")
             });
             let captures = call
@@ -1104,7 +1104,13 @@ fn store_sql_helper_call(expression: &str) -> Option<String> {
                 .expect("analysis claim predicate helper takes one literal placeholder");
             Some(match &captures[1] {
                 "analysis_source_capacity_clause" => {
-                    super::fragment_index_cluster::analysis_source_capacity_clause(&captures[2])
+                    super::fragment_index_cluster::analysis_source_capacity_clause(
+                        &captures[2],
+                        captures
+                            .get(3)
+                            .expect("capacity clause takes now and node placeholders")
+                            .as_str(),
+                    )
                 }
                 "analysis_live_viewer_clause" => {
                     super::fragment_index_cluster::analysis_live_viewer_clause(&captures[2])
@@ -2296,7 +2302,10 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // 106 -> 107: media::library_file_paths_under (48ebff9b5) prepares its ?1/?2
 // folder SELECT separately, then binds exactly [library_id, folder] in the
 // following query_map call.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 107;
+// 107 -> 108: media::files_missing_dv_levels (Dolby Vision levels pass)
+// prepares its ?1/?2 page SELECT, then binds exactly [after_id, limit] in the
+// following query_map call, the same shape as its files_missing_* siblings.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 108;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
@@ -2743,7 +2752,7 @@ mod scanner {
         for (backend, pipeline, exclusion, boost) in [("$", 4, 5, 6), ("?", 5, 6, 4)] {
             let source = format!(
                 r#"fn claim() {{
-                let capacity = super::fragment_index_cluster::analysis_source_capacity_clause("{backend}3");
+                let capacity = super::fragment_index_cluster::analysis_source_capacity_clause("{backend}3", "{backend}1");
                 let viewer = if viewer_only {{
                     super::fragment_index_cluster::analysis_live_viewer_clause("{backend}3")
                 }} else {{ "1".to_owned() }};
@@ -2781,6 +2790,7 @@ mod scanner {
             let parameter = |slot| format!("{backend}{slot}");
             let capacity = super::super::fragment_index_cluster::analysis_source_capacity_clause(
                 &parameter(3),
+                &parameter(1),
             );
             let viewer =
                 super::super::fragment_index_cluster::analysis_live_viewer_clause(&parameter(3));

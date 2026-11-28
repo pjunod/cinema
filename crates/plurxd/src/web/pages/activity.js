@@ -93,19 +93,25 @@ function activitySourceRecovery(d){
   // The summary is one Store observation. Browser time only bounds its age;
   // lease expiry is evaluated at that observation, never against a peer clock.
   if(summary?.available!==true||!Number.isSafeInteger(observed)||observed<=0||Math.abs(Date.now()-observed)>=30000||!Array.isArray(summary.source_io_holders))return null;
-  return summary.source_io_holders.filter(holder=>holder&&holder.active_occupancy!==false
+  return summary.source_io_holders.filter(holder=>holder
     &&typeof holder.resource_key==="string"&&(holder.resource_key==="source_io"||holder.resource_key.startsWith("source_io:"))
     &&Number.isSafeInteger(holder.lease_expires_at_ms)&&holder.lease_expires_at_ms>=0
-    // The store sweep releases an owner a minute after its lease lapses and
-    // runs every minute; three minutes on, the sweep itself is not running.
+    // A lease stops counting a minute after it expires, and the store sweep
+    // collects it every minute; three minutes on, the sweep is not running.
     &&holder.lease_expires_at_ms<=observed-180000);
+}
+function activitySourceResourceLabel(resourceKey,capacity){
+  const key=String(resourceKey||""),prefix="source_io:root/";
+  if(!key.startsWith(prefix))return key;
+  const root=(capacity?.roots||[]).find(row=>String(row.root_id)===key.slice(prefix.length));
+  return root?.root_path?`${root.library_name||"Library"} · ${root.root_path}`:"Source root";
 }
 function activitySourceRecoveryHtml(d){
   if(!ME?.is_admin)return "";
   const holders=activitySourceRecovery(d);
   if(holders===null)return '<p class="hint" data-activity-source-capacity role="status">Source capacity unknown: a fresh shared-reader observation is unavailable.</p>';
   if(!holders.length)return "";
-  return `<section class="system-attention" data-activity-source-recovery role="status"><h2>Source capacity held past its lease</h2><p>These owners stopped renewing their leases more than three minutes ago but still hold source capacity, so media jobs that read a source are waiting. The lease-expiry sweep normally releases them within two minutes; this means it is not running.</p><ul>${holders.map(holder=>`<li>${holder.origin_job_kind?`<a href="#/activity/jobs/${esc(encodeURIComponent(holder.work_id))}">${esc(holder.origin_job_kind.replace(/_/g," "))}</a> · job now ${esc(holder.origin_job_state||"unknown")} · `:""}<b>${esc(holder.work_id)}</b>${holder.origin_node_id?` · reader on ${esc(nodeLabel(d.node_hostnames||{},holder.origin_node_id))}`:""} · ${esc(holder.resource_key)} · lease lapsed ${esc(new Date(holder.lease_expires_at_ms).toLocaleString())}</li>`).join("")}</ul><a class="ghost sm" href="#/analysis">Review source readers and analysis</a></section>`;
+  return `<section class="system-attention" data-activity-source-uncollected role="status"><h2>Source leases not collected</h2><p>These leases expired more than three minutes ago. They stopped counting against source capacity a minute after expiry, so nothing waits on them, but the store sweep normally deletes them within two minutes; this means it is not running.</p><ul>${holders.map(holder=>`<li>${holder.origin_job_kind?`<a href="#/activity/jobs/${esc(encodeURIComponent(holder.work_id))}">${esc(holder.origin_job_kind.replace(/_/g," "))}</a> · job now ${esc(holder.origin_job_state||"unknown")} · `:""}<b>${esc(holder.work_id)}</b>${holder.origin_node_id?` · reader on ${esc(nodeLabel(d.node_hostnames||{},holder.origin_node_id))}`:""} · ${esc(activitySourceResourceLabel(holder.resource_key,d.analysis?.source_capacity))} · lease lapsed ${esc(new Date(holder.lease_expires_at_ms).toLocaleString())}</li>`).join("")}</ul><a class="ghost sm" href="#/analysis">Review source readers and analysis</a></section>`;
 }
 const ACTIVITY_TABS=["status","jobs","starts"];
 const ACTIVITY_TAB_LABELS={status:"Status",jobs:"Jobs",starts:"Starts"};
@@ -162,7 +168,7 @@ function durableJobReason(job){
   // A domain-specific reader cannot be attributed to this library from this
   // projection. Only the global source_io reservation applies to every root.
   const recovery=ME?.is_admin&&activitySourceRecovery(ACTIVITY_SNAPSHOT||{})?.some(holder=>holder.resource_key==="source_io");
-  return [root,recovery?"Shared source capacity is still held by an owner whose lease lapsed long ago; the lease-expiry sweep is not releasing it.":""].filter(Boolean).join(" ");
+  return [root,recovery?"A source lease that expired long ago has not been collected; the lease sweep is not running.":""].filter(Boolean).join(" ");
 }
 // Compute both views from the same server window, independent of job filters.
 function durableProcessingHtml(nodeNames={}){
@@ -319,7 +325,7 @@ function activityInspectorHtml(){
   if(selected.kind==="node"){
     const id=selected.id,w=d.workers?.[id],status=(d.activity_nodes||[]).find(n=>n.node_id===id)?.status,fresh=w&&(!status||status==="answered")&&Date.now()-w.observed_at_ms<30000&&Date.now()-w.observed_at_ms>=-30000;
     const assignments=(q.activeJobs||[]).filter(job=>job.owner_node_id===id);
-    return `<h2>${activityIsClustered()?esc(nodeLabel(names,id)):"This server"}</h2>${activityIsClustered()?`<p class="hint">${esc(id)}</p>`:""}${fresh?`<dl class="activity-facts"><dt>Heavy slots</dt><dd>${esc(w.heavy_in_use)} / ${esc(w.heavy_limit)} occupied · ${esc(w.heavy_available)} available</dd>${w.probe_batch_limit?`<dt>Media probe batch</dt><dd>Up to ${esc(w.probe_batch_limit)} jobs sharing one heavy slot; storage admission still applies</dd>`:""}<dt>CPU reserved</dt><dd>${esc(w.software_used)} / ${esc(w.software_limit)} threads</dd><dt>GPU sessions</dt><dd>${esc(w.hardware_used)} / ${esc(w.hardware_limit)}</dd><dt>Admission</dt><dd>${w.accepting_work?w.heavy_available?"Available for compatible work":w.heavy_in_use?"Heavy work is active":"Waiting for media capacity":"Node is starting or in maintenance"}</dd><dt>Observed</dt><dd>${esc(new Date(w.observed_at_ms).toLocaleTimeString())}</dd></dl>`:'<p class="hint">Capacity unknown. This node has no fresh worker observation.</p>'}<h3>Assignments</h3>${assignments.map(job=>`<p><button class="ghost sm" data-inspector-focus="job-${esc(job.id)}" onclick="showDurableJob(${esc(JSON.stringify(job.id))})">${esc(job.title||durableKindLabel(job))}</button> · ${esc(durableStateLabel(job))}${durableLeaseExpired(job)?" · previous owner":""}</p>`).join("")||'<p class="hint">No durable assignment reported.</p>'}${fresh?`<details><summary>${esc(w.child_count)} child processes</summary>${(w.children||[]).map(child=>`<p class="hint">${esc(child)}</p>`).join("")}</details>`:""}<button class="ghost sm" onclick="openActivityNodeJobs(${esc(JSON.stringify(id))})">View ${activityIsClustered()?"this node’s":"server"} jobs →</button>`;
+    return `<h2>${activityIsClustered()?esc(nodeLabel(names,id)):"This server"}</h2>${activityIsClustered()?`<p class="hint">${esc(id)}</p>`:""}${fresh?`<dl class="activity-facts"><dt>Heavy slots</dt><dd>${esc(w.heavy_in_use)} / ${esc(w.heavy_limit)} occupied · ${esc(w.heavy_available)} available</dd>${w.probe_batch_limit?`<dt>Media probe batch</dt><dd>Up to ${esc(w.probe_batch_limit)} jobs sharing one heavy slot; storage admission still applies</dd>`:""}<dt>CPU reserved</dt><dd>${esc(w.software_used)} / ${esc(w.software_limit)} threads</dd><dt>GPU sessions</dt><dd>${esc(w.hardware_used)} / ${esc(w.hardware_limit)}</dd>${w.copy_memory_limit?`<dt>Copy memory</dt><dd>${esc(fmtBytes(w.copy_memory_used||0))} / ${esc(fmtBytes(w.copy_memory_limit))} held by verified copies</dd>`:""}<dt>Admission</dt><dd>${w.accepting_work?w.heavy_available?"Available for compatible work":w.heavy_in_use?"Heavy work is active":"Waiting for media capacity":"Node is starting or in maintenance"}</dd><dt>Observed</dt><dd>${esc(new Date(w.observed_at_ms).toLocaleTimeString())}</dd></dl>`:'<p class="hint">Capacity unknown. This node has no fresh worker observation.</p>'}<h3>Assignments</h3>${assignments.map(job=>`<p><button class="ghost sm" data-inspector-focus="job-${esc(job.id)}" onclick="showDurableJob(${esc(JSON.stringify(job.id))})">${esc(job.title||durableKindLabel(job))}</button> · ${esc(durableStateLabel(job))}${durableLeaseExpired(job)?" · previous owner":""}</p>`).join("")||'<p class="hint">No durable assignment reported.</p>'}${fresh?`<details><summary>${esc(w.child_count)} child processes</summary>${(w.children||[]).map(child=>`<p class="hint">${esc(child)}</p>`).join("")}</details>`:""}<button class="ghost sm" onclick="openActivityNodeJobs(${esc(JSON.stringify(id))})">View ${activityIsClustered()?"this node’s":"server"} jobs →</button>`;
   }
   const detail=q.detail?.job.id===selected.id?q.detail:null;
   if(!detail)return `<p role="status">${q.detailError?`Could not load details: ${esc(q.detailError)} <button class="ghost sm" onclick="showDurableJob(${esc(JSON.stringify(selected.id))})">Try again</button>`:"Loading job details…"}</p>`;

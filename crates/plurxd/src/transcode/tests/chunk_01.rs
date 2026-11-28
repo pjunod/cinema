@@ -2253,6 +2253,7 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
     ));
     let req = SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2260,6 +2261,7 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2325,6 +2327,7 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
 fn snapshot_probe_request() -> SessionRequest {
     SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2332,6 +2335,7 @@ fn snapshot_probe_request() -> SessionRequest {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -4101,6 +4105,7 @@ async fn the_hdr10_grade_is_refused_until_every_precondition_is_proved() {
 fn the_grade_is_part_of_a_request_identity() {
     let request = SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -4108,6 +4113,7 @@ fn the_grade_is_part_of_a_request_identity() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -4137,6 +4143,7 @@ fn the_grade_is_part_of_a_request_identity() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,

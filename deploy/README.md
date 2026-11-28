@@ -414,6 +414,48 @@ the build stamp and does not require the registry to answer. The noirr fleet's
 registry operations and recovery runbook live in
 [`docs/OPERATIONS.md`](../docs/OPERATIONS.md#the-fleet-registry--build-once-pull-everywhere).
 
+### Source deploys build once per commit
+
+A commit that has no qualified fleet image yet (a branch under test, or a
+`main` merge before the manual post-merge sweep publishes) goes out with
+`make docker-up`. Without help, every node compiled that same image for itself.
+Add the registry to each node's `deploy/.env` and the first node to deploy a
+commit shares it with the rest:
+
+```bash
+PLURX_REGISTRY=forge.lan:3000
+```
+
+`make docker-up` then runs `scripts/fleet-image pull` once the hardware
+overlay is resolved. It looks for
+`forge.lan:3000/noirr/plurxd:build-<40-character commit>-<arch>`. If another
+node already built this commit, the target pulls the image and checks its
+revision label against `HEAD` and its platform against the host. It proves
+the startup budget against that image ID and starts it with `--no-build`, so
+nothing is compiled. If no node has built the commit, Compose builds it as
+before, and `scripts/fleet-image push` publishes the result under that name
+for the next node.
+
+- **Only a fully clean checkout is shared.** The checkout must have no tracked
+  or untracked changes, so that the commit names the build context. A dirty
+  tree builds locally and pushes nothing.
+- **Only the standard image is shared.** Some hosts' Compose files pin their
+  own image: the Raspberry Pi runtime overlay from `--prepare-pi`, or an
+  `image:` line in a host override. Those hosts build locally and never pull
+  or publish a shared image.
+- **A share can never fail a deploy.** A missing `PLURX_REGISTRY`, a registry
+  outage or a refused push is printed and the local build carries on.
+- **`build-` is not `sha-`.** The `sha-<12hex>` and `main` tags remain the
+  images `scripts/registry-push` publishes after the full validation sweep.
+  A `build-` tag is the same commit built on a node, not a qualified image.
+  Deploy one node first and check it, then roll out to the rest; the rest
+  pull. Nodes of another architecture build and share their own copy.
+- **Bound `build-` tags in the registry.** Every shared commit adds one image.
+  Give the `noirr` owner a Forgejo container cleanup rule (Settings →
+  Packages → Cleanup rules) whose remove pattern is `build-.*`, keeping the
+  five most recent and removing those older than seven days. Check its preview
+  matches no `main` or `sha-` version before saving.
+
 ### Project name
 
 The compose file pins `name: plurx`. Left to itself, Compose names the project

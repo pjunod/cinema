@@ -237,10 +237,8 @@ impl SourceInputRangeReader {
     }
 }
 struct InputState {
-    // Drop the original capability before its exact ledger guard.
     source: std::sync::Mutex<Option<crate::fragment_index_cluster::SourceFence>>,
     custody: std::sync::Mutex<Option<SourceCustody>>,
-    _background_holder: Option<crate::background_jobs::SourceHolder>,
     observer: Option<SourceObserver>,
     purpose_budget: Option<Arc<dyn SourceInputByteBudget>>,
     background_budget: Option<Arc<dyn SourceInputByteBudget>>,
@@ -338,9 +336,7 @@ impl SourceInput {
     ) -> Result<Self, String> {
         let source =
             crate::fragment_index_cluster::open_source_playback_fence(request.file(), None).await?;
-        let len = source
-            .handle
-            .metadata()
+        let len = plurx_core::media_io::fstat(&source.handle)
             .map_err(|error| error.to_string())?
             .len();
         let mime = crate::http::stream::file_content_type(&request.file().path);
@@ -389,7 +385,6 @@ impl SourceInput {
         }
         let state = Arc::new(InputState {
             source: std::sync::Mutex::new(Some(source)),
-            _background_holder: None,
             custody: std::sync::Mutex::new(Some(custody)),
             observer: Some(observer),
             purpose_budget,
@@ -447,9 +442,7 @@ impl SourceInput {
         request: SourceRequest,
         attempt: impl ToString,
     ) -> Result<Self, String> {
-        let len = source
-            .handle
-            .metadata()
+        let len = plurx_core::media_io::fstat(&source.handle)
             .map_err(|error| error.to_string())?
             .len();
         let custody = request
@@ -460,7 +453,6 @@ impl SourceInput {
         observer.mediate_reads();
         let state = Arc::new(InputState {
             source: std::sync::Mutex::new(Some(source)),
-            _background_holder: None,
             custody: std::sync::Mutex::new(Some(custody)),
             observer: Some(observer),
             purpose_budget: None,
@@ -501,67 +493,19 @@ impl SourceInput {
         let (input, file, _) = tests::input(bytes, SOURCE_HTTP_CHUNK, None).await;
         (input, file)
     }
-    #[cfg(all(test, target_os = "linux"))]
-    pub(crate) async fn completion_read_fixture(
-        file: &Arc<std::fs::File>,
-        owner: &Arc<crate::background_jobs::SourceReadBudget>,
-    ) -> (
-        Self,
-        tokio::sync::oneshot::Receiver<()>,
-        Arc<tests::ReadGate>,
-    ) {
-        let source = crate::fragment_index_cluster::SourceFence::clone_current_held(file)
-            .expect("fixture source");
-        let holder = owner.source_holder().expect("registered physical source");
-        let (reached, parked) = tokio::sync::oneshot::channel();
-        let gate = Arc::new(tests::ReadGate::new(reached));
-        let len = file.metadata().expect("source metadata").len();
-        let state = Arc::new(InputState {
-            source: std::sync::Mutex::new(Some(source)),
-            custody: std::sync::Mutex::new(None),
-            _background_holder: holder,
-            observer: None,
-            purpose_budget: None,
-            background_budget: Some(Arc::new(tests::UnlimitedBudget::default())),
-            pause: None,
-            budget: tokio::sync::Mutex::new(ByteBudget::default()),
-            close: tokio_util::sync::CancellationToken::new(),
-            read_slot: Arc::new(tokio::sync::Semaphore::new(1)),
-            len,
-            mime: "application/octet-stream",
-            window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
-            source_bytes: std::sync::atomic::AtomicU64::new(0),
-            cache_hits: std::sync::atomic::AtomicU64::new(0),
-            read_failed: std::sync::atomic::AtomicBool::new(false),
-            physical_read_failed: std::sync::atomic::AtomicBool::new(false),
-            cached_bytes: std::sync::atomic::AtomicUsize::new(0),
-            read_gate: Some(Arc::clone(&gate)),
-            read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
-            seek_bootstrap: std::sync::OnceLock::new(),
-        });
-        (
-            Self::launch(state).await.expect("real input bridge"),
-            parked,
-            gate,
-        )
-    }
     pub(crate) async fn open_background_held(
         source: crate::fragment_index_cluster::SourceFence,
         mime: &'static str,
         budget: Arc<crate::background_jobs::SourceReadBudget>,
     ) -> Result<Self, String> {
-        let holder = budget.source_holder()?;
-        if !source.unchanged() {
+        if !source.unchanged().await {
             return Err("held source changed before input bridge".into());
         }
-        let len = source
-            .handle
-            .metadata()
+        let len = plurx_core::media_io::fstat(&source.handle)
             .map_err(|error| error.to_string())?
             .len();
         let state = Arc::new(InputState {
             source: std::sync::Mutex::new(Some(source)),
-            _background_holder: holder,
             custody: std::sync::Mutex::new(None),
             observer: None,
             purpose_budget: None,
@@ -756,9 +700,16 @@ impl SourceInput {
     }
     #[cfg(target_os = "linux")]
     pub(crate) fn source_object_version(&self) -> Option<String> {
-        let state = self.state.source.lock().expect("source input fence");
-        let source = state.as_ref().filter(|source| source.unchanged())?;
-        Some(source.object_version().to_owned())
+        // The fence's lock is held across each positioned read of the source
+        // (`read_source`), so on a hung mount it is held for as long as the
+        // mount is hung. Wait for it off the scheduler, like the fstat after.
+        plurx_core::media_io::in_place(|| {
+            let state = self.state.source.lock().expect("source input fence");
+            let source = state
+                .as_ref()
+                .filter(|source| source.unchanged_in_place())?;
+            Some(source.object_version().to_owned())
+        })
     }
     /// Whether any read this input served to its consumer failed.
     pub(crate) fn source_read_failed(&self) -> bool {
@@ -844,7 +795,7 @@ impl SourceInput {
             .await
             .map_err(std::io::Error::other)?;
         let state = Arc::clone(&self.state);
-        tokio::task::spawn_blocking(move || {
+        plurx_core::media_io::blocking(move || {
             let _permit = permit;
             drop(state.source.lock().expect("source input").take());
             drop(state.custody.lock().expect("source custody").take());
@@ -973,14 +924,14 @@ async fn read_source(
             .acquire_owned()
             .await
             .map_err(std::io::Error::other)?;
-        let valid = tokio::task::spawn_blocking(move || {
+        let valid = plurx_core::media_io::blocking(move || {
             let _permit = permit;
             source
                 .source
                 .lock()
                 .expect("source input")
                 .as_ref()
-                .is_some_and(|source| source.unchanged())
+                .is_some_and(|source| source.unchanged_in_place())
         })
         .await
         .map_err(std::io::Error::other)?;
@@ -1190,11 +1141,15 @@ async fn read_source(
         if size == 0 || read_state.close.is_cancelled() {
             return Err(std::io::Error::other("source purpose or input closed"));
         }
+        // The media slot covers the source lock, fence checks and reads only.
+        // The revalidation above waits on grants and the store; holding a
+        // slot through it would let healthy waits pin every media slot.
+        let _media = tokio::runtime::Handle::current().block_on(plurx_core::media_io::slot());
         let mut source = read_state.source.lock().expect("source input");
         let source = source
             .as_mut()
             .ok_or_else(|| std::io::Error::other("source input closed"))?;
-        if !source.unchanged() {
+        if !source.unchanged_in_place() {
             return Err(std::io::Error::other("source input changed"));
         }
         window.resize(size, 0);
@@ -1226,7 +1181,7 @@ async fn read_source(
         read_state
             .source_bytes
             .fetch_add(count as u64, std::sync::atomic::Ordering::SeqCst);
-        if !source.unchanged() {
+        if !source.unchanged_in_place() {
             return Err(std::io::Error::other("source input changed"));
         }
         if count > 0 {

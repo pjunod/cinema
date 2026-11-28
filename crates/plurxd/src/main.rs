@@ -8,6 +8,7 @@
 
 mod admission;
 mod availability;
+mod node_memory;
 use plurx_core::process::bounded as bounded_process;
 #[cfg(test)]
 #[path = "../../plurx-core/tests/support/queue_fixture.rs"]
@@ -661,7 +662,6 @@ fn main() -> anyhow::Result<()> {
         result.context("launching namespace-bound probe")?;
         anyhow::bail!("probe exec unexpectedly returned");
     }
-    crate::source_custody::note_process_start();
     daemon_main()
 }
 
@@ -1999,11 +1999,6 @@ async fn run(config: Config) -> anyhow::Result<()> {
             tracing::info!("shutdown signal received during store activation; not serving");
             return Ok(());
         }
-        crate::source_custody::validate_recovery_startup(
-            selected.backend == SelectedBackend::Replicated,
-        )
-        .map_err(anyhow::Error::msg)
-        .context("validating physical source recovery before serving")?;
         let source_layout_ready = Box::pin(selected.prepare_source_schema_before_serving())
             .await
             .context("qualifying Source schema before serving")?;
@@ -2011,20 +2006,6 @@ async fn run(config: Config) -> anyhow::Result<()> {
             tracing::info!(target:"plurx::sharing","Source schema readiness pending; Local serving continues");
         }
         let store = Arc::clone(&selected.store);
-        crate::source_custody::configure_settlement_journal(&config.storage.data_dir);
-        crate::source_custody::configure_recovery_backend(
-            &store,
-            &config.storage.data_dir,
-            selected.backend == SelectedBackend::Replicated,
-        )
-        .map_err(anyhow::Error::msg)
-        .context("configuring exact-Store source recovery")?;
-        if let Err(error) =
-            crate::source_custody::replay_verified_recovery(&store, &selected.identity.node_id)
-                .await
-        {
-            tracing::warn!(%error, "source recovery evidence retained for retry");
-        }
         let cluster_parts = cluster::ClusterParts::of(&selected);
         let catalogue = selected.catalogue_reader();
         let applied = selected.applied_view();
@@ -5317,5 +5298,7 @@ fn healthcheck(config: &Config) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(test)]
+mod media_io_guard_tests;
 #[cfg(test)]
 mod startup_tests;

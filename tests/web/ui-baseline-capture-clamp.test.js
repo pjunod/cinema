@@ -164,3 +164,25 @@ test("the settings clamp only counts the interval PAGE_TIMER owns", () => {
   assert.equal(page.isScheduled(ownedId), false);
   assert.equal(page.window.__plurxSettingsScanCaptureTick, true);
 });
+
+test("the focus baseline keeps the quality control stable as video evidence arrives", () => {
+  const match = SOURCE.match(/FOCUS_JS = """([\s\S]+?)"""/);
+  assert.ok(match, "scripts/ui-baseline no longer defines FOCUS_JS");
+  const evaluateFocus = new Function("document", `return (${match[1].replaceAll("\\\\", "\\")})();`);
+  const describe = (id, label) => evaluateFocus({
+    activeElement: {
+      id,
+      tagName: "BUTTON",
+      classList: ["picon"],
+      getAttribute: name => name === "aria-label" ? label : null,
+    },
+  });
+
+  const stable = 'button#pbquality.picon "Playback quality"';
+  assert.equal(describe("pbquality", "Playback quality"), stable);
+  assert.equal(describe("pbquality", "Playback quality: Auto · awaiting picture"), stable);
+  assert.equal(describe("pbquality", "Playback quality: Original · 1080p (1920×1080) · SDR"), stable);
+  assert.equal(describe("pbquality", "Quality unavailable"), 'button#pbquality.picon "Quality unavailable"');
+  assert.equal(describe("other", "Playback quality: Auto · awaiting picture"),
+    'button#other.picon "Playback quality: Auto · awaiting picture"');
+});

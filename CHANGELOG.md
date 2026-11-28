@@ -12,6 +12,76 @@ bump may break compatibility and a **patch** bump never does.
 `Changelog:` field (validation/changelog_field.py); scripts/release-cut collects them
 from the landing commits into the dated section below. -->
 
+## [0.9.3] — 2026-11-27
+<!-- changelog-through: 75990958a9fed06e0fa140da1ff659433d881b7f -->
+
+### Added
+- Prometheus series `plurx_hls_requests_total` and `plurx_hls_response_bytes_total` (HLS requests and bytes by surface, resource and rendition role) and `plurx_vod_segment_answers_total` (VOD segment reuse); `playback-lab --server-metrics` records them per case.
+
+### Changed
+- A processed HDR upgrade refused after its trial now names which recovery read missed, and the new `plurx_playback_preparation_processed_recovery_unavailable_total{reason}` counter counts each reason by admission stage.
+
+### Fixed
+- Dolby Vision title scans and other per-file maintenance no longer wait behind work reading a different disk of the same library.
+- Playback info and the Linux player no longer call a Dolby Vision Profile 7 minimal enhancement layer (MEL) "FEL", or an unscanned title's layer FEL; a MEL title's row and EL pill say MEL.
+- the iPhone and iPad version picker dropped each version's Dolby Vision line and clipped long release names
+- the Linux player's EL pill now reads MEL or FEL when the title scan has classified a Dolby Vision Profile 7 enhancement layer, matching the info panel.
+- macOS desktop updates now delete superseded runtime versions (keeping the active one and the one before it) and old app backups, instead of keeping a 1.6 GB copy for every update forever.
+- Custom tags now apply to videos inside folders, and Home rows built from those tags show them. Saving a new Home row twice no longer creates a duplicate row.
+- A three-server cluster no longer briefly reports replication as behind on one or more nodes right after its own writes; a server that is down or stalled is still reported at once, and cluster status reads now give up waiting sooner so they no longer risk timing out the roster check.
+- background jobs whose worker died no longer show as running for hours; they return to the queue about a minute after their lease lapses.
+- Resuming a 4K Dolby Vision title partway through can again use the faster in-place enhancement switch, instead of waiting for a separate upgraded stream.
+- Shared copies are admitted against the node's memory. Each verified copy, whether a viewer's growing copy or an Analysis gap fill, charges a per-node budget
+  (⅛ of node or cgroup memory, or PLURX_COPY_MEMORY_BUDGET) before its FFmpeg child starts, and returns it when the copy ends. Viewers are served before background work, and a copy that doesn't fit answers busy.
+  The budget counts plurxd's heap only, not FFmpeg.
+- A shared copy of a high-bitrate source, such as a 4K remux with 70 MB fragments, now streams instead of failing with copy_range_input_limit.
+  Each copy is admitted for one segment of its file's bitrate. Its memory charge then follows what it actually holds: it grows as larger fragments arrive and shrinks after each segment.
+  A viewer's copy always grows within the node, and waits for room rather than failing when the node is full. An Analysis gap fill pauses until there is room. Only a copy larger than the node's own memory is refused. A finished copy returns its memory at once.
+- A shared HEVC title whose file carries its decoder settings only inside the video stream now stops at once with a named reason and offers to convert it.
+  It used to fail as "too large" after a long wait. Copying such a file is still refused, as it is for local playback.
+- GPU tone-mapping with libplacebo (Vulkan) no longer fails to start on Intel QuickSync nodes; its device setup now derives Vulkan and QSV from one VA-API device.
+- The web player's quality menu labels cropped 4K titles as 4K, keeps lower rungs distinct, and says before you choose when a quality converts to SDR.
+
+## [0.9.2] — 2026-11-26
+<!-- changelog-through: 6410a406eb4237e0f13181a6c9be54bbf3bd1664 -->
+
+### Added
+- each version's Dolby Vision details and how it plays on every device the account uses, in the item detail view
+- `GET /api/v1/playback/devices` (scope `playback:read`) lists the playback capabilities each signed-in device reported
+- each version's Dolby Vision details and how it plays on every device in the iOS, tvOS and Android version pickers and version details
+- Playback info on web, Apple, Android and the Linux player shows which Dolby Vision metadata levels a title carries, which Cinema applied and which are left for the display, and the display peak a processed stream was mapped for; the server records each title's levels once in a background pass
+
+### Changed
+- the Linux player's Playback info list is grouped under Input, Processing and Output
+
+### Fixed
+- plurx Player (Linux): the EL pill now follows whether mpv's native Dolby renderer actually composed the enhancement layer, so it turns off when the layer is lost even if mapping continues (needs mpv +rogdv5.7; older builds keep the previous behaviour).
+- CI runners no longer fill up with leftovers from jobs that die early: the runner janitors now reclaim the Docker workspace volumes and Apple simulators that a job which dies before its last step leaves behind.
+- Android read a version's Dolby Vision profile only from the format text, never from the server's profile field
+- An index probe killed by a host out-of-memory event no longer marks a title's delivery route as permanently unindexable; such records are retried once.
+- Linux player: Cinema's playback controls hide again during Dolby Vision playback instead of staying on screen.
+- Resuming a Dolby Vision title partway through can now use the faster in-place enhancement switch when the file carries its HDR10 metadata inside the video stream.
+- Linux player: Cinema's playback controls keep auto-hiding even if drawing them becomes slow, instead of staying on screen.
+- Dolby Vision Profile 7 FEL titles played at Original quality, or at a chosen resolution, now get the same FEL/RPU processed upgrade as Auto. Previously they stayed on the converted Profile 8.1 copy with DYN only, which is what Android clients showed.
+- A server whose network media storage stops answering keeps serving everything else instead of freezing until the storage returns.
+- A Dolby Vision F+ index whose first-packet check timed out or was killed by the host is retried instead of being refused until the file changes.
+- A one-server cluster no longer briefly reports replication as behind while it applies its own writes, so a native desktop stop or restart no longer refuses intermittently with "recovery, activation or stale topology prevents safe local shutdown".
+- The Linux packages and the Windows server download build and publish again.
+
+## [0.9.1] — 2026-11-25
+<!-- changelog-through: c19e68681671c5ced73a9881c30714c06cc0373d -->
+
+### Changed
+- Reopening a playback at a new position costs one replicated write and one claim read fewer.
+
+### Fixed
+- Resuming a Dolby Vision FEL title whose file embeds cover art no longer loses the native enhancement splice.
+- Dolby Vision Profile 7 FEL titles whose luma reshaping curve has more than two pivots are no longer refused by the F+ curve fit.
+- A Dolby Vision title the scanner refuses on its content (for example an untagged Matroska track) now fails once instead of being read in full five times.
+- A Dolby Vision FEL session whose native enhancement splice could not be used now still reaches FEL through the prepared switch instead of staying on the plain conversion.
+- A cluster voter that stalls (for example while its media storage is unreachable) no longer forces a healthy leader to step down when it resumes; voters now pre-vote before starting an election.
+- plurx Player on Linux starts when TMPDIR is a deep directory and XDG_RUNTIME_DIR is unset, instead of failing because mpv's control socket path was too long.
+
 ## [0.9.0] — 2026-11-24
 <!-- changelog-through: 681167543c42d197ff732d1dc0a79c544e61c672 -->
 
@@ -4496,8 +4566,11 @@ a hundred commits of history.
   binary is stamped with the git commit it was built from, and `/api/v1/server`
   reports both. See [docs/RELEASING.md](docs/RELEASING.md).
 
-[Unreleased]: https://github.com/pjunod/plurx/compare/v0.9.0...HEAD
-[0.9.0]: https://github.com/pjunod/plurx/compare/v0.7.0...v0.9.0
+[Unreleased]: https://github.com/pjunod/plurx/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/pjunod/plurx/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/pjunod/plurx/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/pjunod/plurx/compare/v0.7.0...v0.9.1
+[0.9.0]: https://github.com/pjunod/plurx/compare/v0.7.0...e3eec613f9de4b2f1a9c705ce058bc14d55a16fc
 [0.8.0]: https://github.com/pjunod/plurx/compare/v0.7.0...000300ccfcd98b7b3a2221d7031420cd99748bfd
 [0.7.0]: https://github.com/pjunod/plurx/compare/v0.3.0...v0.7.0
 [0.3.0]: https://github.com/pjunod/plurx/compare/v0.2.8...v0.3.0

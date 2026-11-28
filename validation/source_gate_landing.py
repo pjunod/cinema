@@ -14,6 +14,7 @@ import subprocess
 import sys
 import zipfile
 
+from validation import mirror_guard
 from validation import promotion_unit_retention as retention
 from validation import python_unit_receipts as r
 from validation import qualification
@@ -83,7 +84,7 @@ def require_unchanged_worker_inputs(candidate, base, prior, root):
     identities = [worker_input_identity(tree) for tree in trees]
     r.require(identities[0] == identities[1] == identities[2],
               'Worker controller proof source changed and requires actual current qualification')
-    recipes = [nextest.projected_main_workflow(tree.text('.github/workflows/main-fast-lane.yml').encode())
+    recipes = [nextest.projected_main_workflow(mirror_guard.strip(tree.text('.github/workflows/main-fast-lane.yml')).encode())
                for tree in trees]
     r.require(recipes[0] == recipes[1] == recipes[2], 'Worker proof invocation recipe changed')
     return retention.digest(json.dumps(identities[0], sort_keys=True).encode())

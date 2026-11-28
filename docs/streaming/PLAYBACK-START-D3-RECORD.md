@@ -145,12 +145,14 @@ Same fixture and cells as §2 (**authority/local/writes**, `·` none), measured 
 | `complete_media_session_terminal_projection` | · | 1/0/1 | · | · | · |
 | `complete_media_session_handoff` | · | 1/0/1 | · | · | · |
 | `register_foreground_source` | · | · | 0/0/1 | 0/0/1 | 0/0/1 |
-| `activate_foreground_source_custody` | · | · | 0/0/1 | 0/0/1 | 0/0/1 |
+| `activate_foreground_source_custody` (removed by the source-lease build) | · | · | · | · | · |
 | `suspend_playback_analysis_interest` | · | · | · | 0/0/1 | · |
 | `settle_media_session_activation` | 1/0/2 | 1/0/2 | 1/0/2 | 1/0/2 | 1/0/2 |
 | `publish_media_session_activation` | 2/0/1 | 2/0/1 | 2/0/1 | 2/0/1 | 2/0/1 |
 | `session_layout` (layout reads) | 8/0/0 | 12/0/0 | 8/0/0 | 8/0/0 | 9/0/0 |
-| **total** | **23/2/6** | **30/2/8** | **19/2/8** | **20/2/9** | **21/2/8** |
+| **total** | **23/2/6** | **30/2/8** | **19/2/7** | **20/2/8** | **21/2/7** |
+
+Source leases (2026-11-16, `claude/source-lease-steps-2-4`): the playback lease is written once by `register_foreground_source`, so `activate_foreground_source_custody` is gone and the three source-reading shapes drop one write each (8/9/8 → 7/8/7).
 
 **Each delta and its cause** (against §2's 29/1/6, 36/1/8, 30/1/8, 28/1/9, 32/1/9; site names from a backtrace of every planning-input read on the D3a build).
 

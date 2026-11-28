@@ -246,7 +246,7 @@ impl TranscodeManager {
             return Err("encoded intent unavailable".to_owned());
         }
         let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
-        if !source.unchanged() || source.object_version() != encoding.source_object_version {
+        if !source.unchanged().await || source.object_version() != encoding.source_object_version {
             return Err("encoded source changed before queue publication".to_owned());
         }
         // Allocation budget, never measured wire cost. Actual writes remain
@@ -382,6 +382,7 @@ impl TranscodeManager {
         let file = &resolved_file;
         let mut request = SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -392,6 +393,7 @@ impl TranscodeManager {
             finite_bitrate_limit_bps: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             file_id,
             playback_id: String::new(),
             request_id: None,
@@ -624,7 +626,7 @@ impl TranscodeManager {
         }) {
             return Ok(None);
         }
-        if !source.unchanged() {
+        if !source.unchanged().await {
             return Ok(None);
         }
         let cap = u64::try_from(file.size)
@@ -795,7 +797,7 @@ impl TranscodeManager {
             return Err(PreparationError::Yield("owner_busy"));
         }
         let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
-        if !source.unchanged() || source.object_version() != source_object_version {
+        if !source.unchanged().await || source.object_version() != source_object_version {
             if !manual {
                 return Ok(Self::stop_unverifiable_candidate(&fence).await?);
             }
@@ -867,6 +869,7 @@ impl TranscodeManager {
         );
         let mut request = SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -877,6 +880,7 @@ impl TranscodeManager {
             finite_bitrate_limit_bps: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             file_id: file.id,
             playback_id: String::new(),
             request_id: None,
@@ -987,7 +991,7 @@ impl TranscodeManager {
                 || self.fragment_worker_idle(admission),
             )
             .await?;
-        if !source.unchanged() {
+        if !source.unchanged().await {
             return Err(PreparationError::Stop("source_changed"));
         }
         if !self.fragment_worker_idle(admission) {
@@ -1087,18 +1091,6 @@ impl TranscodeManager {
         publication_fence: Option<PublicationFence>,
         pretranscode_fence: Option<PretranscodeFence>,
     ) -> Result<PretranscodeProduceOutcome, String> {
-        // This scope retains the operation registration until the future is
-        // destroyed. File Arc clones in detached collectors remain separately
-        // owned capabilities; the completion actor closes its last original.
-        let _source_operation = match (
-            crate::background_jobs::source_budget(),
-            bound_source.as_ref(),
-        ) {
-            (Some(budget), Some(source)) => {
-                budget.enroll_preparation(Arc::clone(&source.handle))?
-            }
-            _ => None,
-        };
         if cancelled.is_cancelled() {
             return Ok(PretranscodeProduceOutcome::Yielded("ownership_lost"));
         }
@@ -3252,15 +3244,6 @@ impl TranscodeManager {
                 .map_err(|error| error.to_string())?;
             match registered {
                 BackgroundSourceRegistration::Registered(token) => {
-                    if crate::source_custody::activate_background_with_journal(
-                        &self.store,
-                        token.clone(),
-                    )
-                    .await
-                    .is_err()
-                    {
-                        return Err("offline source custody activation was not acknowledged".into());
-                    }
                     let budget = crate::background_jobs::SourceReadBudget::from_existing_custody(
                         Arc::clone(&self.store),
                         &token,

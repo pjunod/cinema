@@ -378,15 +378,6 @@ pub fn encoder_identity(ffmpeg_digest: &str, va_driver: &str, device: &str) -> S
     ))
 }
 
-/// The title scan demand binding that asks for one title to be rescanned and
-/// re-qualified: never equal to a scanner digest, so the scan worker rebinds
-/// the demand to its scanner and runs the title job again.
-pub fn requalify_binding(scanner: &str, identity: &str) -> String {
-    hex::encode(Sha256::digest(
-        serde_json::to_vec(&("plurx-dv-fel-requalify-v1", scanner, identity)).expect("bounded"),
-    ))
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum VerdictState {
     /// No verdict for this source with this renderer and recipe.
@@ -701,7 +692,6 @@ mod tests {
         ] {
             assert_ne!(id, identity("renderer-a", "recipe-1", &other));
         }
-        assert_ne!(requalify_binding("scanner", &id), "scanner");
         let window = WindowScore {
             start_ms: 1000,
             served_mean: 1.0,

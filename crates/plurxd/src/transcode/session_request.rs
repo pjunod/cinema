@@ -559,6 +559,9 @@ pub struct CandidateExecutionContext {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
     pub(crate) display_target_note: Option<String>,
+    /// The title facts the Playback info rows report, frozen beside the
+    /// display-target policy from the same probe snapshot. Observation only.
+    pub(crate) dv_row_facts: Option<plurx_core::playback::dv_provenance::DvRowFacts>,
     pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
     pub(crate) selected_candidate: plurx_core::playback::candidate::QualityCandidate,
     pub(crate) planning_binding: Option<crate::media_pool::PlanningBinding>,
@@ -708,6 +711,10 @@ pub enum SourceTelemetry {
     Unknown,
 }
 
+pub(crate) use plurx_core::transcode::{
+    VodCopyLayout, VodSoundtrackIdentity, VodSplitVideoIdentity,
+};
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRequest {
@@ -717,6 +724,13 @@ pub struct SessionRequest {
     pub(crate) quality_catalog: Option<std::sync::Arc<crate::media_pool::QualityCatalogResult>>,
     #[serde(skip)]
     pub candidate_context: Option<Box<CandidateExecutionContext>>,
+    /// The processed-upgrade ask of a start without an Auto candidate
+    /// (Original or a manual rung), derived at create from its accepted
+    /// capabilities. An Auto start leaves it `None`: its candidate context
+    /// is the ask. Read both through [`SessionRequest::processed_upgrade_ask`].
+    /// Process-private, like the candidate context it stands in for.
+    #[serde(skip)]
+    pub(crate) accepted_processed_ask: Option<Box<super::ProcessedUpgradeAsk>>,
     /// The viewer's per-playback output-retention choice from the HTTP
     /// create (`CreateOverrides::retain_output`). `Some(false)` means this
     /// playback queues no complete-output preparation and does no rolling
@@ -792,6 +806,9 @@ pub struct SessionRequest {
     /// only for indexed copy; any other route keeps the muxed presentation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub split_audio: bool,
+    /// Absent on P49 recipes, which use the original AAC grid on recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) vod_copy_layout: Option<VodCopyLayout>,
     /// The client asked for the HDR10 re-encode grade rather than the SDR
     /// ladder: it decodes and presents HEVC Main10 PQ (`hdr10t=1` at
     /// `/decision`, `CreateSession::hdr10` here).
@@ -1108,6 +1125,98 @@ impl SessionKind {
 }
 
 impl SessionRequest {
+    /// Select the current split recipe for a newly negotiated copy.
+    pub(crate) fn prepare_vod_copy_layout(&mut self) {
+        self.vod_copy_layout = (self.split_audio
+            && self.presentation == Presentation::Vod
+            && matches!(
+                self.kind,
+                SessionKind::Copy {
+                    preserve_dolby_vision: false,
+                    convert_dolby_vision: false,
+                    ..
+                }
+            )
+            && self.continuous_media.is_none()
+            && self.subtitle_burn.is_none())
+        .then_some(VodCopyLayout::PendingV1);
+    }
+
+    pub(crate) fn vod_copy_layout_valid(&self) -> bool {
+        self.vod_copy_layout.as_ref().is_none_or(|layout| {
+            self.presentation == Presentation::Vod
+                && matches!(self.kind, SessionKind::Copy { .. })
+                && self.continuous_media.is_none()
+                && self.subtitle_burn.is_none()
+                && self.split_audio != matches!(layout, VodCopyLayout::Muxed)
+                && layout.valid()
+        })
+    }
+
+    /// Freeze the owner's verdict for first activation or a replay of the
+    /// same verdict. A non-copy result can only consume a pending request.
+    pub(crate) fn seal_vod_copy_layout(
+        &mut self,
+        issued: Option<VodCopyLayout>,
+        copied_vod: bool,
+    ) -> bool {
+        match (&self.vod_copy_layout, &issued) {
+            (Some(VodCopyLayout::PendingV1), Some(layout)) if copied_vod => {
+                if !layout.valid() || matches!(layout, VodCopyLayout::PendingV1) {
+                    return false;
+                }
+                self.split_audio = matches!(layout, VodCopyLayout::SplitV1 { .. });
+                self.vod_copy_layout = issued;
+                true
+            }
+            (Some(VodCopyLayout::PendingV1), None) if !copied_vod => {
+                self.split_audio = false;
+                self.vod_copy_layout = None;
+                true
+            }
+            (Some(VodCopyLayout::PendingV1), _) => false,
+            (current, issued) => current == issued,
+        }
+    }
+
+    /// The one processed-upgrade ask for this request: its Auto candidate's,
+    /// or the accepted ask of a start that has none. `None` only for a start
+    /// that reported no capabilities, which no processed route can serve.
+    pub(crate) fn processed_upgrade_ask(&self) -> Option<super::ProcessedUpgradeAsk> {
+        self.candidate_context
+            .as_deref()
+            .map(super::ProcessedUpgradeAsk::from_candidate)
+            .or_else(|| self.accepted_processed_ask.as_deref().cloned())
+    }
+
+    /// The rendition height the processed ask describes, if there is one.
+    pub(crate) fn processed_ask_target_height(&self) -> Option<u32> {
+        self.candidate_context
+            .as_ref()
+            .map(|context| context.selected_candidate.target_height)
+            .or_else(|| {
+                self.accepted_processed_ask
+                    .as_ref()
+                    .map(|ask| ask.target_height)
+            })
+    }
+
+    /// Record a completed FEL qualification on whichever ask this request
+    /// carries. `None` when it carries neither.
+    pub(crate) fn require_fel_qualification(
+        &mut self,
+        qualification: super::PendingFelQualification,
+    ) -> Option<()> {
+        if let Some(context) = self.candidate_context.as_mut() {
+            context.required_fel_qualification = Some(qualification);
+        } else {
+            self.accepted_processed_ask
+                .as_mut()?
+                .required_fel_qualification = Some(qualification);
+        }
+        Some(())
+    }
+
     /// Resolve legacy routes and explicit encoded destinations in one place so
     /// preflight and the completed-window runtime cannot disagree.
     pub(crate) fn dv_processing_route(
@@ -1323,6 +1432,7 @@ impl SessionRequest {
 }
 
 pub struct StartInfo {
+    pub(crate) vod_copy_layout: Option<VodCopyLayout>,
     /// Profile of an admitted, prepared processed presentation. Independent
     /// of the physical transcode kind and its PQ base grade; never source tags.
     pub(crate) processed_dv_profile: Option<u8>,
@@ -1334,10 +1444,6 @@ pub struct StartInfo {
     /// not be consumed, and this session serves the ordinary request it
     /// enhanced instead; the reason, for the create's plan notes.
     pub(crate) degraded_processing: Option<String>,
-    /// Why this start's own processing (a reconstructed 8.1 or HDR10-E the
-    /// ordinary request was eligible for) was declined: the verdict, a busy
-    /// reconstruction slot, a refused window. For the enhancement detail.
-    pub(crate) processing_note: Option<String>,
     pub(crate) retained_output: Option<super::RetainedOutputFacts>,
     pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,

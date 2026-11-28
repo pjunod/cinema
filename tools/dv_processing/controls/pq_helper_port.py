@@ -1,17 +1,19 @@
-"""The precise CM4 transfer helpers of dv_dm.h: exact reference, sample inputs and a CPU build.
+"""The CM4 transfer helpers of dv_dm.h: exact reference, sample inputs and a CPU build.
 
 dfi_eq_finish_eotf (PQ code -> nits, extended above code 1 up to its pole) and eqpq_oetf3
-(nits -> PQ code) are split-float (double-word) evaluations of ST 2084. The EOTF rounds its
-double-word result to float32 itself; the OETF returns the high word of a normalised double-word.
-With a fused fma and `precise` honoured, both equal the correctly rounded float32 of the exact
-function on every sample here (the dense ramps, the helpers' branch boundaries, subnormals, values
-past both ends and the EOTF's pole). Non-finite inputs are not sampled: the helpers pass NaN (and
-the EOTF +inf) to the legacy float functions, which promise no bits.
+(nits -> PQ code) evaluate ST 2084 from the segment tables of dm_pq_tables.h. Fused or with fma
+as a*b+c, both are within 1 ULP of the correctly rounded float32 of the exact function on every
+float32 input (pq_helper_exhaustive.py, which uses this build); the samples here (dense ramps,
+the helpers' lane and region boundaries, subnormals, values past both ends and the EOTF's pole)
+are the quick check. Non-finite inputs are not sampled: the helpers pass NaN (and the EOTF +inf)
+to the legacy float functions, which promise no bits.
 
-build() compiles the GLSL text of the header, unchanged, as C++ against a small vec3 shim, so the
-same source can be run with a fused fma ("fused"), with fma as a*b+c ("unfused-fma") and with the
-compiler free to reassociate, which is what dropping `precise` allows ("no-precise").
-Used by tests/operations/test_dv_dm_pq_precision.py (no GPU) and run_pq_helper_exact.py (GPU).
+build() compiles the GLSL text of the header and the tables' GLSL constants, unchanged, as C++
+against a small shim (vec3 lanes, texelFetch over dm_pqt_words), so the same source can be run
+with a fused fma ("fused"), with fma as a*b+c ("unfused-fma") and with the compiler free to
+reassociate, which is what dropping `precise` allows ("no-precise").
+Used by tests/operations/test_dv_dm_pq_precision.py (no GPU), run_pq_helper_exact.py (GPU) and
+pq_helper_exhaustive.py.
 """
 from decimal import Decimal, getcontext
 from pathlib import Path
@@ -23,6 +25,7 @@ import struct
 import subprocess
 
 HEADER = Path(__file__).resolve().parents[1] / "dv_dm.h"
+TABLES = HEADER.parent / "dm_pq_tables.h"
 MODES = ("fused", "unfused-fma", "no-precise")
 INF = 0x7F800000
 M1, M2 = Decimal("0.1593017578125"), Decimal("78.84375")
@@ -130,7 +133,9 @@ def compare(xs, got, want):
 
 SHIM = r"""
 #include <cmath>
+#include <cstddef>
 #include <cstring>
+#include "dm_pq_tables.h"
 typedef unsigned uint;
 #define precise
 struct bvec3 { bool x, y, z; bvec3() {} explicit bvec3(bool a) : x(a), y(a), z(a) {} bvec3(bool a, bool b, bool c) : x(a), y(b), z(c) {} };
@@ -170,16 +175,29 @@ inline vec3 ldexp(vec3 a, ivec3 k) { return vec3(std::ldexp(a.x, k.x), std::ldex
 inline vec3 frexp(vec3 a, ivec3 &k) { return vec3(std::frexp(a.x, &k.x), std::frexp(a.y, &k.y), std::frexp(a.z, &k.z)); }
 inline int findMSB(uint a) { return a ? 31 - __builtin_clz(a) : -1; }
 inline ivec3 findMSB(uvec3 a) { return ivec3(findMSB(a.x), findMSB(a.y), findMSB(a.z)); }
+// GLSL fma, fused or (UNFUSED_FMA) a separately rounded multiply and add. A macro, so no C++
+// library's own fma overloads can be chosen instead.
 #ifdef UNFUSED_FMA
-inline vec3 fma(vec3 a, vec3 b, vec3 c) { return a * b + c; }
+inline float port_fma(float a, float b, float c) { float p = a * b; return p + c; }
 #else
-inline vec3 fma(vec3 a, vec3 b, vec3 c) { return vec3(std::fma(a.x, b.x, c.x), std::fma(a.y, b.y, c.y), std::fma(a.z, b.z, c.z)); }
+inline float port_fma(float a, float b, float c) { return std::fmaf(a, b, c); }
 #endif
+inline vec3 port_fma(vec3 a, vec3 b, vec3 c) { return vec3(port_fma(a.x, b.x, c.x), port_fma(a.y, b.y, c.y), port_fma(a.z, b.z, c.z)); }
+#define fma port_fma
+inline float roundEven(float a) { return std::nearbyint(a); }
+struct ivec2 { int x, y; ivec2(int a, int b) : x(a), y(b) {} };
+struct vec4 { float x, y, z, w; };
+struct sampler2D {};
+static const sampler2D pqtab = {};
+inline vec4 texelFetch(sampler2D, ivec2 p, int) {
+  vec4 v; std::memcpy(&v, dm_pqt_words + 4 * ((size_t)p.y * DM_PQT_WIDTH + p.x), 16); return v; }
 inline float max(float a, float b) { return std::fmax(a, b); }
 inline float clamp(float x, float a, float b) { return std::fmin(std::fmax(x, a), b); }
+#ifndef _LIBCPP_VERSION   // libc++ declares these float overloads itself
 inline float pow(float a, float b) { return std::pow(a, b); }
 inline float log(float a) { return std::log(a); }
 inline float exp(float a) { return std::exp(a); }
+#endif
 """
 
 EXPORTS = r"""
@@ -216,12 +234,12 @@ def float_literals(glsl):
 
 
 def port_source(header):
-    """C++ for the header's precise helpers: the GLSL as written, with only its spelling adapted."""
+    """C++ for the header's transfer helpers: the GLSL as written, with only its spelling adapted."""
     legacy = "\n".join(glsl_function(glsl_literals(header), r"\bfloat\s+%s\s*\(float\s+\w+\)" % name)
                        for name in ("pq_log1p", "pq_expm1", "pq_eotf_ext", "pq_oetf"))
-    precise = glsl_literals(header, "DV_DM_GLSL_CM4_PQ")
+    precise = glsl_literals(TABLES.read_text(), "DM_PQT_GLSL") + glsl_literals(header, "DV_DM_GLSL_CM4_PQ")
     if "fma(" not in precise or "precise " not in precise:
-        raise ValueError("the precise helpers no longer use fma and precise")
+        raise ValueError("the transfer helpers no longer use fma and precise")
     precise = re.sub(r"\bnot\(", "not_(", precise)                              # `not` is a C++ token
     precise = re.sub(r"\bbvec3\((ivec3\([^()]*\)[&|]ivec3\([^()]*\))\)", r"bvec3_of(\1)", precise)
     precise = re.sub(r"=uint\[\d+\]\(([^()]*)\);", r"={\1};", precise)          # array constructor
@@ -244,7 +262,7 @@ def build(work, mode, header=None):
     """Compile the helpers for one of MODES into `work` and load them."""
     compiler = shutil.which("c++")
     if not compiler:
-        raise RuntimeError("C++ compiler required for the precise PQ helper port")
+        raise RuntimeError("C++ compiler required for the PQ helper port")
     work = Path(work)
     source, compiled, library = (work / ("pq_helper_port_%s.%s" % (mode, suffix)) for suffix in ("cpp", "o", "so"))
     source.write_text(port_source(HEADER.read_text() if header is None else header))
@@ -252,7 +270,7 @@ def build(work, mode, header=None):
     # -ffast-math: reassociation and contraction allowed, as without `precise`.
     flags = {"fused": ["-ffp-contract=off"], "unfused-fma": ["-ffp-contract=off", "-DUNFUSED_FMA"],
              "no-precise": ["-ffast-math"]}[mode]
-    subprocess.run([compiler, "-std=c++17", "-O2", "-fPIC", "-Wall", "-Wextra", "-Werror",
+    subprocess.run([compiler, "-std=c++17", "-O2", "-fPIC", "-Wall", "-Wextra", "-Werror", "-I", str(TABLES.parent),
                     "-Wno-unused-function", "-Wno-unused-parameter", *flags, "-c", str(source), "-o", str(compiled)],
                    check=True)
     # Linked without the mode's flags: before GCC 13 a -ffast-math link adds crtfastmath.o even to

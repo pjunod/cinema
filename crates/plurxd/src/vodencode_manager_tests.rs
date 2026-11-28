@@ -276,7 +276,10 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             crate::transcode::errors::pending_fel_qualification(&reason).is_some(),
             "missing measurement must leave an exact pending continuation: {reason}"
         );
-        let reason = crate::transcode::errors::ordinary_processing_decline(reason);
+        let reason = crate::transcode::errors::pending_fel_qualification(&reason)
+            .expect("pending continuation")
+            .reason()
+            .to_owned();
         assert!(
             reason.contains("quality measurement"),
             "missing measurement must be named: {reason}"
@@ -1572,6 +1575,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -1591,6 +1595,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -1799,6 +1804,7 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -1943,6 +1949,7 @@ async fn encoded_vod_manager_refuses_replaced_source_with_stale_probe() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2043,6 +2050,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2093,6 +2101,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
+                accepted_processed_ask: None,
                 vod_only: false,
                 passive_vod: false,
                 finite_bitrate_limit_bps: None,
@@ -2135,6 +2144,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
+                accepted_processed_ask: None,
                 vod_only: false,
                 passive_vod: false,
                 finite_bitrate_limit_bps: None,
@@ -2246,6 +2256,7 @@ async fn a_source_encoder_selection_refuses_is_refused_before_any_burn_extractio
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2342,6 +2353,7 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2516,6 +2528,7 @@ async fn encoding_shipped_shape() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2604,6 +2617,7 @@ async fn an_encode_the_software_budget_can_never_admit_is_refused_at_create() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -2750,6 +2764,7 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
             role: ContinuousMediaRole::Video,
         })),
         candidate_context: None,
+        accepted_processed_ask: None,
         request_id: Some(uuid::Uuid::new_v4().to_string()),
         previous_session_id: None,
         reopen_reason: None,
@@ -3722,7 +3737,7 @@ async fn create_local_vod(
 async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_copy() {
     use plurx_core::store::SqliteStore;
     let base = crate::test_tempdir().expect("split admission fixture");
-    let source = base.path().join("two-languages.mkv");
+    let source = base.path().join("four-soundtracks.mkv");
     let made = std::process::Command::new(crate::ffmpeg::ffmpeg_bin())
         .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y"])
         .args([
@@ -3744,7 +3759,8 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
             "sine=frequency=660:sample_rate=48000:duration=6",
         ])
         .args([
-            "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "libx264", "-g", "48",
+            "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "1:a", "-map", "2:a", "-c:v",
+            "libx264", "-g", "48",
         ])
         .args([
             "-pix_fmt",
@@ -3763,7 +3779,7 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         ])
         .arg(&source)
         .output()
-        .expect("two-language fixture");
+        .expect("soundtrack fixture");
     assert!(
         made.status.success(),
         "{}",
@@ -3802,9 +3818,43 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         .await
         .expect("file")
         .expect("attested");
-    assert_eq!(file.audio_streams.len(), 2, "{:?}", file.audio_streams);
+    assert_eq!(file.audio_streams.len(), 4, "{:?}", file.audio_streams);
+    let actual_file = file.clone();
+    let identity = crate::source_custody::SourceIdentity {
+        node_id: "split-packet-probe".into(),
+        boot_id: uuid::Uuid::new_v4(),
+    };
+    let held = std::fs::File::open(&source).expect("held soundtrack source");
+    let probe_packets = |file: &plurx_core::domain::MediaFile| {
+        let request = identity.request(
+            Arc::clone(&store),
+            file,
+            "split-packet-probe",
+            uuid::Uuid::new_v4(),
+            plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer,
+        );
+        crate::source_custody::with_request(
+            Some(request),
+            crate::ffmpeg::held_source_audio_packets(&held, 1, Duration::from_secs(10), 1024 * 1024),
+        )
+    };
+    let mut stale = actual_file.clone();
+    stale.mtime += 1;
+    assert!(
+        matches!(
+            probe_packets(&stale).await,
+            Err(crate::ffmpeg::HeldPacketProbeError::Source(reason))
+                if reason.contains("registration lost authority")
+        ),
+        "audio packet evidence requires live source registration"
+    );
+    let packets = probe_packets(&actual_file).await.expect("authorized audio packets");
+    let packets: serde_json::Value = serde_json::from_slice(&packets).expect("packet JSON");
+    assert!(packets["packets"][0]["data_hash"].is_string());
+    let mut file = file;
+    file.audio_streams.truncate(2);
     let manager = TranscodeManager::new(
-        store,
+        Arc::clone(&store),
         base.path().join("manager"),
         EncoderCaps::default(),
         Pipeline::Cpu,
@@ -3822,6 +3872,7 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -3833,6 +3884,7 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         start_seconds: 0.0,
         kind: copy,
         split_audio: true,
+        vod_copy_layout: None,
         audio_index: Some(0),
         ..reopen_request(file_id, "split-admission", "unused", "unused")
     };
@@ -3872,6 +3924,7 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         "an unnegotiated copy",
         &SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             ..req.clone()
         },
         &file,
@@ -3959,4 +4012,99 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         .await
         .expect("three soundtracks prepare");
     assert_eq!(soundtracks.len(), 3, "three soundtracks still split");
+
+    let crate::fragindex::IndexOutcome::Built(index) = crate::fragindex::build(
+        &actual_file,
+        plurx_core::transcode::CopyVideoOptions::new(crate::ffmpeg::has_dovi_rpu().await, false),
+        base.path(),
+        Duration::from_secs(20),
+    )
+    .await
+    else {
+        panic!("four-soundtrack fixture must have a usable copy index");
+    };
+    store
+        .put_fragment_index(file_id, &index)
+        .await
+        .expect("copy index");
+    let mut current = SessionRequest {
+        vod_copy_layout: Some(crate::transcode::VodCopyLayout::PendingV1),
+        ..req.clone()
+    };
+    let four = manager
+        .prepare_vod_split_soundtracks(&current, &actual_file, None)
+        .await
+        .expect("four soundtracks prepare");
+    assert_eq!(four.len(), 4);
+
+    // The group needs twelve AAC threads. No split child is published when
+    // only eight are available, and the same create starts muxed instead.
+    let fallback = create_local_vod(&manager, &current, "test")
+        .await
+        .expect("muxed fallback");
+    assert!(fallback.playlist_url.ends_with("/index.m3u8"));
+    assert_eq!(
+        fallback.vod_copy_layout,
+        Some(crate::transcode::VodCopyLayout::Muxed)
+    );
+    assert_eq!(
+        manager
+            .vod
+            .hls_facts(&fallback.session_id)
+            .await
+            .expect("attached fallback")
+            .vod_copy_layout,
+        Some(crate::transcode::VodCopyLayout::Muxed),
+    );
+
+    store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "16")
+        .await
+        .expect("larger budget");
+    let timed = SessionRequest {
+        block_budget_secs: Some(0.000_001),
+        request_id: Some("split-deadline".into()),
+        ..current.clone()
+    };
+    let timed_fallback = create_local_vod(&manager, &timed, "test")
+        .await
+        .expect("the private split deadline leaves a muxed start");
+    assert!(timed_fallback.playlist_url.ends_with("/index.m3u8"));
+    assert_eq!(
+        timed_fallback.vod_copy_layout,
+        Some(crate::transcode::VodCopyLayout::Muxed)
+    );
+
+    current.request_id = Some("split-large-group".into());
+    let split = create_local_vod(&manager, &current, "test")
+        .await
+        .expect("split start");
+    assert!(split.playlist_url.ends_with("/master.m3u8"));
+    let Some(crate::transcode::VodCopyLayout::SplitV1 { soundtracks, .. }) =
+        split.vod_copy_layout.clone()
+    else {
+        panic!("expected issued split layout: {:?}", split.vod_copy_layout);
+    };
+    assert_eq!(soundtracks.len(), 4);
+    current.request_id = Some("split-rebuild".into());
+    current.vod_copy_layout = split.vod_copy_layout;
+    let rebuilt = create_local_vod(&manager, &current, "test")
+        .await
+        .expect("rebuild frozen group");
+    assert_eq!(rebuilt.vod_copy_layout, current.vod_copy_layout);
+
+    let mut conflicting = SessionRequest {
+        playback_id: "split-rebuild-conflict".into(),
+        request_id: Some("split-rebuild-conflict".into()),
+        ..current
+    };
+    let Some(crate::transcode::VodCopyLayout::SplitV1 { video, .. }) =
+        conflicting.vod_copy_layout.as_mut()
+    else {
+        panic!("issued split video");
+    };
+    video.index_key = Some("a".repeat(64));
+    assert!(create_local_vod(&manager, &conflicting, "test")
+        .await
+        .is_err());
 }

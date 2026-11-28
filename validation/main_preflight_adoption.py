@@ -24,6 +24,7 @@ import unittest
 import zipfile
 from typing import Mapping
 
+from validation import mirror_guard
 from validation.python_unit_receipts import (API, IntegrityError, ReceiptError, SourceApplicability,
     artifact_json, atomic_json, bounded_json, discover, positive, require, test_source_path)
 
@@ -76,6 +77,13 @@ def run_commands(workflow, job="preflight"):
     return commands
 
 
+# The PR events main-fast-lane.yml runs on, as Forgejo spells the payload
+# action. A requested lane (docs/ci/REQUESTED-LANE.md) is a label event:
+# Forgejo sends `label_updated`; `labeled` is the GitHub spelling.
+PR_EVENT_ACTIONS = ("opened", "synchronize", "synchronized", "reopened", "ready_for_review",
+                    "converted_to_draft", "labeled", "label_updated")
+
+
 def bind_event(run, scope, ready=True):
     require(run.get("event") == "pull_request" and isinstance(run.get("event_payload"), str),
             "Prior run lacks authenticated PR event payload")
@@ -88,7 +96,7 @@ def bind_event(run, scope, ready=True):
             and pull["base"]["ref"] == "main"
             and pull["state"] == "open" and pull["head"]["sha"] == run["commit_sha"]
             and run["workflow_id"] == "main-fast-lane.yml"
-            and event["action"] in ("opened", "synchronize", "synchronized", "reopened", "ready_for_review", "converted_to_draft"),
+            and event["action"] in PR_EVENT_ACTIONS,
             "Prior event/source/PR/base/readiness binding mismatch")
     if ready:
         require(pull["draft"] is False and event["action"] != "converted_to_draft",
@@ -342,7 +350,7 @@ def authenticate_journal(api, scope, artifact, env, candidates, skipped_history)
     # Before any git read: the PR #997 force push left a journal whose commit
     # was gone, and reading its workflow crashed prepare outright.
     require(commit_available(commit), f"commit {commit} is not available in this checkout")
-    producer_commands = run_commands(git("show", commit + ":.github/workflows/main-fast-lane.yml"))
+    producer_commands = run_commands(mirror_guard.strip(git("show", commit + ":.github/workflows/main-fast-lane.yml")))
     require(adapter_workflow(producer_commands)
             and journal["producer_blob"] == git("rev-parse", commit + ":validation/main_preflight_adoption.py")
             and journal["manifest_blob"] == git("rev-parse", commit + ":" + str(MANIFEST)),

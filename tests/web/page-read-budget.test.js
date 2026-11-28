@@ -9,6 +9,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const {shellSource} = require("./shell-source.js");
 // The shipped app is a tree now, so the string these assertions slice is
@@ -73,6 +74,60 @@ async function main() {
 function nextTurn() {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+test("saving a new row twice sends one create and moving it saves one entry", async () => {
+  const source = fs.readFileSync(path.join(__dirname, "../../crates/plurxd/src/web/pages/curation.js"), "utf8");
+  const calls = [];
+  const button = {disabled: false};
+  const body = {};
+  const rowDialog = {
+    open: true,
+    close() { this.open = false; },
+    querySelector(selector) { return selector === "#row-save" ? button : null; },
+  };
+  const homeDialog = {open: true, close() { this.open = false; }, querySelector() { return body; }};
+  let creation = Promise.withResolvers();
+  let renders = 0;
+  const context = vm.createContext({
+    window: {addEventListener() {}},
+    document: {getElementById: id => id === "row-editor" ? rowDialog : homeDialog},
+    api(url, options) {
+      calls.push({url, options});
+      return url === "/rows" ? creation.promise : Promise.resolve(null);
+    },
+    esc: String,
+    toast() {},
+    render() { renders += 1; },
+    location: {hash: "#/"},
+  });
+  vm.runInContext(source + `
+    HOME_EDIT={entries:[{key:"recently_added",hidden:false}],rows:[]};
+    ROW_EDIT={id:null,title:"Trips",scope:"private",spec:{all_of:[{tag:7}]},saving:false};
+  `, context);
+
+  const first = vm.runInContext("saveRow()", context);
+  await vm.runInContext("saveRow()", context);
+  assert.equal(button.disabled, true);
+  assert.deepEqual(calls.map(call => call.url), ["/rows"]);
+  creation.resolve({id: 21, title: "Trips", scope: "private", editable: true});
+  await first;
+  assert.equal(rowDialog.open, false);
+  assert.equal(renders, 1);
+  await vm.runInContext("moveHomeEntry(1,-1);saveHomeLayout(false)", context);
+  assert.deepEqual(calls.map(call => call.url), ["/rows", "/home/layout"]);
+  assert.deepEqual(Array.from(calls[1].options.body.entries, entry => entry.key), ["row:21", "recently_added"]);
+
+  creation = Promise.withResolvers();
+  rowDialog.open = true;
+  homeDialog.open = true;
+  const rendersBeforeNavigation = renders;
+  const late = vm.runInContext("saveRow()", context);
+  homeDialog.close();
+  context.location.hash = "#/item/99";
+  creation.resolve({id: 22, title: "Trips", scope: "private", editable: true});
+  await late;
+  assert.equal(renders, rendersBeforeNavigation, "a save that finishes after navigation cannot refresh the new route");
+});
 
 test("Home uses one fixed preview batch and preserves category grouping", async () => {
   const libraries = Array.from({ length: 14 }, (_, index) => ({
@@ -880,7 +935,7 @@ test("Settings loads only the active tab manifest", () => {
     analysis: { required: ["settings", "analysis"], secondary: ["developerReadiness"] },
     maintenance: { required: ["settings", "dvConversions"], secondary: ["developerReadiness"] },
     users: { required: ["settings", "users"], secondary: [] },
-    system: { required: ["sys"], secondary: ["https", "sourceRecovery"] },
+    system: { required: ["sys"], secondary: ["https", "sourceLaunch"] },
     cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness", "settings"] },
     sharing: { required: ["settings", "sharingStatus", "sharingImports", "sharingExports"], secondary: ["developerReadiness"] },
     integrations: { required: ["settings", "trakt"], secondary: ["developerReadiness"] },
@@ -1708,7 +1763,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     analysis:{required:["/settings","/analysis/summary"],secondary:["/developer/readiness"]},
     maintenance:{required:["/settings","/dv-conversions"],secondary:["/developer/readiness"]},
     users:{required:["/settings","/users"],secondary:[]},
-    system:{required:["/system"],secondary:["/system/https","/developer/source-recovery"]},
+    system:{required:["/system"],secondary:["/system/https","/developer/source-launch"]},
     // The cluster settings cards fill their own mount when /settings lands; the
     // health board never waits for it.
     cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","/settings","cluster-log"]},
@@ -1731,9 +1786,9 @@ test("Settings executes exact required and secondary waves for every tab", async
     const harness=new Function(
       "location","SETTINGS_ENDPOINTS","SETTINGS_MANIFEST","settingsTab","renderSettings",
       "patchSettingsSecondary","patchSettingsSecondaryError","refreshLogs","refreshClusterLogs",
-      "setPageFailure","setPagePhase","document","applySourceRecovery",
+      "setPageFailure","setPagePhase","document","applySourceLaunch",
       `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
-         SETTINGS_HTTPS_EPOCH=0,SETTINGS_SOURCE_RECOVERY_EPOCH=0,SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map(),
+         SETTINGS_HTTPS_EPOCH=0,SETTINGS_SOURCE_LAUNCH_EPOCH=0,SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map(),
          DV_SETTINGS_POLL_AT=0; const DV_PROGRESS_POLL_MS=10000;
        const SERVER={cluster_enabled:${expected.legacy?"undefined":expected.clustered!==false}};
        ${shippedSource("settingsClusterEnabled")};
@@ -1743,7 +1798,7 @@ test("Settings executes exact required and secondary waves for every tab", async
        ${shippedSource("cacheSettings")};
        ${shippedSource("cacheTrakt")};
        ${shippedSource("loadSettingsKey")};
-       ${shippedSource("loadSourceRecoveryCard")};
+       ${shippedSource("loadSourceLaunchCard")};
        ${shippedSource("loadSettingsTab")};
        return {load:()=>loadSettingsTab(1,${JSON.stringify(tab)})};`,
     )(

@@ -273,6 +273,9 @@ struct StoreMetricsAtomics {
     background_source_io: AtomicI64,
     background_source_recovery: AtomicI64,
     background_legacy_pending: AtomicI64,
+    source_leases: [AtomicI64; plurx_core::store::background_jobs::SOURCE_LEASE_KINDS.len()],
+    source_readers_per_root: AtomicI64,
+    source_lease_schema_version: AtomicI64,
     analysis_queue_depth: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
     analysis_queue_oldest_age_seconds: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
     analysis_lifecycle_counts: [AtomicI64; plurx_core::store::ANALYSIS_LIFECYCLE_METRIC_SLOTS],
@@ -326,6 +329,9 @@ impl Default for StoreMetricsAtomics {
             background_source_io: AtomicI64::new(0),
             background_source_recovery: AtomicI64::new(0),
             background_legacy_pending: AtomicI64::new(0),
+            source_leases: std::array::from_fn(|_| AtomicI64::new(0)),
+            source_readers_per_root: AtomicI64::new(0),
+            source_lease_schema_version: AtomicI64::new(0),
             analysis_queue_depth: std::array::from_fn(|_| AtomicI64::new(0)),
             analysis_queue_oldest_age_seconds: std::array::from_fn(|_| AtomicI64::new(0)),
             analysis_lifecycle_counts: std::array::from_fn(|_| AtomicI64::new(0)),
@@ -488,6 +494,17 @@ impl StoreMetricsCache {
                         .background_source_recovery
                         .load(Ordering::Relaxed),
                     legacy_pending: self.inner.background_legacy_pending.load(Ordering::Relaxed),
+                    source_leases: std::array::from_fn(|kind| {
+                        self.inner.source_leases[kind].load(Ordering::Relaxed)
+                    }),
+                    source_readers_per_root: self
+                        .inner
+                        .source_readers_per_root
+                        .load(Ordering::Relaxed),
+                    source_lease_schema_version: self
+                        .inner
+                        .source_lease_schema_version
+                        .load(Ordering::Relaxed),
                 },
                 analysis: plurx_core::store::AnalysisStoreMetrics {
                     queue_depth: std::array::from_fn(|slot| {
@@ -689,6 +706,22 @@ impl StoreMetricsCache {
         }
         self.inner.background_source_recovery.store(
             sample.background_jobs.source_recovery_pending,
+            Ordering::Relaxed,
+        );
+        for (target, value) in self
+            .inner
+            .source_leases
+            .iter()
+            .zip(sample.background_jobs.source_leases)
+        {
+            target.store(value, Ordering::Relaxed);
+        }
+        self.inner.source_readers_per_root.store(
+            sample.background_jobs.source_readers_per_root,
+            Ordering::Relaxed,
+        );
+        self.inner.source_lease_schema_version.store(
+            sample.background_jobs.source_lease_schema_version,
             Ordering::Relaxed,
         );
         self.inner.background_source_io.store(
@@ -1209,7 +1242,6 @@ impl AppState {
             credential_key_path,
             backup_source,
         } = config;
-        crate::source_custody::configure_settlement_journal(&data_dir);
         let copy_observation_dir = (!data_dir.as_os_str().is_empty())
             .then(|| data_dir.join("copy-ranges").join("observations"));
         let cluster = crate::cluster::Cluster::compose(cluster_parts, applied.applied_mark());
@@ -7080,9 +7112,9 @@ impl JobManager {
     /// between a learner that quietly does nothing and one that schedules the
     /// cluster's jobs a second time.
     async fn schedule_tick(self: &Arc<Self>, transcode: &Arc<TranscodeManager>) -> bool {
-        // Local fsynced join evidence must be replayed even if this daemon
-        // restarted as a learner. Replicated no-reader proof is node-agnostic.
-        self.replay_settled_source_custody().await;
+        // Any node may collect expired source leases, learner or voter; the
+        // collection is garbage only (capacity frees at expiry plus grace).
+        self.collect_expired_source_leases().await;
         if !self.may_run_cluster_jobs().await {
             tracing::debug!("skipping a scheduler tick: this node is not a committed voter");
             return false;
@@ -7215,6 +7247,7 @@ impl JobManager {
                             renew_every: policy.renew_every(),
                             retry_ms: policy.backoff_base_ms,
                             metrics: Arc::clone(&jobs.analysis_metrics),
+                            copy_memory: transcode.admissions().copy_memory(),
                         };
                         crate::copy_analysis::work_copy_observations(
                             &jobs.copy_analysis,
@@ -7276,18 +7309,9 @@ impl JobManager {
         tokio::join!(preparation, fragments, libraries, subtitles);
     }
 
-    async fn replay_settled_source_custody(&self) {
-        if let Err(error) =
-            crate::source_custody::replay_verified_recovery(&self.store, self.coordinator.node_id())
-                .await
-        {
-            tracing::warn!(%error, "source recovery evidence retained for retry");
-        }
-        if let Err(error) = crate::source_custody::replay_local_settlements(&self.store).await {
-            tracing::warn!(%error,"replaying local source settlement journal");
-        }
-        if let Err(error) = self.store.reap_settled_source_custody(clock_ms()).await {
-            tracing::warn!(%error, "replaying settled source custody");
+    async fn collect_expired_source_leases(&self) {
+        if let Err(error) = self.store.reap_expired_source_leases(clock_ms()).await {
+            tracing::warn!(%error, "collecting expired source leases");
         }
         crate::source_custody::source_pressure_changed().notify_waiters();
     }
@@ -7316,6 +7340,15 @@ impl JobManager {
         let _guard = BackgroundUpkeepGuard(Arc::clone(&self));
         if !self.may_run_cluster_jobs().await {
             return;
+        }
+        // A dead worker's job otherwise stays `running` until a claimer
+        // happens to reach it in candidate order. The sweep revokes leases on
+        // this node's clock, so it runs only where the rest of queue upkeep
+        // does (committed voters, behind `may_run_cluster_jobs`). Its grace
+        // equals the source lease grace, so a swept job's last reader no
+        // longer counts against any claim.
+        if let Err(error) = self.store.requeue_expired_running_jobs(clock_ms()).await {
+            tracing::warn!(%error, "requeueing expired-lease background jobs");
         }
         if let Err(error) = self.store.maintain_jobs(clock_ms()).await {
             tracing::warn!(%error, "durable queue upkeep unavailable");
@@ -9220,6 +9253,7 @@ impl JobManager {
             source_size: file.size,
             source_mtime: file.mtime,
             scanner_digest: pending.scanner_digest,
+            scanner_generation: crate::dv_tools::TITLE_SCANNER_GENERATION,
             stats: pending.stats,
         };
         match self.store.publish_dv_title_from_analysis(output).await {
@@ -10718,7 +10752,15 @@ impl JobManager {
         if lost.is_cancelled() {
             return Err(AnalysisResolutionError::ClaimLost);
         }
-        let raw = raw.map_err(|_| AnalysisResolutionError::Terminal("stored_probe_invalid"))?;
+        let raw = raw.map_err(|error| match error {
+            // Killed by someone else (an OOM, say): the probe has not said
+            // anything about this source yet.
+            crate::ffmpeg::HeldProbeError::Interrupted(_) => AnalysisResolutionError::Retry {
+                code: "index_process_failed",
+                charge_attempt: true,
+            },
+            _ => AnalysisResolutionError::Terminal("stored_probe_invalid"),
+        })?;
         self.store
             .record_fragment_index_source(&attested.observation)
             .await
@@ -11109,15 +11151,6 @@ impl JobManager {
                 });
             }
         };
-        if crate::source_custody::activate_background_with_journal(&self.store, custody.clone())
-            .await
-            .is_err()
-        {
-            return Err(AnalysisResolutionError::Retry {
-                code: "source_custody_unavailable",
-                charge_attempt: false,
-            });
-        }
         let budget = crate::background_jobs::SourceReadBudget::new(
             Arc::clone(&self.store),
             owner,
@@ -11153,7 +11186,7 @@ impl JobManager {
         loop {
             match self.store.register_background_source_custody(owner.clone(), clock_ms()).await {
                 Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(receipt)) => {
-                    crate::background_jobs::settle_no_reader_source_custody(&self.store, receipt).await;
+                    crate::background_jobs::release_unread_source_lease(&self.store, receipt).await;
                     return;
                 }
                 Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired
@@ -11269,7 +11302,7 @@ impl JobManager {
                             })
                         }
                     };
-                    if !source.unchanged()
+                    if !source.unchanged().await
                         || crate::fragment_index_cluster::inspect_source(&file)
                             .await
                             .map_err(|_| unavailable())?

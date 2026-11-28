@@ -220,19 +220,45 @@ pub(crate) struct SourceLinkIdentity {
     source_object_version: String,
 }
 
+/// Why [`SourceLinkIdentity::capture`] captured no identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceIdentityMiss {
+    /// The network identity names no local user.
+    NoUser,
+    /// The network identity carries no credential generation.
+    NoCredentialGeneration,
+    /// The source could not be opened or stat'ed for its fence.
+    FenceOpen,
+    /// The source changed while it was fenced.
+    Changed,
+}
+
 impl SourceLinkIdentity {
     /// Fences the source once. It carries no timer of its own: the caller's
     /// advisory deadline bounds it, and a miss is Unknown, never a refusal.
     pub(crate) async fn capture(network: &NetworkIdentity, file: &MediaFile) -> Option<Self> {
-        let user_id = network.user_id?;
-        let credential_generation = network.credential_generation.as_ref()?.as_str().to_owned();
+        Self::capture_classified(network, file).await.ok()
+    }
+
+    /// [`Self::capture`], naming why no identity was captured.
+    pub(crate) async fn capture_classified(
+        network: &NetworkIdentity,
+        file: &MediaFile,
+    ) -> Result<Self, SourceIdentityMiss> {
+        let user_id = network.user_id.ok_or(SourceIdentityMiss::NoUser)?;
+        let credential_generation = network
+            .credential_generation
+            .as_ref()
+            .ok_or(SourceIdentityMiss::NoCredentialGeneration)?
+            .as_str()
+            .to_owned();
         let fence = crate::fragment_index_cluster::open_source_fence(file, None)
             .await
-            .ok()?;
-        if !fence.unchanged() {
-            return None;
+            .map_err(|_| SourceIdentityMiss::FenceOpen)?;
+        if !fence.unchanged().await {
+            return Err(SourceIdentityMiss::Changed);
         }
-        Some(Self {
+        Ok(Self {
             user_id,
             credential_generation,
             client_class: network.client_class.clone(),
@@ -253,10 +279,18 @@ impl SourceLinkIdentity {
     /// post-acceptance comparison, the staged registration — uses
     /// [`Self::capture`] (via [`binding`]) instead, so it fences again.
     pub(crate) async fn for_request(network: &NetworkIdentity, file: &MediaFile) -> Option<Self> {
+        Self::for_request_classified(network, file).await.ok()
+    }
+
+    /// [`Self::for_request`], naming why no identity was captured.
+    pub(crate) async fn for_request_classified(
+        network: &NetworkIdentity,
+        file: &MediaFile,
+    ) -> Result<Self, SourceIdentityMiss> {
         if let Some(identity) =
             crate::media_pool::create_source_link(|identity| identity.describes(network, file))
         {
-            return Some(identity);
+            return Ok(identity);
         }
         if let Some(identity) = DECISION_SOURCE_LINK
             .try_with(|cell| {
@@ -269,16 +303,16 @@ impl SourceLinkIdentity {
             .ok()
             .flatten()
         {
-            return Some(identity);
+            return Ok(identity);
         }
-        let identity = Self::capture(network, file).await?;
+        let identity = Self::capture_classified(network, file).await?;
         crate::media_pool::remember_create_source_link(&identity);
         let _ = DECISION_SOURCE_LINK.try_with(|cell| {
             *cell
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(identity.clone());
         });
-        Some(identity)
+        Ok(identity)
     }
 
     fn describes(&self, network: &NetworkIdentity, file: &MediaFile) -> bool {
@@ -292,6 +326,24 @@ impl SourceLinkIdentity {
             && self.file_id == file.id
             && self.source_size == file.size
             && self.source_mtime == file.mtime
+    }
+
+    pub(super) fn recovery_scope(
+        self,
+        playback_id: &str,
+        recovery_epoch: &str,
+    ) -> plurx_core::store::CandidateRecoveryScope {
+        plurx_core::store::CandidateRecoveryScope {
+            user_id: self.user_id,
+            playback_id: playback_id.to_owned(),
+            recovery_epoch: recovery_epoch.to_owned(),
+            file_id: self.file_id,
+            source_size: self.source_size,
+            source_mtime: self.source_mtime,
+            source_object_version: self.source_object_version,
+            credential_generation: self.credential_generation,
+            client_class: self.client_class,
+        }
     }
 
     pub(crate) fn candidate(
@@ -951,7 +1003,9 @@ impl LinkReceipts {
         .await
         .ok()?
         .ok()?;
-        if !fence.unchanged() || fence.object_version() != captured.source.source_object_version {
+        if !fence.unchanged().await
+            || fence.object_version() != captured.source.source_object_version
+        {
             return None;
         }
         state
@@ -1008,7 +1062,7 @@ impl LinkReceipts {
         .await
         .ok()?
         .ok()??;
-        if !fence.unchanged()
+        if !fence.unchanged().await
             || !Self::route_for_observation(&captured, &route, &state.node_id, staged.as_ref())
         {
             return None;
@@ -1094,13 +1148,9 @@ fn measured_link_prior(
     if response.session_id != route.session_id {
         return None;
     }
-    let mut matches = response
-        .quality_candidates?
-        .into_iter()
-        .filter(|candidate| candidate.id == id);
-    let candidate = matches.next()?;
-    if matches.next().is_some()
-        || !candidate.identity_matches()
+    let candidates = response.quality_candidates?;
+    let candidate = plurx_core::playback::candidate::single_public_row(&candidates, id)?;
+    if !candidate.identity_matches()
         || candidate.recipe_digest != value.binding.recipe_digest
         || candidate.route != value.binding.route
         || candidate.target_height == 0
@@ -1825,6 +1875,7 @@ mod tests {
         ));
         let mut request = SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -1835,6 +1886,7 @@ mod tests {
             finite_bitrate_limit_bps: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             file_id: file.id,
             playback_id: "typed-player".into(),
             request_id: None,

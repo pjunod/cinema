@@ -50,9 +50,7 @@ impl SourceDirectFile {
         )
         .await
         .map_err(|error| LiveRefusal::from_fence(&error))?;
-        let length = fence
-            .handle
-            .metadata()
+        let length = plurx_core::media_io::fstat(&fence.handle)
             .map_err(|_| LiveRefusal::transient(SourceWorkerError::Unavailable))?
             .len();
         if length != self.length {
@@ -176,10 +174,7 @@ impl SourceViewerActor {
             || route.publication_ready_at_ms != 0
             || route.response_json != serde_json::to_string(&start).map_err(|_| ended)?
             || self.retirement_requested()
-            || guard
-                .source
-                .as_ref()
-                .is_none_or(|source| !source.unchanged())
+            || guard.source.as_ref().missing_or_changed().await
         {
             return Err(ended);
         }
@@ -260,19 +255,12 @@ impl SourceViewerActor {
                 .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
                 .is_err()
             || self.retirement_requested()
-            || guard
-                .source
-                .as_ref()
-                .is_none_or(|source| !source.unchanged())
+            || guard.source.as_ref().missing_or_changed().await
         {
             return Err(SourceWorkerError::Unavailable);
         }
         let route = self.0.gate.renew_with(&self.0.assignment, &proof).await?;
-        if route.session_id != start.session_id
-            || guard
-                .source
-                .as_ref()
-                .is_none_or(|source| !source.unchanged())
+        if route.session_id != start.session_id || guard.source.as_ref().missing_or_changed().await
         {
             return Err(SourceWorkerError::Unavailable);
         }

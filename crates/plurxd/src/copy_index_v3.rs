@@ -185,6 +185,7 @@ pub(crate) async fn resolve(
     video: CopyVideoOptions,
     defects: Option<&CopyAnalysisRegistry>,
     mode: ResolveMode,
+    expected_key: Option<&str>,
 ) -> Result<Resolution, String> {
     // This node's current object: a stat checked against the scanner's facts.
     let object_version = crate::fragment_index_cluster::inspect_source(file).await?;
@@ -222,7 +223,7 @@ pub(crate) async fn resolve(
         .await
         .map_err(|error| format!("reading the copy index head: {error}"))?;
     if let Some(variant) = &own_variant {
-        if let Some(resolved) = consumer.plan_from(variant).await? {
+        if let Some(resolved) = consumer.plan_from(variant, expected_key).await? {
             return Ok(Resolution {
                 index: Some(resolved),
                 own,
@@ -266,7 +267,7 @@ pub(crate) async fn resolve(
         {
             continue;
         }
-        if let Some(resolved) = consumer.plan_from(&variant).await? {
+        if let Some(resolved) = consumer.plan_from(&variant, expected_key).await? {
             return Ok(Resolution {
                 index: Some(resolved),
                 own,
@@ -302,6 +303,7 @@ impl Consumer<'_> {
     async fn plan_from(
         &self,
         variant: &CopyIndexV3Variant,
+        expected_key: Option<&str>,
     ) -> Result<Option<ResolvedCopyIndex>, String> {
         let Some(artifact) = variant.readable().filter(|artifact| {
             artifact.catalog_namespace == self.namespace
@@ -311,7 +313,9 @@ impl Consumer<'_> {
             return Ok(None);
         };
         let rendition_cache_key = format!("copy-index-v3:{}", artifact.contract_key);
-        if refused_on_this_engine(&rendition_cache_key) {
+        if expected_key.is_some_and(|key| key != rendition_cache_key)
+            || refused_on_this_engine(&rendition_cache_key)
+        {
             return Ok(None);
         }
         let blob = match load_blob(

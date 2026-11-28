@@ -1706,6 +1706,13 @@ async fn background_jobs_v70_backup_import_seals_legacy_work() {
 async fn background_library_publication_requires_both_live_owners() {
     use super::{acquired, publication_successor};
     for_each_backend(|store, backend| async move {
+        // Every scenario claims on one node and each earlier scenario's lease
+        // still charges its 60 s grace; this contract is about publication
+        // ownership, not source capacity.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "16")
+            .await
+            .expect("source readers per root");
         for scenario in ["live", "cancelled", "expired", "taken_over", "roots_changed"] {
             let (_, file_id) = seed_file(&store, &format!("dual-owner-{scenario}")).await;
             let file = store
@@ -2064,6 +2071,19 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             });
             files.push(file_id);
         }
+        for domain in ["nas", "other"] {
+            store
+                .put_setting(
+                    &format!(
+                        "{}{}",
+                        plurx_core::store::keys::JOB_DOMAIN_SOURCE_READERS_PREFIX,
+                        domain,
+                    ),
+                    "1",
+                )
+                .await
+                .expect("explicit storage-domain reader cap");
+        }
         assert!(
             store
                 .save_storage_domains(mappings.clone(), None, 1_000)
@@ -2183,7 +2203,9 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             ),
             "{backend}"
         );
-        assert!(matches!(store.apply_pending_storage_domains(100_000).await.expect("expired owners no longer block remap"),
+        // The last claim's lease expires at 61_001 and charges the domain for
+        // the 60 s lease grace after that.
+        assert!(matches!(store.apply_pending_storage_domains(121_002).await.expect("expired owners no longer block remap"),
             plurx_core::store::background_jobs_resources::StorageDomainApply::Applied { .. }), "{backend}");
         assert!(store.storage_domains().await.expect("cleared").is_empty());
     })
@@ -2272,10 +2294,22 @@ async fn storage_domain_bare_to_named_applies_while_a_foreground_reader_holds_ba
         let item = store.get_item(file.item_id).await.expect("item").expect("item");
         let library = store.get_library(item.library_id).await.expect("library").expect("library");
         let root = library.paths[0].display().to_string();
+        // Keep the foreground owner outside the configured library root. Mapping
+        // the different root leaves this file's generic source_io identity unchanged.
+        let unrooted_file_id = store
+            .upsert_file(
+                file.item_id,
+                "/unconfigured-originals/bare-reader.mkv",
+                file.size,
+                file.mtime,
+                &Default::default(),
+            )
+            .await
+            .expect("seed unmatched foreground source");
         let token = store.register_foreground_source(ForegroundSourceOwner {
             owner_id: uuid::Uuid::new_v4().to_string(), lifetime_id: "bare-reader".into(),
             session_incarnation: uuid::Uuid::new_v4().to_string(), producer_attempt: "producer-1".into(),
-            node_id: "node-a".into(), boot_id: uuid::Uuid::new_v4().to_string(), file_id,
+            node_id: "node-a".into(), boot_id: uuid::Uuid::new_v4().to_string(), file_id: unrooted_file_id,
             source_size: file.size, source_mtime: file.mtime, source_generation: "bare-source".into(),
             policy: ForegroundSourcePolicy::Rolling,
         }, 1_000, 20_000).await.expect("foreground registration").expect("reader");
@@ -2396,6 +2430,10 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
             libraries.push(library_id);
             files.push(file_id);
         }
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
+            .await
+            .expect("one maintenance reader per root");
         assert!(set_storage_domains(store.as_ref(), mappings, 1_000)
             .await
             .expect("map"));
@@ -4736,8 +4774,20 @@ async fn background_subtitles_source_changes_cancel_selected_candidates() {
 // with their published triggers and remove the newer extension's claim.
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn pre_v63_retention_rewind(client: &hiqlite::Client) -> Vec<(String, hiqlite::Params)> {
-    let mut statements: Vec<_> = super::replicated_custody_retention_rewind(client)
-        .await
+    let mut rewind = Vec::new();
+    if let Some(lease_rewind) = super::replicated_source_lease_rewind(client).await {
+        // The exact lease catalogue check covers the overlaid custody-retention
+        // definitions. The same transaction restores their frozen v1 shape.
+        super::require_replicated_fixture_marker(client, "background_custody_retention_schema", 1)
+            .await;
+        rewind.extend(lease_rewind);
+        rewind.extend(
+            super::queue_fixture::source_extensions_fixture::custody_retention_rewind_plan(),
+        );
+    } else {
+        rewind.extend(super::replicated_custody_retention_rewind(client).await);
+    }
+    let mut statements: Vec<_> = rewind
         .into_iter()
         .map(|sql| (sql, hiqlite::params!()))
         .collect();
@@ -5046,6 +5096,19 @@ async fn probe_batches_respect_scan_parent_and_shared_domain_reservations() {
             mappings.push(StorageDomainMapping { library_id: item.library_id,
                 root_path: format!("/{prefix}"), domain_id: domain.into() });
             files.push(file_id);
+        }
+        for domain in ["nas", "other"] {
+            store
+                .put_setting(
+                    &format!(
+                        "{}{}",
+                        plurx_core::store::keys::JOB_DOMAIN_SOURCE_READERS_PREFIX,
+                        domain,
+                    ),
+                    "1",
+                )
+                .await
+                .expect("explicit storage-domain reader cap");
         }
         assert!(set_storage_domains(store.as_ref(), mappings.clone(), 1_000).await.expect("map"));
         let mut payloads = vec![JobPayload::LibraryScan {
@@ -6033,6 +6096,12 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
     for_each_backend(|store, backend| async move {
         let boot = uuid::Uuid::new_v4().to_string();
         let (_, id) = seed_file(&store, "progressive-translation").await;
+        // One background reader per node beside the live slot: the numbers
+        // this contract was written against.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
+            .await
+            .expect("one background reader");
         let user = store
             .create_user("translation-admin", "hash", true)
             .await
@@ -6582,6 +6651,359 @@ async fn text_caption_dispatch_refuses_unowned_work_and_reads_absent_state() {
             store.read_shared_captions(invalid).await.is_err(),
             "{backend}: invalid grant refused"
         );
+    })
+    .await;
+}
+
+// A dead worker's running row returns to the queue on the sweep, not only
+// when a claimer reaches it: the same charged attempt, `lease_expired` entry,
+// fence and attempt outcome a takeover records, and nothing for a live lease.
+#[tokio::test]
+async fn expired_lease_sweep_requeues_with_takeover_bookkeeping() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "expired-lease-sweep").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let library_id = store
+            .get_item(file.item_id)
+            .await
+            .expect("item")
+            .expect("item")
+            .library_id;
+        let claim = |job: &BackgroundJob, now_ms: i64| ClaimJob {
+            job_id: job.id.clone(),
+            expected_revision: job.revision,
+            node_id: "worker".into(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            kind: JobKind::MetadataRefresh,
+            payload_version: 1,
+            now_ms,
+            dispatched_at_ms: now_ms,
+        };
+        let claimed = |outcome: ClaimOutcome| match outcome {
+            ClaimOutcome::Claimed { job } => *job,
+            other => panic!("{backend}: expected a claim, got {other:?}"),
+        };
+        let job = |id: String| {
+            let store = std::sync::Arc::clone(&store);
+            async move { store.background_job(&id).await.expect("job").expect("job") }
+        };
+
+        let start = 10_000;
+        let request = metadata_source_request(store.as_ref(), library_id, start).await;
+        let dead = claimed(store.claim_job(request).await.expect("claim"));
+        let stale = dead.token.clone().expect("token");
+        let expiry = stale.lease_expires_ms;
+        // The dead owner's reservation lapses with its lease, so a second
+        // reader can claim at the expiry and hold a live lease through it.
+        let request = metadata_source_request(store.as_ref(), library_id, expiry).await;
+        let live = claimed(store.claim_job(request).await.expect("live claim"));
+
+        // A lease expired by less than the grace is left alone: the owner's
+        // clock or its renewal may merely lag the sweeper's.
+        let sweep_at = expiry + EXPIRED_LEASE_SWEEP_GRACE_MS;
+        for early in [expiry - 1, expiry, sweep_at - 1] {
+            store
+                .requeue_expired_running_jobs(early)
+                .await
+                .expect("early sweep");
+            assert_eq!(
+                job(dead.id.clone()).await.revision,
+                dead.revision,
+                "{backend}: inside the grace at {early}"
+            );
+        }
+
+        store
+            .requeue_expired_running_jobs(sweep_at)
+            .await
+            .expect("sweep");
+        let swept = job(dead.id.clone()).await;
+        assert_eq!(swept.state, JobState::Queued, "{backend}");
+        assert!(
+            swept.token.is_none(),
+            "{backend}: queued rows carry no owner"
+        );
+        assert_eq!(swept.failed_attempts, dead.failed_attempts + 1, "{backend}");
+        assert_eq!(swept.attempt_errors, "lease_expired", "{backend}");
+        assert_eq!(
+            swept.last_error_code.as_deref(),
+            Some("lease_expired"),
+            "{backend}"
+        );
+        assert_eq!(swept.fence, dead.fence + 1, "{backend}");
+        assert_eq!(swept.revision, dead.revision + 1, "{backend}");
+        let attempts = store.job_attempts(&dead.id).await.expect("attempts");
+        assert_eq!(attempts.len(), 1, "{backend}");
+        assert_eq!(attempts[0].fence, dead.fence, "{backend}");
+        assert_eq!(attempts[0].finished_at_ms, Some(sweep_at), "{backend}");
+        assert_eq!(
+            attempts[0].outcome.as_deref(),
+            Some("lease_expired"),
+            "{backend}"
+        );
+        // The live job's lease has expired too, but by less than the grace.
+        let untouched = job(live.id.clone()).await;
+        assert!(
+            untouched
+                .token
+                .as_ref()
+                .expect("live token")
+                .lease_expires_ms
+                < sweep_at
+        );
+        assert_eq!(untouched.state, JobState::Running, "{backend}");
+        assert_eq!(untouched.revision, live.revision, "{backend}");
+        assert_eq!(untouched.fence, live.fence, "{backend}");
+
+        // A worker whose clock still shows its lease live loses by fence.
+        let renewed = store
+            .renew_jobs(RenewJobs {
+                tokens: vec![stale.clone()],
+                now_ms: expiry - 1,
+            })
+            .await
+            .expect("stale renewal");
+        assert!(
+            matches!(renewed.as_slice(), [RenewOutcome::LostOwnership { .. }]),
+            "{backend}: {renewed:?}"
+        );
+        assert!(
+            !store
+                .settle_job(SettleJob {
+                    token: stale,
+                    settlement: JobSettlement::Retry {
+                        error_code: "late".into(),
+                        not_before_ms: expiry,
+                    },
+                    now_ms: expiry - 1,
+                })
+                .await
+                .expect("stale settlement"),
+            "{backend}"
+        );
+
+        // Idempotent: a repeat pass (another node, or the next tick) writes nothing.
+        store
+            .requeue_expired_running_jobs(sweep_at)
+            .await
+            .expect("repeat sweep");
+        assert_eq!(
+            job(dead.id.clone()).await.revision,
+            swept.revision,
+            "{backend}"
+        );
+        assert_eq!(
+            job(live.id.clone()).await.revision,
+            live.revision,
+            "{backend}"
+        );
+        assert!(store
+            .settle_job(SettleJob {
+                token: untouched.token.expect("live token"),
+                settlement: JobSettlement::Stop {
+                    error_code: "test_done".into(),
+                },
+                now_ms: expiry + 1,
+            })
+            .await
+            .expect("live owner settles"));
+
+        // Expire every remaining attempt but the last through the sweep.
+        let mut now = sweep_at + 1;
+        let mut current = swept;
+        while current.failed_attempts + 1 < current.attempt_limit {
+            let owned = claimed(
+                store
+                    .claim_job(claim(&current, now))
+                    .await
+                    .expect("reclaim"),
+            );
+            now = owned.token.expect("token").lease_expires_ms + EXPIRED_LEASE_SWEEP_GRACE_MS;
+            store
+                .requeue_expired_running_jobs(now)
+                .await
+                .expect("sweep");
+            current = job(dead.id.clone()).await;
+            assert_eq!(current.state, JobState::Queued, "{backend}");
+            assert_eq!(current.fence, owned.fence + 1, "{backend}");
+            now += 1;
+        }
+        // The last attempt cannot be taken over, so the sweep leaves it to
+        // the maintenance command, which settles it terminally.
+        let last = claimed(
+            store
+                .claim_job(claim(&current, now))
+                .await
+                .expect("last claim"),
+        );
+        let lapsed = last.token.clone().expect("token").lease_expires_ms;
+        assert!(
+            !matches!(
+                store
+                    .claim_job(claim(&last, lapsed))
+                    .await
+                    .expect("takeover"),
+                ClaimOutcome::Claimed { .. }
+            ),
+            "{backend}: an exhausted job is not claimable"
+        );
+        store
+            .requeue_expired_running_jobs(lapsed + EXPIRED_LEASE_SWEEP_GRACE_MS)
+            .await
+            .expect("exhausted sweep");
+        assert_eq!(
+            job(dead.id.clone()).await.revision,
+            last.revision,
+            "{backend}"
+        );
+        store.maintain_jobs(lapsed).await.expect("upkeep");
+        let settled = job(dead.id.clone()).await;
+        assert_eq!(settled.state, JobState::Failed, "{backend}");
+        assert_eq!(settled.failed_attempts, settled.attempt_limit, "{backend}");
+        assert_eq!(
+            settled.last_error_code.as_deref(),
+            Some("execution_abandoned"),
+            "{backend}"
+        );
+        // Every swept attempt ended `lease_expired`; the terminal one is the
+        // job's failure, as for any exhausted job.
+        let attempts = store.job_attempts(&dead.id).await.expect("attempts");
+        for attempt in &attempts {
+            let expected = if attempt.fence == last.fence {
+                ("failed", "execution_abandoned")
+            } else {
+                ("lease_expired", "")
+            };
+            assert_eq!(
+                attempt.outcome.as_deref(),
+                Some(expected.0),
+                "{backend}: {attempts:?}"
+            );
+            if attempt.fence == last.fence {
+                assert_eq!(attempt.error_code.as_deref(), Some(expected.1), "{backend}");
+            }
+        }
+    })
+    .await;
+}
+
+// A fragment build budgets per waiter: leaving `running` through the sweep
+// charges the waiter that took part in the lapsed attempt, through the same
+// `background_fragment_interest_failed` trigger an ordinary retry uses.
+#[tokio::test]
+async fn expired_lease_sweep_charges_participating_fragment_waiters() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "expired-lease-fragment").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let (source, pipeline) = ("c".repeat(64), "d".repeat(64));
+        let key = plurx_core::store::cluster_fragment_index_key(
+            file_id, file.size, file.mtime, &source, &pipeline,
+        )
+        .expect("key");
+        let outcome = store
+            .enqueue_fragment_job(EnqueueFragmentJob {
+                job: plurx_core::store::NewClusterFragmentIndexJob {
+                    cache_key: key.clone(),
+                    file_id,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                    source_sha256: source,
+                    pipeline_sha256: pipeline,
+                    priority: "normal".into(),
+                    trigger: "background".into(),
+                    target_node_id: "node-a".into(),
+                    not_before_ms: 1_000,
+                    created_at_ms: 1_000,
+                },
+                analysis_request: None,
+                repair: false,
+                now_ms: 1_000,
+            })
+            .await
+            .expect("admit fragment build");
+        let EnqueueOutcome::Accepted { job_id, .. } = outcome else {
+            panic!("{backend}: not accepted: {outcome:?}")
+        };
+        let mut now = 1_001;
+        for round in 1..=2_i64 {
+            let current = store
+                .background_job(&job_id)
+                .await
+                .expect("job")
+                .expect("job");
+            let ClaimOutcome::Claimed { job: owned } = store
+                .claim_job(ClaimJob {
+                    job_id: job_id.clone(),
+                    expected_revision: current.revision,
+                    node_id: "node-a".into(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::FragmentIndexBuild,
+                    payload_version: 1,
+                    now_ms: now,
+                    dispatched_at_ms: now,
+                })
+                .await
+                .expect("claim")
+            else {
+                panic!("{backend}: round {round} not claimed")
+            };
+            let lease = owned.token.as_ref().expect("token").lease_expires_ms;
+            now = lease + EXPIRED_LEASE_SWEEP_GRACE_MS;
+            store
+                .requeue_expired_running_jobs(now)
+                .await
+                .expect("sweep");
+            let swept = store
+                .background_job(&job_id)
+                .await
+                .expect("job")
+                .expect("job");
+            assert_eq!(swept.state, JobState::Queued, "{backend}: round {round}");
+            assert_eq!(swept.fence, owned.fence + 1, "{backend}");
+            assert_eq!(swept.failed_attempts, round, "{backend}");
+            // The domain row projects the participating waiter's own budget.
+            let domain = store
+                .cluster_fragment_index_job(&key, "node-a")
+                .await
+                .expect("domain row")
+                .expect("domain row");
+            assert_eq!(domain.state, "queued", "{backend}");
+            assert_eq!(
+                domain.attempts, round,
+                "{backend}: waiter charged once per lapse"
+            );
+            assert_eq!(
+                domain.attempt_errors,
+                vec!["lease_expired"; round as usize].join(","),
+                "{backend}"
+            );
+            let attempt = store
+                .job_attempts(&job_id)
+                .await
+                .expect("attempts")
+                .into_iter()
+                .find(|attempt| attempt.fence == owned.fence)
+                .expect("lapsed attempt");
+            assert_eq!(
+                attempt.outcome.as_deref(),
+                Some("lease_expired"),
+                "{backend}"
+            );
+            // A repeat pass charges nothing more.
+            store
+                .requeue_expired_running_jobs(now)
+                .await
+                .expect("repeat sweep");
+            let again = store
+                .cluster_fragment_index_job(&key, "node-a")
+                .await
+                .expect("domain row")
+                .expect("domain row");
+            assert_eq!(again.attempts, round, "{backend}");
+            now += 1;
+        }
     })
     .await;
 }

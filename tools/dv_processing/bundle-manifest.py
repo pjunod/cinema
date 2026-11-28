@@ -10,6 +10,7 @@ INPUTS = (
     'display_target.h',
     'dm_closed_form.h',
     'dm_cm29_gamut_tables.h',
+    'dm_pq_tables.h',
     'dv_dm.h',
     'dv_metadata.h',
     'dv_trace.h',

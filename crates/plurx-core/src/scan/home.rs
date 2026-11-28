@@ -57,7 +57,7 @@ pub async fn place(
     library: &Library,
     path: &Path,
 ) -> Result<Option<Placed>, StoreError> {
-    let Some(dirs) = relative_dirs(library, path) else {
+    let Some(dirs) = relative_dirs(library, path).await else {
         // Outside every configured root — can't happen from the walk, but a
         // silent mis-parent would be much worse than a skip.
         return Ok(None);
@@ -126,7 +126,7 @@ pub async fn after_record(
     // Runtime comes from the file itself here (no provider to ask), so the
     // grid can put a duration badge on a home-video card.
     let patch = MetadataPatch {
-        recorded_at: ladder_date(path, probe, mtime),
+        recorded_at: ladder_date(path, probe, mtime).await,
         runtime_ms: probe.duration_ms,
         ..Default::default()
     };
@@ -155,10 +155,19 @@ pub async fn seed_from_nfo(
     if item.kind != ItemKind::Video || item.nfo_seeded_at.is_some() {
         return Ok(false);
     }
-    let Some(sidecar) = nfo::sidecar_for(path) else {
+    // Both the existence checks and the read touch the media mount.
+    let media = path.to_owned();
+    let found = crate::media_io::blocking(move || {
+        nfo::sidecar_for(&media).map(|sidecar| {
+            let parsed = nfo::read(&sidecar);
+            (sidecar, parsed)
+        })
+    })
+    .await;
+    let Ok(Some((sidecar, parsed))) = found else {
         return Ok(false);
     };
-    match nfo::read(&sidecar) {
+    match parsed {
         Some(parsed) => {
             let patch = MetadataPatch {
                 title: parsed.title,
@@ -190,9 +199,10 @@ pub async fn seed_from_nfo(
 /// EXIF for photos, the container's `creation_time` for videos, then a date
 /// lifted off the filename, then the file's mtime. mtime lies after a copy,
 /// but it beats nothing, and the edit UI is the fix.
-fn ladder_date(path: &Path, probe: &ProbeResult, mtime: i64) -> Option<String> {
+async fn ladder_date(path: &Path, probe: &ProbeResult, mtime: i64) -> Option<String> {
     if is_photo(path) {
-        if let Some(shot) = exif::date_for(path) {
+        let photo = path.to_owned();
+        if let Ok(Some(shot)) = crate::media_io::blocking(move || exif::date_for(&photo)).await {
             return Some(shot);
         }
     } else if let Some(created) = probe.creation_time.clone() {
@@ -225,7 +235,19 @@ pub fn date_from_unix(secs: i64) -> String {
 
 /// The directory components between the library root containing `path` and
 /// the file itself. `None` when the path is under no configured root.
-pub(crate) fn relative_dirs(library: &Library, path: &Path) -> Option<Vec<String>> {
+///
+/// Resolving the roots stats every component of each one, on the media mount.
+pub(crate) async fn relative_dirs(library: &Library, path: &Path) -> Option<Vec<String>> {
+    let roots = library.paths.clone();
+    let path = path.to_owned();
+    crate::media_io::blocking(move || relative_dirs_under(&roots, &path))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// [`relative_dirs`] on the calling thread. Blocks on the media mount.
+fn relative_dirs_under(roots: &[PathBuf], path: &Path) -> Option<Vec<String>> {
     let parent = path.parent()?;
     // Match against the resolved root as well as the configured one. The
     // TARGETED scan canonicalizes the file path on purpose (see `scan_path` —
@@ -234,8 +256,7 @@ pub(crate) fn relative_dirs(library: &Library, path: &Path) -> Option<Vec<String
     // root reached through a symlink therefore matched its own files on a full
     // scan and none of them on a targeted one, so Curator's import placed
     // nothing and said it succeeded.
-    let rest: PathBuf = library
-        .paths
+    let rest: PathBuf = roots
         .iter()
         .filter_map(|root| {
             let resolved = root.canonicalize().unwrap_or_else(|_| root.clone());
@@ -298,8 +319,8 @@ mod tests {
     /// the other — "the same file behaves differently depending on who
     /// asked", which `record_candidates` exists to prevent.
     #[cfg(unix)]
-    #[test]
-    fn a_root_reached_through_a_symlink_still_places_its_files() {
+    #[tokio::test]
+    async fn a_root_reached_through_a_symlink_still_places_its_files() {
         let tmp = tempfile::tempdir().expect("tmp");
         let real = tmp.path().join("real");
         std::fs::create_dir_all(real.join("Holiday")).expect("mkdir");
@@ -325,14 +346,14 @@ mod tests {
             .expect("canonical")
             .join("Holiday/clip.mp4");
         assert_eq!(
-            relative_dirs(&library, &canonical),
+            relative_dirs(&library, &canonical).await,
             Some(vec!["Holiday".to_string()]),
             "a canonicalized file under a symlinked root must still resolve"
         );
 
         // The configured spelling keeps working — the full scan's shape.
         assert_eq!(
-            relative_dirs(&library, &link.join("Holiday/clip.mp4")),
+            relative_dirs(&library, &link.join("Holiday/clip.mp4")).await,
             Some(vec!["Holiday".to_string()]),
         );
     }
@@ -369,20 +390,22 @@ mod tests {
         assert_eq!(date_from_unix(1_582_934_400), "2020-02-29");
     }
 
-    #[test]
-    fn the_ladder_prefers_the_container_date() {
+    #[tokio::test]
+    async fn the_ladder_prefers_the_container_date() {
         let probe = ProbeResult {
             creation_time: Some("2019-06-14T18:22:03".into()),
             ..Default::default()
         };
         let path = Path::new("/h/2001-01-01 - Beach.mp4");
         assert_eq!(
-            ladder_date(path, &probe, 1_600_000_000).as_deref(),
+            ladder_date(path, &probe, 1_600_000_000).await.as_deref(),
             Some("2019-06-14T18:22:03")
         );
         // No container date → the filename's.
         assert_eq!(
-            ladder_date(path, &ProbeResult::default(), 1_600_000_000).as_deref(),
+            ladder_date(path, &ProbeResult::default(), 1_600_000_000)
+                .await
+                .as_deref(),
             Some("2001-01-01")
         );
         // Neither → mtime, date only.
@@ -392,6 +415,7 @@ mod tests {
                 &ProbeResult::default(),
                 1_560_500_523
             )
+            .await
             .as_deref(),
             Some("2019-06-14")
         );

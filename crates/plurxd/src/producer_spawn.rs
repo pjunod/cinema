@@ -277,17 +277,13 @@ impl Descriptors {
             return;
         }
         plurx_core::process::source_lifetime::tag_descriptor_handoff(command);
-        let result = plurx_core::process::source_lifetime::unmediated_descriptor().and_then(|()| {
-            let plan = Self::from_mappings(mappings, cwd_target).prepare_inline(StdioFacts {
-                stdin: StdioMode::Inherited,
-                stdout: StdioMode::Inherited,
-                stderr: StdioMode::Inherited,
-            })?;
-            Self::install(&plan, command.as_std_mut());
-            Ok(())
-        });
-        if let Err(error) = result {
-            Self::reject(command.as_std_mut(), error);
+        match Self::from_mappings(mappings, cwd_target).prepare_inline(StdioFacts {
+            stdin: StdioMode::Inherited,
+            stdout: StdioMode::Inherited,
+            stderr: StdioMode::Inherited,
+        }) {
+            Ok(plan) => Self::install(&plan, command.as_std_mut()),
+            Err(error) => Self::reject(command.as_std_mut(), error),
         }
     }
 
@@ -351,7 +347,7 @@ impl WindowsPathHandoff {
             role,
             path: plurx_core::fs_secure::std_file_path(file)
                 .map_err(|error| format!("resolving held {role} path: {error}"))?,
-            identity: plurx_core::fs_secure::std_file_identity(file)
+            identity: plurx_core::media_io::identity_in_place(file)
                 .map_err(|error| format!("reading held {role} identity: {error}"))?,
             directory: false,
         })

@@ -1,7 +1,6 @@
 """Authenticate a partial Cargo run, leaving the current Rust CI job required."""
 from __future__ import annotations
 
-import ast
 import os
 from pathlib import Path
 import re
@@ -47,9 +46,15 @@ IMAGE_6A989B4D_JOB = 'ea8ae633cfe0e1b489dfa9295b7ab83a8b0b1d54564ac8c9312197be16
 # Checkout, image, toolchain, Cargo flags, thread counts and resource caps
 # are unchanged. Prior recipes remain historical; failed or unrun bodies
 # still require execution, and current admission accepts only this recipe.
-CURRENT_JOB = '89fcea13dc18711bb02021fcd414e2489a07ce51831e0322fbc9940637e0fd3b'
-HISTORICAL_JOBS = (ORIGINAL_JOB, PRE_NONVOTER_JOB, NONVOTER_JOB, CGROUP_PARSE_JOB, TIMEOUT_180_JOB, IMAGE_6A989B4D_JOB, CURRENT_JOB)
-ROOT_SOURCES = {'tests/operations/test_source_custody_recovery.py', 'scripts/source-custody-recovery'}
+STACK_8M_JOB = '89fcea13dc18711bb02021fcd414e2489a07ce51831e0322fbc9940637e0fd3b'
+# Reviewed step removal only (source lease plan step 2, PR #1728): the
+# root-container source recovery ownership step leaves with the host recovery
+# helper and test it exercised. Checkout, image, toolchain, Cargo flags,
+# job/test threads, stack, timeout and resource limits are unchanged; current
+# admission accepts only this recipe.
+CURRENT_JOB = 'd5ab64d11a15bc00aedfb2c6d099bd079f94091a4dcedef585aaa1384cda1fd6'
+HISTORICAL_JOBS = (ORIGINAL_JOB, PRE_NONVOTER_JOB, NONVOTER_JOB, CGROUP_PARSE_JOB, TIMEOUT_180_JOB,
+                   IMAGE_6A989B4D_JOB, STACK_8M_JOB, CURRENT_JOB)
 PROTECTED = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'Makefile'}
 NATIVE_ACTIONS = ('.cargo/', '.github/actions/rust-native-deps/', '.github/actions/ffmpeg/',
                   '.github/actions/cargo-cache/', '.github/actions/cargo-cache-finalize/')
@@ -182,24 +187,6 @@ SELECTED_PREFLIGHT_BLOCKS = (
         b'        run: python3 scripts/check-formal smoke --package worker-refinement --cache-dir target/formal-toolchain\n',
     ),
     (
-        b'      - name: Verify source recovery ownership in the root Linux unit container\n'
-        b"        if: steps.workspace-continuation.outputs.root_retained != 'true' && needs.preflight.outputs.root_ownership_retained != 'true'\n"
-        b'        run: |\n'
-        b'          # This container is already the root-capable pinned Linux unit\n'
-        b'          # surface. Exercise real UID/GID handoff instead of counting the\n'
-        b"          # non-root operations lane's ownership-case skip as coverage.\n"
-        b'          python3 -c \'import os; assert os.geteuid() == 0, "source recovery ownership regression requires the root unit container"\'\n'
-        b'          python3 -m unittest discover -s tests/operations -p test_source_custody_recovery.py -v\n',
-        b'      - name: Verify source recovery ownership in the root Linux unit container\n'
-        b"        if: steps.workspace-continuation.outputs.root_retained != 'true'\n"
-        b'        run: |\n'
-        b'          # This container is already the root-capable pinned Linux unit\n'
-        b'          # surface. Exercise real UID/GID handoff instead of counting the\n'
-        b"          # non-root operations lane's ownership-case skip as coverage.\n"
-        b'          python3 -c \'import os; assert os.geteuid() == 0, "source recovery ownership regression requires the root unit container"\'\n'
-        b'          python3 -m unittest discover -s tests/operations -p test_source_custody_recovery.py -v\n',
-    ),
-    (
         b'      - name: Build and test native macOS server tray\n'
         b"        if: needs.scope.outputs.desktop_macos == 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
         b'      - name: Build and test native macOS server tray\n'
@@ -261,6 +248,21 @@ def job_body(raw, job, next_job):
     return raw[start:finish]
 
 
+# Reviewed delta (source lease plan step 2): the root-container source
+# recovery ownership step leaves the check job with the host recovery helper
+# and test it exercised. Nothing else in the predecessor's recipe changes.
+RETIRED_ROOT_RECOVERY_STEP = (
+    b'      - name: Verify source recovery ownership in the root Linux unit container\n'
+    b"        if: steps.workspace-continuation.outputs.root_retained != 'true' && needs.preflight.outputs.root_ownership_retained != 'true'\n"
+    b'        run: |\n'
+    b'          # This container is already the root-capable pinned Linux unit\n'
+    b'          # surface. Exercise real UID/GID handoff instead of counting the\n'
+    b"          # non-root operations lane's ownership-case skip as coverage.\n"
+    b'          python3 -c \'import os; assert os.geteuid() == 0, "source recovery ownership regression requires the root unit container"\'\n'
+    b'          python3 -m unittest discover -s tests/operations -p test_source_custody_recovery.py -v\n'
+)
+
+
 def continuation_preflight_recipe(raw):
     if b'SOURCE_GATE_REPAIR_SELECTION_SHA256' not in raw:
         return raw
@@ -276,7 +278,7 @@ def continuation_preflight_recipe(raw):
     hdr_original = b'      - name: Validate HDR measurement colour conversion\n'
     check = job_body(raw, 'check', 'cluster_store_legacy')
     receipts.require(hdr_guard in check and check.replace(hdr_guard, hdr_original) ==
-                     job_body(original, 'check', 'cluster_store_legacy'),
+                     job_body(original, 'check', 'cluster_store_legacy').replace(RETIRED_ROOT_RECOVERY_STEP, b''),
                      'Ordinary continuation changed the reviewed Rust recipe')
     return raw.replace(preflight, previous).replace(hdr_guard, hdr_original)
 
@@ -288,9 +290,8 @@ def selected_preflight_projection(raw):
     )):
         return raw
     preflight = job_body(raw, 'preflight', 'rust_compile')
-    check = job_body(raw, 'check', 'cluster_store_legacy')
     apple = job_body(raw, 'apple', 'android_apks')
-    blocks = (preflight,) * 4 + (check,) + (apple,) * 8
+    blocks = (preflight,) * 4 + (apple,) * 8
     receipts.require(all(raw.count(selected) == 1 and selected in job
                          for (selected, _), job in zip(SELECTED_PREFLIGHT_BLOCKS, blocks, strict=True)),
                      'Unreviewed selected preflight workflow change or job placement')
@@ -386,8 +387,6 @@ def authenticate(api, descriptor, binding, candidate, *, current_run=None):
     retained = {target: [name for name, status in row['outcomes'].items()
                          if status == 'pass' and target + '::' + name not in invalidated]
                 for target, row in targets.items()}
-    root_ok = not (ROOT_SOURCES & set(record['changes'])) and root_prerequisite(source, retention.git_bytes(prior,
-        'tests/operations/test_source_custody_recovery.py'))
     observed = {target: sorted(row['outcomes']) for target, row in targets.items()}
     must_pass = {target: [name for name, status in row['outcomes'].items()
                           if status == 'fail' or (status == 'pass' and name not in retained[target])]
@@ -397,22 +396,8 @@ def authenticate(api, descriptor, binding, candidate, *, current_run=None):
             observed[target].append(row['interrupted_test'])
             must_pass[target].append(row['interrupted_test'])
     return {'candidate':candidate,'prior':prior,'digest':digest,'retained':retained,
-            'observed':observed,'must_pass':must_pass,'root_ownership_passed':root_ok}
+            'observed':observed,'must_pass':must_pass}
 
-
-def root_prerequisite(raw, test_source):
-    classes = [n for n in ast.parse(test_source).body if isinstance(n, ast.ClassDef)]
-    if len(classes) != 1 or classes[0].name != 'RecoveryHelperTests':
-        return False
-    expected = {n.name for n in classes[0].body if isinstance(n,ast.FunctionDef) and n.name.startswith('test_')}
-    lines = native.clean_lines(raw)
-    section = lines[:lines.index('cargo fmt --all --check')]
-    rows = re.compile(r'(test_\w+) \(test_source_custody_recovery\.RecoveryHelperTests\.(test_\w+)\) \.\.\. ok')
-    matches = [m.groups() for line in section if (m := rows.fullmatch(line))]
-    return bool(matches and all(a == b for a, b in matches) and len(matches) == len(expected)
-                and {a for a, _ in matches} == expected
-                and any(re.fullmatch(r'Ran ' + str(len(matches)) + r' tests in [0-9.]+s', line) for line in section)
-                and section.count('OK') == 1)
 
 
 def main():
@@ -427,7 +412,6 @@ def main():
     print('Verified prior Rust passes for', (len(proof['retained_ids']) if 'retained_ids' in proof else sum(map(len, proof['retained'].values()))), 'named target bodies')
     with open(os.environ['GITHUB_OUTPUT'],'a') as output:
         print('provider=' + proof.get('provider', POLICY), file=output)
-        print('root_retained=' + str(proof['root_ownership_passed']).lower(),file=output)
 
 
 if __name__ == '__main__':

@@ -29,6 +29,7 @@ import urllib.request
 import zipfile
 import zlib
 
+from validation import mirror_guard
 from validation.apple_simulator_runtime import runtime_identifier
 from validation.main_preflight_adoption import (
     UNADOPTABLE, api_context, bind_event, commit_available, git, input_digest,
@@ -47,6 +48,9 @@ RUNTIME = runtime_identifier('tvOS', XCODE.split()[1])
 # commands conditional only on affected scope; failure-preserving artifacts.
 CASE_LEGACY_JOB_SHA256 = '2543b6deb3f55e0743422125cff95f0fb3d7ecee18c4d9e07cd322b7d4e831d8'
 LEGACY_JOB_SHA256 = 'c6b5c40ac94f5505d0afd1f9d724a9fec8ca4f5a077fff01a6e738933bd8a415'
+# The same producer before its TV evidence went from 90 to 14 days' retention
+# (plurx#1932): the job is unchanged, only how long its artifact is kept.
+RETENTION90_JOB_SHA256 = '7edf7a8e71d8096ce3f51b11afcab6184b6d91b51148d1668f055b12b2ade5bf'
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 2 * 1024 * 1024 * 1024
 MAX_MEMBERS = 50000
@@ -99,7 +103,19 @@ BUILD_SPECS = {
     # hiqlite pre-vote tests, the vendored OpenRaft pre-vote module, and the
     # OpenRaft snapshot regression run from vendor/openraft instead of the
     # registry package located through cargo metadata; no native recipe changes.
-    'Makefile': '8355f6bea67a7f4c7f74e00137dad4a40b7f5ca76e141d1476299f43d2bfaea8',
+    # PR #1907 adds only `node --test tests/web/dv-version-facts.test.js` to
+    # the web-unit-check recipe (a Node web test); no native recipe changes.
+    # Effort E-DE100CBAEC: web-unit-check also runs tests/web/dv-provenance-rows.test.js;
+    # no native recipe changes.
+    # plurx#1953 changes only cluster-transport-recovery-contracts' expected
+    # test count from 76 to 79; no native recipe changes.
+    # P62 S1 adds only `node --test tests/playback/server-metrics.test.js`
+    # to the web-unit-check recipe (a Node playback-lab test); no native
+    # recipe changes.
+    # plurx#1979 changes only the docker-up deploy recipe (fleet-image
+    # pull/push around `docker compose up`) and its comment; no native recipe
+    # changes.
+    'Makefile': '1d14c5e0154a310699dfad422cc04f1d3c0070df9237ec59cda47b3855b43ec1',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
     # targets, and one "Stamp derived build number" post-build phase each,
@@ -108,8 +124,8 @@ BUILD_SPECS = {
     # spec closure through APPLE_PROJECT_SHAPE; actual Git blobs still bind
     # fingerprints and case compatibility. Resource, script, or flag changes
     # require a newly reviewed boundary, not counter normalization.
-    # release: v0.9.0 changes only MARKETING_VERSION "0.8.0" -> "0.9.0".
-    'clients/apple/project.yml': '4bffefdd493a84aff0a7dadf4b3a61cc199d3466bfaa2fe7f6a8baac6dde793e',
+    # release: v0.9.3 changes only MARKETING_VERSION "0.9.2" -> "0.9.3".
+    'clients/apple/project.yml': '3172ecb5cec720bd997ce764ff39a3e36a25590f22982b5d643aeade0d1f82c2',
     'validation/apple_simulator_runtime.py': '76b4169a6c3dab2dbf32c28ee5f765f0c0b09a24ca9d83abce5cfa2e7ec95a32',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
@@ -137,9 +153,10 @@ def native_block(workflow):
 
 
 def producer(commit, current):
-    old = native_block(git('show', commit + ':' + WORKFLOW))
-    now = native_block(git('show', current + ':' + WORKFLOW))
-    require(hashlib.sha256(old.encode()).hexdigest() in (LEGACY_JOB_SHA256, CASE_LEGACY_JOB_SHA256) or old == now,
+    old = native_block(mirror_guard.strip(git('show', commit + ':' + WORKFLOW)))
+    now = native_block(mirror_guard.strip(git('show', current + ':' + WORKFLOW)))
+    require(hashlib.sha256(old.encode()).hexdigest() in (LEGACY_JOB_SHA256, CASE_LEGACY_JOB_SHA256,
+                                                         RETENTION90_JOB_SHA256) or old == now,
             'Unknown native workflow producer')
     # The adapter's own adoption records are deliberately never accepted as
     # native origin evidence; producer output must still be an original pass.
@@ -148,7 +165,7 @@ def producer(commit, current):
 # The reviewed input closure is unchanged by the generated positive integer
 # build counter. Actual input fingerprints and case compatibility still use
 # complete Git blobs, so this does not transfer passes between build numbers.
-APPLE_PROJECT_SHAPE = "3277b13012ad9a56dd2f7543a1478e3a93ae526613a16ae6ae9fbcfb492d74c6"
+APPLE_PROJECT_SHAPE = "ff637429449139680dc13f70d975c1e57717e4bda78c7b7725824f3138b17524"
 APPLE_BUILD_COUNTER = re.compile(rb'(?m)^(    CURRENT_PROJECT_VERSION: ")[1-9][0-9]*(")$')
 
 

@@ -1126,43 +1126,6 @@ async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
     }
 }
 
-/// Two source-I/O resource keys contend when they are the same domain or
-/// either is the whole-source wildcard `source_io` -- the overlap rule of the
-/// claim's `domain_readers_full` term.
-fn source_domains_overlap(a: &str, b: &str) -> bool {
-    a == b
-        || (a.starts_with("source_io")
-            && b.starts_with("source_io")
-            && (a == "source_io" || b == "source_io"))
-}
-
-/// Readers per storage domain as the claim counts them: every distinct
-/// active reader (kind and work id, however many rows it holds) whose key
-/// overlaps the domain, a wildcard reader counting against every domain.
-fn domain_readers(
-    holders: &[plurx_core::store::background_jobs::SourceIoHolder],
-) -> std::collections::BTreeMap<String, usize> {
-    let active = holders
-        .iter()
-        .filter(|holder| holder.active_occupancy)
-        .collect::<Vec<_>>();
-    active
-        .iter()
-        .map(|holder| holder.resource_key.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .map(|domain| {
-            let readers = active
-                .iter()
-                .filter(|holder| source_domains_overlap(&holder.resource_key, &domain))
-                .map(|holder| (holder.kind.as_str(), holder.work_id.as_str()))
-                .collect::<std::collections::BTreeSet<_>>()
-                .len();
-            (domain, readers)
-        })
-        .collect()
-}
-
 /// How many measured switches each platform needs before the processed
 /// Dolby Vision upgrade leaves the Developer tab (Paul, 2026-11-07).
 const PROCESSED_UPGRADE_SWITCHES: u64 = 20;
@@ -1314,27 +1277,59 @@ async fn indexing_while_serving(state: &AppState) -> DeveloperEnableItem {
     )
     .await
     {
-        Ok(Ok(holders)) => {
-            let domains = domain_readers(&holders);
-            let full = domains.values().any(|readers| *readers >= 2);
-            let listed = if domains.is_empty() {
-                "No storage domain has an active source reader".to_owned()
-            } else {
-                domains
-                    .iter()
-                    .take(8)
-                    .map(|(domain, readers)| format!("{domain}: {readers} of 2"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            (
-                if full { Unmet } else { Met },
-                format!(
-                    "{listed}. Each domain admits two source readers; without a live viewer a \
-                     background read takes only a domain no other reader holds"
-                ),
-            )
-        }
+        Ok(Ok(holders)) => match state.applied.settings_snapshot().await {
+            Err(error) => (
+                Unavailable,
+                format!("The settings snapshot could not be read: {error}"),
+            ),
+            Ok(snapshot) => {
+                let settings = snapshot.values;
+                match state.store.list_libraries().await {
+                    Err(error) => (
+                        Unavailable,
+                        format!("The source root inventory could not be read: {error}"),
+                    ),
+                    Ok(libraries) => {
+                        let roots = crate::source_custody::capacity::root_inventory(&libraries);
+                        let capacity = crate::source_custody::capacity::summary(
+                            &settings,
+                            &holders,
+                            [state.node_id.clone()],
+                            &roots,
+                        );
+                        let roots = capacity["roots"].as_array().cloned().unwrap_or_default();
+                        let saturated = !roots.is_empty()
+                            && roots.iter().all(|root| {
+                                root["maintenance"].as_i64().unwrap_or_default()
+                                    >= root["readers"].as_i64().unwrap_or_default()
+                            });
+                        let evidence = if roots.is_empty() {
+                            "No configured library roots have a source-reader cap.".to_owned()
+                        } else {
+                            roots
+                                .iter()
+                                .map(|root| {
+                                    format!(
+                                        "{}: {} of {} maintenance readers, {} live",
+                                        root["library_name"].as_str().unwrap_or("Library"),
+                                        root["maintenance"].as_i64().unwrap_or_default(),
+                                        root["readers"].as_i64().unwrap_or_default(),
+                                        root["live"].as_i64().unwrap_or_default(),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        };
+                        (
+                            if saturated { Unmet } else { Met },
+                            format!(
+                                "Read-only root-capacity advisory: {evidence}. Playback has a separate protected slot; this status does not gate indexing."
+                            ),
+                        )
+                    }
+                }
+            }
+        },
         Ok(Err(error)) => (
             Unavailable,
             format!("The source-reader ledger could not be read: {error}"),
@@ -3220,7 +3215,7 @@ async fn dvr(
     let owner = live_tv.owner_node_id == state.node_id;
     let mut requirements = vec![
         root_writable(state, dvr, owner).await,
-        free_space(dvr, owner),
+        free_space(dvr, owner).await,
     ];
     requirements.push(guide_horizon(state, live_tv).await);
     requirements.push(tuner_reserve(live_tv, dvr));
@@ -3273,7 +3268,7 @@ async fn root_writable(
         // a hung NFS server would otherwise park a runtime worker for as long
         // as the mount stayed hung — on a *diagnostic* page.
         let root = dvr.root.clone();
-        match tokio::task::spawn_blocking(move || probe_root(&root)).await {
+        match plurx_core::media_io::blocking(move || probe_root(&root)).await {
             Ok(Ok(())) => (
                 RequirementStatus::Met,
                 format!("Created and removed a probe file under `{}`.", dvr.root),
@@ -3317,9 +3312,9 @@ fn probe_root(root: &str) -> std::io::Result<()> {
     std::fs::remove_file(&probe)
 }
 
-fn free_space(dvr: &crate::live_tv::DvrConfig, owner: bool) -> DeveloperRequirement {
+async fn free_space(dvr: &crate::live_tv::DvrConfig, owner: bool) -> DeveloperRequirement {
     let floor = dvr.free_floor_gb.max(0) as u64 * 1_000_000_000;
-    let (status, evidence) = match crate::live_tv::free_space_bytes(&dvr.root) {
+    let (status, evidence) = match crate::live_tv::free_space_bytes(&dvr.root).await {
         Some(free) if free >= floor => (
             RequirementStatus::Met,
             format!(
@@ -3620,64 +3615,28 @@ async fn display_target_hdr10(
     }
 }
 
-/// Node-local observations only. No enable or recovery path reads this route.
-static SOURCE_RECOVERY_SCAN: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
-    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
-
-fn unavailable_source_recovery(node_name: &str, launches: serde_json::Value) -> serde_json::Value {
-    local_source_diagnostics(
-        serde_json::json!({"error": "unavailable", "poisoned": null}),
-        node_name,
-        launches,
-        crate::source_custody::access_roots_fact(),
-    )
-}
-
-/// Process-local readings every answer carries, including an unavailable one.
+/// Node-local launch-verification readings. Advisory: nothing reads this
+/// route to allow or refuse work.
 fn local_source_diagnostics(
-    mut reading: serde_json::Value,
     node_name: &str,
     launches: serde_json::Value,
     roots: serde_json::Value,
 ) -> serde_json::Value {
-    reading["node_name"] = serde_json::json!(node_name);
-    reading["launches"] = launches;
+    let mut reading = serde_json::json!({"node_name": node_name, "launches": launches});
     for key in ["roots_configured", "roots_unconfigured_reason"] {
         reading[key] = roots[key].clone();
     }
     reading
 }
 
-pub async fn source_recovery(
+pub async fn source_launch(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Json<serde_json::Value> {
-    let node_name = state
-        .node_hostname
-        .as_deref()
-        .unwrap_or(&state.node_id)
-        .to_owned();
-    let launches = serde_json::json!(plurx_core::process::source_lifetime::launch_snapshot());
-    let permit = match SOURCE_RECOVERY_SCAN.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            return Json(unavailable_source_recovery(&node_name, launches));
-        }
-    };
-    let store = std::sync::Arc::clone(&state.store);
-    let reading = match tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        crate::source_custody::recovery_status(&store)
-    })
-    .await
-    {
-        Ok(reading) => reading,
-        Err(_) => return Json(unavailable_source_recovery(&node_name, launches)),
-    };
+    let node_name = state.node_hostname.as_deref().unwrap_or(&state.node_id);
     Json(local_source_diagnostics(
-        reading,
-        &node_name,
-        launches,
+        node_name,
+        serde_json::json!(plurx_core::process::source_lifetime::launch_snapshot()),
         crate::source_custody::access_roots_fact(),
     ))
 }
@@ -3727,70 +3686,20 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_source_recovery_preserves_local_diagnostics_without_a_poison_count() {
-        let launches = serde_json::json!({"total": 3});
-        let response = unavailable_source_recovery("media1", launches.clone());
-        assert_eq!(response["error"], "unavailable");
-        assert!(response["poisoned"].is_null());
-        assert_eq!(response["node_name"], "media1");
-        assert_eq!(response["launches"], launches);
-        assert!(response["roots_configured"].is_boolean());
-    }
-
-    #[test]
-    fn source_recovery_names_unconfigured_roots_and_their_reason() {
+    fn source_launch_names_unconfigured_roots_and_their_reason() {
         let roots = serde_json::json!({
             "roots_configured": false,
             "roots_unconfigured_reason": "reader roots cannot be empty",
         });
-        let response = local_source_diagnostics(
-            serde_json::json!({"supported": true}),
-            "media1",
-            serde_json::json!({"unverified": 2}),
-            roots,
-        );
-        assert_eq!(response["supported"], true);
+        let launches = serde_json::json!({"unverified": 2});
+        let response = local_source_diagnostics("media1", launches.clone(), roots);
+        assert_eq!(response["node_name"], "media1");
+        assert_eq!(response["launches"], launches);
         assert_eq!(response["roots_configured"], false);
         assert_eq!(
             response["roots_unconfigured_reason"],
             "reader roots cannot be empty"
         );
-    }
-
-    /// Review 2 of C1 (S9): the row counts readers the way the claim does --
-    /// a whole-source (`source_io`) reader contends with every domain, and a
-    /// reader holding several rows is one reader.
-    #[test]
-    fn domain_readers_follow_the_claims_overlap_and_distinct_reader_rules() {
-        use plurx_core::store::background_jobs::SourceIoHolder;
-        let holder = |key: &str, work: &str, active: bool| SourceIoHolder {
-            active_occupancy: active,
-            resource_key: key.to_owned(),
-            work_id: work.to_owned(),
-            kind: "analysis_source".to_owned(),
-            priority: "maintenance".to_owned(),
-            started_at_ms: 0,
-            lease_expires_at_ms: 0,
-            phase: None,
-            last_phase_at_ms: None,
-            origin_node_id: None,
-            origin_job_kind: None,
-            origin_job_state: None,
-        };
-        let readers = domain_readers(&[
-            holder("source_io:nas-a", "one", true),
-            holder("source_io:nas-a", "one", true),
-            holder("source_io", "everything", true),
-            holder("source_io:nas-b", "two", true),
-            holder("source_io:nas-b", "paused", false),
-        ]);
-        assert_eq!(readers.get("source_io:nas-a"), Some(&2), "{readers:?}");
-        assert_eq!(readers.get("source_io:nas-b"), Some(&2), "{readers:?}");
-        assert_eq!(readers.get("source_io"), Some(&3), "{readers:?}");
-        assert!(!source_domains_overlap(
-            "source_io:nas-a",
-            "source_io:nas-b"
-        ));
     }
 
     #[test]

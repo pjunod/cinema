@@ -87,7 +87,7 @@ impl SourceGrowingBacking {
     pub(crate) fn is_live(&self) -> bool {
         self.production.is_live()
             && self.owners.contains_live_assignment(&self.assignment)
-            && self.source.unchanged()
+            && self.source.unchanged_in_place()
     }
     /// Viewer activity: the first publication, an authenticated resource
     /// fetch, or a control exchange the fence accepted. A refused exchange is
@@ -434,10 +434,7 @@ impl SourceViewerActor {
         let route = self.0.gate.renew_with(&self.0.assignment, &proof).await?;
         if route.session_id != backing.session_id
             || route.publication_ready_at_ms != 0
-            || guard
-                .source
-                .as_ref()
-                .is_none_or(|source| !source.unchanged())
+            || guard.source.as_ref().missing_or_changed().await
         {
             return Err(ended);
         }
@@ -479,20 +476,6 @@ impl SourceViewerActor {
     }
 }
 
-/// A selected-caption window's own answer: still preparing (`Deadline`) or
-/// over its concurrent-work bound (`Capacity`) passes; anything else is this
-/// track's final answer for this request.
-pub(super) fn subtitle_refusal(error: SourceWorkerError) -> super::LiveRefusal {
-    if matches!(
-        error,
-        SourceWorkerError::Deadline | SourceWorkerError::Capacity
-    ) {
-        super::LiveRefusal::transient(error)
-    } else {
-        super::LiveRefusal::terminal(error)
-    }
-}
-
 impl TranscodeManager {
     async fn prepare_source_growing(
         &self,
@@ -519,6 +502,16 @@ impl TranscodeManager {
         };
         *stage = "growing.preparation_authority";
         let authority = owner.gate.current_preparation(&owner.assignment).await?;
+        // The copy's argv keeps or deletes the in-band parameter sets from
+        // this probe's census; a Source-first play measures it here, under
+        // this owner, without moving the witnessed revision.
+        *stage = "growing.census";
+        Box::pin(crate::hevc_census::ensure_source_census(
+            self.store.as_ref(),
+            prepared.file(),
+        ))
+        .await
+        .map_err(|_| SourceWorkerError::Unresolved)?;
         *stage = "growing.probe_evidence";
         let probe = self
             .store
@@ -544,6 +537,41 @@ impl TranscodeManager {
             probe.as_deref(),
             preserve_dolby_vision,
             convert_dolby_vision,
+        );
+        // The copy's memory is admitted first, before it takes a copy slot or
+        // reads its head: a start waiting for memory holds nothing another
+        // copy needs and discards no work. A node whose copies hold their
+        // budget answers busy, which the receiver retries.
+        // The one recipe of this range. An Analysis gap fill of the same
+        // source repeats it, so its rows are comparable with these.
+        let recipe = crate::copy_analysis::CopyRecipe {
+            video,
+            audio_index: prepared.request().audio_index,
+            transcode_audio: aac,
+            audio_delivery: prepared.request().audio_delivery.clone(),
+        };
+        *stage = "growing.copy_memory";
+        let charge = crate::copyrange::admission_charge(
+            prepared.file().size,
+            prepared.file().duration_ms,
+            recipe.tracks(prepared.file()).audio_bits_per_second,
+        );
+        let memory = std::sync::Arc::new(
+            self.admissions
+                .copy_memory()
+                .acquire(
+                    charge,
+                    crate::admission::CopyPriority::Live,
+                    tokio::time::Instant::from_std(deadline),
+                )
+                .await
+                .map_err(|refusal| match refusal {
+                    crate::admission::CopyMemoryRefusal::Busy => SourceWorkerError::Capacity,
+                    // More than this node can hold even alone.
+                    crate::admission::CopyMemoryRefusal::OverCeiling => {
+                        SourceWorkerError::CopyInputLimit
+                    }
+                })?,
         );
         *stage = "growing.copy_admission";
         let permit = self.admit_source_copy(deadline).await?;
@@ -702,14 +730,6 @@ impl TranscodeManager {
         )
         .await
         .map_err(|_| SourceWorkerError::Unavailable)?;
-        // The one recipe of this range. An Analysis gap fill of the same
-        // source repeats it, so its rows are comparable with these.
-        let recipe = crate::copy_analysis::CopyRecipe {
-            video,
-            audio_index: prepared.request().audio_index,
-            transcode_audio: aac,
-            audio_delivery: prepared.request().audio_delivery.clone(),
-        };
         *stage = "growing.copy_mux";
         let mux = ObservedCopyMux::new(
             Arc::clone(&contract),
@@ -718,6 +738,7 @@ impl TranscodeManager {
             recipe.tracks(&file),
             video.retains_hevc_parameter_sets(),
             file.video_codec.as_deref() == Some("hevc"),
+            memory,
         )
         .map_err(|_| SourceWorkerError::Unsupported)?;
         *stage = "growing.copy_args";
@@ -925,10 +946,10 @@ impl TranscodeManager {
                 })?;
             startup_stage = "growing.source_height";
             let facts = StartInfo {
+                vod_copy_layout: None,
                 processed_dv_profile: None,
                 processed_fel: None,
                 degraded_processing: None,
-                processing_note: None,
                 retained_output: None,
                 audio_delivery: prepared.request().audio_delivery.clone(),
                 session_id: session_id.clone(),

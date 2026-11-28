@@ -1774,7 +1774,8 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS background_storage_domain_pending",
             // v132: exact title-v2 triggers and marker are removed by the shared title teardown.
             "INSERT INTO dv_title_jobs_schema VALUES(1,2)",
-            // v133: the empty delegation tail is removed first by the shared title rewind.
+            // v133: the empty delegation tail is removed after the source
+            // lease rewind by the shared title rewind.
             "CREATE TABLE IF NOT EXISTS delegation_schema",
             // v136: the test rewind restores the exact v124 dispatch definitions.
             "DROP TRIGGER dispatch_turn_job",
@@ -1782,6 +1783,17 @@ mod tests {
             "CREATE TABLE library_curation_schema",
             // v134: the shared title rewind removes the exact empty F+ curve extension.
             "CREATE TABLE IF NOT EXISTS background_dv_refit_schema",
+            // v137/v138: the shared curation rewind restores the exact managed
+            // v6 view and marker and the original analysis view, first.
+            "INSERT INTO subtitle_managed_schema VALUES(1,7)",
+            "CREATE TABLE IF NOT EXISTS analysis_source_scope_schema",
+            // v139: the shared title rewind restores the exact v2 trigger
+            // definitions and marker before removing the authority columns.
+            "INSERT INTO dv_title_jobs_schema VALUES(1,3)",
+            // v140/v141: the shared source-extension fixture drops the empty
+            // lease table and restores the v1 owners and replaced dependents.
+            "CREATE TABLE source_leases",
+            "UPDATE source_lease_schema SET version=3",
         ];
 
         assert!(

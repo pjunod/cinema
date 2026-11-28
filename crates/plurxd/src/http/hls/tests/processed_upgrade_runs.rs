@@ -3,6 +3,122 @@
 // (`staging_fixture_for_playback`), with the trial supplied by the test so no
 // renderer is needed.
 
+#[tokio::test]
+async fn original_processed_upgrade_reads_bound_recovery_without_an_incumbent_candidate() {
+    use super::candidate_recovery::{
+        incumbent, processed_candidate_recovery_evidence, ProcessedRecoveryEvidence,
+    };
+    use plurx_core::{
+        playback::candidate::{CandidateId, CandidateRoute, QualityCandidate},
+        store::{CandidateRecoveryCause, CandidateRecoveryObservation},
+        transcode::OutputGrade,
+    };
+
+    let dir = crate::test_tempdir().expect("state dir");
+    let playback = unique_playback_id("original-processed-recovery");
+    let session = uuid::Uuid::new_v4().to_string();
+    let fixture = HlsDeliveryFixture::publish(dir.path(), &session).await;
+    let (fixture, session, route) =
+        staging_route_with_recovery_on(fixture, session, &playback, None, true).await;
+    let user_id = route.principal.local_user_id().expect("local viewer");
+    let user = fixture
+        .store
+        .get_user(user_id)
+        .await
+        .expect("user query")
+        .expect("user");
+    let file = fixture
+        .store
+        .get_file(fixture.file_id())
+        .await
+        .expect("file query")
+        .expect("file");
+    let socket = "192.0.2.8:12345".parse().expect("peer");
+    let mut network =
+        crate::http::network::identity(&HeaderMap::new(), Some(socket)).expect("network");
+    network.user_id = Some(user_id);
+    network.client_class = "android".to_owned();
+    network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
+        user_id,
+        user.created_at,
+        &user.password_hash,
+    ));
+    let recipe_digest = [0x8a; 32];
+    let processed = QualityCandidate {
+        id: CandidateId::for_recipe_digest(recipe_digest),
+        recipe_digest,
+        route: CandidateRoute::Encode,
+        planned_codec: Some("hevc".into()),
+        processed_dv: true,
+        normalized_geometry: true,
+        width: 3840,
+        height: 2160,
+        target_height: 2160,
+        average_bps: Some(12_000_000),
+        peak_bps: Some(18_000_000),
+        grade: OutputGrade::Hdr10,
+        decoder_compatible: true,
+        complete_cache: false,
+        sustainable: true,
+    };
+    let deadline = || tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+    let evidence = || {
+        processed_candidate_recovery_evidence(
+            &fixture.state,
+            Some(&network),
+            &file,
+            &playback,
+            &processed,
+            Some(&route),
+            deadline(),
+        )
+    };
+
+    assert!(matches!(
+        evidence().await,
+        ProcessedRecoveryEvidence::Admissible
+    ));
+    assert!(
+        incumbent(
+            &fixture.state,
+            &network,
+            &file,
+            &playback,
+            Some(&session),
+            deadline()
+        )
+        .await
+        .is_none(),
+        "candidate-based callers still require a selected candidate"
+    );
+
+    let scope = super::link_receipts::SourceLinkIdentity::capture(&network, &file)
+        .await
+        .expect("source fence")
+        .recovery_scope(&playback, &route.recovery_epoch);
+    let memory = fixture
+        .store
+        .observe_candidate_recovery(
+            &CandidateRecoveryObservation {
+                scope,
+                route: route.clone(),
+                recipe_digest,
+                event_id: "processed-recipe-rejected".to_owned(),
+                cause: CandidateRecoveryCause::Decode,
+                quality_step: false,
+            },
+            unix_ms(),
+        )
+        .await
+        .expect("write recovery observation")
+        .expect("recovery observation stored");
+    assert!(memory.rejected_recipes.contains(&recipe_digest));
+    assert!(matches!(
+        evidence().await,
+        ProcessedRecoveryEvidence::Rejected
+    ));
+}
+
 /// A taken upgrade for the fixture's session, as a first frame would take it,
 /// after one accepted control exchange reporting the viewer at `position_ms`.
 async fn upgrade_after_playing_to(
@@ -343,7 +459,8 @@ async fn an_ordinary_fallback_reports_the_reason_without_private_qualification_d
     file.dolby_vision.profile=Some(7);file.dolby_vision.el_present=Some(true);
     let wait=super::processed_upgrade::pending_qualification_fixture(file.id,file.size,file.mtime,0,"private-held-object");
     let private=crate::transcode::pending_fel_qualification_error(wait);
-    let public=crate::transcode::ordinary_processing_decline(private);
+    // What the upgrade reports while it waits: the explanation, never the token.
+    let public=crate::transcode::pending_fel_qualification(&private).expect("token").reason().to_owned();
     let kind=crate::transcode::SessionKind::Copy {aac:false,preserve_dolby_vision:true,
         convert_dolby_vision:true,dual_layer_as_copied:false};
     let enhancement=session_enhancement(Some(&file),&kind,plurx_core::transcode::OutputGrade::Hdr10,
@@ -353,7 +470,6 @@ async fn an_ordinary_fallback_reports_the_reason_without_private_qualification_d
     for private in ["private-held-object","source_object_version","settings_generation","backend_identity","fel_qualification_pending"] {
         assert!(!wire.contains(private),"private continuation data must not enter Playback Info: {wire}");
     }
-    assert_eq!(crate::transcode::ordinary_processing_decline("the decoder refused the window".into()),"the decoder refused the window");
 }
 
 /// A repeat upgrade of the same playback: this node described the processed

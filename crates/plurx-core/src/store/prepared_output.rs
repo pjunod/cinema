@@ -1,5 +1,8 @@
 //! Seal the actual private output choice of a newly reserved, unpublished successor.
+use serde_json::Value;
+
 use crate::error::StoreError;
+use crate::transcode::VodCopyLayout;
 
 #[derive(Clone, Debug)]
 pub struct PreparedOutputSeal {
@@ -19,7 +22,9 @@ pub struct PreparedOutputSeal {
     /// A sealed replay validates current ownership without changing either JSON value.
     pub already_complete: bool,
     /// Exact facts from the attachment's opaque response owner; None is a sealed choice too.
-    pub retained_output: Option<serde_json::Value>,
+    pub retained_output: Option<Value>,
+    /// Actual layout captured behind the same unpublished attachment fence.
+    pub vod_copy_layout: Option<VodCopyLayout>,
 }
 fn valid_proof(proof: Option<&serde_json::Value>) -> bool {
     proof.is_none_or(|proof| {
@@ -64,12 +69,12 @@ impl PreparedOutputSeal {
             )
     }
 
-    pub(crate) fn proof_json(&self) -> Result<String, StoreError> {
-        let response: serde_json::Value = serde_json::from_str(&self.expected_response_json)
-            .map_err(|_| StoreError::Task("invalid preparation response".into()))?;
-        let recipe: serde_json::Value = serde_json::from_str(&self.expected_recipe_json)
-            .map_err(|_| StoreError::Task("invalid preparation recipe".into()))?;
-        let proof_valid = valid_proof(self.retained_output.as_ref());
+    pub(crate) fn sealed_json(&self) -> Result<(String, String), StoreError> {
+        let invalid = || StoreError::Task("invalid first-preparation output seal".into());
+        let response: Value =
+            serde_json::from_str(&self.expected_response_json).map_err(|_| invalid())?;
+        let recipe: Value =
+            serde_json::from_str(&self.expected_recipe_json).map_err(|_| invalid())?;
         if self.user_id <= 0
             || self.owner_epoch <= 0
             || self.predecessor_owner_epoch <= 0
@@ -77,31 +82,139 @@ impl PreparedOutputSeal {
             || self.deadline_ms <= self.now_ms
             || self.expected_recipe_json.len() > 32768
             || self.expected_response_json.len() > 65536
-            || !recipe.is_object()
             || recipe["retained_output_receiver"] != 1
-            || if self.already_complete {
-                response["prepared_output_capture_complete"] != true
-                    || response.get("prepared_output_capture_pending").is_some()
-                    || recipe["retained_output"]
-                        != self
-                            .retained_output
-                            .clone()
-                            .unwrap_or(serde_json::Value::Null)
-            } else {
-                !recipe["retained_output"].is_null()
-                    || response["prepared_output_capture_pending"] != true
-                    || response.get("prepared_output_capture_complete").is_some()
-            }
-            || !proof_valid
+            || !valid_proof(self.retained_output.as_ref())
         {
-            return Err(StoreError::Task(
-                "invalid first-preparation output seal".into(),
+            return Err(invalid());
+        }
+        if self.vod_copy_layout.is_some() && response["session_id"] != self.session_id {
+            return Err(invalid());
+        }
+        if self.already_complete {
+            if response["prepared_output_capture_complete"] != true
+                || response.get("prepared_output_capture_pending").is_some()
+                || recipe
+                    .get("retained_output")
+                    .filter(|value| !value.is_null())
+                    != self.retained_output.as_ref()
+                || layout_from_recipe(&recipe) != Some(self.vod_copy_layout.clone())
+                || !completed_layout_is_valid(&recipe, &response, self.vod_copy_layout.as_ref())
+            {
+                return Err(invalid());
+            }
+            return Ok((
+                self.expected_recipe_json.clone(),
+                self.expected_response_json.clone(),
             ));
         }
-        serde_json::to_string(&self.retained_output)
-            .map_err(|error| StoreError::Task(error.to_string()))
+        let (recipe, response) = seal_values(
+            recipe,
+            response,
+            self.retained_output.clone(),
+            self.vod_copy_layout.as_ref(),
+        )
+        .ok_or_else(invalid)?;
+        let sealed_recipe = recipe.to_string();
+        let sealed_response = response.to_string();
+        if sealed_recipe.len() > 32768 || sealed_response.len() > 65536 {
+            return Err(invalid());
+        }
+        Ok((sealed_recipe, sealed_response))
     }
 }
+
+fn layout_from_recipe(recipe: &Value) -> Option<Option<VodCopyLayout>> {
+    match recipe.pointer("/request/vod_copy_layout") {
+        Some(value) => serde_json::from_value(value.clone()).ok(),
+        None => Some(None),
+    }
+}
+
+fn playlist_paths(response: &Value) -> Option<(String, String)> {
+    let id = response["session_id"].as_str()?;
+    let uuid = uuid::Uuid::parse_str(id).ok()?;
+    if uuid.to_string() != id {
+        return None;
+    }
+    Some((
+        format!("/api/v1/hls/{id}/index.m3u8"),
+        format!("/api/v1/hls/{id}/master.m3u8"),
+    ))
+}
+
+fn completed_layout_is_valid(
+    recipe: &Value,
+    response: &Value,
+    layout: Option<&VodCopyLayout>,
+) -> bool {
+    let Some(layout) = layout else {
+        return true;
+    };
+    let Some((index, master)) = playlist_paths(response) else {
+        return false;
+    };
+    let playlist = response["playlist_url"].as_str().unwrap_or_default();
+    match layout {
+        VodCopyLayout::PendingV1 => false,
+        VodCopyLayout::Muxed => {
+            recipe["request"]["split_audio"] != true
+                && playlist.split('?').next() == Some(index.as_str())
+        }
+        VodCopyLayout::SplitV1 { .. } => {
+            recipe["request"]["split_audio"] == true
+                && playlist == master
+                && response.get("prepared_playlist_shape").is_none()
+                && layout.valid()
+        }
+    }
+}
+
+fn seal_values(
+    mut recipe: Value,
+    mut response: Value,
+    proof: Option<Value>,
+    layout: Option<&VodCopyLayout>,
+) -> Option<(Value, Value)> {
+    if recipe["retained_output_receiver"] != 1
+        || !recipe["retained_output"].is_null()
+        || response["prepared_output_capture_pending"] != true
+        || response.get("prepared_output_capture_complete").is_some()
+        || !valid_proof(proof.as_ref())
+    {
+        return None;
+    }
+    match (layout_from_recipe(&recipe)?, layout) {
+        (None, None) => {}
+        (Some(VodCopyLayout::PendingV1), Some(layout))
+            if !matches!(layout, VodCopyLayout::PendingV1) && layout.valid() =>
+        {
+            let (index, master) = playlist_paths(&response)?;
+            if recipe["request"]["split_audio"] != true
+                || response["playlist_url"].as_str()?.split('?').next() != Some(index.as_str())
+            {
+                return None;
+            }
+            let request = recipe.get_mut("request")?.as_object_mut()?;
+            request.insert("vod_copy_layout".into(), serde_json::to_value(layout).ok()?);
+            if matches!(layout, VodCopyLayout::SplitV1 { .. }) {
+                let response_fields = response.as_object_mut()?;
+                response_fields.insert("playlist_url".into(), Value::String(master));
+                response_fields.remove("prepared_playlist_shape");
+            } else {
+                request.remove("split_audio");
+            }
+        }
+        _ => return None,
+    }
+    recipe
+        .as_object_mut()?
+        .insert("retained_output".into(), proof.unwrap_or(Value::Null));
+    let fields = response.as_object_mut()?;
+    fields.remove("prepared_output_capture_pending");
+    fields.insert("prepared_output_capture_complete".into(), Value::Bool(true));
+    Some((recipe, response))
+}
+
 /// An original fresh reservation can replay its own sealed row without
 /// changing the captured choice. Every other recipe/response value stays exact.
 pub(crate) fn sealed_reservation_matches(
@@ -110,10 +223,10 @@ pub(crate) fn sealed_reservation_matches(
     actual_recipe: &str,
     actual_response: &str,
 ) -> bool {
-    let parse = |text: &str| serde_json::from_str::<serde_json::Value>(text).ok();
+    let parse = |text: &str| serde_json::from_str::<Value>(text).ok();
     let (
-        Some(mut expected_recipe),
-        Some(mut expected_response),
+        Some(expected_recipe),
+        Some(expected_response),
         Some(mut actual_recipe),
         Some(actual_response),
     ) = (
@@ -125,41 +238,27 @@ pub(crate) fn sealed_reservation_matches(
     else {
         return false;
     };
-    if !expected_recipe.is_object()
-        || !actual_recipe.is_object()
-        || !expected_response.is_object()
-        || expected_recipe["retained_output_receiver"] != 1
-        || !expected_recipe["retained_output"].is_null()
-        || expected_response["prepared_output_capture_pending"] != true
-        || expected_response
-            .get("prepared_output_capture_complete")
-            .is_some()
-        || actual_response["prepared_output_capture_complete"] != true
-        || actual_response
-            .get("prepared_output_capture_pending")
-            .is_some()
-        || !valid_proof(
-            actual_recipe
-                .get("retained_output")
-                .filter(|value| !value.is_null()),
-        )
-    {
+    let Some(actual_layout) = layout_from_recipe(&actual_recipe) else {
         return false;
+    };
+    let Some((mut expected_recipe, expected_response)) = seal_values(
+        expected_recipe,
+        expected_response,
+        actual_recipe
+            .get("retained_output")
+            .filter(|value| !value.is_null())
+            .cloned(),
+        actual_layout.as_ref(),
+    ) else {
+        return false;
+    };
+    if let Some(fields) = actual_recipe.as_object_mut() {
+        fields.remove("retained_output");
     }
     expected_recipe
         .as_object_mut()
-        .expect("object")
+        .expect("sealed recipe object")
         .remove("retained_output");
-    actual_recipe
-        .as_object_mut()
-        .expect("object")
-        .remove("retained_output");
-    let fields = expected_response.as_object_mut().expect("object");
-    fields.remove("prepared_output_capture_pending");
-    fields.insert(
-        "prepared_output_capture_complete".into(),
-        serde_json::Value::Bool(true),
-    );
     expected_recipe == actual_recipe && expected_response == actual_response
 }
 
@@ -167,47 +266,48 @@ pub(crate) fn sealed_reservation_matches(
 // writer and its consistent read, so the two can never drift apart.
 macro_rules! seal_predicate {
     () => {
-        "s.incarnation_id=$5 AND s.session_id=$6 AND s.user_id=$7 AND s.playback_id=$8
- AND s.owner_node_id=$9 AND s.owner_epoch=$10 AND s.state='active'
- AND length(CAST(json_set($2, '$.retained_output', json($3)) AS BLOB))<=32768
- AND length(CAST(json_set(json_remove($4, '$.prepared_output_capture_pending'), '$.prepared_output_capture_complete', json('true')) AS BLOB))<=65536
- AND s.publication_ready_at_ms=9223372036854775807 AND s.lease_expires_at_ms=$11 AND s.lease_expires_at_ms>$12
- AND ((s.recipe_json=$2 AND s.response_json=$4)
- OR (NOT $1 AND s.recipe_json=json_set($2, '$.retained_output', json($3))
- AND s.response_json=json_set(json_remove($4, '$.prepared_output_capture_pending'), '$.prepared_output_capture_complete', json('true'))))
+        "s.incarnation_id=$4 AND s.session_id=$5 AND s.user_id=$6 AND s.playback_id=$7
+ AND s.owner_node_id=$8 AND s.owner_epoch=$9 AND s.state='active'
+ AND length(CAST($15 AS BLOB))<=32768
+ AND length(CAST($16 AS BLOB))<=65536
+ AND s.publication_ready_at_ms=9223372036854775807 AND s.lease_expires_at_ms=$10 AND s.lease_expires_at_ms>$11
+ AND ((s.recipe_json=$2 AND s.response_json=$3)
+ OR (NOT $1 AND s.recipe_json=$15
+ AND s.response_json=$16))
  AND NOT EXISTS(SELECT 1 FROM quality_preparation_owners q JOIN quality_cancellation_receipts c ON c.receipt_key=q.cancellation_key WHERE q.staged_incarnation_id=s.incarnation_id)
  AND EXISTS(SELECT 1 FROM job_leases j WHERE j.resource='session:'||s.incarnation_id
  AND j.owner_node_id=s.owner_node_id AND j.fence=s.owner_epoch AND j.expires_at_ms=s.lease_expires_at_ms)
  AND EXISTS(SELECT 1 FROM media_session_preparations p JOIN media_playback_pointers ptr
  ON ptr.user_id=p.user_id AND ptr.playback_id=p.playback_id
  JOIN media_sessions predecessor ON predecessor.incarnation_id=p.expected_predecessor_incarnation_id
- WHERE p.user_id=$7 AND p.playback_id=$8 AND p.staged_incarnation_id=$5
- AND p.expected_predecessor_incarnation_id=$13 AND p.deadline_ms=$11 AND p.deadline_ms>$12
- AND ptr.current_incarnation_id=$13 AND predecessor.user_id=$7 AND predecessor.playback_id=$8
- AND predecessor.owner_node_id=$14 AND predecessor.owner_epoch=$15 AND predecessor.state='active'
- AND predecessor.lease_expires_at_ms>$12)"
+ WHERE p.user_id=$6 AND p.playback_id=$7 AND p.staged_incarnation_id=$4
+ AND p.expected_predecessor_incarnation_id=$12 AND p.deadline_ms=$10 AND p.deadline_ms>$11
+ AND ptr.current_incarnation_id=$12 AND predecessor.user_id=$6 AND predecessor.playback_id=$7
+ AND predecessor.owner_node_id=$13 AND predecessor.owner_epoch=$14 AND predecessor.state='active'
+ AND predecessor.lease_expires_at_ms>$11)"
     };
 }
 
-// Both backends use the same atomic ownership predicate. Only the private artifact
-// field and capture marker change; no playback pointer, request, lease or intent moves.
+// Both backends bind the same ownership fence and completed JSON values.
+macro_rules! seal_bindings {
+    () => {
+        "WITH seal_bindings AS (SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9,
+ $10, $11, $12, $13, $14, $15, $16) "
+    };
+}
 pub(crate) const SEAL: &str = concat!(
+    seal_bindings!(),
     "UPDATE media_sessions AS s SET
- recipe_json=CASE WHEN $1 THEN s.recipe_json ELSE json_set($2, '$.retained_output', json($3)) END,
- response_json=CASE WHEN $1 THEN s.response_json ELSE json_set(json_remove($4, '$.prepared_output_capture_pending'), '$.prepared_output_capture_complete', json('true')) END
+ recipe_json=CASE WHEN $1 THEN s.recipe_json ELSE $15 END,
+ response_json=CASE WHEN $1 THEN s.response_json ELSE $16 END
  WHERE ",
     seal_predicate!()
 );
 
-// Whether an already-complete seal still holds, read under the same predicate
-// and bindings as `SEAL` (with `$1` true) instead of replaying it as a write:
-// the replay changes no column but still costs a replicated UPDATE. SQLite
-// numbers `$N` parameters by first appearance, not by their digits, so the
-// leading CTE names `$1`..`$4` first and the predicate then introduces
-// `$5`..`$15` in order: the positional bindings land exactly as in `SEAL`.
+// A read of the same predicate avoids a replicated UPDATE on sealed replays.
 pub(crate) const SEALED: &str = concat!(
-    "WITH seal_bindings(complete, recipe, proof, response) AS (SELECT $1, $2, $3, $4)
- SELECT EXISTS(SELECT 1 FROM media_sessions AS s WHERE ",
+    seal_bindings!(),
+    "SELECT EXISTS(SELECT 1 FROM media_sessions AS s WHERE ",
     seal_predicate!(),
     ") AS sealed"
 );

@@ -1405,6 +1405,10 @@ mod tests {
     #[tokio::test]
     async fn library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
+            .await
+            .expect("give the two workers one shared root slot");
         let root = crate::test_tempdir().expect("root");
         let library = store
             .create_library(&NewLibrary {

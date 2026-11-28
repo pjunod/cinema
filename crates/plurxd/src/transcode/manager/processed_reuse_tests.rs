@@ -774,6 +774,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                 file_id,
                 range,
                 profile,
+                None,
             )
             .await
             .is_none(),
@@ -803,6 +804,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
             file_id,
             range,
             profile,
+            None,
         )
         .await
         .expect("fresh enhancement from the actual primed owner");
@@ -826,6 +828,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                     wrong_file,
                     wrong_range,
                     wrong_profile,
+                    None,
                 )
                 .await
                 .is_none(),
@@ -848,6 +851,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                 file_id,
                 range,
                 profile,
+                None,
             )
             .await
             .is_none(),
@@ -874,6 +878,7 @@ async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
                 file_id,
                 range,
                 profile,
+                None,
             )
             .await
             .is_none(),
@@ -1086,7 +1091,7 @@ async fn prepared_fel_batch_is_bound_to_first_snapshot_and_attempt() {
             .collect()
     };
     for (staged_attempt, served_last) in [(2, 1), (1, 2)] {
-        let split = NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        let split = NativeSplitInventory::with_budget(100, u64::MAX).compare_prepared_head();
         assert!(split.stage_prepared_head(staged_attempt, objects()).is_ok());
         assert!(!split.defer_first_snapshot_for_prepared_head(std::time::Instant::now()));
         assert_eq!(
@@ -1098,7 +1103,7 @@ async fn prepared_fel_batch_is_bound_to_first_snapshot_and_attempt() {
         assert!(split.fel_object(0, 1).is_none());
     }
 
-    let split = NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+    let split = NativeSplitInventory::with_budget(100, u64::MAX).compare_prepared_head();
     assert!(split.stage_prepared_head(1, objects()).is_ok());
     assert!(split.fel_object(0, 1).is_none(), "staged bytes are private");
     assert!(split
@@ -1880,6 +1885,7 @@ printf '%s\n' '{}'
         display_target,
         display: caps.display.clone(),
         display_target_note: display_target_note.clone(),
+        dv_row_facts: None,
         source_tick,
         source_origin,
         native_bl: (64, 64),
@@ -1987,9 +1993,11 @@ printf '%s\n' '{}'
     let session_id = uuid::Uuid::new_v4().to_string();
     let request = SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         continuous_media: None,
         quality_catalog: None,
+        accepted_processed_ask: None,
         candidate_context: Some(Box::new(context)),
         retain_output: None,
         dv_refit_digest: None,

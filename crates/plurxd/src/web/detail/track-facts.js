@@ -74,6 +74,15 @@ function trackFactRow(label, tracks, selectedIndex, chip, note, collapse=false){
   }
   return `<dt>${label}</dt><dd>${chips}${note?`<div class="langnote">${esc(note)}</div>`:""}</dd>`;
 }
+// How this version plays on each of the account's devices, from what each
+// last reported and the decision Play makes. A fallback (base layer,
+// tone-map, dropped EL) reads as a caution rather than hiding it.
+function playsOnRow(f){
+  const rows=f.plays_on||[];
+  if(!rows.length) return "";
+  return `<dt>Plays on</dt><dd><ul class="plays-on">${rows.map(r=>
+    `<li class="${r.full_quality&&!r.el_dropped?"":"plays-caution"}"><span>${esc(r.device||r.client||"Device")}</span><span>${esc(r.label)}</span></li>`).join("")}</ul></dd>`;
+}
 function specBlock(f){
   const vid=[f.video_codec&&f.video_codec.toUpperCase(),(f.width&&f.height)?`${f.width}×${f.height}`:null,(f.hdr_format||f.hdr),f.bit_depth?`${f.bit_depth}-bit`:null,fmtMbps(f.bitrate)].filter(Boolean).join(" · ");
   const file=[f.container&&f.container.toUpperCase(),fmtSize(f.size),fmtDur(f.duration_ms)].filter(Boolean).join(" · ");
@@ -114,6 +123,8 @@ function specBlock(f){
   const analysis=analysisFileControl(f);
   const facts=`<dl class="specs">
     ${vid||!auds.length?`<dt>Video</dt><dd>${esc(vid||"—")}</dd>`:''}
+    ${f.dv_facts?`<dt>Dolby Vision</dt><dd>${esc(f.dv_facts)}</dd>`:""}
+    ${playsOnRow(f)}
     ${audRow}
     ${subRow}
     ${hlsRow}

@@ -78,6 +78,9 @@ pub(super) const CONTENT_REFUSALS: &[&str] = &[
     "complete selected video duration",
     "selected video duration tag",
     "complete selected video duration tag",
+    "complete declared Matroska segment",
+    "declared Matroska segment duration",
+    "Matroska segment tail reached",
     "independent complete selected-video endpoint unavailable",
 ];
 
@@ -125,7 +128,7 @@ pub(super) enum SourceRead {
 }
 
 #[cfg(unix)]
-fn source_read(input: Option<&SourceInput>) -> SourceRead {
+pub(super) fn source_read(input: Option<&SourceInput>) -> SourceRead {
     match input {
         Some(input) if input.source_physical_read_failed() => SourceRead::StorageFailed,
         Some(input) if input.source_read_failed() => SourceRead::Interrupted,
@@ -138,7 +141,7 @@ fn source_read(input: Option<&SourceInput>) -> SourceRead {
 /// capability URL redacted.
 const STDERR_TAIL_BYTES: usize = 512;
 
-fn stderr_tail(stderr: &[u8]) -> String {
+pub(super) fn stderr_tail(stderr: &[u8]) -> String {
     let start = stderr.len().saturating_sub(STDERR_TAIL_BYTES);
     let line = String::from_utf8_lossy(&stderr[start..])
         .split_whitespace()
@@ -287,7 +290,7 @@ pub(super) async fn scan(
         if !tools.is_current().await {
             return Err("DV scanner identity changed".into());
         }
-        if !source.unchanged() || source.reopen(file).await.is_err() {
+        if !source.unchanged().await || source.reopen(file).await.is_err() {
             return Err("source changed during title scan".into());
         }
     }
@@ -340,17 +343,25 @@ pub(crate) async fn publish_title_with_tools_for_control(
     let scanner = tools.title_scanner_digest();
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
     let mut demand = store
-        .dv_title_demands(&scanner, 0, crate::source_probe::now_ms())
+        .dv_title_demand_for_file(
+            &scanner,
+            crate::dv_tools::TITLE_SCANNER_GENERATION,
+            file.id,
+            crate::source_probe::now_ms(),
+        )
         .await
         .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|demand| demand.file_id == file.id)
         .ok_or("ordinary probe created no current title demand")?;
     if demand.source_size != file.size || demand.source_mtime != file.mtime {
         return Err("title control source does not match ordinary probe demand".into());
     }
     demand.probe_revision = store
-        .bind_dv_title_demand(demand.probe_revision, &scanner)
+        .bind_dv_title_demand(
+            demand.probe_revision,
+            &scanner,
+            crate::dv_tools::TITLE_SCANNER_GENERATION,
+            crate::source_probe::now_ms(),
+        )
         .await
         .map_err(|e| e.to_string())?
         .ok_or("title demand changed before scanner binding")?;
@@ -462,7 +473,10 @@ pub(crate) async fn publish_title_with_tools_for_control(
         )
         .await
         .map_err(|error| error.to_string())?;
-        if !tools.is_current().await || !source.unchanged() || source.reopen(file).await.is_err() {
+        if !tools.is_current().await
+            || !source.unchanged().await
+            || source.reopen(file).await.is_err()
+        {
             return Err("title scanner or source changed before control publication".into());
         }
         if !fence
@@ -532,7 +546,6 @@ mod scanner_launch_tests {
     use super::*;
     use plurx_core::process::source_lifetime as lifetime;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
     async fn managed_title_scanner_reads_the_broker_with_a_bound_manifest() {
@@ -563,21 +576,6 @@ mod scanner_launch_tests {
             return;
         }
 
-        static OBSERVED: AtomicUsize = AtomicUsize::new(0);
-
-        fn observe(value: &lifetime::LaunchObservation) -> std::io::Result<()> {
-            assert_eq!(value.declared, lifetime::SourceAccess::Brokered);
-            assert_eq!(
-                value.reason,
-                Some("broker_confinement_unqualified"),
-                "the command, manifest, registered broker and daemon cwd must pass all preceding checks"
-            );
-            assert!(!value.verified, "the fixture cannot grant confinement");
-            assert!(!value.descriptor_handoff, "legacy descriptor hook");
-            OBSERVED.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
         let root = crate::test_tempdir().expect("scanner fixture");
         let runtime = root.path().join("runtime");
         let tools = root.path().join("tools");
@@ -605,7 +603,8 @@ exec /usr/bin/curl --noproxy '*' -fsS "$1"
         let (_store, _id, active) = crate::background_jobs::tests::active().await;
         lifetime::set_daemon_roots(std::slice::from_ref(&runtime), &[tools])
             .expect("source-policy roots");
-        lifetime::install_observer(observe).expect("isolated observer");
+        // The child process is isolated, so these counters start at this test.
+        let before = lifetime::launch_snapshot();
         let input = SourceInput::open_background_held(
             crate::fragment_index_cluster::SourceFence::clone_current_held(&held).expect("source"),
             "application/octet-stream",
@@ -629,6 +628,18 @@ exec /usr/bin/curl --noproxy '*' -fsS "$1"
         active.finish().await;
         assert!(output.status.success(), "{:?}", output.stderr);
         assert_eq!(output.stdout, body[..64 * 1024]);
-        assert_eq!(OBSERVED.load(Ordering::SeqCst), 1);
+        // The scanner declares brokered access; the fixture cannot grant
+        // broker confinement, so the launch is counted unverified, not verified.
+        let after = lifetime::launch_snapshot();
+        assert_eq!(
+            after.unverified,
+            before.unverified + 1,
+            "one declared, unverified launch"
+        );
+        assert_eq!(after.unknown, before.unknown + 1);
+        assert_eq!(
+            after.verified, before.verified,
+            "the fixture cannot grant confinement"
+        );
     }
 }

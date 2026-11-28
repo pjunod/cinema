@@ -700,20 +700,77 @@ function watchDisplayDynamicRange(){
 const QUALITY_MODES=[["auto","Auto"],["original","Original"],
                      ["nomse","Original · one stream"]];
 function playQuality(){ try{ return localStorage.getItem("plurx_quality")||"auto"; }catch(e){ return "auto"; } }
+// Standard frames, smallest first, as [long edge, short edge].
+const STANDARD_QUALITY_FRAMES=[[256,144],[426,240],[640,360],[854,480],[960,540],
+  [1024,576],[1280,720],[1920,1080],[2560,1440],[3840,2160],[7680,4320]];
+// How close a crop's long edge must be to a standard frame's: DCI 4096 and
+// slightly trimmed masters (3832, 1916) are that frame; a 3438-wide picture
+// is not a 4K one.
+const QUALITY_CROP_TOLERANCE=0.08;
+// The tier a raster honestly names, in this order:
+// 1. Its short edge is a standard height. The server scales every lower rung
+//    to its target height whatever the width, so the 3438×1440 and 2560×1080
+//    rungs of a scope title are 1440p and 1080p, as is an ultrawide master.
+// 2. It is a crop of a standard frame: its long edge is that frame's (within
+//    the tolerance) and it fits inside it, so 3840×1608 is 4K and 1920×800
+//    is 1080p.
+// Anything else has no tier name and is shown by its raster.
+function playbackQualityResolution(width,height){
+  if(!(width>0&&height>0)) return null;
+  const long=Math.max(width,height),short=Math.min(width,height);
+  const crop=([w,h])=>short<=h&&Math.abs(long/w-1)<=QUALITY_CROP_TOLERANCE;
+  const frame=STANDARD_QUALITY_FRAMES.find(([,h])=>short===h)
+    ||STANDARD_QUALITY_FRAMES.filter(crop).sort(([a],[b])=>Math.abs(long/a-1)-Math.abs(long/b-1))[0];
+  return frame?qualityCapLabel(frame[1]):null;
+}
+function qualityCapLabel(height){
+  return height===4320?"8K":height===2160?"4K":`${height}p`;
+}
+function qualitySourceIsHdr(){
+  const range=sourceDynamicRange(PLAYER?.source||{})||PLAYER?.deliveredRange;
+  return !!range&&range!=="sdr";
+}
 function qualityOptions(){
   const candidates=PLAYER&&PLAYER.qualityCandidates;
-  if(Array.isArray(candidates)){
-    // The catalog describes this source, selected tracks and decoder. An
-    // empty catalog is authoritative too; do not invent manual encode rungs.
-    const heights=[...new Set(candidates.filter(candidate=>candidate
-      &&candidate.route==='encode'&&candidate.decoder_compatible===true
-      &&Number.isInteger(candidate.target_height)&&candidate.target_height>0
-      &&candidate.target_height<=2160)
-      .map(candidate=>candidate.target_height))].sort((a,b)=>b-a);
-    return QUALITY_MODES.concat(heights.map(height=>[String(height),`${height}p`]));
+  const hdr=qualitySourceIsHdr();
+  const uncertain=hdr?" · may convert to SDR":"";
+  if(!Array.isArray(candidates)){
+    const ladder=PlaybackPolicy.normalizedLadder(PLAYER&&PLAYER.ladder);
+    return QUALITY_MODES.concat(ladder.slice().reverse()
+      .map(({height})=>[String(height),qualityCapLabel(height)+uncertain]));
   }
-  const ladder=PlaybackPolicy.normalizedLadder(PLAYER&&PLAYER.ladder);
-  return QUALITY_MODES.concat(ladder.slice().reverse().map(r=>[String(r.height),`${r.height}p`]));
+  // The request and the remote wire carry a height cap, not a candidate ID.
+  // A grade or raster can describe the option only if its eligible rows agree.
+  const byHeight=new Map();
+  for(const candidate of candidates){
+    if(!candidate||candidate.route!=="encode"||candidate.decoder_compatible!==true) continue;
+    const {target_height:height}=candidate;
+    if(!Number.isInteger(height)||height<=0||height>2160) continue;
+    if(!byHeight.has(height)) byHeight.set(height,[]);
+    byHeight.get(height).push(candidate);
+  }
+  const options=Array.from(byHeight).sort(([a],[b])=>b-a).map(([height,rows])=>{
+    const resolutions=new Set(rows.map(row=>playbackQualityResolution(row.width,row.height)));
+    const tier=resolutions.size===1?[...resolutions][0]:null;
+    const label=tier||`Up to ${qualityCapLabel(height)}`;
+    const consequence=!hdr||rows.every(row=>row.grade==="hdr10")?""
+      :rows.every(row=>row.grade==="sdr")?" · SDR transcode":uncertain;
+    return {height,label,consequence};
+  });
+  const labelCounts=new Map();
+  for(const {label,consequence} of options){
+    const text=label+consequence;
+    labelCounts.set(text,(labelCounts.get(text)||0)+1);
+  }
+  // Auto chooses among the decoder-compatible rows of every route. When each
+  // of them is SDR, Auto can only deliver SDR, so it says so like a cap does.
+  const compatible=candidates.filter(candidate=>candidate?.decoder_compatible===true);
+  const autoSdr=hdr&&compatible.length>0&&compatible.every(row=>row.grade==="sdr");
+  const modes=QUALITY_MODES.map(([id,name])=>id==="auto"&&autoSdr?[id,`${name} · SDR transcode`]:[id,name]);
+  return modes.concat(options.map(({height,label,consequence})=>{
+    const cap=labelCounts.get(label+consequence)>1?` · ${height}p cap`:"";
+    return [String(height),label+consequence+cap];
+  }));
 }
 function autoLastGoodHeight(){
   try{ const h=Number.parseInt(localStorage.getItem("plurx_auto_rung")||"",10); return h>0?h:null; }
@@ -796,7 +853,7 @@ function qualityLabel(){
   const q=playQuality(), f=qualityOptions().find(x=>x[0]===q);
   if(f) return f[1];
   const h=PlaybackPolicy.transcodeHeight(q);
-  return h?`${h}p`:"Auto";
+  return h?`Saved ${h}p cap${qualitySourceIsHdr()?" · may convert to SDR":""}`:"Auto";
 }
 
 async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt, retryIntent){
@@ -903,10 +960,15 @@ function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAtte
           intent:playbackSurfaceIntent(PLAYER),
           title:"Playback could not prepare.",detail:error.message,actions:["retry"]});
       }else{
+        // The sharing host refused the file itself for a copy: a retry meets
+        // the same refusal. Offer the conversion instead; the viewer chooses.
+        const copyRefused=error&&(error.code==="copy_range_input_limit"||error.code==="copy_target_exceeded"||error.code==="copy_observation_skew"||error.code==="hevc_configuration_unsupported");
+        const convertible=copyRefused&&PLAYER&&PLAYER.method!=="transcode";
+        if(convertible)PLAYER.surfaceTranscodeReason="stall-manual";
         stopPlayerForExhaustion();
         raisePlaybackSurface("owner_stopped",{context:"start",player_stopped:true,
           title:"Playback could not prepare.",detail:error.message,
-          actions:["retry","close"]});
+          actions:convertible?["force_transcode","close"]:["retry","close"]});
       }
     }
   };
@@ -1038,6 +1100,9 @@ async function decideForPlay(attempt){
         });
         d2.reasons=[`${learnedLimitView.reason} `+
           `(Quality → Original bypasses this measurement)`].concat(d2.reasons||[]);
+        // The replaced decision was sessionless, so its range is the server's
+        // answer for the source video that Original plays later.
+        d2._sourceVideoRange=ordinaryRange||null;
         decision=d2;
       }catch(e){
         if(!openIsCurrent()) return null;
@@ -1151,6 +1216,13 @@ function buildPlayer(attempt,decided,prepared){
     // decision never promised); direct play has no session, so this stands for
     // the whole playback. MEDIA-BADGES-PLAN.md §3.2.
     deliveredRange:decision.delivered_dynamic_range||null,
+    // The server's answer for the source video unchanged on this client
+    // (direct play or remux: DV kept or stripped to its base grade). It only
+    // answers that for a sessionless decision, including the one a learned
+    // decode limit replaced; a transcode decision's range is its encode
+    // grade, so otherwise the source's stays unknown.
+    sourceVideoRange:decision._sourceVideoRange
+      ??(decision.method!=='transcode'&&decision.delivered_dynamic_range||null),
     deliveredDvProfile:decision.delivered_dolby_vision_profile||null,
     playStartedAt:clickedAt, ttffMs:null, stalls:0, sessionId:null, streamId:null, health:null,
     attemptId:null, attemptReason:null, bufferLimits:null,
@@ -1379,7 +1451,7 @@ function attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,in
     }
     retireOutgoing();
     resetMediaSource(video);
-    const attachment=beginPlaybackMediaAttachment(openedPlayer);
+    const attachment=beginPlaybackMediaAttachment(openedPlayer,{sourceVideo:true});
     setPlaybackMediaSource(video,url);
     markPlaybackControlSeekExecuted(PLAYER,startSec);
     video.onloadedmetadata=()=>{
@@ -1528,7 +1600,7 @@ async function executePlaybackMediaChange(p,change){
       teardownHls(); resetMediaSource(v); clearSubs(v);
       p.started=false; p.method='remux'; p.copyHls=false; p.offset=pos;
       p.probeUrl=playbackFileUrl(playbackFileContextForPlayer(p),"stream.mp4");
-      const attachment=beginPlaybackMediaAttachment(p);
+      const attachment=beginPlaybackMediaAttachment(p,{sourceVideo:true});
       v.onloadedmetadata=()=>{if(!attachment.current())return;v.onloadedmetadata=null;applyPlaybackAttachmentPosition(v,p,attachment,0);};
       setPlaybackMediaSource(v,remuxUrl(playbackFileContextForPlayer(p),audio,pos));
       markPlaybackControlSeekExecuted(p,pos);
@@ -1637,8 +1709,11 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
         .catch(error=>{
           // Soundtrack alternates need encoder capacity a plain copy does not;
           // when the encoders are busy, keep the copy without alternates.
-          if(!options.split_audio||!error||error.code!=="vod_family_capacity") throw error;
-          const {split_audio,...muxed}=options;
+          // The server reports the family's encoder refusal as the typed
+          // `transcode_capacity_pending`; older builds named it directly.
+          if(!options.split_audio||!error||!["vod_family_capacity","transcode_capacity_pending"].includes(error.code)) throw error;
+          // `false` is the explicit muxed request; it outranks the caps token.
+          const muxed={...options,split_audio:false};
           return openSessionRetryingNotYet(playbackFileContextForPlayer(PLAYER),muxed,signal,retry);
         }),
       late=>releaseSession(late&&late.session_id));
@@ -1667,7 +1742,7 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
       detail:"the HLS index is still building — remuxing without segmentation"});
     resetMediaSource(v);
     if(live && !live()) return false;
-    const player=PLAYER,attachment=beginPlaybackMediaAttachment(player);
+    const player=PLAYER,attachment=beginPlaybackMediaAttachment(player,{sourceVideo:true});
     v.onloadedmetadata=()=>{if(!attachment.current())return;v.onloadedmetadata=null;applyPlaybackAttachmentPosition(v,player,attachment,0);};
     setPlaybackMediaSource(v,remuxUrl(context,aidx,from));
     markPlaybackControlSeekExecuted(PLAYER,from);

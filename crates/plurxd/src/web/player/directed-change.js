@@ -930,8 +930,17 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
   // `plan_derivation.legacy_trusted` off zero.
   const caps=(typeof PLAYER!=="undefined"&&PLAYER&&PLAYER.capsSnapshot)
     ||currentCapsDocument();
+  // A split request is a claim about this start's engine (hls.js plays the
+  // alternate audio group; Safari's native parser ignores it), so the caps
+  // token rides only this create. `split_audio:false` stays on the wire as
+  // the explicit muxed request.
+  // Without a usable caps document the legacy flag carries the request.
+  const splitAv=body.split_audio===true&&capsDocumentIsUsable(caps);
+  if(splitAv) delete body.split_audio;
   if(capsDocumentIsUsable(caps)){
-    body.caps=caps;
+    body.caps=splitAv
+      ?Object.assign({},caps,{transports:[...(caps.transports||[]).filter(t=>t!=="hls-split-av-v1"),"hls-split-av-v1"]})
+      :caps;
     // The other half of the same question. `/decision` is asked with the
     // quality menu's force on the query string; a create that hands the server
     // the document but not the force is re-derived under `Force::Auto`, which
@@ -1275,6 +1284,9 @@ function attachSession(v, t, info, wantSec){
   const into = Math.max(0,(Number(wantSec)||0)-(t.offset||0));
   t.controlPositionHintSec=(t.offset||0)+into;
   attachHls(v, info.playlist_url, into);
+  // The legacy range hint can survive a response that omits its grade.
+  // The quality control uses only this attachment's reported range.
+  if(t.mediaAttachment) t.mediaAttachment.qualityRange=info.delivered_dynamic_range||null;
   startPlaybackControl(v,t,info.control||null);
   t.effectiveProcessing=effectiveHdrProcessing(info.effective_processing,
     t.controlReporter?.bootstrap?.generation,info.delivered_dynamic_range);
@@ -1343,7 +1355,7 @@ function attachSharedDirect(v,t,info,wantSec){
   t.directUrl=info.url; t.probeUrl=info.url;
   if(t===PLAYER) renderPlayerInfo();
   resetMediaSource(v);
-  const attachment=beginPlaybackMediaAttachment(t);
+  const attachment=beginPlaybackMediaAttachment(t,{sourceVideo:true});
   const direct={session_id:info.session_id,attachment,timeline:false};
   t.sharedDirect=direct;
   setPlaybackMediaSource(v,info.url);

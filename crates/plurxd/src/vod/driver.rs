@@ -1056,6 +1056,16 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 encoding.reset_active_production(epoch, false);
             }
         }
+        if matches!(
+            decision.action,
+            Action::Suspend {
+                reason: crate::prodsched::Hold::NoRoom { .. },
+                ..
+            }
+        ) && shared.pool.blocked_on(&rendition.key).is_some()
+        {
+            shared.reclaim_working_set(&rendition.key, position.working_set.release_limit());
+        }
         // Record only this pass's decision. A later non-capacity decision
         // clears the reason, so the status cannot outlive the condition that
         // produced it.
@@ -1365,6 +1375,13 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                         // Room may now exist; decide again promptly — and the
                         // freed bytes are node-wide news, so every other
                         // rendition's driver re-examines its hold too.
+                        if freed.bytes < wanted && shared.pool.blocked_on(&rendition.key).is_some()
+                        {
+                            shared.reclaim_working_set(
+                                &rendition.key,
+                                position.working_set.release_limit(),
+                            );
+                        }
                         if freed.bytes > 0 {
                             rendition.kick();
                             shared.kick_all();
@@ -1425,10 +1442,9 @@ pub(super) fn reader_admission_priority(
             priority = Some(purpose);
         }
     };
-    for reader in readers
-        .values()
-        .filter(|reader| !reader.authority_only && !reader.draining_after_prepared_commit)
-    {
+    for reader in readers.values().filter(|reader| {
+        !reader.authority_only && !reader.on_demand_only && !reader.draining_after_prepared_commit
+    }) {
         include(reader.admission_priority);
     }
     for request in pool.demands(&rendition.key) {
@@ -1512,7 +1528,11 @@ pub(super) fn playback_demands(
     demands.extend(
         readers
             .values()
-            .filter(|reader| !reader.authority_only && !reader.draining_after_prepared_commit)
+            .filter(|reader| {
+                !reader.authority_only
+                    && !reader.on_demand_only
+                    && !reader.draining_after_prepared_commit
+            })
             .map(|reader| match reader.preparation_frontier {
                 Some(frontier) => {
                     // Admission records an actual bounded Prepare request,

@@ -1637,6 +1637,11 @@ async fn final_readable_core_completes_without_gaps_or_loser_downgrade_and_cache
         subtitle_translation_read::{AcquireTranslationLease, TranslationQuery, TranslationRead},
     };
     let (_dir, store, conn) = fixture();
+    conn.execute(
+        "INSERT INTO settings(key,value) VALUES(?1,'1')",
+        [plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT],
+    )
+    .expect("reserve one maintenance reader per root");
     let recipe = prepared(&store).await;
     let observation = |now| TranslationRead {
         user_id: 1,
@@ -1678,15 +1683,25 @@ async fn final_readable_core_completes_without_gaps_or_loser_downgrade_and_cache
         .expect("lease");
     let mut last = recipe.clone();
     last.core_index = 1;
-    // The common queue reserves one source lane for a viewer. Give this
-    // fixture an explicit foreground interest so both attempts acquire real,
-    // counted reservations; two background readers must remain contended.
+    // Both attempts hold a lease on the same root. The winner's viewer
+    // interest lets it use the protected live slot.
     let winner = range_for_consumer(&store, &last, "last-winner", 1700, "playback_fragment").await;
     let loser = range(&store, &last, "last-loser", 1750).await;
-    assert_eq!(conn.query_row(
-        "SELECT count(*) FROM background_job_reservations WHERE resource_key='source_io' AND expires_at_ms>1751",
-        [], |r| r.get::<_, i64>(0)
-    ).expect("two counted live source reservations"), 2);
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(DISTINCT held.work_id) FROM source_leases held
+             JOIN source_lease_effective_resources scope ON scope.lease_id=held.lease_id
+             WHERE held.owner_kind='job' AND held.work_id IN (?1, ?2)
+               AND held.phase!='paused' AND held.expires_at_ms>1751
+               AND scope.resource_key IN (
+                 SELECT resource_key FROM source_lease_file_resources WHERE file_id=1
+               )",
+            [&winner.id, &loser.id],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("two charged leases on the fixture root"),
+        2
+    );
     let publication = |job: &plurx_core::store::background_jobs::BackgroundJob,
                        text: &str,
                        now_ms| PublishTranslationSegment {

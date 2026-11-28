@@ -30,12 +30,23 @@ pub(crate) const QUALITY_CANDIDATES_PATH: &str = "/internal/v1/media/quality-can
 pub(crate) const QUALITY_CATALOG_DEADLINE: Duration =
     plurx_core::cluster::timing::pool::QUALITY_CATALOG_DEADLINE;
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
+/// Protocol 14 seals a VOD copy's issued layout and soundtrack identities
+/// in the strict worker contract before publishing the session (P62 S3).
+/// Protocol 13 adds the split-copy offer contract (`OFFER_SPLIT_COPY`): an
+/// offer for a predicted split copy names its audio-free video, so placement
+/// and cache reuse no longer depend on the selected soundtrack (P62 S2).
+/// Protocol 12 added `split_audio` to the strict SessionRequest.
 /// Protocol 11 adds the server-selected F+ curve digest to strict SessionRequest.
 /// Protocol 10 retains the original descriptive catalog query in the strict
 /// CandidateCatalogContext. Protocol 9 added resolved audio facts. Exact-version
 /// placement excludes older workers, so rolling upgrades retain an eligible
 /// owner in each cohort and drain old ingress/sessions before the last old node.
-pub(crate) const PROTOCOL_VERSION: i64 = 12;
+pub(crate) const PROTOCOL_VERSION: i64 = 14;
+/// The offer contract of every placement except a predicted split copy.
+pub(crate) const OFFER_MUXED: &str = "hls-mpegts-v1";
+/// A predicted split copy: one shared video-only rendition, with every
+/// soundtrack beside it. The offer carries no audio selection.
+pub(crate) const OFFER_SPLIT_COPY: &str = "hls-split-fmp4-v1";
 pub(crate) const SNAPSHOT_INTERVAL: Duration = plurx_core::cluster::timing::pool::SNAPSHOT_INTERVAL;
 pub(crate) const SNAPSHOT_DEADLINE: Duration = plurx_core::cluster::timing::pool::SNAPSHOT_DEADLINE;
 pub(crate) const SNAPSHOT_EXPIRY: Duration = plurx_core::cluster::timing::pool::SNAPSHOT_EXPIRY;
@@ -843,6 +854,9 @@ pub(crate) struct MediaOfferRequest {
 }
 
 impl MediaOfferRequest {
+    /// An offer for the presentation the ingress predicts. A split copy's
+    /// offer drops the audio selection: its video is the same for every
+    /// soundtrack, so every soundtrack must place and reuse the same way.
     pub(crate) fn new(
         file: &MediaFile,
         target_height: i64,
@@ -850,7 +864,9 @@ impl MediaOfferRequest {
         audio_index: Option<i64>,
         subtitle_index: Option<i64>,
         hdr10: bool,
+        split_copy: bool,
     ) -> Result<Self, &'static str> {
+        let audio_index = if split_copy { None } else { audio_index };
         let decoder = decoder_contract(file).ok_or("unsupported_decoder")?;
         let scratch_bytes_required = scratch_estimate(file, target_height);
         let mut request = Self {
@@ -865,7 +881,12 @@ impl MediaOfferRequest {
             audio_index,
             subtitle_index,
             hdr10,
-            output_contract: "hls-mpegts-v1".to_owned(),
+            output_contract: if split_copy {
+                OFFER_SPLIT_COPY
+            } else {
+                OFFER_MUXED
+            }
+            .to_owned(),
             scratch_bytes_required,
         };
         request.request_fingerprint = request.fingerprint();
@@ -891,7 +912,10 @@ impl MediaOfferRequest {
                 .is_none_or(|index| (0..=MAX_TRACK_INDEX).contains(&index))
             && self.decoder.len() <= MAX_CAPABILITY_BYTES
             && !self.decoder.is_empty()
-            && self.output_contract == "hls-mpegts-v1"
+            && (self.output_contract == OFFER_MUXED
+                || (self.output_contract == OFFER_SPLIT_COPY
+                    && self.audio_index.is_none()
+                    && self.subtitle_index.is_none()))
             && self.scratch_bytes_required > 0
             && self.request_fingerprint.len() == 64
             && self.request_fingerprint == self.fingerprint()
@@ -914,6 +938,33 @@ impl MediaOfferRequest {
             u8::from(self.hdr10).to_string(),
             self.output_contract.clone(),
             self.scratch_bytes_required.to_string(),
+        ] {
+            hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+            hasher.update(value.as_bytes());
+        }
+        hex::encode(hasher.finalize())
+    }
+
+    pub(crate) fn split_copy(&self) -> bool {
+        self.output_contract == OFFER_SPLIT_COPY
+    }
+
+    /// The key rendezvous ranks peers by. A split copy is keyed on its video
+    /// alone — source, decoder and contract — so viewers who start the same
+    /// title at another position or in another language rank the same peers
+    /// in the same order. Every other offer keeps its request fingerprint.
+    pub(crate) fn placement_key(&self) -> String {
+        if !self.split_copy() {
+            return self.request_fingerprint.clone();
+        }
+        let mut hasher = Sha256::new();
+        for value in [
+            self.protocol_version.to_string(),
+            self.file_id.to_string(),
+            self.source_size.to_string(),
+            self.source_mtime.to_string(),
+            self.decoder.clone(),
+            self.output_contract.clone(),
         ] {
             hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
             hasher.update(value.as_bytes());
@@ -2135,7 +2186,7 @@ impl MediaPool {
         rank_offers(
             &mut offers,
             &ranking_snapshots,
-            &request.request_fingerprint,
+            &request.placement_key(),
             &state.node_id,
         );
         let selected_node_id = offers
@@ -2686,21 +2737,31 @@ pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -
                 count_pressure(probe.active_sessions, probe.session_pressure_limit);
             let egress_pressure = source_io_pressure;
             let scratch_ok = probe.scratch_bytes_free >= request.scratch_bytes_required;
+            // A split copy reuses its shared video, which the live-transcode
+            // plan for one soundtrack cannot describe.
+            let cache_hit = if request.split_copy() {
+                state.transcode.vod_holds_split_video(&file).await
+            } else {
+                probe.cache_hit
+            };
             let capability_ok = probe.decoder_supported
                 && probe.target_supported
-                && request.output_contract == "hls-mpegts-v1";
+                && (request.output_contract == OFFER_MUXED || request.split_copy());
             let pressure_ok = !matches!(egress_pressure, PressureBand::Unavailable);
+            // A held muxed output needs neither source nor scratch. A held
+            // split video still needs both: its soundtracks are encoded here.
+            let reuse_suffices = cache_hit && !request.split_copy();
             let eligible = capability_ok
                 && pressure_ok
-                && (probe.cache_hit || (source_likely_readable && scratch_ok));
+                && (reuse_suffices || (source_likely_readable && scratch_ok));
             let refusal_code = (!eligible).then(|| {
                 if !capability_ok {
                     "incapable"
                 } else if !pressure_ok {
                     "egress_saturated"
-                } else if !source_likely_readable && !probe.cache_hit {
+                } else if !source_likely_readable && !reuse_suffices {
                     "source_unverified"
-                } else if !scratch_ok && !probe.cache_hit {
+                } else if !scratch_ok && !reuse_suffices {
                     "scratch_full"
                 } else {
                     "temporarily_busy"
@@ -2710,7 +2771,7 @@ pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -
             MediaOffer {
                 eligible,
                 refusal_code,
-                cache_hit: probe.cache_hit,
+                cache_hit,
                 source_likely_readable,
                 scratch_bytes_free: probe.scratch_bytes_free,
                 source_io_pressure,
@@ -3683,6 +3744,82 @@ mod tests {
             probed: true,
             dolby_vision: Default::default(),
         }
+    }
+
+    /// The P49 canary: a split copy of one title placed by its selected
+    /// soundtrack (audio 0 on one node, audio 1 on another) packaged the same
+    /// audio-free video twice. A split copy offer names only its video.
+    #[test]
+    fn split_copy_offer_places_every_soundtrack_and_start_by_its_video() {
+        let file = media_file_with_tracks();
+        let split = |audio, start| {
+            MediaOfferRequest::new(&file, 1080, start, audio, None, false, true)
+                .expect("split offer")
+        };
+        let first = split(Some(4), 0);
+        assert_eq!(first.output_contract, OFFER_SPLIT_COPY);
+        assert_eq!(
+            first.audio_index, None,
+            "the soundtrack is not part of the offer"
+        );
+        assert!(first.is_valid());
+        assert_eq!(
+            first.request_fingerprint,
+            split(Some(9), 0).request_fingerprint
+        );
+        assert_eq!(
+            first.request_fingerprint,
+            split(None, 0).request_fingerprint
+        );
+        // Another start position is another request, but the same placement.
+        let later = split(Some(4), 600);
+        assert_ne!(first.request_fingerprint, later.request_fingerprint);
+        assert_eq!(first.placement_key(), later.placement_key());
+
+        let muxed = |audio| {
+            MediaOfferRequest::new(&file, 1080, 0, audio, None, false, false).expect("muxed offer")
+        };
+        assert_eq!(muxed(Some(4)).output_contract, OFFER_MUXED);
+        assert_ne!(
+            muxed(Some(4)).request_fingerprint,
+            muxed(None).request_fingerprint,
+            "a muxed transcode still differs per soundtrack"
+        );
+        assert_eq!(
+            muxed(Some(4)).placement_key(),
+            muxed(Some(4)).request_fingerprint
+        );
+        assert_ne!(muxed(None).placement_key(), first.placement_key());
+
+        // A forged split offer that names a soundtrack or a burn is refused.
+        let mut forged = first.clone();
+        forged.audio_index = Some(4);
+        forged.request_fingerprint = forged.fingerprint();
+        assert!(!forged.is_valid());
+        let mut forged = first.clone();
+        forged.subtitle_index = Some(7);
+        forged.request_fingerprint = forged.fingerprint();
+        assert!(!forged.is_valid());
+        let mut unknown = first;
+        unknown.output_contract = "hls-split-fmp4-v2".to_owned();
+        unknown.request_fingerprint = unknown.fingerprint();
+        assert!(!unknown.is_valid());
+
+        // Rendezvous over the placement key orders peers identically for
+        // every soundtrack of the split copy.
+        let nodes = ["peer-a", "peer-b", "peer-c", "peer-d"];
+        let order = |key: &str| {
+            let mut offers: Vec<_> = nodes.iter().map(|node| offer(node)).collect();
+            rank_offers(&mut offers, &HashMap::new(), key, "elsewhere");
+            offers
+                .into_iter()
+                .map(|offer| offer.node_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(&split(Some(4), 0).placement_key()),
+            order(&split(Some(9), 1_000).placement_key())
+        );
     }
 
     #[test]

@@ -70,8 +70,13 @@ something else, e.g. `DV P7 → DV P8`, `DV → HDR10` or `DV P7 → HDR10-E`), 
 active Dolby Vision enhancements and the audio format. RPU and DYN mean mpv
 applied the RPU and the per-shot display mapping on this machine (RPU is not
 claimed on a Profile 7 → 8.1 delivery, where it is a pass-through). EL means
-the private build received the dual-layer Profile 7 stream and pairs its
-enhancement layer; neither plurx nor mpv says whether that layer is full or
+the native Dolby renderer composed the enhancement layer into the picture it is
+mapping now: the private mpv's `native-dovi-target-state` reports this as the
+level `enhancement-layer-composed`, which follows the frame on screen and drops
+when that frame maps without the layer, even while mapping continues, and on a
+failed render or a reset. An mpv without that field, or a non-native renderer, keeps
+the older inference (a dual-layer Profile 7 stream reached the private build).
+Neither plurx nor mpv says whether that layer is full or
 minimal, so FEL appears only when the server reports it (for example a
 server-reconstructed picture). Playback info adds the mapper line and why each
 enhancement is or is not active.
@@ -161,6 +166,12 @@ bundled executable through dpkg's normal obsolete-file handling. The source
 package has one launcher orig tarball plus the Debian tarball; historical
 renderer patches and CPU controls remain source only. `SHA256SUMS` covers the
 binary and source artifacts; `.buildinfo` records the build environment.
+
+A Debian changelog update merged to Forgejo main builds and verifies the
+package there. The workflow attaches the binary, Debian source, checksums
+and build information to `plurx-player-deb-<version>` for the project APT
+publisher. The release identifies the source commit. Reusing a version
+with different bytes fails the release job.
 
 Verification checks checksums (including a negative self-test), lintian,
 installation, package ownership/file list, scheme registration, default binary,

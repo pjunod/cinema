@@ -495,12 +495,14 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
     };
     let mut request = SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
+        accepted_processed_ask: None,
         candidate_context: Some(Box::new(TranscodeManager::candidate_context(&candidate))),
         vod_only: false,
         passive_vod: false,

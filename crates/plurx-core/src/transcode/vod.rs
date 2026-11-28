@@ -68,7 +68,7 @@ impl VodSourceClock {
         bytes
     }
 
-    fn origin_microseconds(self) -> i64 {
+    pub fn origin_microseconds(self) -> i64 {
         match self {
             Self::ReportedOrigin(value) => value,
             Self::ProducerDefaultZero => 0,
@@ -85,6 +85,10 @@ impl VodSourceClock {
 
 pub const VOD_AUDIO_RATE: u32 = 48_000;
 pub const VOD_AAC_FRAME_SAMPLES: u64 = 1_024;
+/// The copy plan's 15-second ceiling plus allowance for rounding at both
+/// ends. The publisher also enforces its separate interval byte limit.
+pub(crate) const VOD_AAC_MAX_SEGMENT_TICKS: u64 =
+    VOD_AUDIO_RATE as u64 * super::COPY_SEGMENT_MAX_SECS as u64 + VOD_AAC_FRAME_SAMPLES;
 /// The sample entry promised by encoded HEVC HLS presentations. The fMP4
 /// normalizer already promotes/removes in-band parameter sets for this entry.
 pub const VOD_HEVC_SAMPLE_ENTRY: &str = "hvc1";
@@ -139,11 +143,7 @@ fn shared_audio_plan_ticks(duration: u64, bitrate_kbps: u32) -> SegmentPlan {
             kind: PlanEntryKind::AudioTail,
             start_ticks: start,
             duration_ticks: ticks,
-            est_bytes: u64::from(bitrate_kbps)
-                .saturating_mul(1_000)
-                .saturating_mul(ticks)
-                .saturating_mul(3)
-                / (u64::from(VOD_AUDIO_RATE) * 16),
+            est_bytes: shared_audio_entry_bytes(bitrate_kbps, ticks),
             cut: if start + ticks == duration {
                 PlanCut::EndOfStream
             } else {
@@ -159,6 +159,90 @@ fn shared_audio_plan_ticks(duration: u64, bitrate_kbps: u32) -> SegmentPlan {
         target_duration: if entries.is_empty() { 0 } else { 3 },
         entries,
     }
+}
+
+fn shared_audio_entry_bytes(bitrate_kbps: u32, ticks: u64) -> u64 {
+    u64::from(bitrate_kbps)
+        .saturating_mul(1_000)
+        .saturating_mul(ticks)
+        .saturating_mul(3)
+        / (u64::from(VOD_AUDIO_RATE) * 16)
+}
+
+fn shared_audio_plan_aligned_to_video(
+    video: &SegmentPlan,
+    end_ticks: u64,
+    bitrate_kbps: u32,
+) -> Option<SegmentPlan> {
+    shared_audio_plan_aligned_to_video_with_width(
+        video,
+        end_ticks,
+        bitrate_kbps,
+        VOD_AAC_FRAME_SAMPLES,
+    )
+}
+
+fn shared_audio_plan_aligned_to_video_with_width(
+    video: &SegmentPlan,
+    end_ticks: u64,
+    bitrate_kbps: u32,
+    packet_ticks: u64,
+) -> Option<SegmentPlan> {
+    let first = video.entries.first()?;
+    if first.start_ticks != 0 || video.timescale == 0 || video.len() > 100_000 {
+        return None;
+    }
+    let frame_denominator = u128::from(video.timescale) * u128::from(packet_ticks);
+    let mut plan = SegmentPlan {
+        version: SEGPLAN_VERSION,
+        timescale: VOD_AUDIO_RATE,
+        entries: Vec::with_capacity(video.len()),
+        target_duration: 0,
+    };
+    let mut start = 0_u64;
+    for boundary in video.entries.iter().skip(1).map(|entry| entry.start_ticks) {
+        // Round each absolute time once. A tie goes to the later packet.
+        let numerator = u128::from(boundary) * u128::from(VOD_AUDIO_RATE);
+        let frame = (numerator + frame_denominator / 2) / frame_denominator;
+        let end = u64::try_from(frame * u128::from(packet_ticks)).ok()?;
+        if end >= end_ticks {
+            return None;
+        }
+        push_shared_audio_interval(&mut plan, bitrate_kbps, start, end, PlanCut::Clean)?;
+        start = end;
+    }
+    push_shared_audio_interval(
+        &mut plan,
+        bitrate_kbps,
+        start,
+        end_ticks,
+        PlanCut::EndOfStream,
+    )?;
+    Some(plan)
+}
+
+fn push_shared_audio_interval(
+    plan: &mut SegmentPlan,
+    bitrate_kbps: u32,
+    start: u64,
+    end: u64,
+    cut: PlanCut,
+) -> Option<()> {
+    let ticks = end
+        .checked_sub(start)
+        .filter(|ticks| (1..=VOD_AAC_MAX_SEGMENT_TICKS).contains(ticks))?;
+    let seconds = u32::try_from(ticks.div_ceil(u64::from(VOD_AUDIO_RATE))).ok()?;
+    plan.target_duration = plan.target_duration.max(seconds);
+    plan.entries.push(PlanEntry {
+        index: u32::try_from(plan.entries.len()).ok()?,
+        kind: PlanEntryKind::AudioTail,
+        start_ticks: start,
+        duration_ticks: ticks,
+        est_bytes: shared_audio_entry_bytes(bitrate_kbps, ticks),
+        cut,
+        fragments: 0,
+    });
+    Some(())
 }
 
 /// The declared OUTPUT cadence, not a claim that the input is constant-rate.
@@ -472,8 +556,9 @@ pub struct VodSharedAudioRendition {
     init_id: String,
     recipe_id: String,
     source_object_version: String,
-    facts: crate::fmp4::AacSampleEntryFacts,
+    facts: VodAudioSampleEntryFacts,
     bitrate_kbps: u32,
+    aligned_plan: Option<std::sync::Arc<SegmentPlan>>,
 }
 
 impl VodSharedAudioRendition {
@@ -494,7 +579,7 @@ impl VodSharedAudioRendition {
             || source_object_version
                 .bytes()
                 .any(|byte| byte.is_ascii_control())
-            || VodSharedAudioRecipe::from_plan(plan).as_ref() != Some(recipe)
+            || VodSharedAudioRecipe::from_plan(plan).is_none_or(|base| base.digest != recipe.digest)
         {
             return Err(crate::fmp4::Fmp4Error::Unsupported(
                 "soundtrack does not match its source-bound recipe".into(),
@@ -503,10 +588,14 @@ impl VodSharedAudioRendition {
         Ok(Self {
             rendition_id: rendition_id.to_owned(),
             init_id: hex::encode(Sha256::digest(&init.bytes)),
-            recipe_id: recipe.digest.clone(),
+            recipe_id: recipe.digest().to_owned(),
             source_object_version: source_object_version.to_owned(),
             facts: recipe.verify_init(init)?,
             bitrate_kbps: recipe.audio_bitrate_kbps,
+            aligned_plan: recipe
+                .alignment
+                .as_ref()
+                .map(|alignment| alignment.plan.clone()),
         })
     }
     pub fn rendition_id(&self) -> &str {
@@ -521,7 +610,7 @@ impl VodSharedAudioRendition {
     pub fn source_object_version(&self) -> &str {
         &self.source_object_version
     }
-    pub fn facts(&self) -> &crate::fmp4::AacSampleEntryFacts {
+    pub fn facts(&self) -> &VodAudioSampleEntryFacts {
         &self.facts
     }
     pub fn bitrate_kbps(&self) -> u32 {
@@ -529,6 +618,14 @@ impl VodSharedAudioRendition {
     }
 
     pub fn media_playlist(&self, plan: &SegmentPlan) -> Result<String, crate::fmp4::Fmp4Error> {
+        if let Some(aligned) = self.aligned_plan.as_deref() {
+            if aligned != plan {
+                return Err(crate::fmp4::Fmp4Error::Unsupported(
+                    "split soundtrack plan differs from its verified recipe".into(),
+                ));
+            }
+            return Ok(rendition_media_playlist(plan, &self.init_id));
+        }
         continuous_media_playlist(
             plan,
             &self.init_id,
@@ -550,8 +647,12 @@ fn continuous_media_playlist(
     frame_ticks: u64,
     kind: PlanEntryKind,
 ) -> Result<String, crate::fmp4::Fmp4Error> {
-    use std::fmt::Write;
     validate_continuous_media_plan(plan, timescale, span, frame_ticks, kind)?;
+    Ok(rendition_media_playlist(plan, init_id))
+}
+
+fn rendition_media_playlist(plan: &SegmentPlan, init_id: &str) -> String {
+    use std::fmt::Write;
     let mut out = String::with_capacity(256 + plan.entries.len() * 48);
     out.push_str("#EXTM3U\n#EXT-X-VERSION:7\n");
     let _ = writeln!(out, "#EXT-X-TARGETDURATION:{}", plan.target_duration);
@@ -561,12 +662,12 @@ fn continuous_media_playlist(
         let _ = writeln!(
             out,
             "#EXTINF:{:.6},\nsegment/{}.m4s",
-            entry.seconds(timescale),
+            entry.seconds(plan.timescale),
             entry.index
         );
     }
     out.push_str("#EXT-X-ENDLIST\n");
-    Ok(out)
+    out
 }
 
 fn validate_continuous_media_plan(
@@ -633,6 +734,13 @@ impl VodRenditionBandwidth {
             && self
                 .sustained_bps
                 .is_none_or(|sustained| sustained > 0 && sustained <= self.peak_bps)
+    }
+
+    fn split_budget(&self) -> super::split_master::SplitBudget {
+        super::split_master::SplitBudget {
+            peak_bps: self.peak_bps,
+            average_bps: self.average_bps,
+        }
     }
 }
 
@@ -794,14 +902,19 @@ impl VodPresentationFamily {
         Ok(dependencies)
     }
 
-    /// Render only verified media identities. The owner must independently
-    /// retain admission and a bounded serving path for every advertised URI.
-    /// Relative paths keep each rendition under the existing parent capability.
-    pub fn master_playlist(
+    /// Describe only verified media identities for the one split master
+    /// writer. The owner must independently retain admission and a bounded
+    /// serving path for every advertised URI. Relative paths keep each
+    /// rendition under the existing parent capability.
+    pub fn presentation(
         &self,
         video_budgets: &[VodRenditionBandwidth],
         audio_budget: Option<&VodRenditionBandwidth>,
-    ) -> Result<String, crate::fmp4::Fmp4Error> {
+        audio_source: Option<&super::split_master::SplitAudioSource>,
+    ) -> Result<super::split_master::SplitPresentation, crate::fmp4::Fmp4Error> {
+        use super::split_master::{
+            SplitAudio, SplitBandwidth, SplitPresentation, SplitVideo, VideoRange,
+        };
         let refuse = || {
             crate::fmp4::Fmp4Error::Unsupported(
                 "continuous master has incomplete or conflicting rendition budgets".into(),
@@ -829,46 +942,66 @@ impl VodPresentationFamily {
         {
             return Err(refuse());
         }
-        let mut out = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
-        if let Some(audio) = &self.audio {
-            out.push_str(&format!(
-                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"shared\",NAME=\"Audio\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"{}\",URI=\"audio/{}/index.m3u8\"\n",
-                audio.facts.channels, audio.rendition_id,
-            ));
-        }
-        for rung in &self.video.rungs {
-            let budget = budgets[rung.rendition_id()];
-            let peak = budget
-                .peak_bps
-                .checked_add(audio_budget.map_or(0, |audio| audio.peak_bps))
-                .ok_or_else(refuse)?;
-            out.push_str(&format!("#EXT-X-STREAM-INF:BANDWIDTH={peak}"));
-            let average = match (budget.average_bps, audio_budget) {
-                (Some(video), None) => Some(video),
-                (Some(video), Some(audio)) => audio
-                    .average_bps
-                    .map(|audio| video.checked_add(audio).ok_or_else(refuse))
-                    .transpose()?,
-                _ => None,
-            };
-            if let Some(average) = average {
-                out.push_str(&format!(",AVERAGE-BANDWIDTH={average}"));
+        let variants = self
+            .video
+            .rungs
+            .iter()
+            .map(|rung| {
+                let budget = budgets[rung.rendition_id()];
+                SplitVideo {
+                    rendition_id: rung.rendition_id.clone(),
+                    codec: rung.facts.codec.clone(),
+                    supplemental_codecs: None,
+                    width: Some(u32::from(rung.facts.width)),
+                    height: Some(u32::from(rung.facts.height)),
+                    frame_rate: Some(
+                        f64::from(rung.grid.numerator) / f64::from(rung.grid.denominator),
+                    ),
+                    video_range: VideoRange::of_avc(rung.facts.color_transfer),
+                    budget: Some(budget.split_budget()),
+                }
+            })
+            .collect();
+        let audio = match (&self.audio, audio_budget) {
+            (Some(audio), Some(budget)) => {
+                let source = audio_source.ok_or_else(refuse)?;
+                vec![SplitAudio {
+                    rendition_id: audio.rendition_id.clone(),
+                    source_index: source.source_index,
+                    title: source.title.clone(),
+                    language: source.language.clone(),
+                    default: true,
+                    channels: Some(audio.facts.channels),
+                    codec: audio.facts.codec.to_owned(),
+                    budget: Some(budget.split_budget()),
+                }]
             }
-            let codecs = self.audio.as_ref().map_or_else(
-                || rung.facts.codec.clone(),
-                |audio| format!("{},{}", rung.facts.codec, audio.facts.codec),
-            );
-            let rate = f64::from(rung.grid.numerator) / f64::from(rung.grid.denominator);
-            out.push_str(&format!(
-                ",RESOLUTION={}x{},FRAME-RATE={rate:.3},CODECS=\"{codecs}\"",
-                rung.facts.width, rung.facts.height,
-            ));
-            if self.audio.is_some() {
-                out.push_str(",AUDIO=\"shared\"");
-            }
-            out.push_str(&format!("\nvideo/{}/index.m3u8\n", rung.rendition_id));
-        }
-        Ok(out)
+            _ => Vec::new(),
+        };
+        Ok(SplitPresentation {
+            variants,
+            audio,
+            bandwidth: SplitBandwidth::PerRole,
+            subtitles: String::new(),
+            // Init verification alone cannot attest every fragment join.
+            independent_segments: false,
+        })
+    }
+
+    #[cfg(test)]
+    fn master_playlist(
+        &self,
+        video_budgets: &[VodRenditionBandwidth],
+        audio_budget: Option<&VodRenditionBandwidth>,
+    ) -> Result<String, crate::fmp4::Fmp4Error> {
+        let source = super::split_master::SplitAudioSource {
+            source_index: 1,
+            title: None,
+            language: Some("eng".into()),
+        };
+        self.presentation(video_budgets, audio_budget, Some(&source))?
+            .master_text()
+            .map_err(|error| crate::fmp4::Fmp4Error::Unsupported(error.to_string()))
     }
 }
 
@@ -974,7 +1107,8 @@ pub struct VodSplitSoundtrack {
     pub audio: VodSharedAudioRendition,
     pub source_index: i64,
     pub language: Option<String>,
-    pub name: String,
+    /// The stream title; the master derives a unique NAME from it.
+    pub title: Option<String>,
 }
 
 /// One copied video rendition plus a soundtrack per source language. The
@@ -986,18 +1120,6 @@ pub struct VodSplitCopyFamily {
     video: VodCopyVideoRendition,
     soundtracks: Vec<VodSplitSoundtrack>,
     default_source_index: i64,
-}
-
-/// HLS quoted strings cannot hold quotes or line breaks.
-fn hls_quoted(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| match c {
-            '"' => '\'',
-            '\r' | '\n' => ' ',
-            c => c,
-        })
-        .collect()
 }
 
 impl VodSplitCopyFamily {
@@ -1014,8 +1136,9 @@ impl VodSplitCopyFamily {
             )
         };
         soundtracks.sort_by_key(|track| track.source_index);
+        // Two streams can have byte-identical decoder configuration. Their
+        // init URLs are still distinct because each is under its rendition.
         let mut renditions = std::collections::BTreeSet::new();
-        let mut inits = std::collections::BTreeSet::new();
         if soundtracks.is_empty()
             || soundtracks
                 .windows(2)
@@ -1025,7 +1148,6 @@ impl VodSplitCopyFamily {
                     || track.audio.rendition_id == video.rendition_id
                     || track.audio.init_id == video.init_id
                     || !renditions.insert(track.audio.rendition_id.as_str())
-                    || !inits.insert(track.audio.init_id.as_str())
             })
             || !soundtracks
                 .iter()
@@ -1069,14 +1191,18 @@ impl VodSplitCopyFamily {
             .find(|track| track.audio.rendition_id == rendition_id)
     }
 
-    /// Alternate-audio master: one video variant, one `EXT-X-MEDIA` per
-    /// language. Budgets must cover exactly the advertised renditions.
-    pub fn master_playlist(
+    /// Alternate-audio presentation: one video variant, one rendition per
+    /// language, for the one split master writer. Budgets must cover exactly
+    /// the advertised renditions.
+    pub fn presentation(
         &self,
         video_budget: &VodRenditionBandwidth,
         audio_budgets: &[VodRenditionBandwidth],
         default_source_index: i64,
-    ) -> Result<String, crate::fmp4::Fmp4Error> {
+    ) -> Result<super::split_master::SplitPresentation, crate::fmp4::Fmp4Error> {
+        use super::split_master::{
+            SplitAudio, SplitBandwidth, SplitPresentation, SplitVideo, VideoRange,
+        };
         let refuse = || {
             crate::fmp4::Fmp4Error::Unsupported(
                 "split copy master has incomplete or conflicting rendition budgets".into(),
@@ -1102,74 +1228,53 @@ impl VodSplitCopyFamily {
         {
             return Err(refuse());
         }
-        let mut out = String::from("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n");
-        let mut audio_codecs: Vec<&str> = Vec::new();
-        let mut max_audio_peak = 0u64;
-        let mut max_audio_average = Some(0u64);
-        for track in &self.soundtracks {
-            let budget = budgets[track.audio.rendition_id.as_str()];
-            max_audio_peak = max_audio_peak.max(budget.peak_bps);
-            max_audio_average = match (max_audio_average, budget.average_bps) {
-                (Some(max), Some(average)) => Some(max.max(average)),
-                _ => None,
-            };
-            if !audio_codecs.contains(&track.audio.facts.codec) {
-                audio_codecs.push(track.audio.facts.codec);
-            }
-            let language = track
-                .language
-                .as_deref()
-                .map(|lang| {
-                    lang.chars()
-                        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-                        .collect::<String>()
-                })
-                .filter(|lang| !lang.is_empty());
-            out.push_str(&format!(
-                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{}\"",
-                hls_quoted(&track.name),
-            ));
-            if let Some(language) = language {
-                out.push_str(&format!(",LANGUAGE=\"{language}\""));
-            }
-            out.push_str(&format!(
-                ",DEFAULT={},AUTOSELECT=YES,CHANNELS=\"{}\",STABLE-RENDITION-ID=\"a{}\",URI=\"audio/{}/index.m3u8\"\n",
-                if track.source_index == default_source_index {
-                    "YES"
-                } else {
-                    "NO"
-                },
-                track.audio.facts.channels,
-                track.source_index,
-                track.audio.rendition_id,
-            ));
-        }
-        let peak = video_budget
-            .peak_bps
-            .checked_add(max_audio_peak)
-            .ok_or_else(refuse)?;
-        out.push_str(&format!("#EXT-X-STREAM-INF:BANDWIDTH={peak}"));
-        if let (Some(video), Some(audio)) = (video_budget.average_bps, max_audio_average) {
-            let average = video.checked_add(audio).ok_or_else(refuse)?;
-            out.push_str(&format!(",AVERAGE-BANDWIDTH={average}"));
-        }
-        out.push_str(&format!(
-            ",RESOLUTION={}x{}",
-            self.video.facts.width, self.video.facts.height
-        ));
-        if let Some((num, den)) = self.video.frame_rate {
-            out.push_str(&format!(
-                ",FRAME-RATE={:.3}",
-                f64::from(num) / f64::from(den)
-            ));
-        }
-        out.push_str(&format!(
-            ",CODECS=\"{},{}\",AUDIO=\"audio\"\nvideo/{}/index.m3u8\n",
-            self.video.facts.codec,
-            audio_codecs.join(","),
-            self.video.rendition_id,
-        ));
-        Ok(out)
+        let video = SplitVideo {
+            rendition_id: self.video.rendition_id.clone(),
+            codec: self.video.facts.codec.clone(),
+            supplemental_codecs: None,
+            width: Some(u32::from(self.video.facts.width)),
+            height: Some(u32::from(self.video.facts.height)),
+            frame_rate: self
+                .video
+                .frame_rate
+                .map(|(num, den)| f64::from(num) / f64::from(den)),
+            video_range: VideoRange::of_avc(self.video.facts.color_transfer),
+            budget: Some(video_budget.split_budget()),
+        };
+        let audio = self
+            .soundtracks
+            .iter()
+            .map(|track| SplitAudio {
+                rendition_id: track.audio.rendition_id.clone(),
+                source_index: track.source_index,
+                title: track.title.clone(),
+                language: track.language.clone(),
+                default: track.source_index == default_source_index,
+                channels: Some(track.audio.facts.channels),
+                codec: track.audio.facts.codec.to_owned(),
+                budget: Some(budgets[track.audio.rendition_id.as_str()].split_budget()),
+            })
+            .collect();
+        Ok(SplitPresentation {
+            variants: vec![video],
+            audio,
+            bandwidth: SplitBandwidth::PerRole,
+            subtitles: String::new(),
+            // The copy video can cut on its ceiling, which breaks the claim.
+            independent_segments: false,
+        })
+    }
+
+    #[cfg(test)]
+    fn master_playlist(
+        &self,
+        video_budget: &VodRenditionBandwidth,
+        audio_budgets: &[VodRenditionBandwidth],
+        default_source_index: i64,
+    ) -> Result<String, crate::fmp4::Fmp4Error> {
+        self.presentation(video_budget, audio_budgets, default_source_index)?
+            .master_text()
+            .map_err(|error| crate::fmp4::Fmp4Error::Unsupported(error.to_string()))
     }
 }
 
@@ -1207,6 +1312,107 @@ impl AudioClock {
     }
 }
 
+/// Verified configuration of a split or continuous soundtrack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VodAudioSampleEntryFacts {
+    pub codec: &'static str,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub samples_per_frame: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceAudioCodec {
+    Aac,
+    Ac3,
+    Eac3,
+}
+
+/// Complete, contiguous source packet evidence. Hashes are ordered by film
+/// sample clock so a seeked producer cannot substitute different packets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VodSourceAudio {
+    codec: SourceAudioCodec,
+    channels: u16,
+    clock_tolerance: u32,
+    packets: std::sync::Arc<[([u8; 32], u32)]>,
+}
+
+impl VodSourceAudio {
+    pub fn new(
+        codec: &str,
+        channels: u16,
+        clock_tolerance: u32,
+        packets: Vec<([u8; 32], u32)>,
+    ) -> Option<Self> {
+        let codec = match codec {
+            "aac" => SourceAudioCodec::Aac,
+            "ac3" => SourceAudioCodec::Ac3,
+            "eac3" => SourceAudioCodec::Eac3,
+            _ => return None,
+        };
+        if !(1..=8).contains(&channels)
+            || clock_tolerance > VOD_AUDIO_RATE / 1000
+            || packets.is_empty()
+            || packets.iter().any(|(_, size)| !(1..=16_384).contains(size))
+        {
+            return None;
+        }
+        Some(Self {
+            codec,
+            channels,
+            clock_tolerance,
+            packets: packets.into(),
+        })
+    }
+
+    pub fn packet_evidence_bytes(&self) -> usize {
+        std::mem::size_of_val(self.packets.as_ref())
+    }
+
+    pub fn packet_ticks(&self) -> u64 {
+        match self.codec {
+            SourceAudioCodec::Aac => VOD_AAC_FRAME_SAMPLES,
+            SourceAudioCodec::Ac3 | SourceAudioCodec::Eac3 => 1536,
+        }
+    }
+
+    pub(crate) fn clock_tolerance(&self) -> u64 {
+        u64::from(self.clock_tolerance)
+    }
+
+    pub(crate) fn matches_packet(&self, tick: u64, bytes: &[u8]) -> bool {
+        use sha2::{Digest, Sha256};
+        let index = usize::try_from(tick / self.packet_ticks()).ok();
+        index
+            .and_then(|index| self.packets.get(index))
+            .is_some_and(|(hash, size)| {
+                usize::try_from(*size).ok() == Some(bytes.len())
+                    && *hash == <[u8; 32]>::from(Sha256::digest(bytes))
+            })
+    }
+
+    fn interval_bytes(&self, start: u64, end: u64) -> Option<u64> {
+        let low = usize::try_from(start / self.packet_ticks()).ok()?;
+        let high = usize::try_from(end / self.packet_ticks()).ok()?;
+        let packets = self.packets.get(low..high)?;
+        // Packet table and fixed fragment headers, rounded above merge's
+        // serialized overhead. This cap also guides the immutable cache.
+        let bytes = 2048
+            + packets
+                .iter()
+                .map(|(_, size)| u64::from(*size) + 16)
+                .sum::<u64>();
+        (bytes <= 16 * 1024 * 1024).then_some(bytes)
+    }
+
+    fn end_ticks(&self) -> Option<u64> {
+        u64::try_from(self.packets.len())
+            .ok()?
+            .checked_mul(self.packet_ticks())
+    }
+}
+
 /// Frozen soundtrack semantics. Video shape, bitrate and encoder selection
 /// never enter this digest, so all rungs reuse one audio recipe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1215,7 +1421,16 @@ pub struct VodSharedAudioRecipe {
     audio_offset_ms: i64,
     audio_channels: u32,
     audio_bitrate_kbps: u32,
+    alignment: Option<CopySoundtrackAlignment>,
+    source_copy: Option<VodSourceAudio>,
     digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CopySoundtrackAlignment {
+    plan: std::sync::Arc<SegmentPlan>,
+    digest: String,
+    source_rates: Option<(u64, u64)>,
 }
 
 /// One decoder, one filter worker and one AAC encoder worker are reserved.
@@ -1250,37 +1465,195 @@ impl VodSharedAudioRecipe {
             audio_offset_ms: media.audio_offset_ms,
             audio_channels: media.audio_channels,
             audio_bitrate_kbps: media.audio_bitrate_kbps,
+            alignment: None,
+            source_copy: None,
             digest: hex::encode(hash.finalize()),
         })
     }
 
     pub fn digest(&self) -> &str {
-        &self.digest
+        self.alignment
+            .as_ref()
+            .map_or(&self.digest, |alignment| &alignment.digest)
+    }
+
+    pub fn source_copy(&self) -> Option<&VodSourceAudio> {
+        self.source_copy.as_ref()
+    }
+
+    pub fn is_source_copy(&self) -> bool {
+        self.source_copy.is_some()
+    }
+
+    pub fn select_source_copy(&mut self, source: VodSourceAudio) -> bool {
+        if self.audio_offset_ms != 0 || self.alignment.is_some() {
+            return false;
+        }
+        self.source_copy = Some(source);
+        true
+    }
+
+    pub fn source_copy_rates(&self) -> Option<(u64, u64)> {
+        self.alignment.as_ref()?.source_rates
+    }
+
+    pub fn discard_source_copy(&mut self) {
+        self.source_copy = None;
+    }
+
+    /// Freeze a copy presentation's AAC cuts without changing the shared
+    /// video's identity or the continuous-quality soundtrack's fixed grid.
+    pub fn align_to_copy_video(
+        &mut self,
+        video: &SegmentPlan,
+        duration_ms: i64,
+        grid: VodFrameGrid,
+    ) -> Option<()> {
+        use sha2::{Digest, Sha256};
+
+        let mut hash = Sha256::new();
+        let aligned = if let Some(source) = &self.source_copy {
+            let end = source.end_ticks()?;
+            let video_end = video.entries.last()?.end_ticks();
+            let clock = u128::from(video.timescale);
+            if (u128::from(end) * clock)
+                .abs_diff(u128::from(video_end) * u128::from(VOD_AUDIO_RATE))
+                > clock * 2_400
+            {
+                return None;
+            }
+            hash.update(b"vod-copy-video-aligned-source-audio-v1\0");
+            hash.update([match source.codec {
+                SourceAudioCodec::Aac => 1,
+                SourceAudioCodec::Ac3 => 2,
+                SourceAudioCodec::Eac3 => 3,
+            }]);
+            hash.update(source.channels.to_le_bytes());
+            hash.update(source.clock_tolerance.to_le_bytes());
+            for (digest, size) in source.packets.iter() {
+                hash.update(digest);
+                hash.update(size.to_le_bytes());
+            }
+            let mut aligned = shared_audio_plan_aligned_to_video_with_width(
+                video,
+                end,
+                self.audio_bitrate_kbps,
+                source.packet_ticks(),
+            )?;
+            for entry in &mut aligned.entries {
+                entry.est_bytes = source.interval_bytes(entry.start_ticks, entry.end_ticks())?;
+            }
+            aligned
+        } else {
+            hash.update(b"vod-copy-video-aligned-aac-v1\0");
+            shared_audio_plan_aligned_to_video(
+                video,
+                grid.shared_audio_end_ticks(duration_ms),
+                self.audio_bitrate_kbps,
+            )?
+        };
+        hash.update(self.digest.as_bytes());
+        hash.update(aligned.timescale.to_le_bytes());
+        for entry in &aligned.entries {
+            hash.update(entry.start_ticks.to_le_bytes());
+            hash.update(entry.duration_ticks.to_le_bytes());
+        }
+        let source_rates = if self.source_copy.is_some() {
+            Some(copy_soundtrack_rates(&aligned)?)
+        } else {
+            None
+        };
+        self.alignment = Some(CopySoundtrackAlignment {
+            plan: std::sync::Arc::new(aligned),
+            digest: hex::encode(hash.finalize()),
+            source_rates,
+        });
+        Some(())
+    }
+
+    pub fn end_ticks_on_grid(&self, duration_ms: i64, grid: VodFrameGrid) -> u64 {
+        self.alignment
+            .as_ref()
+            .and_then(|alignment| alignment.plan.entries.last())
+            .map_or_else(
+                || grid.shared_audio_end_ticks(duration_ms),
+                PlanEntry::end_ticks,
+            )
     }
 
     pub fn verify_init(
         &self,
         init: &crate::fmp4::Init,
-    ) -> Result<crate::fmp4::AacSampleEntryFacts, crate::fmp4::Fmp4Error> {
+    ) -> Result<VodAudioSampleEntryFacts, crate::fmp4::Fmp4Error> {
+        if let Some(source) = &self.source_copy {
+            let (codec, channels) = match source.codec {
+                SourceAudioCodec::Aac => {
+                    let facts = crate::fmp4::aac_lc_sample_entry_facts(init)?;
+                    (facts.codec, facts.channels)
+                }
+                SourceAudioCodec::Ac3 | SourceAudioCodec::Eac3 => {
+                    let facts = crate::fmp4::dolby_audio_sample_entry_facts(init)?;
+                    if facts.joc {
+                        return Err(crate::fmp4::Fmp4Error::Unsupported(
+                            "copied E-AC-3 JOC requires HLS channel signaling".into(),
+                        ));
+                    }
+                    (facts.codec, facts.channels)
+                }
+            };
+            let expected_codec = match source.codec {
+                SourceAudioCodec::Aac => "mp4a.40.2",
+                SourceAudioCodec::Ac3 => "ac-3",
+                SourceAudioCodec::Eac3 => "ec-3",
+            };
+            if codec != expected_codec
+                || channels != source.channels
+                || init.tracks[0].timescale != VOD_AUDIO_RATE
+                || init.tracks[0].has_edit_list
+            {
+                return Err(crate::fmp4::Fmp4Error::Unsupported(
+                    "copied audio init differs from its frozen source track".into(),
+                ));
+            }
+            return Ok(VodAudioSampleEntryFacts {
+                codec,
+                channels,
+                sample_rate: VOD_AUDIO_RATE,
+                samples_per_frame: source.packet_ticks() as u16,
+            });
+        }
         let facts = crate::fmp4::aac_lc_sample_entry_facts(init)?;
         if u32::from(facts.channels) != self.audio_channels {
             return Err(crate::fmp4::Fmp4Error::Unsupported(
                 "shared AAC output channels differ from the frozen recipe".into(),
             ));
         }
-        Ok(facts)
+        Ok(VodAudioSampleEntryFacts {
+            codec: facts.codec,
+            channels: facts.channels,
+            sample_rate: facts.sample_rate,
+            samples_per_frame: facts.samples_per_frame,
+        })
     }
 
     pub fn plan(&self, duration_ms: i64) -> SegmentPlan {
-        vod_shared_audio_plan(duration_ms, self.audio_bitrate_kbps)
+        self.alignment.as_ref().map_or_else(
+            || vod_shared_audio_plan(duration_ms, self.audio_bitrate_kbps),
+            |alignment| alignment.plan.as_ref().clone(),
+        )
     }
 
     /// A presentation's soundtrack shares its film end with the frozen video
     /// cadence while keeping independent, whole-AAC-frame interval boundaries.
     pub fn plan_on_grid(&self, duration_ms: i64, grid: VodFrameGrid) -> SegmentPlan {
-        shared_audio_plan_ticks(
-            grid.shared_audio_end_ticks(duration_ms),
-            self.audio_bitrate_kbps,
+        self.alignment.as_ref().map_or_else(
+            || {
+                shared_audio_plan_ticks(
+                    grid.shared_audio_end_ticks(duration_ms),
+                    self.audio_bitrate_kbps,
+                )
+            },
+            |alignment| alignment.plan.as_ref().clone(),
         )
     }
 
@@ -1310,6 +1683,52 @@ impl VodSharedAudioRecipe {
             || execution.start_seconds < 0.0
         {
             return None;
+        }
+        if let Some(source) = &self.source_copy {
+            // Select the first whole planned packet with an output seek. A
+            // small preroll lets the demuxer seek independently. The writer
+            // verifies the resulting packet against its absolute plan before
+            // restoring the muxer's zero-based decode clock.
+            let preroll = (execution.start_seconds - 2.0).max(0.0);
+            let threshold = execution.start_seconds
+                - source.packet_ticks() as f64 / (2.0 * f64::from(VOD_AUDIO_RATE));
+            let mut args = vec![
+                "-copyts".into(),
+                "-itsoffset".into(),
+                source_clock.input_offset(),
+                "-ss".into(),
+                format!("{preroll:.9}"),
+                "-threads".into(),
+                "1".into(),
+                "-i".into(),
+                execution.source_path.to_string_lossy().into_owned(),
+            ];
+            if execution.start_seconds > 0.0 {
+                args.extend(["-ss".into(), format!("{threshold:.9}")]);
+            }
+            args.extend([
+                "-map".into(),
+                format!("0:a:{}", self.audio_index),
+                "-vn".into(),
+                "-sn".into(),
+                "-dn".into(),
+                "-map_chapters".into(),
+                "-1".into(),
+                "-c:a".into(),
+                "copy".into(),
+                "-avoid_negative_ts".into(),
+                "disabled".into(),
+                "-use_editlist".into(),
+                "0".into(),
+                "-movflags".into(),
+                "+empty_moov+delay_moov+default_base_moof".into(),
+                "-frag_duration".into(),
+                "2000000".into(),
+                "-f".into(),
+                "mp4".into(),
+                "pipe:1".into(),
+            ]);
+            return Some(args);
         }
         let clock = AudioClock::new(execution.start_seconds, self.audio_offset_ms);
         let anchor = vod_audio_anchor(execution.start_seconds) as f64 / f64::from(VOD_AUDIO_RATE);
@@ -1362,6 +1781,21 @@ impl VodSharedAudioRecipe {
             "pipe:1".into(),
         ])
     }
+}
+
+fn copy_soundtrack_rates(plan: &SegmentPlan) -> Option<(u64, u64)> {
+    let end = plan.entries.last()?.end_ticks();
+    let mut total = 0_u128;
+    let mut peak = 0_u128;
+    for entry in &plan.entries {
+        let bits_scaled = u128::from(entry.est_bytes) * 8 * u128::from(plan.timescale);
+        total += bits_scaled;
+        peak = peak.max(bits_scaled.div_ceil(u128::from(entry.duration_ticks)));
+    }
+    Some((
+        u64::try_from(peak).ok()?,
+        u64::try_from(total.div_ceil(u128::from(end))).ok()?,
+    ))
 }
 
 /// Compatibility entry point for existing resolved VOD callers.
@@ -1965,6 +2399,61 @@ pub fn vod_completed_reconstructed_pipe_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_soundtrack_uses_nearest_aac_frames_on_the_indexed_video_timeline() {
+        let mut video = SegmentPlan {
+            version: SEGPLAN_VERSION,
+            timescale: 90_000,
+            entries: Vec::new(),
+            target_duration: 15,
+        };
+        // The first boundary is exactly halfway between AAC frames. The
+        // second is irregular and must be rounded from the absolute origin.
+        for (index, [start, end]) in [[0, 540_480], [540_480, 1_361_110], [1_361_110, 1_900_000]]
+            .into_iter()
+            .enumerate()
+        {
+            video.entries.push(PlanEntry {
+                index: index as u32,
+                kind: PlanEntryKind::Video,
+                start_ticks: start,
+                duration_ticks: end - start,
+                est_bytes: 0,
+                cut: PlanCut::Clean,
+                fragments: 1,
+            });
+        }
+        let end = 1_013_333;
+        let audio = shared_audio_plan_aligned_to_video(&video, end, 160).expect("aligned AAC plan");
+        let starts = audio
+            .entries
+            .iter()
+            .map(|entry| entry.start_ticks)
+            .collect::<Vec<_>>();
+        assert_eq!(starts, [0, 288_768, 726_016]);
+        let last = audio.entries.last().expect("final AAC segment");
+        assert_eq!(last.end_ticks(), end);
+        assert_eq!(audio.target_duration, 10);
+        assert_eq!(last.cut, PlanCut::EndOfStream);
+        assert!(audio
+            .entries
+            .windows(2)
+            .all(|pair| pair[0].end_ticks() == pair[1].start_ticks));
+        let mut rendition = split_audio('a', 'b', 2);
+        rendition.aligned_plan = Some(std::sync::Arc::new(audio.clone()));
+        let playlist = rendition
+            .media_playlist(&audio)
+            .expect("verified aligned playlist");
+        assert!(playlist.contains("#EXT-X-TARGETDURATION:10\n"));
+        assert!(playlist.contains("#EXTINF:6.016000,\nsegment/0.m4s"));
+        assert!(rendition
+            .media_playlist(&vod_shared_audio_plan(21_000, 160))
+            .is_err());
+        assert!(shared_audio_plan_aligned_to_video(&video, 726_016, 160).is_none());
+        video.entries[1].start_ticks = 1;
+        assert!(shared_audio_plan_aligned_to_video(&video, end, 160).is_none());
+    }
 
     #[test]
     fn held_source_origin_is_precise_signed_and_distinguishes_demux_default() {
@@ -3195,13 +3684,14 @@ mod tests {
             init_id: "e".repeat(64),
             recipe_id: "c".repeat(64),
             source_object_version: "source-one".into(),
-            facts: crate::fmp4::AacSampleEntryFacts {
+            facts: VodAudioSampleEntryFacts {
                 codec: "mp4a.40.2",
                 channels: 2,
                 sample_rate: 48_000,
                 samples_per_frame: 1_024,
             },
             bitrate_kbps: 160,
+            aligned_plan: None,
         };
         assert!(VodPresentationFamily::new(family.clone(), Some(soundtrack.clone())).is_err());
         let mut voiced = family;
@@ -3330,7 +3820,9 @@ mod tests {
             .master_playlist(&budgets, Some(&audio_budget))
             .expect("master");
         assert_eq!(master.matches("#EXT-X-MEDIA:TYPE=AUDIO").count(), 1);
-        assert_eq!(master.matches("AUDIO=\"shared\"").count(), 2);
+        assert_eq!(master.matches("AUDIO=\"audio\"").count(), 2);
+        assert_eq!(master.matches("VIDEO-RANGE=SDR").count(), 2);
+        assert!(master.contains("NAME=\"eng\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"2\",STABLE-RENDITION-ID=\"a1\""));
         assert!(master.contains("BANDWIDTH=4192000,AVERAGE-BANDWIDTH=3160000"));
         assert!(master.contains("BANDWIDTH=8192000,AVERAGE-BANDWIDTH=6160000"));
         assert!(master.contains("FRAME-RATE=23.976,CODECS=\"avc1.640032,mp4a.40.2\""));
@@ -3528,13 +4020,14 @@ mod tests {
             init_id: init.to_string().repeat(64),
             recipe_id: "c".repeat(64),
             source_object_version: "source-one".into(),
-            facts: crate::fmp4::AacSampleEntryFacts {
+            facts: VodAudioSampleEntryFacts {
                 codec: "mp4a.40.2",
                 channels,
                 sample_rate: 48_000,
                 samples_per_frame: 1_024,
             },
             bitrate_kbps: 160,
+            aligned_plan: None,
         }
     }
 
@@ -3549,7 +4042,7 @@ mod tests {
             audio: split_audio(id, init, 2),
             source_index: index,
             language: lang.map(str::to_owned),
-            name: name.into(),
+            title: Some(name.into()),
         }
     }
 
@@ -3590,10 +4083,10 @@ mod tests {
         let (video, audio) = split_budgets();
         let master = family.master_playlist(&video, &audio, 1).expect("master");
         let expected = format!(
-            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n\
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"English\",LANGUAGE=\"eng\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"2\",STABLE-RENDITION-ID=\"a1\",URI=\"audio/{d}/index.m3u8\"\n\
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Francais\",LANGUAGE=\"fre\",DEFAULT=NO,AUTOSELECT=YES,CHANNELS=\"2\",STABLE-RENDITION-ID=\"a2\",URI=\"audio/{f}/index.m3u8\"\n\
-#EXT-X-STREAM-INF:BANDWIDTH=8250000,AVERAGE-BANDWIDTH=6160000,RESOLUTION=1920x1080,FRAME-RATE=23.976,CODECS=\"avc1.640028,mp4a.40.2\",AUDIO=\"audio\"\n\
+            "#EXTM3U\n#EXT-X-VERSION:7\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"2\",STABLE-RENDITION-ID=\"a1\",URI=\"audio/{d}/index.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Francais\",LANGUAGE=\"fr\",DEFAULT=NO,AUTOSELECT=YES,CHANNELS=\"2\",STABLE-RENDITION-ID=\"a2\",URI=\"audio/{f}/index.m3u8\"\n\
+#EXT-X-STREAM-INF:BANDWIDTH=8250000,AVERAGE-BANDWIDTH=6160000,RESOLUTION=1920x1080,FRAME-RATE=23.976,CODECS=\"avc1.640028,mp4a.40.2\",VIDEO-RANGE=SDR,AUDIO=\"audio\"\n\
 video/{a}/index.m3u8\n",
             d = "d".repeat(64),
             f = "f".repeat(64),
@@ -3622,8 +4115,8 @@ video/{a}/index.m3u8\n",
                 .replace("DEFAULT=NO", "DEFAULT=_")
         };
         assert_eq!(strip(&eng), strip(&fre));
-        assert!(eng.contains("NAME=\"English\",LANGUAGE=\"eng\",DEFAULT=YES"));
-        assert!(fre.contains("NAME=\"Francais\",LANGUAGE=\"fre\",DEFAULT=YES"));
+        assert!(eng.contains("NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES"));
+        assert!(fre.contains("NAME=\"Francais\",LANGUAGE=\"fr\",DEFAULT=YES"));
         let other = VodSplitCopyFamily::new(
             split_video(),
             family.soundtracks().iter().rev().cloned().collect(),
@@ -3663,7 +4156,7 @@ video/{a}/index.m3u8\n",
         assert!(VodSplitCopyFamily::new(split_video(), dup_rendition, 1).is_err());
         let mut dup_init = tracks();
         dup_init[1].audio.init_id = dup_init[0].audio.init_id.clone();
-        assert!(VodSplitCopyFamily::new(split_video(), dup_init, 1).is_err());
+        assert!(VodSplitCopyFamily::new(split_video(), dup_init, 1).is_ok());
         let mut video_rendition = tracks();
         video_rendition[0].audio.rendition_id = "a".repeat(64);
         assert!(VodSplitCopyFamily::new(split_video(), video_rendition, 1).is_err());
@@ -3708,7 +4201,7 @@ video/{a}/index.m3u8\n",
         assert!(master.contains("NAME=\"Say 'hi'  now\",LANGUAGE=\"eng-US\",DEFAULT=YES"));
         assert!(master.contains("NAME=\"Plain\",DEFAULT=NO"));
         assert!(!master.contains("LANGUAGE=\"\""));
-        assert_eq!(master.lines().count(), 7);
+        assert_eq!(master.lines().count(), 6);
     }
 
     #[test]

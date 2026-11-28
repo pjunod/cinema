@@ -1922,7 +1922,7 @@ async fn applied_planning_view_closes_on_the_dv_title_and_probe_result_writers()
         .find(|demand| demand.file_id == file)
         .expect("the DV source demands a title scan");
     node.store
-        .bind_dv_title_demand(demand.probe_revision, &scanner)
+        .bind_dv_title_demand(demand.probe_revision, &scanner, 1, 1_000)
         .await
         .expect("bind the scanner");
     assert_eq!(source(&view).await, Some(ViewSource::Authority));

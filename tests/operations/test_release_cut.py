@@ -8,6 +8,7 @@ scheduled release-readiness run tags only a green, untagged, dated release.
 from __future__ import annotations
 
 import importlib.machinery
+import hashlib
 import importlib.util
 from pathlib import Path
 import re
@@ -111,6 +112,26 @@ DOCUMENTS = {
     ),
 }
 STATUS_PAGE = "docs/STATUS.html"
+RECEIPTS = "validation/native_receipts.py"
+# The shape of validation/native_receipts.py's reviewed Apple project pins.
+NATIVE_RECEIPTS = (
+    "BUILD_SPECS = {{\n"
+    "    # release: v0.3.0 changes only MARKETING_VERSION \"0.2.9\" -> \"0.3.0\".\n"
+    "    'clients/apple/project.yml': '{pin}',\n"
+    "}}\n"
+    'APPLE_PROJECT_SHAPE = "{shape}"\n'
+    "APPLE_BUILD_COUNTER = re.compile(rb'(?m)^(    CURRENT_PROJECT_VERSION: \")[1-9][0-9]*(\")$')\n"
+)
+
+
+def load_native_receipts(path: Path):
+    """A copy of validation/native_receipts.py, loaded from where the cut rewrote it."""
+
+    loader = importlib.machinery.SourceFileLoader("native_receipts_copy", str(path))
+    spec = importlib.util.spec_from_loader("native_receipts_copy", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def git(root: Path, *args: str) -> str:
@@ -272,7 +293,7 @@ class ReleaseCutCase(unittest.TestCase):
         root = Path(temporary.name)
         for path in (
             "CHANGELOG.md", "Cargo.toml", release_cut.ANDROID, release_cut.APPLE,
-            *DOCUMENTS, STATUS_PAGE,
+            *DOCUMENTS, STATUS_PAGE, RECEIPTS,
         ):
             (root / path).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / path, root / path)
@@ -298,6 +319,109 @@ class ReleaseCutCase(unittest.TestCase):
         self.assertEqual(validate_documented_builds(read), ())
         self.assertEqual(check_repository(root), ())
         self.assertEqual(validate_versions(after), ())
+        # v0.9.1 and v0.9.2 each needed a second push: the cut left the
+        # reviewed project.yml fingerprints in validation/native_receipts.py
+        # describing the old MARKETING_VERSION, failing the fast lane.
+        receipts = load_native_receipts(root / RECEIPTS)
+        project = (root / release_cut.APPLE).read_bytes()
+        self.assertEqual(
+            receipts.BUILD_SPECS[release_cut.APPLE], hashlib.sha256(project).hexdigest()
+        )
+        normalized = receipts.APPLE_BUILD_COUNTER.sub(rb"\g<1>0\g<2>", project)
+        self.assertEqual(receipts.APPLE_PROJECT_SHAPE, hashlib.sha256(normalized).hexdigest())
+        self.assertIn(
+            f'# release: v{after.workspace} changes only MARKETING_VERSION '
+            f'"{before.workspace}" -> "{after.workspace}".',
+            read(RECEIPTS),
+        )
+
+    def receipts_tree(self) -> tuple[Path, str]:
+        """A fixture whose native receipts pin its project.yml the way the real file does."""
+
+        root = self.tree()
+        digest = lambda data: hashlib.sha256(data.encode("utf-8")).hexdigest()  # noqa: E731
+        receipts = NATIVE_RECEIPTS.format(
+            pin=digest(APPLE), shape=digest(APPLE.replace('VERSION: "1"', 'VERSION: "0"'))
+        )
+        (root / RECEIPTS).parent.mkdir(exist_ok=True)
+        (root / RECEIPTS).write_text(receipts, encoding="utf-8")
+        self.commit(root, "pin the reviewed boundary")
+        return root, receipts
+
+    def test_the_cut_moves_the_reviewed_apple_boundary_with_the_marketing_version(self):
+        root, receipts = self.receipts_tree()
+        result = self.run_cut(root, "--date", "2026-09-28")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"changed {RECEIPTS}", result.stdout)
+        bumped = APPLE.replace('"0.3.0"', '"0.3.1"')
+        digest = lambda data: hashlib.sha256(data.encode("utf-8")).hexdigest()  # noqa: E731
+        self.assertEqual(
+            (root / RECEIPTS).read_text(encoding="utf-8"),
+            NATIVE_RECEIPTS.format(
+                pin=digest(bumped), shape=digest(bumped.replace('VERSION: "1"', 'VERSION: "0"'))
+            ).replace('v0.3.0 changes only MARKETING_VERSION "0.2.9" -> "0.3.0"',
+                      'v0.3.1 changes only MARKETING_VERSION "0.3.0" -> "0.3.1"'),
+        )
+
+    def test_an_unreviewed_project_change_refuses_the_cut_before_anything_is_written(self):
+        """The cut never widens the reviewed boundary: only its own version bump re-pins."""
+
+        root, receipts = self.receipts_tree()
+        edited = APPLE + "    preBuildScripts: [{script: cat ../../extra/file}]\n"
+        (root / release_cut.APPLE).write_text(edited, encoding="utf-8")
+        self.commit(root, "an unreviewed project change")
+        result = self.run_cut(root, "--date", "2026-09-28")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no longer matches its reviewed fingerprint", result.stderr)
+        self.assertEqual((root / release_cut.APPLE).read_text(encoding="utf-8"), edited)
+        self.assertEqual((root / RECEIPTS).read_text(encoding="utf-8"), receipts)
+        self.assertEqual((root / "Cargo.toml").read_text(encoding="utf-8"), CARGO)
+
+    def test_a_cut_that_moves_more_than_the_marketing_version_is_refused(self):
+        module = load_release_cut()
+        before = APPLE
+        after = APPLE.replace('"0.3.0"', '"0.3.1"').replace("tvOS:", "watchOS:")
+        digest = lambda data: hashlib.sha256(data.encode("utf-8")).hexdigest()  # noqa: E731
+        receipts = NATIVE_RECEIPTS.format(
+            pin=digest(before), shape=digest(before.replace('VERSION: "1"', 'VERSION: "0"'))
+        )
+        with self.assertRaisesRegex(module.CutError, "only its MARKETING_VERSION line"):
+            module.repin_native_receipts(receipts, before, after, "0.3.0", "0.3.1")
+
+    def test_the_cut_needs_both_the_exact_pin_and_the_shape(self):
+        """A counter-only variant, or a stale shape, is not the reviewed file."""
+
+        module = load_release_cut()
+        digest = lambda data: hashlib.sha256(data.encode("utf-8")).hexdigest()  # noqa: E731
+        shape = digest(APPLE.replace('VERSION: "1"', 'VERSION: "0"'))
+        bump = lambda text: text.replace('"0.3.0"', '"0.3.1"')  # noqa: E731
+        counter = APPLE.replace('VERSION: "1"', 'VERSION: "2"')
+        for label, receipts, before in (
+            ("counter-only variant", NATIVE_RECEIPTS.format(pin=digest(APPLE), shape=shape), counter),
+            ("stale shape", NATIVE_RECEIPTS.format(pin=digest(APPLE), shape="0" * 64), APPLE),
+        ):
+            with self.subTest(label), self.assertRaisesRegex(
+                module.CutError, "no longer matches its reviewed fingerprint"
+            ):
+                module.repin_native_receipts(receipts, before, bump(before), "0.3.0", "0.3.1")
+
+    def test_a_reviewed_note_above_the_pin_gets_the_release_line_added(self):
+        module = load_release_cut()
+        digest = lambda data: hashlib.sha256(data.encode("utf-8")).hexdigest()  # noqa: E731
+        normalize = lambda text: text.replace('VERSION: "1"', 'VERSION: "0"')  # noqa: E731
+        reviewed = NATIVE_RECEIPTS.format(pin=digest(APPLE), shape=digest(normalize(APPLE))).replace(
+            '# release: v0.3.0 changes only MARKETING_VERSION "0.2.9" -> "0.3.0".',
+            "# PR #2000: a reviewed project change.",
+        )
+        after = APPLE.replace('"0.3.0"', '"0.3.1"')
+        self.assertEqual(
+            module.repin_native_receipts(reviewed, APPLE, after, "0.3.0", "0.3.1"),
+            NATIVE_RECEIPTS.format(pin=digest(after), shape=digest(normalize(after))).replace(
+                '    # release: v0.3.0 changes only MARKETING_VERSION "0.2.9" -> "0.3.0".\n',
+                "    # PR #2000: a reviewed project change.\n"
+                '    # release: v0.3.1 changes only MARKETING_VERSION "0.3.0" -> "0.3.1".\n',
+            ),
+        )
 
     def test_a_reworded_claim_refuses_the_cut_before_anything_is_written(self):
         root = self.tree()
@@ -520,38 +644,46 @@ class WeeklyTagWorkflowCase(unittest.TestCase):
         self.assertIn("github.event_name == 'schedule'", condition)
         self.assertIn("needs.release-check.result == 'success'", condition)
         self.assertIn("needs.release-check.outputs.pending == 'true'", condition)
-        # The gate for a pending release is the whole of `make release-check`.
+        # The gate for a pending release is the green promotion gate its
+        # landing already carries, read, never rerun.
         self.assertIn(
-            "        if: steps.release.outputs.pending == 'true'\n        run: python3 \"$RUNNER_TEMP/release-readiness\" make release-check",
+            "        if: steps.release.outputs.pending == 'true'\n"
+            "        env:\n"
+            "          GITHUB_TOKEN: ${{ github.token }}\n"
+            "          RELEASE_SHA: ${{ steps.release.outputs.sha }}\n"
+            '        run: python3 -m validation.release_evidence --sha "$RELEASE_SHA"',
             self.check,
         )
 
     def test_the_gate_runs_on_the_release_commit_not_the_tip(self):
-        """The commit gated is the commit tagged: the release commit.
+        """The commit whose evidence is read is the commit tagged: the release commit.
 
         `--pending`'s `sha` is the release commit (see
-        `test_pending_names_the_release_commit_never_main_s_tip`); the gate has
-        to check it out before `make release-check`, or it tests the tip and
-        tags a commit it never ran.
+        `test_pending_names_the_release_commit_never_main_s_tip`); the evidence
+        check is handed that sha, never HEAD, or it would vouch for the tip
+        and tag a commit it never looked at.
         """
 
-        checkout = self.check.index(
-            "      - name: Check out the release commit\n"
-            "        if: steps.release.outputs.pending == 'true'\n"
-            "        env:\n"
-            "          RELEASE_SHA: ${{ steps.release.outputs.sha }}\n"
-            '        run: git checkout -q --detach "$RELEASE_SHA"\n'
-        )
-        self.assertLess(
-            checkout,
-            self.check.index('run: python3 "$RUNNER_TEMP/release-readiness" make release-check'),
-        )
+        self.assertIn('RELEASE_SHA: ${{ steps.release.outputs.sha }}', self.check)
+        self.assertIn('--sha "$RELEASE_SHA"', self.check)
         self.assertIn("sha: ${{ steps.release.outputs.sha }}", self.check)
         # A refusal from `--pending` fails the step instead of vanishing into a pipe.
         find = self.check.split("id: release\n", 1)[1].split("      - name:", 1)[0]
         self.assertNotIn("| tee", find)
         self.assertIn('scripts/release-cut --pending > "$found"', find)
         self.assertIn('grep -qx "sha=$TESTED_SHA"', self.tag)
+
+    def test_it_reruns_no_test_suite(self):
+        """Release code passed its gate once, when it merged; tagging it reruns nothing.
+
+        Paul, 2026-11-25: run 9184 spent three hours rerunning the Rust suite
+        on v0.9.1's already-gated landing until the runner killed it.
+        """
+
+        for command in ("make ", "cargo", "release-readiness\"", "scripts/validate", "rust-toolchain",
+                        "cargo-cache", "nonvoter"):
+            self.assertNotIn(command, self.check, command)
+        self.assertIn("    timeout-minutes: 10\n", self.check)
 
     def test_the_tag_goes_on_the_commit_the_gate_passed_and_is_annotated(self):
         self.assertIn("ref: ${{ needs.release-check.outputs.sha }}", self.tag)
@@ -563,6 +695,30 @@ class WeeklyTagWorkflowCase(unittest.TestCase):
         self.assertEqual(self.workflow.count("secrets.RELEASE_TAG_TOKEN"), 1)
         self.assertNotIn("git config", self.tag)
         self.assertIn('http.extraheader="AUTHORIZATION: basic $auth"', self.tag)
+
+
+class ReleaseTagPublicationCase(unittest.TestCase):
+    """A pushed tag publishes from its commit's existing gate; nothing is retested (Paul, 2026-11-25)."""
+
+    def setUp(self):
+        self.workflow = (ROOT / ".github/workflows/release-tag.yml").read_text(encoding="utf-8")
+
+    def test_a_tag_publishes_only_after_its_commit_s_existing_gate(self):
+        self.assertIn('on:\n  push:\n    tags: ["v*"]\n\n', self.workflow)
+        evidence = self.workflow.split("\n  evidence:\n", 1)[1].split("\n  publish:\n", 1)[0]
+        publish = self.workflow.split("\n  publish:\n", 1)[1]
+        self.assertIn('sha=$(git rev-parse --verify "refs/tags/$TAG^{commit}")', evidence)
+        self.assertIn('python3 -m validation.release_evidence --sha "$sha"', evidence)
+        self.assertIn("    needs: evidence\n", publish)
+        self.assertIn("    uses: ./.github/workflows/publish-release.yml\n", publish)
+        self.assertIn("      release_tag: ${{ github.ref_name }}\n", publish)
+
+    def test_a_tag_starts_no_test_sweep(self):
+        for command in ("make ", "cargo", "scripts/validate", "rust-toolchain", "nonvoter"):
+            self.assertNotIn(command, self.workflow, command)
+        for name in ("ci", "lint"):
+            triggers = (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8").split("\njobs:", 1)[0]
+            self.assertNotIn("tags:", triggers, name)
 
 
 if __name__ == "__main__":

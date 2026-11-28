@@ -1237,7 +1237,7 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 .PHONY: cluster-transport-recovery-contracts
 cluster-transport-recovery-contracts: ## Run transport recovery schemas, validators, and focused regressions
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=76 \
+	PLURX_EXPECT_TEST_COUNT=79 \
 	  PLURX_EXPECT_TEST_NAMES='transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly,transport_recovery::tests::two_early_acknowledgements_cannot_hide_a_long_recovery_gap,transport_recovery::tests::writer_must_cover_the_end_of_recovery,transport_recovery::tests::whole_recovery_duration_cannot_exceed_the_absolute_deadline,transport_recovery::tests::worst_transfer_duration_covers_the_complete_source_series,transport_recovery::tests::artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result,transport_recovery::tests::owned_async_task_growth_has_no_resource_slack' \
 	  scripts/require-test-count $(CARGO) test --locked \
 	  -p plurx-cluster-check transport_recovery --lib
@@ -1614,6 +1614,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/cinema-remote-browser-support.test.js
 	@node --test tests/web/cinema-remote-client.test.js
 	@node --test tests/web/offload.test.js
+	@node --test tests/web/dv-version-facts.test.js
 	@node --test tests/web/cinema-remote-controller.test.js
 	@node --test tests/web/cinema-remote-guard.test.js
 	@node --test tests/web/cinema-remote-receiver.test.js
@@ -1660,6 +1661,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/caption-controls.test.js
 	# HDR10-E appears only for an accepted current-generation processing report.
 	@node --test tests/web/dv-processing-badge.test.js
+	@node --test tests/web/dv-provenance-rows.test.js
 	@node --test tests/web/hdr-display-peak.test.js
 	# The HDR display claim follows (dynamic-range: high) after boot (Linux Chrome, monitor moves).
 	@node --test tests/web/hdr-display-change.test.js
@@ -1680,6 +1682,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/error-reporter.test.js
 	@node --test tests/playback/current-main-effort-quality.test.js
 	@node --test tests/playback/frame-diagnostics.test.js
+	@node --test tests/playback/server-metrics.test.js
 	@node tests/playback/network-shaping.test.js
 	@node --test tests/playback/cq-native-shipping-evidence.test.js
 	@node --test tests/playback/preparation-measurement.test.js
@@ -1815,6 +1818,16 @@ docker-startup-budget-check: ## Prove the resolved Compose startup budget before
 # mutation, rather than depending on `docker-startup-budget-check` and letting
 # each recipe derive its own. A preflight that proves one number while
 # `compose up` applies another is not a preflight.
+# Build once per commit, not once per node. `scripts/fleet-image pull` asks
+# the fleet registry (PLURX_REGISTRY in deploy/.env) for this exact clean
+# commit's `build-<sha>-<arch>` image once the hardware overlay is resolved.
+# It prints `use <image id>` when another node already built it (verified, and
+# both services resolve through PLURX_IMAGE), and that ID is proved and started
+# with --no-build instead of compiling. It prints `share <sha>` when this node
+# should build and then `fleet-image push --expect <sha>` the result for the
+# next node. It prints nothing (plain source build, nothing pushed) with no
+# registry configured, a dirty checkout, or an overlay that pins its own image
+# (the Pi runtime). Neither step can fail the deploy.
 .PHONY: docker-up
 docker-up: ## Build + (re)start Compose after its startup budget passes
 	cd deploy && hardware="$$(mktemp "$${TMPDIR:-/tmp}/plurx-hardware.XXXXXX")" \
@@ -1822,8 +1835,16 @@ docker-up: ## Build + (re)start Compose after its startup budget passes
 	  && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
 	  && compose_files="$$(python3 ../scripts/docker-hardware --prepare-pi --output "$$hardware")" \
 	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
+	  && shared="$$(python3 ../scripts/fleet-image pull)" \
+	  && case "$$shared" in "use "*) export PLURX_IMAGE="$${shared#use }" ;; esac \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
-	  && PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT="$(PLURX_MEDIA_RUNTIME_REPOSITORY)" PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
+	  && case "$$shared" in \
+	     "use "*) \
+	       PLURX_HEALTH_START_PERIOD="$$period" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --no-build --pull never ;; \
+	     *) \
+	       PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT="$(PLURX_MEDIA_RUNTIME_REPOSITORY)" PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build \
+	         && case "$$shared" in "share "*) python3 ../scripts/fleet-image push --expect "$${shared#share }" ;; esac ;; \
+	     esac
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 
 # Fleet voters consume the already-qualified registry image. Pulling is safe

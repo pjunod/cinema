@@ -3362,33 +3362,30 @@ with a newly issued token. Never copy the removed directory back into service.
 
 ## Rolling upgrades
 
-Settings → Cluster reports each node's build, media protocol
-(`PROTOCOL_VERSION` in `crates/plurxd/src/media_pool.rs`), and eligible-owner
-status. Placement requires a fresh, exact-protocol advertisement, available
-egress and an encoder; the card explains refusals. Different protocols form
-separate placement cohorts. Build skew alone does not prevent placement.
+Settings → Cluster reports each node's build, media protocol and owner
+eligibility. Placement requires a fresh, exact-protocol advertisement, an
+available encoder and egress. Build skew alone permits placement.
 
-1. Upgrade one node at a time. Confirm ready, the new build/protocol and
-   eligible-owner status before proceeding.
-2. Keep an eligible owner in each protocol cohort while its ingress serves
-   requests. Without one, old ingress can only start locally.
-3. Drain old ingress and finish or move its sessions before upgrading the
-   last old node: new-protocol workers cannot accept old placement.
+1. Upgrade one node at a time. Confirm readiness, the reported protocol and
+   owner eligibility.
+2. Keep an eligible owner in each active ingress cohort.
+3. Drain old ingress and its sessions before upgrading the last old node.
 
-Strict media-pool envelope changes require a protocol bump and dated note
-here (`make paperwork` checks this). Newest first:
+Strict envelope changes require a `PROTOCOL_VERSION` bump and a dated note
+here. Newest first:
 
+- 2026-11-27: protocol 14 — records the issued VOD copy layout and soundtrack
+  URLs at activation. Drain by cohort before removing the last old owner.
+- 2026-11-27: protocol 13 — an offer for a predicted split copy carries
+  `output_contract` `hls-split-fmp4-v1` and no soundtrack, so every language
+  places on and reuses one shared video. Drain by cohort as above.
+  [Detail](streaming/SPLIT-HLS-RENDITION-CONTRACT.md#4-the-offer-names-its-artifact-protocol-13).
 - 2026-11-22: protocol 12 — `split_audio` on the strict `SessionRequest`
-  media-worker envelope: a copy session whose client selects soundtracks
-  itself is served one shared video with every soundtrack as an alternate.
-  A protocol-11 worker refuses the field, so drain with the cohort procedure
-  above before web clients reach a mixed fleet. Detail:
-  [SHARED-VIDEO-MULTILINGUAL-VOD.md](streaming/SHARED-VIDEO-MULTILINGUAL-VOD.md).
+  (one shared video, soundtracks as alternates); protocol 11 refuses it, so
+  drain by cohort. [Detail](streaming/SHARED-VIDEO-MULTILINGUAL-VOD.md).
 - 2026-11-13: protocol 11 — a server-selected F+ curve digest on the strict
-  `SessionRequest` media-worker envelope, combined with protocol 10 catalog
-  provenance. Use the cohort/drain procedure above; clients send no new
-  platform signal. Detail:
-  [FEL-RPU-REFIT-BUILD.md](streaming/FEL-RPU-REFIT-BUILD.md).
+  `SessionRequest`, with protocol 10 catalog provenance; drain by cohort.
+  [Detail](streaming/FEL-RPU-REFIT-BUILD.md).
 
 - 2026-11-13: protocol 10 — retain validated source, track and full-capability
   catalog-query provenance in `CandidateCatalogContext` so processed commits
@@ -3444,6 +3441,7 @@ membership addresses and token-file paths are intentionally file-only:
 | — | `cluster.artwork_url` | `http://<advertise_host>:<server port>` | Node-specific public plurxd base peers use to recover local artwork. Set an explicit per-node URL when `join_url` names a shared proxy or load balancer |
 | — | `cluster.join_token_file` | empty | Owner-only file containing one token on a fresh joining node. Empty bootstraps or reopens; a successful join deletes it |
 | `PLURX_CONFIG` | — | — | Explicit config-file path (must exist if set) |
+| `PLURX_COPY_MEMORY_BUDGET` | — | ⅛ of node memory | Bytes this node's verified copies may hold in plurxd's heap at once (not FFmpeg children; per node). Admission, growth and refusal: [COPY-MEMORY-BUDGET](server/COPY-MEMORY-BUDGET.md) |
 | `PLURX_FFMPEG` | — | `ffmpeg` | ffmpeg binary — point at jellyfin-ffmpeg for best hwaccel |
 | `PLURX_FFPROBE` | — | `ffprobe` | ffprobe binary (inspection + chapter markers) |
 | `PLURX_DOVI_TOOL` | — | `dovi_tool` | `dovi_tool` binary for permanent Profile 7 → 8.1 conversion; probed at boot and required only when that feature is enabled |
@@ -4612,8 +4610,9 @@ generations. It does not encode them. The generation identity includes the
 requested encoder and rate-control policy plus normalized audio language,
 subtitle language, and subtitle mode. Every eligible voter or ready learner with a configured local
 cache then competes for a compatible durable artifact job. Whole-title preparation and
-fragment indexing share one ownership queue, one heavy worker per node and two
-reader slots per shared storage domain. Unmapped roots use one global domain. Spare nodes can prepare different titles
+fragment indexing share one ownership queue, one heavy worker per node and its
+background source readers ([source leases](server/SOURCE-LEASES-OPERATIONS.md)).
+Spare nodes can prepare different titles
 without duplicating the same computation or multiplying NAS reads by node count.
 
 Settings → Libraries → Shared storage budgets assigns the same domain name to
@@ -5889,6 +5888,7 @@ session, a title or a path. Nothing here names content.
 | Metric | How to read it |
 |---|---|
 | `plurx_http_requests_total{route_group,method,status}` | Every request's outcome, counted outside the cluster capacity gate — so a learner, fenced or maintenance 503 is counted, which is the point. `status` is the class (`2xx`…`5xx`, `other`), not a code: a node that has turned every request into `5xx` or every request into a `503` shows up here and nowhere else. |
+| `plurx_hls_*`, `plurx_vod_segment_answers_total` | HLS GETs, bytes by role; VOD reuse ([labels](streaming/SPLIT-HLS-DEFAULT-INVENTORY.md#5-how-the-baseline-is-measured)). |
 | `plurx_http_route_seconds{route_group,role}` | **Response-header** latency: it stops when the handler returns its response, before a byte of the body is read. This is the number to alert on for JSON pages, and the number a two-hour direct play would otherwise ruin. |
 | `plurx_http_body_seconds{route_group}` | **Body delivery** time, from the handler's response to the body's last frame or its drop. A different scale from the line above — seconds to hours rather than milliseconds — which is why it is a separate family rather than more buckets. It is per **response body**, so a direct play answered as ten range requests is ten observations, not one viewing. |
 | `plurx_http_bodies_total{route_group,outcome="complete\|aborted"}` | How bodies ended. `complete` is a body that handed the connection everything it promised: it reached its end, or — for a response with a `Content-Length`, which is every direct play range and HLS segment — it yielded the declared number of bytes (hyper stops polling a fixed-length body once those are written, so "reached its end" alone would miss every one of them). `aborted` is a body let go of short of that, or one that ended in an error. `complete` means handed to the connection, not acknowledged by the client. A HEAD, 204 or 304 response promises no body and counts `complete`. **`aborted` is not an error rate**: on a media route a consumer that leaves mid-body — a seek, a player that drops a segment it no longer needs — is ordinary. But a body delivered in full is `complete` whatever its framing, so `aborted` counts real departures only. Read it against `complete` on the *same* route group, and read a change in the ratio rather than its level. |
@@ -6036,8 +6036,7 @@ sample.
 
 A node no longer stops indexing because one of its encoders is in use. The
 analysis worker claims requests one after another for as long as the claim's
-source-capacity rule admits one (two readers per storage domain; without a live
-viewer, a background read takes only a domain no other reader holds), and the
+source-capacity rule admits one ([source leases](server/SOURCE-LEASES-OPERATIONS.md)), and the
 rule is asked again before the read starts, while it reads (every 2 s; the
 node-local "viewer queuing" check every 0.5 s) and before the result is
 submitted — a foreground stream that takes the source in between makes
@@ -6093,6 +6092,20 @@ lacks the create's catalog scope.
 upgrades (`scheduled`, `staged`, `not_staged`, `declined`,
 `admission_refused`, `not_applicable`, `qualification_pending`, `displaced`,
 `cancelled`).
+`plurx_playback_preparation_processed_recovery_unavailable_total{stage,reason}`
+counts the reads of a playback's recovery memory, for a processed recipe, that
+could not answer. `stage` is `before_trial` (the trial still runs, and the
+check after it decides) or `after_trial` (the upgrade is refused as
+`admission_refused`). `reason` names the read and the exit:
+`deadline_route_read`, `deadline_source_identity`, `deadline_route_reread`
+and `deadline_memory_read` are the deadline passing during that read. The
+others are an answer that could not bind the incumbent: `route_*` (including
+`route_reread_store_error`, `route_reread_missing` and `route_moved` at the
+re-read after the source fence), `no_route`, `recipe_mismatch`,
+`response_mismatch`, `candidate_mismatch`, `candidate_identity`,
+`no_network_user`, `no_credential_generation`, `source_fence_open`,
+`source_changed`, `scope_invalid`, `memory_store_error`. A refusal after the
+trial carries the same label in its `processing_skip` reason.
 `plurx_playback_preparation_seams_total{platform,processed,outcome}` counts the
 prepared switches the clients reported at their seam (`committed`, `refused`,
 `switched_without_a_frame`) and

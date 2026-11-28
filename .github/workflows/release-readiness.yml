@@ -4,21 +4,21 @@ name: release readiness
 # docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.5 option (a), the
 # cadence Paul chose on 2026-09-23). Every Monday this asks `main`'s tip
 # whether a release is waiting: its version is dated in CHANGELOG.md and not
-# yet tagged. If one is, the run checks out the release commit itself -- the
-# commit `scripts/release-cut` produced, which dated that section -- runs the
-# full release gate there, and when it is green the `tag` job pushes the
-# annotated `v` tag onto that same commit, which is what starts ci.yml's full
-# sweep and the image publication. Whatever merged on top of the release
-# commit since is not in the tag. A red gate tags nothing. A week with no
-# release pending runs the gate on the tip and tags nothing. A manual
-# dispatch answers the readiness question and never tags.
+# yet tagged. If one is, it names the release commit -- the landing commit of
+# the `scripts/release-cut` pull request -- and reads the CI evidence that
+# landing already carries: `scripts/land` only lands a head whose fast-lane
+# `Main promotion gate` is green (validation/release_evidence.py). When that
+# evidence is there, the `tag` job pushes the annotated `v` tag onto that
+# commit, which is what starts release-tag.yml's image publication.
+# Nothing is retested here: the release code passed its gate once, when it
+# merged (Paul, 2026-11-25). No green gate, an untested landing, or a commit
+# scripts/land did not make tags nothing. Whatever merged on top of the
+# release commit since is not in the tag. A manual dispatch answers the
+# readiness question and never tags.
 on:
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
-
-env:
-  CARGO_TERM_COLOR: always
 
 concurrency:
   group: release-readiness
@@ -26,73 +26,29 @@ concurrency:
 
 jobs:
   release-check:
+    if: github.server_url != 'https://github.com'
     name: current version is ready to tag
-    # Use the shipped media runtime, independently of the host's FFmpeg.
-    # The complete Rust suite needs the same memory pool as ci.yml:check: the
-    # plurxd test build alone peaks near 15.3 GiB, which a 16 GiB container on
-    # the unit-memory-16g carrier killed (run 9325). The heavy nonvoter VM is
-    # the host-mode pool with a verified 20 GiB swapless bound, as for the
-    # nightly sweep; release-readiness runs its container at 18 GiB there.
-    runs-on: [incus, ci-nonvoter-heavy-amd64]
-    env:
-      CARGO_BUILD_JOBS: "1"
-      RUST_TEST_THREADS: "2"
-      # As ci.yml:check: debug source-actor futures need 8 MiB test threads
-      # (docs/ci/RUST-UNIT-FANOUT.md).
-      RUST_MIN_STACK: "8388608"
-    # Includes the candidate-owned runtime build and complete strict sweep.
-    # rust-gate-ci alone is ci.yml:check's suite (~175 min on this pool, run
-    # 7243), and the rest of the sweep took about 65 min in run 9325.
-    timeout-minutes: 300
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    # Reads git history and two forge endpoints; it runs no test suite.
+    timeout-minutes: 10
     outputs:
       pending: ${{ steps.release.outputs.pending }}
       tag: ${{ steps.release.outputs.tag }}
       sha: ${{ steps.release.outputs.sha }}
     steps:
-      - name: Verify effective nonvoter resource bounds
-        shell: sh
-        run: |
-          set -eu
-          cgroup_membership=/proc/self/cgroup
-          cgroup_mount=/sys/fs/cgroup
-          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
-          # VPN's net_cls may precede it on hybrid hosts and are ignored.
-          relative=
-          while IFS=: read -r hierarchy controllers path; do
-            if [ "$hierarchy" = 0 ]; then
-              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
-              relative=$path
-            fi
-          done < "$cgroup_membership"
-          case "$relative" in /*) ;; *) exit 1 ;; esac
-          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
-          cgroup_root="$cgroup_mount$relative"
-          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
-            name=${limit%%=*}
-            expected=${limit#*=}
-            actual="$(cat "$cgroup_root/$name")"
-            if [ "$actual" != "$expected" ]; then
-              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
-              exit 1
-            fi
-          done
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
-        with:
-          components: rustfmt, clippy
-      - id: cargo-cache
-        uses: ./.github/actions/cargo-cache
-        with:
-          lane: release-readiness
-          disk-gb: "45"
-      - name: Prepare the shipped-runtime release runner
-        run: |
-          # Keep the current runner outside the checkout: a pending release
-          # can predate this workflow fix and its helper.
-          cp scripts/release-readiness "$RUNNER_TEMP/release-readiness"
       - name: Find the release commit, if a release is waiting
         id: release
         run: |
@@ -102,33 +58,27 @@ jobs:
           scripts/release-cut --pending > "$found"
           cat "$found"
           cat "$found" >> "$GITHUB_OUTPUT"
-      - name: Check out the release commit
+      - name: Require the release commit's existing green promotion gate
         if: steps.release.outputs.pending == 'true'
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
-        run: git checkout -q --detach "$RELEASE_SHA"
-      - name: Verify release readiness
-        if: steps.release.outputs.pending == 'true'
-        run: python3 "$RUNNER_TEMP/release-readiness" make release-check
-      - name: Verify main is releasable (no release pending)
+        run: python3 -m validation.release_evidence --sha "$RELEASE_SHA"
+      - name: Report that no release is pending
         if: steps.release.outputs.pending != 'true'
+        run: echo "No release pending; nothing to tag."
+      - name: Restore persistent runner workspace ownership
+        if: always()
         run: |
-          echo "No release pending: $(scripts/release-cut --pending | tr '\n' ' ')"
-          python3 "$RUNNER_TEMP/release-readiness" scripts/validate run --profile ci --all --strict
-      - name: Enforce persistent Cargo bounds
-        if: always() && steps.cargo-cache.outputs.local == 'true'
-        uses: ./.github/actions/cargo-cache-finalize
-        with:
-          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
-          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
-          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   tag:
     name: tag the green release commit
     needs: release-check
-    # Only a scheduled run tags, only when the gate above passed, and only a
-    # commit that is an untagged, dated release.
-    if: github.event_name == 'schedule' && needs.release-check.result == 'success' && needs.release-check.outputs.pending == 'true'
+    # Only a scheduled run tags, only when the release commit's gate evidence
+    # was found above, and only a commit that is an untagged, dated release.
+    if: github.server_url != 'https://github.com' && (github.event_name == 'schedule' && needs.release-check.result == 'success' && needs.release-check.outputs.pending == 'true')
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -149,7 +99,7 @@ jobs:
       - name: Push the annotated tag on the release commit the gate passed
         env:
           # A tag pushed with the run's own token starts no workflow, so the
-          # tag that must start ci.yml is pushed with a repository secret
+          # tag that must start release-tag.yml is pushed with a repository secret
           # scoped to this one step.
           RELEASE_TAG_TOKEN: ${{ secrets.RELEASE_TAG_TOKEN }}
           TESTED_SHA: ${{ needs.release-check.outputs.sha }}

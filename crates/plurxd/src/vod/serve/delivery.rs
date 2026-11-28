@@ -923,7 +923,8 @@ impl VodServe {
         &self,
         session_id: &str,
         deadline: Instant,
-    ) -> Option<VodPublication<Option<Vec<u8>>>> {
+    ) -> Option<VodPublication<Option<plurx_core::transcode::split_master::SplitPresentation>>>
+    {
         // A split copy is the other role-split family: one shared copy video
         // and every soundtrack, served through the same master and children.
         if let Some(split) = self.split_copy_master_before(session_id, deadline).await {
@@ -940,8 +941,11 @@ impl VodServe {
                 .await?;
             family
                 .family
-                .master_playlist(&family.video_budgets, family.audio_budget.as_ref())
-                .map(String::into_bytes)
+                .presentation(
+                    &family.video_budgets,
+                    family.audio_budget.as_ref(),
+                    family.audio_source.as_ref(),
+                )
                 .map(Some)
                 .map_err(|error| VodError::ProducerFailed(error.to_string()))
         }
@@ -1197,6 +1201,7 @@ impl VodServe {
             }
             let mut audio = None;
             let mut audio_budget = None;
+            let mut audio_source = None;
             let mut rungs = Vec::new();
             let mut video_budgets = Vec::new();
             let fail =
@@ -1230,6 +1235,21 @@ impl VodServe {
                             || VodError::ProducerFailed("audio delivery budget missing".into()),
                         )?,
                         sustained_bps: encoding.continuous_sustained_bps(),
+                    });
+                    // The soundtrack encodes the recipe's stream, or the
+                    // source's first when the recipe names none.
+                    let streams = &rendition.recipe.file.audio_streams;
+                    let stream = match rendition.recipe.audio_index {
+                        Some(index) => streams.iter().find(|stream| stream.index == index),
+                        None => streams.first(),
+                    };
+                    audio_source = Some(plurx_core::transcode::split_master::SplitAudioSource {
+                        source_index: stream
+                            .map_or(rendition.recipe.audio_index.unwrap_or(0), |stream| {
+                                stream.index
+                            }),
+                        title: stream.and_then(|stream| stream.title.clone()),
+                        language: stream.and_then(|stream| stream.language.clone()),
                     });
                 }
             }
@@ -1313,6 +1333,7 @@ impl VodServe {
                 family,
                 video_budgets,
                 audio_budget,
+                audio_source,
                 candidates,
             }))
         }

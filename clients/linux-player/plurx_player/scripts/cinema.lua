@@ -6,9 +6,16 @@ local opts = {accent = '6EA8FE', hide_ms = 4000}
 require('mp.options').read_options(opts, 'cinema')
 local overlay = mp.create_osd_overlay('ass-events')
 local S = {shown = true, touched = 0, buttons = {}, focus = nil, menu = nil,
-           row = 1, preview = nil, dragging = false, hover = nil, mouse_bound = false}
+           row = 1, preview = nil, dragging = false, hover = nil, mouse_bound = false,
+           native = {}}
 local W, H = 1280, 720
 local render, activity, mouse, click, key, play_pause
+-- Every handler asks for a frame; one frame is drawn when the event queue
+-- has drained. mpv's Lua loop runs timers only once wait_event returns none
+-- and idle handlers just after them, so a render costing a whole video frame
+-- can never keep the hide timer from running however often properties change.
+local dirty = false
+local function invalidate() dirty = true end
 local function number(v) return type(v) == 'number' and v == v and math.abs(v) < math.huge end
 local function clamp(v, lo, hi) return math.max(lo, math.min(hi, v)) end
 local function prop(name, fallback) local v = mp.get_property_native(name); if v == nil then return fallback end; return v end
@@ -159,11 +166,66 @@ end
 local PILL = {res='6EA8FE', hdr='12B3A6', dv='C99A2B', audio='7F8FE0', enh='4BB9B2'}
 local RANGE_SHORT = {dolby_vision='DV', hdr10='HDR10', hlg='HLG', sdr='SDR'}
 local SDR_GAMMA = {srgb=true,['bt.1886']=true,['gamma2.2']=true,['gamma2.4']=true}
--- EL is this player's own fact: the dual-layer stream reached the private
--- build, which pairs its enhancement layer. Neither plurx nor mpv reports
--- whether that layer is full (FEL) or minimal (MEL), so FEL stays the server's
--- claim alone.
+-- EL is this player's own fact. The private mpv's native-dovi-target-state
+-- reports enhancement-layer-composed as a level: true while the picture its
+-- native Dolby renderer maps has the enhancement layer composed in. From
+-- +rogdv5.8 it also reports enhancement-layer-nlq-active, the renderer's own
+-- per-frame decision whether that composed layer is full (FEL: an active NLQ
+-- residual) or minimal (MEL: an identity one). The EL pill follows that level
+-- like the composition level. The server's complete-title classification (the
+-- enhancement's el_kind) is the cross-check: when both name the layer and
+-- disagree, the pill keeps the renderer's name with a mark and the Info row
+-- names both. An mpv without the field keeps the server's name alone.
 local ENHANCEMENTS = {'FEL','EL','RPU','DYN'}
+local EL_KIND = {fel=' — the full enhancement layer (FEL)',
+    mel=' — a minimal enhancement layer (MEL), which adds no picture detail'}
+-- A badge's pill text. The EL pill names the layer FEL for a full layer and
+-- MEL for a minimal one: the native renderer's kind when it reports one,
+-- otherwise the server's title scan, as the panel does; an unnamed layer
+-- keeps EL. A FEL label already on a pill (the server's own FEL claim) is not
+-- drawn twice, and when the renderer names the layer that claim is only the
+-- server's side of the cross-check.
+local EL_LABEL = {fel='FEL', mel='MEL'}
+-- The kind the native renderer reports for the presented picture: 'fel',
+-- 'mel', or nil when it reports none (older mpv, another renderer, or no
+-- composed layer).
+local function renderer_el_kind(view)
+    local n,r=view.native,view.renderer
+    if r and r.kind~='native' then return nil end
+    if view.p.colormatrix~='dolbyvision' then return nil end
+    if n['enhancement-layer-composed']~=true then return nil end
+    local nlq=n['enhancement-layer-nlq-active']
+    if type(nlq)~='boolean' then return nil end
+    return nlq and 'fel' or 'mel'
+end
+-- The renderer's kind, then the server's; the second value is true when both
+-- name the layer and disagree.
+-- The server's side: its title scan, else its own active FEL claim.
+local function server_el_kind(view)
+    local e=view.enhancement
+    if not e then return nil end
+    if EL_LABEL[e.el_kind] then return e.el_kind end
+    for _,badge in ipairs(type(e.active)=='table' and e.active or {}) do
+        if badge=='FEL' then return 'fel' end
+    end
+end
+local function el_kind(view)
+    local scan=server_el_kind(view)
+    local mine=renderer_el_kind(view)
+    if mine then return mine,scan~=nil and scan~=mine,scan end
+    return scan,false,scan
+end
+local function badge_labels(badges,view)
+    local k,disagree=el_kind(view)
+    local kind=EL_LABEL[k] and (EL_LABEL[k]..(disagree and '!' or ''))
+    local named=renderer_el_kind(view)~=nil
+    local labels,seen={},{}
+    for _,badge in ipairs(badges) do
+        local label=((badge=='EL' or (badge=='FEL' and named)) and kind) or badge
+        if not seen[label] then seen[label]=true; labels[#labels+1]=label end
+    end
+    return labels
+end
 local function table_of(value) return type(value)=='table' and value or {} end
 -- One read of each property per render; the info timer runs at 5 Hz.
 local function snapshot()
@@ -177,6 +239,11 @@ local function snapshot()
     view.source=table_of(view.facts.source)
     view.renderer=type(view.facts.renderer)=='table' and view.facts.renderer or nil
     view.enhancement=type(view.facts.enhancement)=='table' and view.facts.enhancement or nil
+    -- Delivered by its observer, never read here: mpv answers a read of this
+    -- property on its video-output thread, which can take a whole frame.
+    -- Renders follow every frame, so reading it would keep this script's event
+    -- queue from ever draining, and mpv runs the hide timer only once it has.
+    view.native=S.native
     return view
 end
 -- detail/helpers.js resLabel, on the frame mpv decodes rather than the file.
@@ -277,8 +344,22 @@ local function enhancement_state(view)
         local now,was=delivered_profile(view.video),source_profile(s)
         if not (was==7 and now==8) then put('RPU',true,'RPU: reshaping applied on this device by '..how) end
         put('DYN',true,'DYN: per-shot Dolby display mapping on this device'..target..' by '..how)
-        if r and now==7 and s.dv_el_present==true then
-            put('EL',true,'EL: the dual-layer Profile 7 stream reached this device, which pairs its enhancement layer (full or minimal is not reported)')
+        -- The level speaks for the native renderer. Other renderers, and mpv
+        -- builds without the level, keep the inference from the stream.
+        local k,disagree,scan=el_kind(view)
+        local kind=EL_KIND[k] or ' (full or minimal is not reported)'
+        if disagree then
+            kind=kind.."; the server's title scan says "..EL_LABEL[scan]..', which disagrees'
+        elseif scan and renderer_el_kind(view) then
+            kind=kind..", as the server's title scan says"
+        end
+        local composed=view.native['enhancement-layer-composed']
+        if type(composed)=='boolean' and not (r and r.kind~='native') then
+            if composed then
+                put('EL',true,"EL: plurx Player's Dolby renderer composed the enhancement layer into the picture it is mapping"..kind)
+            end
+        elseif r and now==7 and s.dv_el_present==true then
+            put('EL',true,'EL: the dual-layer Profile 7 stream reached this device, which pairs its enhancement layer'..kind)
         end
     end
     -- Display order: FEL, EL, RPU, DYN, then any badge a newer server adds.
@@ -319,7 +400,7 @@ local function quality_pills(view)
     if res then pills[#pills+1]={text=res,colour=PILL.res,rank=3} end
     local range=range_pill(view)
     if range then range.rank=1; pills[#pills+1]=range end
-    for _,badge in ipairs((enhancement_state(view))) do pills[#pills+1]={text=badge,colour=PILL.enh,rank=2} end
+    for _,label in ipairs(badge_labels((enhancement_state(view)),view)) do pills[#pills+1]={text=label,colour=PILL.enh,rank=2} end
     local audio=audio_pill(view.audio)
     if audio then audio.rank=4; pills[#pills+1]=audio end
     return pills
@@ -346,26 +427,21 @@ local function playback_info()
     local methods={direct='Direct play',remux='Remux',transcode='Transcode'}
     local transports={progressive='Progressive file · range requests',hls='Segmented HLS'}
     local sessions={none='No server-side session',live='Live HLS session',vod='VOD HLS session'}
-    row('Method',methods[facts.mode])
-    row('Transport',transports[facts.transport])
-    row('Session',sessions[facts.session])
-    local state
-    if prop('eof-reached')==true then state='Ended'
-    elseif prop('paused-for-cache')==true then state='Buffering'
-    elseif prop('pause')==true then state='Paused'
-    elseif prop('pause')==false and prop('idle-active')==false then state='Playing' end
-    row('Player state',state)
-    local total=duration()
-    row('Position',number(prop('time-pos')) and (time(position())..' / '..
-        (number(total) and total>0 and time(total) or 'Unavailable')) or nil)
+    -- Three groups, as in the other clients. Input: what the file and stream
+    -- are, as the source facts and mpv's decoded-stream observations report.
+    -- Processing: how the server and this device handled it (method, transport,
+    -- session, Dolby Vision mapper, enhancements and the server's metadata and
+    -- display-target rows, renderer, decoder, decoded audio). Output: what
+    -- reaches the screen and speakers, and playback state and rates.
+    -- Headings are plain text lines.
+    local function heading(name) r[#r+1]={text=name} end
+    local view=snapshot()
+    local source=view.source
+    heading('Input')
+    row('Source dynamic range',joined(observed(source.hdr_format) or RANGE_SHORT[source_range(source) or ''],
+        source.dv_el_present==true and 'enhancement layer present' or nil))
     row('Stream format',joined(observed(prop('video-format')),observed(prop('video-codec'))))
     row('Stream frame (mpv decoder)',dimensions(decoded,'w','h'))
-    row('Player window size',dimensions(osd,'w','h'))
-    if number(osd.w) and number(osd.h) and number(osd.ml) and number(osd.mr)
-            and number(osd.mt) and number(osd.mb) then
-        row('Video display area',dimensions({w=osd.w-osd.ml-osd.mr,
-            h=osd.h-osd.mt-osd.mb},'w','h'))
-    else row('Video display area') end
     row('Pixel format',joined(observed(p.pixelformat),observed(p['hw-pixelformat'])))
     local range
     local sdr={srgb=true,['bt.1886']=true,['gamma2.2']=true,['gamma2.4']=true}
@@ -375,39 +451,70 @@ local function playback_info()
     elseif sdr[p.gamma] then range='SDR (mpv transfer)' end
     row('Dynamic range',range)
     row('Input color',joined(observed(p.primaries),observed(p.gamma),observed(p.colormatrix),observed(p['colorlevels'])))
-    row('VO target color',joined(observed(target.primaries),observed(target.gamma)))
-    row('VO target peak',number(target['max-luma']) and target['max-luma']>0
-        and measurement(target['max-luma'],'%.0f nits') or nil)
-    local view=snapshot()
-    local source=view.source
-    row('Source dynamic range',joined(observed(source.hdr_format) or RANGE_SHORT[source_range(source) or ''],
-        source.dv_el_present==true and 'enhancement layer present' or nil))
+    local selected
+    for _,track in ipairs(prop('track-list',{})) do
+        if track.type=='audio' and track.selected then selected=track; break end
+    end
+    row('Stream audio track',selected and joined(observed(selected.codec),observed(selected.lang)))
+    heading('Processing')
+    row('Method',methods[facts.mode])
+    row('Transport',transports[facts.transport])
+    row('Session',sessions[facts.session])
     row('Dolby Vision mapper',observed((view.renderer or {}).label))
     local active,details,order=enhancement_state(view)
     if #order==0 then
         row('Dolby Vision enhancements',source_range(source)=='dolby_vision' and 'None reported' or 'Not a Dolby Vision source')
     else
-        row('Dolby Vision enhancements',#active>0 and table.concat(active,' · ') or 'None active')
+        local names=badge_labels(active,view)
+        row('Dolby Vision enhancements',#names>0 and table.concat(names,' · ') or 'None active')
         for _,badge in ipairs(order) do
             for _,line in ipairs(wrapped((details[badge].active and '● ' or '○ ')..details[badge].text,columns)) do
                 r[#r+1]={text=line}
             end
         end
     end
+    -- The server's two rows, already validated by the launcher; an absent row
+    -- is omitted rather than shown as Unavailable.
+    local provenance=type(view.facts.provenance)=='table' and view.facts.provenance or {}
+    for _,spec in ipairs({{'dv_metadata','Dolby Vision metadata'},{'display_target','Display target'}}) do
+        local item=provenance[spec[1]]
+        if type(item)=='table' and type(item.value)=='string' then
+            row(spec[2],item.value)
+            for _,sub in ipairs(table_of(item.rows)) do
+                if type(sub)=='table' and type(sub.label)=='string' and type(sub.text)=='string' then
+                    for _,line in ipairs(wrapped(sub.label..': '..sub.text,columns)) do r[#r+1]={text=line} end
+                end
+            end
+        end
+    end
     row('Renderer',joined(observed(prop('current-vo')),observed(prop('current-gpu-context'))))
     local hw=observed(prop('hwdec-current'))
     row('Decoder',hw=='no' and 'Software (mpv)' or hw)
+    row('Decoded audio',audio_format(table_prop('audio-params')))
+    heading('Output')
+    local state
+    if prop('eof-reached')==true then state='Ended'
+    elseif prop('paused-for-cache')==true then state='Buffering'
+    elseif prop('pause')==true then state='Paused'
+    elseif prop('pause')==false and prop('idle-active')==false then state='Playing' end
+    row('Player state',state)
+    local total=duration()
+    row('Position',number(prop('time-pos')) and (time(position())..' / '..
+        (number(total) and total>0 and time(total) or 'Unavailable')) or nil)
+    row('Player window size',dimensions(osd,'w','h'))
+    if number(osd.w) and number(osd.h) and number(osd.ml) and number(osd.mr)
+            and number(osd.mt) and number(osd.mb) then
+        row('Video display area',dimensions({w=osd.w-osd.ml-osd.mr,
+            h=osd.h-osd.mt-osd.mb},'w','h'))
+    else row('Video display area') end
+    row('VO target color',joined(observed(target.primaries),observed(target.gamma)))
+    row('VO target peak',number(target['max-luma']) and target['max-luma']>0
+        and measurement(target['max-luma'],'%.0f nits') or nil)
+    row('Device audio output',joined(observed(prop('current-ao')),audio_format(table_prop('audio-out-params'))))
     row('Frame rate (estimated)',measurement(prop('estimated-vf-fps'),'%.2f fps'))
-    row('Video bitrate (packets)',bitrate(prop('video-bitrate')))
     row('Dropped frames (renderer)',measurement(prop('frame-drop-count'),'%.0f'))
     row('Dropped frames (decoder)',measurement(prop('decoder-frame-drop-count'),'%.0f'))
-    local selected
-    for _,track in ipairs(prop('track-list',{})) do
-        if track.type=='audio' and track.selected then selected=track; break end
-    end
-    row('Stream audio track',selected and joined(observed(selected.codec),observed(selected.lang)))
-    row('Decoded audio',audio_format(table_prop('audio-params')))
-    row('Device audio output',joined(observed(prop('current-ao')),audio_format(table_prop('audio-out-params'))))
+    row('Video bitrate (packets)',bitrate(prop('video-bitrate')))
     row('Audio bitrate (packets)',bitrate(prop('audio-bitrate')))
     -- mpv keeps decoding while a script runs: capture once before checking,
     -- since a property may disappear between requests during reattachment.
@@ -530,6 +637,10 @@ local function bind_mouse(wanted)
     else
         mp.remove_key_binding('cinema-click'); mp.remove_key_binding('cinema-double')
     end
+    -- Renders run from an idle handler, after mpv's own idle flush of key
+    -- bindings: flush now, or a click right after the pointer stops would
+    -- still reach the binding of the frame before.
+    mp.flush_keybindings()
 end
 render = function()
     local w, h = mp.get_osd_size()
@@ -675,7 +786,7 @@ render = function()
     local mx,my = coords(); bind_mouse(S.dragging or hit(mx,my) ~= nil)
 end
 activity = function()
-    S.shown=true; S.touched=mp.get_time(); render()
+    S.shown=true; S.touched=mp.get_time(); invalidate()
 end
 local function preview_pointer()
     local x = coords()
@@ -686,9 +797,9 @@ mouse = function()
     if S.dragging then preview_pointer() end
     S.hover=nil
     activity()
+    -- Hit-test what is on screen: the frame drawn after the last drain.
     local b = hit(x,y)
     if b then S.hover=b.id end
-    render()
 end
 click = function(event)
     local x,y = coords(); local b = hit(x,y)
@@ -757,8 +868,9 @@ end
 mp.add_forced_key_binding('WHEEL_UP','cinema-wheel-up',function() if S.menu then key('up') else mp.commandv('add','volume',5); activity() end end)
 mp.add_forced_key_binding('WHEEL_DOWN','cinema-wheel-down',function() if S.menu then key('down') else mp.commandv('add','volume',-5); activity() end end)
 for _, name in ipairs({'time-pos','duration','pause','track-list','sid','aid','fullscreen','osd-dimensions','user-data/osc/film','force-media-title','demuxer-cache-state','speed','audio-delay','video-params','video-target-params','user-data/cinema-video','audio-params'}) do
-    mp.observe_property(name,'native',function() render() end)
+    mp.observe_property(name,'native',invalidate)
 end
+mp.observe_property('native-dovi-target-state','native',function(_,value) S.native=table_of(value); invalidate() end)
 mp.observe_property('user-data/cinema','native',function()
     local retryable=cinema().retryable == true
     -- A stale popup must not cover the recovery action, especially in a
@@ -773,11 +885,14 @@ mp.register_event('file-loaded',function() S.preview=nil; S.dragging=false; S.me
 mp.add_periodic_timer(0.2,function()
     -- No diagnostic polling while the panel is closed. Read fresh properties
     -- while open even when playback is paused or notifications are throttled.
-    if S.menu=='info' then render() end
+    if S.menu=='info' then invalidate() end
     if S.shown and not prop('pause',false) and not S.menu and not S.preview and not S.dragging
             and not busy() and mp.get_time()-S.touched >= opts.hide_ms/1000 then
-        S.shown=false; S.focus=nil; render()
+        S.shown=false; S.focus=nil; invalidate()
     end
 end)
 mp.register_event('shutdown',function() overlay:remove() end)
+mp.register_idle(function()
+    if dirty then dirty=false; render() end
+end)
 activity()

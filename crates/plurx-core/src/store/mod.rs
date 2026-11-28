@@ -16,7 +16,10 @@
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
 pub mod analysis_coordination;
+mod analysis_source_scope;
 mod copy_index_v3;
+pub mod playback_device_caps;
+pub use playback_device_caps::PlaybackDeviceCaps;
 pub mod playback_input_keys;
 pub use copy_index_v3::{
     copy_index_v3_publish_payload, copy_index_v3_rebuild_generation, copy_index_v3_source_key,
@@ -259,6 +262,7 @@ mod placeholder_census;
 #[cfg(all(test, feature = "hiqlite-store"))]
 mod consistent_read_census;
 
+#[macro_use]
 pub mod background_jobs;
 pub use background_jobs::{AnalysisViewerInterest, ArtifactViewerInterest, BackgroundJobStore};
 mod background_job_turns;
@@ -302,6 +306,9 @@ pub mod offline_claim;
 pub mod offline_expiry;
 pub mod replicated;
 pub mod scan_request_v2;
+mod source_leases;
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod source_leases_tests;
 mod storage_domain_pending;
 pub(crate) mod storage_domain_pending_api;
 mod subtitle_managed_schema;
@@ -312,6 +319,16 @@ pub mod watched_drain;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 pub use dv_conversion::validation_pre_provenance_admission_trigger;
+
+/// Canonical expanded generation and its generated contract for owned fixtures.
+#[cfg(feature = "hiqlite-contract-tests")]
+pub fn validation_expanded_source_lease_fixture(
+) -> Result<(rusqlite::Connection, Vec<String>), crate::error::StoreError> {
+    let conn = sqlite::SqliteStore::open_migrated_through(source_leases::EXPANDED_VERSION)?;
+    fragment_publication::install_sqlite(&conn)?;
+    Ok((conn, source_leases::statements(source_leases::CONTRACT)))
+}
+
 pub use dv_conversion::{
     DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
     DvConversionProgressSnapshot, DvConversionQueueBatch, DvConversionState, DvConversionStore,
@@ -2527,6 +2544,15 @@ pub mod keys {
     /// right number is a property of the silicon: a discrete card with two
     /// NVENC chips is not a NUC.
     pub const MAX_HW_SESSIONS: &str = "transcode.max_hw_sessions";
+    /// Background readers per configured source root, default 2 (1-16).
+    /// One additional slot is reserved for live demand. The replicated
+    /// writer applies lower limits to new admissions without stopping readers.
+    pub const JOB_SOURCE_READERS_PER_ROOT: &str = "jobs.source_readers_per_root";
+    /// Per-root override, suffixed with library-id/uppercase-hex-root-path.
+    /// An empty value restores the root default.
+    pub const JOB_ROOT_SOURCE_READERS_PREFIX: &str = "jobs.root_source_readers.";
+    /// Explicit optional aggregate-domain cap (1-16). Empty means unlimited.
+    pub const JOB_DOMAIN_SOURCE_READERS_PREFIX: &str = "jobs.domain_source_readers.";
     /// Threads the software-encoder CPU pool may hand out at once. Defaults
     /// to every core but one (plurxd derives it from the machine); an admin
     /// sets it lower on a box whose CPU has other jobs, or higher at their
@@ -2922,6 +2948,29 @@ pub trait UserStore: Send + Sync + 'static {
     /// List a bounded, oldest-first inventory without exposing full token
     /// digests to the HTTP layer.
     async fn list_tokens_for_user(&self, user_id: i64) -> Result<Vec<TokenSummary>, StoreError>;
+    /// Keep the playback capability document a native login token's device
+    /// just sent (Curator ADR 0031 §5), as that token's record. Compared
+    /// against this node's copy first and written only when it differs, so an
+    /// ordinary Play is not a replicated write. Returns whether it wrote. A
+    /// token that is unknown or a Jellyfin compatibility login records
+    /// nothing. The record is removed with its token
+    /// ([`playback_device_caps`]).
+    async fn put_device_caps(
+        &self,
+        token_hash: &str,
+        caps: &str,
+        now: i64,
+    ) -> Result<bool, StoreError>;
+    /// One account's recorded devices whose sign-in is still live (present
+    /// and not idle-expired), most recently used first, at most
+    /// [`TOKEN_SUMMARY_MAX`]. A local read: a presentation answer.
+    async fn device_caps_for_user(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<PlaybackDeviceCaps>, StoreError>;
+    /// Every account's live recorded devices, most recently used first, at
+    /// most [`playback_device_caps::DEVICE_CAPS_LIST_MAX`].
+    async fn device_caps_for_all_users(&self) -> Result<Vec<PlaybackDeviceCaps>, StoreError>;
     /// Delete exactly one token selected by an eight-hex prefix. Ambiguous
     /// prefixes are never accepted, and clustered writes retain the exact
     /// cache-admin mutation claim.
@@ -3933,6 +3982,25 @@ pub trait MediaStore: Send + Sync + 'static {
         mtime: i64,
         report_json: &str,
     ) -> Result<bool, StoreError>;
+    /// Graft the Dolby Vision levels record (`scan::dv_levels`) onto a file's
+    /// stored probe JSON under `PROBE_FIELD`, fenced to the measured size and
+    /// mtime like the other probe-document grafts. Writes nothing else and
+    /// answers `false` when the fence or the probe is gone; a probe republish
+    /// replaces the document and so drops the record.
+    async fn merge_file_probe_dv_levels(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        record: &crate::scan::dv_levels::DvLevelsRecord,
+    ) -> Result<bool, StoreError>;
+    /// One page, by id, of Dolby Vision HEVC sources (the title-scan
+    /// eligibility predicate) whose probe document carries no levels record.
+    async fn files_missing_dv_levels(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MediaFile>, StoreError>;
     /// Files whose probe never succeeded (`probe_json IS NULL`), oldest scan
     /// first. `library_id` narrows to one library; `None` is server-wide. These
     /// are the records the retry job and the scan's repair pass exist for —

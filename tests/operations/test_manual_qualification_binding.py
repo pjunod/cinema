@@ -111,11 +111,9 @@ class ManualQualificationBindingCase(unittest.TestCase):
         # reads that base for them any more.
         self.assertNotIn("PLURX_VALIDATION_MERGE_TARGET", workflow)
         self.assertNotIn("needs.windows_compile", workflow)
-        publish = workflow.split("  publish:\n", 1)[1].split("  publish_main:\n", 1)[0]
-        self.assertIn("startsWith(github.ref, 'refs/tags/v')", publish)
-        for field in ("promotion_pr", "promotion_head_sha", "promotion_base_sha"):
-            self.assertIn(f"inputs.{field} == ''", publish)
-        self.assertIn("needs.scope.outputs.qualification != 'true'", publish)
+        # A release tag publishes through release-tag.yml, never this sweep.
+        self.assertNotIn("\n  publish:\n", workflow)
+        self.assertNotIn("tags:", workflow.split("\njobs:", 1)[0])
         publish_main = workflow.split("  publish_main:\n", 1)[1].split("  pr_gate:\n", 1)[0]
         self.assertIn("inputs.promotion_pr == ''", publish_main)
         self.assertIn("needs.scope.outputs.qualification != 'true'", publish_main)

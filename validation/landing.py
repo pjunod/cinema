@@ -2,7 +2,7 @@
 
 `make history-check` reads a corrective pull request's `Regression-Test:`
 lines from the landing commit's message (docs/VALIDATION.md, "The boundary,
-and what replaces a fragment past it"). The merge train copies them. The raw
+and what replaces a fragment past it"). The raw
 API does not: `POST …/pulls/<N>/merge` without `MergeMessageField` lands the
 title alone, and a landing commit cannot be amended, so every such merge
 costs a permanent row in `validation/merge-errata.toml` (#1596 and #1599 on
@@ -10,11 +10,11 @@ costs a permanent row in `validation/merge-errata.toml` (#1596 and #1599 on
 
 Two entry points share one definition of a landing message:
 
-* `scripts/land <pr> --head <sha>` is the landing path for a merge made with
-  the train off. It refuses a pull request that is not ready, whose head has
+* `scripts/land <pr> --head <sha>` is the landing path for every merge into
+  `main` (docs/ci/REQUESTED-LANE.md). It refuses a pull request that is not ready, whose head has
   not passed the lane's promotion gate, or whose merge tree it cannot build;
   resolves every line in the tree the merge will produce; merges with the
-  message the merge train uses; then reads the landed commit back.
+  message the retired merge train used; then reads the landed commit back.
 * `python3 -m validation.landing check` runs on every push to `main`
   (`.github/workflows/landing-check.yml`) and fails, naming the pull request,
   when a landing lacks the lines its description carries. It is the same
@@ -59,18 +59,33 @@ TARGET = "main"
 # Forgejo's own work-in-progress prefixes; either keeps a pull request a draft.
 DRAFT_RE = re.compile(r"^\s*(?:wip:|\[wip\])", re.IGNORECASE)
 # Forgejo answers 405 with this text while it is still computing whether the
-# pull request merges cleanly. The merge train waits on the same answer.
+# pull request merges cleanly.
 RETRY_LATER = re.compile(r"try again later", re.IGNORECASE)
 FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 MERGE_RETRIES = 12
 MERGE_WAIT = 5.0
 READBACK_RETRIES = 5
 READBACK_WAIT = 2.0
-# What the merge train calls green: the fast lane's `promotion_gate` job
-# itself succeeded. A run that skipped the gate (a draft, a paperwork-only
-# run) reports an overall success and is not green.
+# Green: the fast lane's `promotion_gate` job itself succeeded on this head.
+# It runs only on a requested lane run (the `lane` label); a run that skipped
+# the gate (a cheap push run, a draft, a paperwork-only run) reports an
+# overall success and is not green.
 GATE_CONTEXT = "main fast lane / Main promotion gate"
 UNTESTED_TRAILER = "Landed-Untested"
+# A batch pass (docs/ci/REQUESTED-LANE.md, "Batches"): ci-fleet ran the lane
+# once on a `lane-batch/` pull request merging several heads and posted this
+# status on each member head. It is a pass only once `verify_batch` has traced
+# it to that run; until then it is ignored, neither a pass nor a failure.
+BATCH_CONTEXT = GATE_CONTEXT + " (batch)"
+LANE_BOT = "ci-fleet-lane"
+LANE_WORKFLOW = "main-fast-lane.yml"
+GATE_JOB = "Main promotion gate"
+BATCH_BRANCH = "lane-batch/"
+BATCH_RE = re.compile(
+    r"ci-fleet batch (?P<batch>b-[A-Za-z0-9][A-Za-z0-9._-]{0,63}): run (?P<run>[1-9][0-9]{0,18}) "
+    r"of #(?P<pull>[1-9][0-9]{0,9}) at (?P<head>[0-9a-f]{40}) green"
+    r"(?: · with(?: #[1-9][0-9]{0,9})+)?(?: · interaction)?"
+)
 
 
 class LandRefused(Exception):
@@ -137,10 +152,31 @@ class Forge:
         return self._call("GET", f"/pulls/{number}")
 
     def statuses(self, sha: str) -> list[dict]:
-        """The latest commit status per context for `sha`."""
+        """Every commit status reported for `sha`, newest first.
 
-        combined = self._call("GET", f"/commits/{sha}/status") or {}
-        return list(combined.get("statuses") or [])
+        The full list, not the combined `/status` view: that keeps only the
+        newest status per context, so a later run on the same head (a cheap
+        push-event run, a label tidy-up) posting a skipped gate would hide the
+        requested run's green one, which `gate_state` accepts.
+        """
+
+        statuses: list[dict] = []
+        for page in range(1, 21):
+            rows = self._call("GET", f"/commits/{sha}/statuses?page={page}&limit=50") or []
+            statuses.extend(rows)
+            if len(rows) < 50:
+                break
+        return statuses
+
+    def _api(self):
+        from validation import python_unit_receipts as receipts
+        return receipts.API(self.url + "/api/v1", self.repo, self._token)
+
+    def run(self, run_id: int) -> dict:
+        return self._api().get(f"/actions/runs/{run_id}")
+
+    def run_jobs(self, run_id: int) -> list[dict]:
+        return self._api().pages(f"/actions/runs/{run_id}/jobs")
 
     def source_gate(self, number, head, main, root, run_id):
         from validation import source_gate_landing
@@ -163,26 +199,22 @@ class Forge:
     def commit_message(self, sha: str) -> str:
         return self._call("GET", f"/git/commits/{sha}")["commit"]["message"]
 
-    def fetch(self, root: Path, number: int) -> tuple[str, str]:
-        """Bring main and the pull request's head into `root`; their SHAs.
-
-        The token travels in the environment, never in an argument list or a
-        stored remote URL, and is not sent after a redirect.
-        """
+    def _git_env(self) -> dict:
+        """The token travels in the environment, never in an argument list or a
+        stored remote URL, and is not sent after a redirect."""
 
         env = os.environ.copy()
-        env.update({
-            "GIT_TERMINAL_PROMPT": "0",
-            "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "http.followRedirects",
-            "GIT_CONFIG_VALUE_0": "false",
-        })
+        env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "http.followRedirects", "GIT_CONFIG_VALUE_0": "false"})
         if self._token:
-            env.update({
-                "GIT_CONFIG_COUNT": "2",
-                "GIT_CONFIG_KEY_1": "http.extraHeader",
-                "GIT_CONFIG_VALUE_1": f"Authorization: token {self._token}",
-            })
+            env.update({"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_1": "http.extraHeader",
+                        "GIT_CONFIG_VALUE_1": f"Authorization: token {self._token}"})
+        return env
+
+    def fetch(self, root: Path, number: int) -> tuple[str, str]:
+        """Bring main and the pull request's head into `root`; their SHAs."""
+
+        env = self._git_env()
         fetched = subprocess.run(
             ["git", "-C", str(root), "fetch", "--quiet", "--no-tags", f"{self.url}/{self.repo}.git",
              f"+refs/heads/{TARGET}:refs/land/{TARGET}",
@@ -200,18 +232,26 @@ class Forge:
     def fetch_commit(self, root: Path, sha: str) -> None:
         """Make main's current history, which holds the landing `sha`, readable in `root`."""
 
-        env = os.environ.copy()
-        env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_COUNT": "1",
-                    "GIT_CONFIG_KEY_0": "http.followRedirects", "GIT_CONFIG_VALUE_0": "false"})
-        if self._token:
-            env.update({"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_1": "http.extraHeader",
-                        "GIT_CONFIG_VALUE_1": f"Authorization: token {self._token}"})
+        env = self._git_env()
         subprocess.run(
             ["git", "-C", str(root), "fetch", "--quiet", "--no-tags", f"{self.url}/{self.repo}.git",
              f"+refs/heads/{TARGET}:refs/land/{TARGET}"],
             env=env, capture_output=True, text=True, check=False,
         )
         _git(root, "rev-parse", "--verify", f"{sha}^{{commit}}")
+
+    def fetch_pull(self, root: Path, number: int) -> str:
+        """Bring pull request `number`'s head (open or closed) into `root`; its SHA."""
+
+        fetched = subprocess.run(
+            ["git", "-C", str(root), "fetch", "--quiet", "--no-tags", f"{self.url}/{self.repo}.git",
+             f"+refs/pull/{number}/head:refs/land/batch-{number}"],
+            env=self._git_env(), capture_output=True, text=True, check=False,
+        )
+        if fetched.returncode != 0:
+            raise HistoryError(f"cannot fetch pull request #{number} from the forge "
+                               f"(git fetch exit {fetched.returncode})")
+        return _git(root, "rev-parse", f"refs/land/batch-{number}").strip()
 
 
 # -- the merge tree ------------------------------------------------------------------
@@ -270,11 +310,11 @@ def merge_tree(root: Path, main: str, head: str) -> tuple[str | None, bool]:
 def landing_message(pull: dict, untested: str | None = None) -> tuple[str, str]:
     """The subject and message a landing of `pull` carries.
 
-    The merge train's form (`cifleet/train.py` `_merge_message`, ci-fleet
-    472831c): Forgejo's own subject, then the whole description and a
+    The retired merge train's form (`cifleet/train.py` `_merge_message`,
+    ci-fleet 472831c): Forgejo's own subject, then the whole description and a
     `Reviewed-on:` line, which is also what `MERGE_TEMPLATE.md` prefills the
     web form with. The description is where the `Regression-Test:` lines are,
-    so a landing made here and one made by the train read the same.
+    so every landing on `main` reads the same.
     `untested` adds the reason a head was landed without a green gate.
     """
 
@@ -301,17 +341,118 @@ def gate_state(statuses: list[dict]) -> tuple[str, str]:
     """(state, where to look) of the promotion gate among a commit's statuses.
 
     "missing" when the lane never reported the gate for this commit.
+    Any `success` on this exact head is the answer: one complete green
+    requested run is the receipt, and a later cheap or label-event run on
+    the same head posts a newer `skipped` gate that must not hide it.
+    Otherwise the latest status says where the gate stands. A batch status
+    (BATCH_CONTEXT) is not read here: `batch_pass` decides it.
     """
 
     gates = [
         status for status in statuses
-        if str(status.get("context") or "") == GATE_CONTEXT
-        or str(status.get("context") or "").startswith(GATE_CONTEXT + " (")
+        if str(status.get("context") or "") != BATCH_CONTEXT
+        and (str(status.get("context") or "") == GATE_CONTEXT
+             or str(status.get("context") or "").startswith(GATE_CONTEXT + " ("))
     ]
     if not gates:
         return "missing", ""
+    passed = [status for status in gates if str(status.get("status") or status.get("state") or "") == "success"]
+    if passed:
+        gates = passed
     latest = max(gates, key=lambda status: (str(status.get("updated_at") or ""), status.get("id") or 0))
     return str(latest.get("status") or latest.get("state") or "missing"), str(latest.get("target_url") or "")
+
+
+def _state(status: dict) -> str:
+    return str(status.get("status") or status.get("state") or "")
+
+
+def verify_batch(forge, status: dict, head: str, root: Path) -> str:
+    """Why a batch status on member `head` is a pass; raises BatchUnverified otherwise.
+
+    Each claim in the description is checked against the forge and git: the
+    run is a pull_request run of the fast lane on the batch head that
+    succeeded, with a successful promotion gate job; the batch pull request is
+    ci-fleet's `lane-batch/` branch into main at that head; `head` is an
+    ancestor of the batch head; ci-fleet's bot posted the status.
+    """
+
+    from validation.main_preflight_adoption import terminal_status
+    from validation.python_unit_receipts import NOT_ADOPTED
+
+    def need(condition, why: str) -> None:
+        if not condition:
+            raise BatchUnverified(why)
+
+    description = str(status.get("description") or "")
+    claim = BATCH_RE.fullmatch(description)
+    need(claim, f"its description {description[:120]!r} is not ci-fleet's batch grammar")
+    batch, run_id, pull_number, batch_head = (claim["batch"], int(claim["run"]), int(claim["pull"]),
+                                              claim["head"])
+    need(str((status.get("creator") or {}).get("login") or "") == LANE_BOT,
+         f"it was posted by {(status.get('creator') or {}).get('login') or 'an unknown account'}, "
+         f"not {LANE_BOT}")
+    try:
+        run = forge.run(run_id)
+        need(run.get("id") == run_id, f"run {run_id} reads back as {run.get('id')}")
+        need(run.get("workflow_id") == LANE_WORKFLOW,
+             f"run {run_id} is {run.get('workflow_id')!r}, not {LANE_WORKFLOW}")
+        need(run.get("event") == "pull_request", f"run {run_id} is a {run.get('event')!r} run, not pull_request")
+        need(run.get("commit_sha") == batch_head,
+             f"run {run_id} ran {run.get('commit_sha')}, not batch head {batch_head}")
+        event = json.loads(run["event_payload"])
+        need(event.get("number") == pull_number and (event.get("pull_request") or {}).get("number") == pull_number,
+             f"run {run_id} is not a run of #{pull_number}")
+        need(terminal_status(run) == "success", f"run {run_id} concluded {terminal_status(run)!r}")
+        gates = [job for job in forge.run_jobs(run_id) if job.get("name") == GATE_JOB]
+        need(len(gates) == 1, f"run {run_id} has {len(gates)} '{GATE_JOB}' jobs, not one")
+        need(gates[0].get("run_id") == run_id and terminal_status(gates[0]) == "success",
+             f"run {run_id}'s '{GATE_JOB}' job is {terminal_status(gates[0])!r}")
+        pull = forge.pull(pull_number)
+    except BatchUnverified:
+        raise
+    except (ForgeError, *NOT_ADOPTED) as error:
+        raise BatchUnverified(f"the forge could not show its run or pull request ({error})") from None
+    # Forgejo (Gitea 1.22) reports `head.ref` as `refs/pull/<n>/head` once the
+    # branch is deleted, which ci-fleet does after the run; `head.label` keeps
+    # the branch name either way.
+    head_info = pull.get("head") or {}
+    branch = str(head_info.get("label") or head_info.get("ref") or "")
+    need(branch == BATCH_BRANCH + batch and head_info.get("ref") in (branch, f"refs/pull/{pull_number}/head"),
+         f"#{pull_number} is from {branch!r}, not {BATCH_BRANCH}{batch}")
+    need((pull.get("base") or {}).get("ref") == TARGET, f"#{pull_number} does not target {TARGET}")
+    need((pull.get("head") or {}).get("sha") == batch_head,
+         f"#{pull_number} head is {(pull.get('head') or {}).get('sha')}, not {batch_head}")
+    try:
+        fetched = forge.fetch_pull(root, pull_number)
+    except HistoryError as error:
+        raise BatchUnverified(str(error)) from None
+    need(fetched == batch_head, f"refs/pull/{pull_number}/head is {fetched}, not {batch_head}")
+    ancestor = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", head, batch_head],
+                              capture_output=True, check=False).returncode == 0
+    need(ancestor, f"{head} is not an ancestor of batch head {batch_head}")
+    return (f"batch {batch}: run {run_id} of #{pull_number} at {batch_head}, "
+            f"its '{GATE_JOB}' job {gates[0].get('id')}")
+
+
+class BatchUnverified(Exception):
+    """A batch status that is not traced to a green batch run; it is ignored."""
+
+
+def batch_pass(forge, statuses: list[dict], head: str, root: Path,
+               say: Callable[[str], None]) -> str | None:
+    """The verified batch pass among `head`'s statuses, newest first; None when there is none."""
+
+    batches = sorted((status for status in statuses
+                      if str(status.get("context") or "") == BATCH_CONTEXT and _state(status) == "success"),
+                     key=lambda status: (str(status.get("updated_at") or ""), status.get("id") or 0),
+                     reverse=True)
+    for status in batches:
+        try:
+            return verify_batch(forge, status, head, root)
+        except BatchUnverified as why:
+            say(f"Ignoring '{BATCH_CONTEXT}' status {status.get('id')} on {head}: {why}")
+    return None
 
 
 def require_green(forge, number: int, head: str, untested: str | None,
@@ -325,8 +466,13 @@ def require_green(forge, number: int, head: str, untested: str | None,
         say(f"Verified ci / Main promotion gate: actual run {proof['run']}, job {proof['job']}, {proof['url']}")
         return False
 
-    state, url = gate_state(forge.statuses(head))
+    statuses = forge.statuses(head)
+    state, url = gate_state(statuses)
     if state == "success":
+        return False
+    batch = batch_pass(forge, statuses, head, root or REPO_ROOT, say)
+    if batch is not None:
+        say(f"Verified {BATCH_CONTEXT}: {batch}")
         return False
     found = {
         "missing": f"the lane has reported no '{GATE_CONTEXT}' status for it",
@@ -673,7 +819,7 @@ def main_land(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="scripts/land",
         description="Land a pull request on main with its Regression-Test lines in the landing "
-                    "commit. The landing path when MERGE_TRAIN is off; never the raw merge API.",
+                    "commit. The landing path for main; never the raw merge API.",
         epilog="Exit codes: 0 landed (or a clean dry run); 1 refused or conflicting, nothing merged; "
                "2 usage or forge error, nothing merged; 3 MERGED, but the landing commit is wrong "
                "and needs an errata row.",

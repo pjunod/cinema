@@ -653,7 +653,7 @@ pub(super) async fn run(
             return Err(transient(format!("joining F+ source input: {error}")));
         }
     }
-    if !source.unchanged() || source.reopen(file).await.is_err() {
+    if !source.unchanged().await || source.reopen(file).await.is_err() {
         // What the helper read may straddle two sources: keep nothing.
         spool.discard().await;
         return Err(transient("source changed during the F+ fit".into()));
@@ -741,16 +741,6 @@ mod tests {
         }
         use plurx_core::process::source_lifetime as lifetime;
         use std::os::unix::fs::PermissionsExt;
-        static OBSERVED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        fn observe(value: &lifetime::LaunchObservation) -> std::io::Result<()> {
-            assert_eq!(value.reason, Some("broker_confinement_unqualified"));
-            assert!(
-                !value.verified,
-                "the manifest must not grant broker confinement"
-            );
-            OBSERVED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }
         let root = crate::test_tempdir().expect("owned spool fixture");
         let tools = root.path().join("tools");
         std::fs::create_dir(&tools).expect("tool root");
@@ -759,7 +749,8 @@ mod tests {
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))
             .expect("executable");
         lifetime::set_daemon_roots(&[root.path().to_owned()], &[tools]).expect("roots");
-        lifetime::install_observer(observe).expect("observer");
+        // The child process is isolated, so these counters start at this test.
+        let before = lifetime::launch_snapshot();
         let path = root.path().join("stdout.run");
         let stdout = std::fs::File::create(&path).expect("spool");
         let _asset =
@@ -793,7 +784,11 @@ mod tests {
             std::fs::read(path).expect("settled output"),
             b"manifest-owned-spool"
         );
-        assert_eq!(OBSERVED.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The manifest must not grant broker confinement: one declared launch,
+        // counted unverified, none verified.
+        let after = lifetime::launch_snapshot();
+        assert_eq!(after.unverified, before.unverified + 1);
+        assert_eq!(after.verified, before.verified);
     }
 
     fn output(

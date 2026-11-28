@@ -62,7 +62,9 @@ class DvHelperOwnershipTests(unittest.TestCase):
         # A context copy: no --from, so the helper sources are this checkout's.
         self.assertIn("COPY tools/dv_processing /build-inputs/dv_processing", helpers)
         build = [line for line in helpers if line.startswith("RUN ")]
-        self.assertEqual(len(build), 3)
+        # The bundle build, then the active-area, base-renderer and scanner
+        # segment-endpoint controls.
+        self.assertEqual(len(build), 4)
         self.assertIn("sh /build-inputs/dv_processing/build-bundle.sh /opt/dv-dependencies /opt/dv-bundle", build[0])
         self.assertIn("bundle-manifest.py /opt/dv-bundle/sources /opt/dv-bundle --verify", build[0])
         runtime = instructions(stage(source, "runtime"))
@@ -160,6 +162,30 @@ class DvHelperOwnershipTests(unittest.TestCase):
             self.assertIn(f"  RUN({case});", source)
             self.assertIn(case, wrapper)
         self.assertIn("test_l5_cm29_crop_domain_excludes_adversarial_bars", cases)
+
+    def test_application_build_runs_the_scanner_segment_endpoint_controls(self):
+        helpers = instructions(stage(DOCKERFILE.read_text(encoding="utf-8"), "dv-processing-helpers"))
+        control = [line for line in helpers if "test_scan_segment_endpoint" in line]
+        self.assertEqual(len(control), 1)
+        run = control[0]
+        self.assertTrue(run.startswith("RUN "))
+        self.assertGreater(helpers.index(run), helpers.index(
+            next(line for line in helpers if "build-bundle.sh /opt/dv-dependencies" in line)))
+        # The scanner this stage just built, with no baseline, and nothing that
+        # could let a failing case through.
+        self.assertIn("/build-inputs/dv_processing/controls/test_scan_segment_endpoint.py", run)
+        self.assertTrue(run.rstrip().endswith("--scanner /opt/dv-bundle/bin/scan_title"))
+        self.assertNotIn("||", run)
+        self.assertNotIn(";", run)
+        self.assertTrue((ROOT / "tools/dv_processing/controls/segment-av.mkv").is_file())
+        source = (ROOT / "tools/dv_processing/controls/test_scan_segment_endpoint.py").read_text(encoding="utf-8")
+        self.assertIn("def test_untagged_matroska_segment_endpoint(", source)
+        scanner = (ROOT / "tools/dv_processing/scan_title.c").read_text(encoding="utf-8")
+        for reason in ("complete declared Matroska segment", "declared Matroska segment duration",
+                       "Matroska segment tail reached"):
+            # Every refusal the control expects is one the scanner can print.
+            self.assertIn(f'"{reason}"', scanner)
+            self.assertIn(f'"{reason}"', source)
 
     def test_active_area_receipt_rejects_changed_measured_tables(self):
         import json
