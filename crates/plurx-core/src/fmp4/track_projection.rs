@@ -1,11 +1,11 @@
-//! Split the live copy muxer's authored audio and video without encoding,
+//! Split authored fMP4 audio and video without encoding,
 //! resetting either track's timestamps, or changing its samples.
 
 use super::video_splice::{check_track_boxes, unsupported, write_single_track_fragment};
 use super::{
-    aac_lc_sample_entry_facts, be_u32, children, malformed, mp4_box, parse_moof,
+    aac_lc_sample_entry_facts, be_u32, children, malformed, mp4_box, parse_moof, peek_box_before,
     replace_dolby_file_type_brand, track_id_in_trak, Fmp4Error, Fragment, FragmentReader, Init,
-    Plan, TrackFragment, TrackKind, Unit,
+    Plan, TrackFragment, TrackKind, Unit, MAX_BOX_BYTES,
 };
 
 pub struct CopyTrackProjection {
@@ -18,6 +18,15 @@ pub struct ProjectedCopySegment {
     pub audio: Fragment,
     pub video: Fragment,
 }
+
+pub struct ProjectedVodWindow {
+    pub audio: Vec<u8>,
+    pub video: Vec<u8>,
+}
+
+// A fixed range per window keeps sequence numbers independent of seek and
+// generation order, including windows with different fragment counts.
+const VOD_WINDOW_FRAGMENT_LIMIT: u32 = 256;
 
 impl CopyTrackProjection {
     /// Split the single-video/single-AAC rolling copy output. Preserve track
@@ -74,30 +83,7 @@ impl CopyTrackProjection {
         {
             return Err(unsupported("split copy segment contains unsupported boxes"));
         }
-        let moof_body = &bytes[*moof_at..*moof_end];
-        let structure = children(moof_body)?;
-        let [(mfhd, start, end), tracks @ ..] = structure.as_slice() else {
-            return malformed("split copy moof has no header");
-        };
-        if mfhd.kind() != b"mfhd"
-            || *end - *start != 8
-            || be_u32(moof_body, *start) != 0
-            || tracks.len() != 2
-            || !tracks
-                .last()
-                .is_some_and(|(_, _, end)| *end == moof_body.len())
-        {
-            return Err(unsupported(
-                "split copy moof requires two clear track fragments",
-            ));
-        }
-        for (header, start, end) in tracks {
-            if header.kind() != b"traf" {
-                return Err(unsupported("split copy moof cannot carry auxiliary data"));
-            }
-            check_track_boxes(&moof_body[*start..*end])?;
-        }
-
+        check_projection_moof(&bytes[*moof_at..*moof_end], 2)?;
         let moof_start = *moof_at - moof.header_len;
         let tracks = parse_moof(
             &bytes[moof_start..*moof_end],
@@ -117,6 +103,131 @@ impl CopyTrackProjection {
             video: project_track(&fragment, video_track, &self.video, sequence)?,
         })
     }
+
+    /// Project a complete encoded VOD segment. The segment can concatenate
+    /// muxed pairs and pairs containing only one of its two admitted tracks.
+    pub fn vod_window(&self, bytes: &[u8], index: u32) -> Result<ProjectedVodWindow, Fmp4Error> {
+        if bytes.len() > MAX_BOX_BYTES {
+            return Err(unsupported("split VOD window exceeds the fMP4 size limit"));
+        }
+        let sequence_base = index
+            .checked_mul(VOD_WINDOW_FRAGMENT_LIMIT)
+            .ok_or_else(|| unsupported("split VOD window index exceeds the sequence limit"))?;
+        let mut output = ProjectedVodWindow {
+            audio: Vec::new(),
+            video: Vec::new(),
+        };
+        let (mut audio_end, mut video_end) = (None, None);
+        let mut offset = 0;
+        let mut ordinal = 0;
+        while offset < bytes.len() {
+            let header = peek_box_before(bytes, offset, Some(bytes.len()))?
+                .ok_or_else(|| unsupported("split VOD window has an incomplete box header"))?;
+            if (header.kind() == b"styp" && offset == 0)
+                || (header.kind() == b"sidx" && ordinal == 0)
+            {
+                offset += header.size;
+                continue;
+            }
+            if header.kind() != b"moof" {
+                return Err(unsupported("split VOD window contains an unsupported box"));
+            }
+            let moof_end = offset + header.size;
+            let media = peek_box_before(bytes, moof_end, Some(bytes.len()))?
+                .filter(|media| media.kind() == b"mdat")
+                .ok_or_else(|| unsupported("split VOD window moof is missing its mdat"))?;
+            ordinal += 1;
+            let sequence = sequence_base
+                .checked_add(ordinal)
+                .filter(|_| ordinal <= VOD_WINDOW_FRAGMENT_LIMIT)
+                .ok_or_else(|| {
+                    unsupported("split VOD window exceeds the fragment sequence limit")
+                })?;
+
+            let moof = &bytes[offset..moof_end];
+            check_projection_moof(&moof[header.header_len..], 1)?;
+            let tracks = parse_moof(moof, header.header_len, &self.multiplexed.tracks)?;
+            if let [first, second] = tracks.as_slice() {
+                if first.track_id == second.track_id {
+                    return malformed("split VOD fragment repeats a track");
+                }
+            }
+            let end = moof_end + media.size;
+            let fragment = Fragment {
+                bytes: bytes[offset..end].to_vec(),
+                mdat_payload: (header.size + media.header_len)..(end - offset),
+                tracks,
+            };
+            check_media_extents(&fragment)?;
+            for track in &fragment.tracks {
+                let (init, decode_end, child) = if track.track_id == self.audio.tracks[0].id {
+                    (&self.audio, &mut audio_end, &mut output.audio)
+                } else if track.track_id == self.video.tracks[0].id {
+                    (&self.video, &mut video_end, &mut output.video)
+                } else {
+                    return Err(unsupported("split VOD window contains an unknown track"));
+                };
+                if track.track_id == self.video.tracks[0].id
+                    && decode_end.is_none()
+                    && track
+                        .runs
+                        .iter()
+                        .flat_map(|run| &run.samples)
+                        .next()
+                        .is_none_or(|sample| !sample.is_sync())
+                {
+                    return malformed(
+                        "split VOD window has no independently decodable video start",
+                    );
+                }
+                if decode_end.is_some_and(|end| end != track.base_decode_time) {
+                    return malformed("split VOD track fragments are not contiguous");
+                }
+                *decode_end = Some(
+                    track
+                        .base_decode_time
+                        .checked_add(track.duration())
+                        .ok_or_else(|| unsupported("split VOD track decode time overflows"))?,
+                );
+                let projected = project_track(&fragment, track, init, sequence)?;
+                child.extend_from_slice(&projected.bytes);
+            }
+            offset = end;
+        }
+        if audio_end.is_none() || video_end.is_none() {
+            return malformed("split VOD window does not contain both admitted tracks");
+        }
+        Ok(output)
+    }
+}
+
+fn check_projection_moof(moof_body: &[u8], minimum_tracks: usize) -> Result<(), Fmp4Error> {
+    let structure = children(moof_body)?;
+    let [(mfhd, start, end), tracks @ ..] = structure.as_slice() else {
+        return malformed("split copy moof has no header");
+    };
+    if mfhd.kind() != b"mfhd"
+        || *end - *start != 8
+        || be_u32(moof_body, *start) != 0
+        || !(minimum_tracks..=2).contains(&tracks.len())
+        || !tracks
+            .last()
+            .is_some_and(|(_, _, end)| *end == moof_body.len())
+    {
+        return Err(unsupported(if minimum_tracks == 2 {
+            "split copy moof requires two clear track fragments"
+        } else {
+            "split VOD moof requires one or two clear track fragments"
+        }));
+    }
+    for (header, start, end) in tracks {
+        if header.kind() != b"traf" {
+            return Err(unsupported("split copy moof cannot carry auxiliary data"));
+        }
+        check_track_boxes(&moof_body[*start..*end])?;
+    }
+
+    Ok(())
 }
 
 pub(super) fn check_media_extents(fragment: &Fragment) -> Result<(), Fmp4Error> {
@@ -303,5 +414,95 @@ mod tests {
         let mut oversized = fragment;
         oversized.tracks[1].runs[0].samples[0].size = u32::MAX;
         assert!(check_media_extents(&oversized).is_err());
+    }
+
+    #[test]
+    fn vod_window_preserves_mixed_fragments_and_refuses_incomplete_or_discontinuous_media() {
+        let fixture = crate::testfixtures::pipe("closed-gop");
+        let mut reader = FragmentReader::new();
+        reader.push(&fixture);
+        let Some(Unit::Init(init)) = reader.next_unit().expect("verified projection fixture")
+        else {
+            panic!("missing fixture init");
+        };
+        let Some(Unit::Fragment(first)) = reader.next_unit().expect("verified projection fixture")
+        else {
+            panic!("missing first fixture fragment");
+        };
+        let projection = CopyTrackProjection::new(init).expect("verified projection fixture");
+        let first_children = projection
+            .segment(&first.bytes, 257)
+            .expect("verified projection fixture");
+        let single = projection
+            .vod_window(&first.bytes, 1)
+            .expect("verified projection fixture");
+        assert_eq!(single.audio, first_children.audio.bytes);
+        assert_eq!(single.video, first_children.video.bytes);
+
+        let Some(Unit::Fragment(next)) = reader.next_unit().expect("verified projection fixture")
+        else {
+            panic!("missing second fixture fragment");
+        };
+        let next_children = projection
+            .segment(&next.bytes, 258)
+            .expect("verified projection fixture");
+        let next_video = project_track(
+            &next,
+            select_track(&next, projection.video_init()).expect("verified projection fixture"),
+            projection.video_init(),
+            259,
+        )
+        .expect("verified projection fixture");
+        let mut window = first.bytes.clone();
+        window.extend_from_slice(&next_children.audio.bytes);
+        window.extend_from_slice(&next_children.video.bytes);
+        let split = projection
+            .vod_window(&window, 1)
+            .expect("verified projection fixture");
+        assert_eq!(
+            split.audio,
+            [first_children.audio.bytes, next_children.audio.bytes].concat()
+        );
+        assert_eq!(
+            split.video,
+            [first_children.video.bytes, next_video.bytes].concat()
+        );
+
+        window.push(0);
+        assert!(projection.vod_window(&window, 1).is_err());
+        assert!(projection
+            .vod_window(&[first.bytes.as_slice(), &first.bytes].concat(), 1)
+            .is_err());
+        assert!(projection
+            .vod_window(&next_children.video.bytes, 1)
+            .is_err());
+        assert!(projection.vod_window(&next.bytes, u32::MAX).is_err());
+    }
+    #[test]
+    fn vod_window_projects_a_published_dolby_vision_segment() {
+        let mut reader = FragmentReader::new();
+        reader.push(include_bytes!(
+            "../../tests/fixtures/dv-runtime/authored-with-aac.mp4"
+        ));
+        let Some(Unit::Init(init)) = reader.next_unit().expect("verified projection fixture")
+        else {
+            panic!("missing authored init");
+        };
+        let Some(Unit::Fragment(fragment)) =
+            reader.next_unit().expect("verified projection fixture")
+        else {
+            panic!("missing authored fragment");
+        };
+        let segment = super::super::merge_retaining(&[fragment], &init, 1, true)
+            .expect("verified projection fixture");
+        let projection = CopyTrackProjection::new(init).expect("verified projection fixture");
+        let expected = projection
+            .segment(&segment.bytes, 1)
+            .expect("verified projection fixture");
+        let projected = projection
+            .vod_window(&segment.bytes, 0)
+            .expect("verified projection fixture");
+        assert_eq!(projected.video, expected.video.bytes);
+        assert_eq!(projected.audio, expected.audio.bytes);
     }
 }

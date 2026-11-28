@@ -577,6 +577,7 @@ pub(crate) struct ResponseOwner {
     /// Frozen parent shape; a response-only scalar hint cannot stand in for
     /// a continuous family's independently owned child playlist.
     scalar_playlist: bool,
+    encoded_split_only: bool,
     retained_output: Option<Arc<retained::RetainedVodArtifact>>,
     lifecycle: Arc<Mutex<()>>,
     incarnation: Arc<()>,
@@ -1314,6 +1315,7 @@ impl VodServingAdmission {
 pub(crate) struct VodReleaseFence<'a> {
     transition: Arc<tokio::sync::Mutex<()>>,
     released: &'a AtomicBool,
+    deadline: Option<Instant>,
     attachment_owner: Option<&'a StdMutex<Option<ResponseOwner>>>,
 }
 
@@ -1322,8 +1324,14 @@ impl<'a> VodReleaseFence<'a> {
         Self {
             transition,
             released,
+            deadline: None,
             attachment_owner: None,
         }
+    }
+
+    pub(crate) fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
     }
 
     /// First-preparation cleanup is armed with registry commit, before any
@@ -1392,6 +1400,7 @@ pub struct SegmentReady {
     pub delivery: Arc<crate::meter::Meter>,
     pub(crate) retained_lease: Option<Arc<retained::RetainedVodArtifact>>,
     pub(crate) cache_pin: Option<crate::playback_cache::CachePin>,
+    pub(crate) projection_scratch: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 // split: begin vod-reader
@@ -1771,6 +1780,8 @@ pub(crate) use vod_serve_create::AdmittedSourceVodRendition;
 pub(crate) use vod_serve_create::ReservedSourceVodRendition;
 #[path = "vod/serve/delivery.rs"]
 mod vod_serve_delivery;
+#[path = "vod/serve/encoded_split.rs"]
+mod vod_serve_encoded_split;
 #[path = "vod/serve/end.rs"]
 mod vod_serve_end;
 #[path = "vod/serve/serve.rs"]

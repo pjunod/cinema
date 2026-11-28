@@ -764,6 +764,7 @@ async fn vod_ready_metered(
         delivery,
         retained_lease: None,
         cache_pin: None,
+        projection_scratch: None,
         file: tokio::fs::File::open(path)
             .await
             .expect("open VOD response object"),

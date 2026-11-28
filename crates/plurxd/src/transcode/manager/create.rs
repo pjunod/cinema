@@ -5867,7 +5867,13 @@ impl TranscodeManager {
             return !serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(
                 &preparation.recipe_json,
             )
-            .is_ok_and(|remote| remote.request.vod_copy_layout == Some(VodCopyLayout::PendingV1));
+            .is_ok_and(|remote| {
+                remote
+                    .request
+                    .vod_copy_layout
+                    .as_ref()
+                    .is_some_and(VodCopyLayout::pending)
+            });
         }
         let Ok(Some(route)) = self
             .store
@@ -6140,7 +6146,12 @@ impl TranscodeManager {
                         successor_incarnation_id: route.incarnation_id.clone(),
                     });
                 if !pending && !complete {
-                    if current_recipe.request.vod_copy_layout == Some(VodCopyLayout::PendingV1) {
+                    if current_recipe
+                        .request
+                        .vod_copy_layout
+                        .as_ref()
+                        .is_some_and(VodCopyLayout::pending)
+                    {
                         return false;
                     }
                     return self
@@ -6492,7 +6503,11 @@ impl TranscodeManager {
                 req.split_audio = false;
             }
             if !req.vod_copy_layout_valid()
-                || !first_capture && matches!(req.vod_copy_layout, Some(VodCopyLayout::PendingV1))
+                || !first_capture
+                    && req
+                        .vod_copy_layout
+                        .as_ref()
+                        .is_some_and(VodCopyLayout::pending)
             {
                 return false;
             }
@@ -6668,7 +6683,8 @@ impl TranscodeManager {
                         Arc::clone(&release_gate.transition),
                         &release_gate.released,
                     )
-                    .with_attachment_owner(Some(attachment_owner.as_ref())),
+                    .with_attachment_owner(Some(attachment_owner.as_ref()))
+                    .with_deadline(deadline),
                 )
                 .await
             {
@@ -7341,10 +7357,10 @@ pub(crate) fn split_copy_eligible(
     let soundtracks = file.audio_streams.len();
     let eligible_count = match req.vod_copy_layout {
         None => (2..=3).contains(&soundtracks),
-        Some(VodCopyLayout::Muxed) => false,
         Some(VodCopyLayout::PendingV1 | VodCopyLayout::SplitV1 { .. }) => {
             (1..=VodCopyLayout::MAX_SOUNDTRACKS).contains(&soundtracks)
         }
+        Some(_) => false,
     };
     eligible_count && req.split_audio
         // The split master describes an AVC copy; HEVC and Dolby Vision
