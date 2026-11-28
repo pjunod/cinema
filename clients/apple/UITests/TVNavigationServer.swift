@@ -168,6 +168,7 @@ final class TVNavigationServer: @unchecked Sendable {
             value = ["version": "cinema.remote.v1", "grants": [["id": "55555555-5555-4555-8555-555555555555", "receiver_id": "44444444-4444-4444-8444-444444444444", "name": "Fixture phone", "created_at": 1]]]
         case "/api/v1/auth/login": value = ["token": "fixture-only", "user": user]
         case "/api/v1/me": value = user
+        case "/api/v1/ai-subtitles/preferences": value = ["language": "eng", "mode": "auto"]
         case "/api/v1/server": value = ["name": "Library fixture", "instance_id": "library-fixture"]
         case "/api/v1/hubs":
             value = ["recently_added": homeTitles ? [["id": 1, "library_id": 1, "kind": "movie", "title": "A Movie 0"]] : []]

@@ -307,6 +307,8 @@ struct SettingsView: View {
 
             Section {
                 NavigationLink("Subtitle preferences and AI subtitles") { AISubtitleSettingsView() }
+                    .accessibilityIdentifier("settings-ai-subtitles")
+                    .focused($focusedEntry, equals: .subtitles)
             } header: {
                 Text("Subtitles")
             }

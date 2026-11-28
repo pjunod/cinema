@@ -111,7 +111,6 @@ final class TVSecondaryNavigationTests: TVNavigationTestCase {
         add(screenshot)
         XCTAssertTrue(app.staticTexts["settings-quality-title"].exists, "The setting name must remain visible beside Auto")
         XCTAssertTrue(app.staticTexts["Audio language"].exists, "Language values must identify their setting")
-        XCTAssertTrue(app.staticTexts["Subtitle language"].exists, "Language values must identify their setting")
         XCTAssertTrue(app.staticTexts["Subtitle switching"].exists, "Readiness values must identify their setting")
         remote.press(.select)
         let auto = app.cells.containing(NSPredicate(format: "label == %@", "Auto")).firstMatch
@@ -128,6 +127,22 @@ final class TVSecondaryNavigationTests: TVNavigationTestCase {
         assertFocus(quality, in: app, context: "Quality Back restores setting")
         remote.press(.menu)
         assertFocus(playback, in: app, context: "Playback Back restores category")
+
+        let subtitles = app.buttons["settings-category-Subtitles"]
+        reachForSetup(subtitles, in: app, limit: 8)
+        assertFocus(subtitles, in: app, context: "Subtitles category")
+        remote.press(.right)
+        let subtitleSettings = app.descendants(matching: .any).matching(identifier: "settings-ai-subtitles").firstMatch
+        assertFocus(subtitleSettings, in: app, context: "Subtitle preferences opener")
+        remote.press(.select)
+        let subtitleLanguage = app.staticTexts["Subtitle language-title"]
+        XCTAssertTrue(subtitleLanguage.waitForExistence(timeout: 10), "The subtitle language must identify its setting")
+        XCTAssertGreaterThan(server.requestCount("GET /api/v1/ai-subtitles/preferences"), 0)
+        remote.press(.menu)
+        assertFocus(subtitleSettings, in: app, context: "Subtitle preferences Back restores the opener")
+        remote.press(.menu)
+        assertFocus(subtitles, in: app, context: "Subtitles Back restores category")
+
         let appearance = app.buttons["settings-category-Appearance"]
         reachForSetup(appearance, in: app, limit: 8)
         assertFocus(appearance, in: app, context: "Appearance category")
