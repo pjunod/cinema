@@ -7521,25 +7521,22 @@ async fn run_live_session_inner(
                     }
                 }
 
-                let scanned = if verifying {
-                    None
-                } else {
-                    let scan =
-                        inventory_scan.get_or_insert_with(|| spawn_scratch_scan(manager, &session));
-                    match tokio::time::timeout(SESSION_TICK, &mut *scan).await {
-                        Ok(joined) => {
-                            inventory_scan = None;
-                            Some(joined.map_err(|error| {
-                                LiveTvError::StreamFailed(format!(
-                                    "reading live-TV scratch: {error}"
-                                ))
-                            }))
-                        }
-                        Err(_) => None,
+                let scan = inventory_scan
+                    .get_or_insert_with(|| spawn_scratch_scan(manager, session, !verifying));
+                let scanned = match tokio::time::timeout(SESSION_TICK, &mut *scan).await {
+                    Ok(joined) => {
+                        inventory_scan = None;
+                        Some(joined.map_err(|error| {
+                            LiveTvError::StreamFailed(format!("reading live-TV scratch: {error}"))
+                        }))
                     }
+                    Err(_) => None,
                 };
                 match scanned.map(|joined| joined.and_then(|result| result)) {
-                    Some(Ok(Some(inventory))) => {
+                    Some(Ok(Some(ScratchObservation {
+                        inventory,
+                        opening_verified,
+                    }))) => {
                         let now = tokio::time::Instant::now();
                         let publishable = {
                             let mut state = session
@@ -7548,7 +7545,7 @@ async fn run_live_session_inner(
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             record_producer_inventory(&mut state, inventory, now)
                         };
-                        if !published && publishable && !verifying {
+                        if !published && publishable && opening_verified {
                             let owner = manager.upgrade().ok_or_else(|| {
                                 LiveTvError::StreamFailed("live-TV manager stopped".into())
                             })?;
@@ -9253,7 +9250,12 @@ fn input_contradicts_plan(planned: &LiveSourceFacts, input: &LiveTvSourceFormat)
         || differs(planned.audio_channels, input.audio_channels)
 }
 
-type ScratchScanTask = tokio::task::JoinHandle<Result<Option<ScratchInventory>, LiveTvError>>;
+struct ScratchObservation {
+    inventory: ScratchInventory,
+    opening_verified: bool,
+}
+
+type ScratchScanTask = tokio::task::JoinHandle<Result<Option<ScratchObservation>, LiveTvError>>;
 
 /// The `linger_after_warm_reap` seam: hold a disagreeing warm start between
 /// its FFmpeg's reap and its restart until the transport has closed this
@@ -9308,6 +9310,7 @@ fn spawn_session_ledger_fence(
 fn spawn_scratch_scan(
     manager: &Weak<LiveTvManager>,
     session: &Arc<LiveTvSession>,
+    opening_verified: bool,
 ) -> ScratchScanTask {
     #[cfg(test)]
     if let Some(manager) = manager.upgrade() {
@@ -9323,7 +9326,15 @@ fn spawn_scratch_scan(
         let Some(mut inventory) = inspect_scratch(&session.directory).await? else {
             return Ok(None);
         };
-        if let Some(delivery) = session.delivery() {
+        // Keep observing producer progress during a warm probe. Only a scan
+        // started with proven facts can select and publish the layout, even
+        // if an earlier scan completes after the probe.
+        let delivery = if opening_verified {
+            session.delivery()
+        } else {
+            None
+        };
+        if let Some(delivery) = delivery {
             let eligible = delivery.packaging == LivePackaging::Fmp4
                 && !delivery
                     .reasons
@@ -9337,7 +9348,10 @@ fn spawn_scratch_scan(
                 .observe(&session.directory, &delivery, &inventory, eligible)
                 .await?;
         }
-        Ok(Some(inventory))
+        Ok(Some(ScratchObservation {
+            inventory,
+            opening_verified,
+        }))
     })
 }
 

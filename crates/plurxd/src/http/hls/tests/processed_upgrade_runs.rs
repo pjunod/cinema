@@ -552,6 +552,7 @@ async fn a_description_without_production_proof_still_reaches_the_trial() {
             authority_refused: false,
             complete: true,
             causes: Vec::new(),
+            local_measurements: None,
         },
     ));
     assert!(

@@ -1321,6 +1321,7 @@ impl VodServe {
                     remaining
                 })
             });
+            // Keep encoded settlement out of the common create future's stack.
             return Box::pin(self.settle_encoded_split(
                 requested,
                 started?,

@@ -7031,6 +7031,8 @@ pub(crate) async fn metrics(
         crate::state::fragment_index_validation_prometheus() + &super::browse::detail_projection_prometheus(),
         crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &crate::background_jobs::analysis_reconcile::prometheus() + &crate::state::analysis_completed_prometheus(&state.node_id) + &state.clock.prometheus() + &crate::source_custody::launch_prometheus(),
     );
+    let process_metrics =
+        process_metrics + &super::shared_source_playback::source_start_refusals_prometheus();
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus();
     let backup_metrics = state.backup.prometheus();
