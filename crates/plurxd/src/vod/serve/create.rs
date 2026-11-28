@@ -2288,6 +2288,7 @@ impl VodServe {
         if let Some(sink) = attachment_owner {
             *sink.lock().expect("first preparation owner") = Some(replacement.response_owner());
         }
+        let incarnation = Arc::clone(&replacement.incarnation);
         sessions.insert(session_id.clone(), replacement);
         {
             let mut observation = self
@@ -2376,6 +2377,7 @@ impl VodServe {
             "vod session attached (start entry {start_entry})"
         );
         Ok(VodStart {
+            incarnation,
             session_id,
             duration_ms,
             split,
@@ -3151,6 +3153,7 @@ impl VodServe {
         if let Some(outgoing) = sessions.get(&session_id) {
             outgoing.abort_staged_preparation();
         }
+        let incarnation = Arc::clone(&replacement.incarnation);
         sessions.insert(session_id.clone(), replacement);
         // Both reader graphs are committed, so the rendition-wide guards have
         // no further work. They used to live to the end of the function, which
@@ -3192,6 +3195,7 @@ impl VodServe {
             "vod session attached (start entry {start_entry})"
         );
         Ok(VodStart {
+            incarnation,
             session_id,
             duration_ms,
             split: false,

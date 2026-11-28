@@ -7237,9 +7237,12 @@ impl TranscodeManager {
             kind
         };
 
-        if !matches!(normalized.kind, SessionKind::Copy { .. }) {
-            normalized.vod_copy_layout = None;
-            normalized.split_audio = false;
+        if normalized
+            .vod_copy_layout
+            .as_ref()
+            .is_some_and(VodCopyLayout::pending)
+        {
+            normalized.prepare_vod_copy_layout();
         }
 
         let target_height = if wedged {

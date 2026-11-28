@@ -973,6 +973,7 @@ pub struct VodDeliveryInfo {
 /// this request.
 #[derive(Debug)]
 pub struct VodStart {
+    pub(super) incarnation: Arc<()>,
     pub session_id: String,
     pub duration_ms: i64,
     pub(crate) split: bool,

@@ -484,7 +484,7 @@ mod tests {
         reader.push(include_bytes!(
             "../../tests/fixtures/dv-runtime/authored-with-aac.mp4"
         ));
-        let Some(Unit::Init(init)) = reader.next_unit().expect("verified projection fixture")
+        let Some(Unit::Init(mut init)) = reader.next_unit().expect("verified projection fixture")
         else {
             panic!("missing authored init");
         };
@@ -493,9 +493,19 @@ mod tests {
         else {
             panic!("missing authored fragment");
         };
+        // The FFmpeg fixture supplies Main10 PQ and AAC. Author the same
+        // Profile 8.1 declaration the completed processing path seals.
+        let record = super::super::DolbyVisionRecord::new(8, 6, false, true, true, 1)
+            .expect("Profile 8.1 record");
+        super::super::set_dolby_vision_record(&mut init, &record).expect("author Dolby init");
         let segment = super::super::merge_retaining(&[fragment], &init, 1, true)
             .expect("verified projection fixture");
         let projection = CopyTrackProjection::new(init).expect("verified projection fixture");
+        assert_eq!(
+            super::super::dolby_vision_record(projection.video_init())
+                .expect("projected Dolby Vision declaration"),
+            Some(record),
+        );
         let expected = projection
             .segment(&segment.bytes, 1)
             .expect("verified projection fixture");

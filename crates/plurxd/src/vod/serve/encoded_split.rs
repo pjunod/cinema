@@ -22,9 +22,38 @@ pub(super) struct EncodedVodProjection {
     layout: VodCopyLayout,
     projector: Arc<CopyTrackProjection>,
     master: SplitPresentation,
+    peak_bps: u64,
     // Audio and video requests can share one projected window. The files
     // are linked only through this session and reclaimed when it advances.
-    recent: tokio::sync::Mutex<Option<ProjectedFiles>>,
+    recent: Arc<RecentProjection>,
+}
+
+type RecentProjection = tokio::sync::Mutex<Option<ProjectedFiles>>;
+static RECENT_PROJECTIONS: StdMutex<Vec<std::sync::Weak<RecentProjection>>> =
+    StdMutex::new(Vec::new());
+
+fn reserve_projection_scratch(mib: u32) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    let reserve = || {
+        Arc::clone(&PROJECTION_SCRATCH)
+            .try_acquire_many_owned(mib)
+            .ok()
+    };
+    if let Some(permit) = reserve() {
+        return Some(permit);
+    }
+    let mut projections = RECENT_PROJECTIONS
+        .lock()
+        .expect("projection cache registry");
+    projections.retain(|cell| cell.strong_count() != 0);
+    for cell in projections.iter().filter_map(std::sync::Weak::upgrade) {
+        if let Ok(mut window) = cell.try_lock() {
+            window.take();
+            if let Some(permit) = reserve() {
+                return Some(permit);
+            }
+        }
+    }
+    None
 }
 
 struct ProjectedFiles {
@@ -283,11 +312,20 @@ impl EncodedVodProjection {
         if !layout.valid() {
             return Err(invalid("encoded projection identity is invalid"));
         }
+        let recent = Arc::new(tokio::sync::Mutex::new(None));
+        {
+            let mut projections = RECENT_PROJECTIONS
+                .lock()
+                .expect("projection cache registry");
+            projections.retain(|cell| cell.strong_count() != 0);
+            projections.push(Arc::downgrade(&recent));
+        }
         Ok(Self {
             layout,
             projector: Arc::new(projector),
             master,
-            recent: tokio::sync::Mutex::new(None),
+            peak_bps: peak,
+            recent,
         })
     }
 
@@ -342,19 +380,23 @@ impl EncodedVodProjection {
                 .filter(|_| source.len <= MAX_WINDOW_BYTES)
                 .ok_or_else(|| invalid("encoded window exceeds its projection budget"))?;
             let mib = u32::try_from(output_limit.div_ceil(MIB)).map_err(|_| busy())?;
-            let scratch = Arc::clone(&PROJECTION_SCRATCH)
-                .try_acquire_many_owned(mib)
-                .map_err(|_| busy())?;
+            let scratch = reserve_projection_scratch(mib).ok_or_else(busy)?;
             let etag = source.etag.clone();
             let bytes = read_projection_input(source, MAX_WINDOW_BYTES).await?;
             let projector = Arc::clone(&self.projector);
             let directory = rendition.dir.path().to_owned();
+            let peak_bps = self.peak_bps;
             let projected = tokio::task::spawn_blocking(move || {
                 let _worker = worker;
                 let ProjectedVodWindow { video, audio } = projector
                     .vod_window(&bytes, index)
                     .map_err(|error| invalid(error.to_string()))?;
-                if (video.len() as u64).saturating_add(audio.len() as u64) > output_limit {
+                let total = (video.len() as u64).saturating_add(audio.len() as u64);
+                if total > output_limit
+                    || duration.is_none_or(|duration| {
+                        u128::from(total) * 8_000 > u128::from(peak_bps) * u128::from(duration)
+                    })
+                {
                     return Err(invalid(
                         "encoded children exceed the reserved projection budget",
                     ));
@@ -428,6 +470,9 @@ impl VodServe {
             return Err("encoded split producer is unavailable".into());
         };
         let owner = publication.owner;
+        if !Arc::ptr_eq(&owner.incarnation, &start.incarnation) {
+            return Err("encoded producer ownership changed before split verification".into());
+        }
         let prove = async {
             if found
                 .rendition
@@ -690,10 +735,13 @@ impl VodServe {
             let source = self
                 .encoded_split_input(session_id, &found, &owner, Some(index), budget)
                 .await?;
-            projection
+            let ready = projection
                 .project_segment(&found.rendition, index, source, request.role == "audio")
-                .await
-                .map(Some)
+                .await?;
+            if self.source_changed(&found.rendition) {
+                return Err(invalid("encoded split source changed during projection"));
+            }
+            Ok(Some(ready))
         };
         let result =
             match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), result).await {
