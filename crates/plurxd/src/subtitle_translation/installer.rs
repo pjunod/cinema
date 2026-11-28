@@ -716,7 +716,7 @@ mod qualification {
             "demand_generation":generation.to_string(),"playback_id":viewer["playback_id"],"continuity_id":viewer["continuity_id"],
             "position_ms":position,"playback_rate":1.0,"paused":false})).expect("typed heartbeat");
         let response = super::super::api::demand(
-            AdminUser(admin.clone()),
+            AuthUser(admin.clone()),
             State(state.clone()),
             Path((
                 viewer["operation_id"].as_str().expect("operation").into(),
@@ -864,6 +864,13 @@ mod qualification {
             .expect("actual read-only user row");
         let st = State(state.clone());
         let read = || AuthUser(reader.clone());
+        store
+            .put_setting(
+                "subtitles.ai.v1",
+                crate::ai_subtitles::settings::TEST_ADMINS_ALL_ON,
+            )
+            .await
+            .expect("AI subtitles on");
         let mut operations = Vec::new();
         for selected in selected_profiles {
             let settings = config::read(state.store.as_ref(), crate::state::clock_ms())
@@ -876,7 +883,7 @@ mod qualification {
             let playback = uuid::Uuid::new_v4().to_string();
             let continuity = moving.then(|| uuid::Uuid::new_v4().to_string());
             let playback_started_at_ms = crate::state::clock_ms();
-            let mut viewer=reply(api::create(AdminUser(admin.clone()),State(state.clone()),Path(file_id),Json(serde_json::from_value(json!({"version":1,"request_id":uuid::Uuid::new_v4().to_string(),
+            let mut viewer=reply(api::create(AuthUser(admin.clone()),State(state.clone()),Path(file_id),Json(serde_json::from_value(json!({"version":1,"request_id":uuid::Uuid::new_v4().to_string(),
                 "intent_expires_at_ms":crate::state::clock_ms()+300000,"source_size":file.size.to_string(),"source_mtime":file.mtime.to_string(),"audio_index":2,"spoken_language":"de",
                 "output_language":selected.task.output_language("de"),"task":selected.task,"model_id":selected.model_id,"profile_id":selected.id().expect("profile ID"),
                 "playback_id":playback,"continuity_id":continuity,"position_ms":0,"playback_rate":1.0,"paused":false})).expect("typed create"))).await.expect("real producer request")).await;
@@ -1086,7 +1093,7 @@ mod qualification {
                 .expect("canonical generation")
                 .checked_add(1)
                 .expect("next release generation");
-            reply(api::release(AdminUser(admin.clone()),State(state.clone()),Path((operation_id.clone(),viewer["demand_id"].as_str().expect("demand").into())),Json(serde_json::from_value(json!({"version":1,"request_id":uuid::Uuid::new_v4().to_string(),
+            reply(api::release(AuthUser(admin.clone()),State(state.clone()),Path((operation_id.clone(),viewer["demand_id"].as_str().expect("demand").into())),Json(serde_json::from_value(json!({"version":1,"request_id":uuid::Uuid::new_v4().to_string(),
                 "intent_expires_at_ms":crate::state::clock_ms()+300000,"expected_operation_epoch":viewer["operation_epoch"],"demand_generation":release_generation.to_string(),"playback_id":viewer["playback_id"]})).expect("typed release"))).await.expect("release owned viewer")).await;
             operations.push(json!({"operation_id":operation_id,"task":selected.task,"profile_id":selected.id().expect("profile"),"moving_playback":{"rate":1.0,"duration_ms":duration_ms,"max_heartbeat_position_ms":viewer["max_heartbeat_position_ms"],"continuity_id":viewer["continuity_id"]},"first_committed_ms":first_ms,"complete_ms":complete_ms,"processing_wall_per_source_second":complete_ms as f64/duration_ms as f64,"first_useful_ms":viewer["first_useful_ms"],"useful_coverage_observations":viewer["observations"],"segments":segments}));
         }

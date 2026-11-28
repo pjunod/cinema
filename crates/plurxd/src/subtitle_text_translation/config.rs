@@ -3,7 +3,7 @@ use crate::{http::error::ApiError, state::AppState};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const KEY: &str = "subtitles.text_translation.config.v1";
-const GENERATION: &str = "subtitles.text_translation.revision.v1";
+pub(crate) const GENERATION: &str = "subtitles.text_translation.revision.v1";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Snapshot {

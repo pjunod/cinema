@@ -906,7 +906,49 @@ const ANALYSIS_SCOPE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE
 /// published shape and marker, then restores the original analysis view and
 /// the managed v6 view with marker 6. Only views and markers change, so no
 /// queued work or reservation is discarded.
+/// Rewind v140 (translation continuity follows `subtitles.ai.v1`) and v139
+/// (the held translation viewer follows it) to v138 by restoring the
+/// published trigger and view. Only one view and one trigger change, so no
+/// queued work or reservation is discarded.
+fn rewind_ai_authority_to_v138(conn: &rusqlite::Connection) {
+    let version = conn
+        .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+        .expect("AI authority ordinal");
+    if version <= 138 {
+        return;
+    }
+    assert!(
+        version <= 140,
+        "only the published AI authority tail can rewind"
+    );
+    let chunk = |source: &str, needle: &str| {
+        source
+            .split("-- next statement")
+            .find(|sql| sql.contains(needle))
+            .expect("published statement")
+            .trim()
+            .to_owned()
+    };
+    let mut plan = vec!["SAVEPOINT rewind_ai_authority;".to_owned()];
+    if version == 140 {
+        plan.push("DROP TRIGGER subtitle_translation_capture_continuity;".to_owned());
+        plan.push(chunk(
+            include_str!("../../src/store/subtitle_translation_continuity.sql"),
+            "CREATE TRIGGER subtitle_translation_capture_continuity",
+        ));
+    }
+    plan.push("DROP VIEW dispatch_turn_translation_viewer;".to_owned());
+    plan.push(chunk(
+        include_str!("../../src/store/background_job_turns.sql"),
+        "CREATE VIEW dispatch_turn_translation_viewer",
+    ));
+    plan.push("PRAGMA user_version=138; RELEASE rewind_ai_authority;".to_owned());
+    conn.execute_batch(&plan.join("\n"))
+        .expect("published AI authority rewind");
+}
+
 fn rewind_file_root_scope_to_v136(conn: &rusqlite::Connection) {
+    rewind_ai_authority_to_v138(conn);
     let ordinal = |conn: &rusqlite::Connection| {
         conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .expect("file-root scope ordinal")

@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-24, plurx has 446 routes declared by the ordinary listener's
+As of 2026-11-27, plurx has 447 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 446 routes across the registered routers.
+plurx has 447 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -2677,12 +2677,12 @@ Discovery does not grant producer authority or override the saved enable choice.
 | GET, PUT | `/api/v1/subtitle-translation` | admin bearer | Saved enable/model/profile/language preferences with opaque revision CAS. Readiness never rejects Save. |
 | GET | `/api/v1/subtitle-translation/models` | admin bearer | The two immutable Small task profiles, bounds, saved-choice hint and independent speech-task qualification. |
 | GET | `/api/v1/files/{id}/subtitle-translation/options` | bearer | Current source revision, supported profile and bounded cached asset list; no work. |
-| POST | `/api/v1/files/{id}/subtitle-translation` | admin bearer | Durable operation and expiring playback demand before source hashing; exact request replay. |
+| POST | `/api/v1/files/{id}/subtitle-translation` | bearer; `who` (see AI subtitles) | Durable operation and expiring playback demand before source hashing; exact request replay. |
 | GET | `/api/v1/files/{id}/subtitle-translation/assets` | bearer | Explicit cursor page of cached assets. |
 | GET | `/api/v1/subtitle-translation/operations/{id}` | bearer | Closed live operation, source-check and current-job observation. |
-| PUT, DELETE | `/api/v1/subtitle-translation/operations/{id}/demands/{demand}` | admin bearer | Renew or release one viewer's versioned interest. |
-| POST | `/api/v1/subtitle-translation/operations/{id}/stop` | admin bearer | Durable global Stop advances the epoch and fences preparation, ranges and publication. |
-| POST | `/api/v1/subtitle-translation/operations/{id}/retry` | admin bearer | Explicit observed-state/epoch or failed-range revision CAS; heartbeats cannot undo Stop. |
+| PUT, DELETE | `/api/v1/subtitle-translation/operations/{id}/demands/{demand}` | bearer; `who` (see AI subtitles) | Renew or release one viewer's versioned interest. |
+| POST | `/api/v1/subtitle-translation/operations/{id}/stop` | bearer; `who` (see AI subtitles) | Durable global Stop advances the epoch and fences preparation, ranges and publication. |
+| POST | `/api/v1/subtitle-translation/operations/{id}/retry` | bearer; `who` (see AI subtitles) | Explicit observed-state/epoch or failed-range revision CAS; heartbeats cannot undo Stop. |
 | GET | `/api/v1/subtitle-translation/operations/{id}/failed-ranges` | bearer | Bounded current-view failures under a read lease and scoped cursor. |
 | GET | `/api/v1/subtitle-translation/assets/{id}/manifest` | bearer | Windowed coverage/segment descriptors and a 30-second read lease. |
 | GET | `/api/v1/subtitle-translation/assets/{id}/segments` | bearer | Scoped cursor page inside the requested playback window. |
@@ -2709,10 +2709,35 @@ Their version 2 responses identify `purpose: "translation"`, `model_id` and
 Model job phases include `waiting_for_capacity` while a claimed test holds a
 FIFO place for the shared heavy-background slot; this consumes no CPU admission.
 Translation qualification does not imply that the ordinary generation self-test
-ran. Work mutations require current administrator authority and an unexpired
+ran. Work mutations require AI subtitles authority (an admin, or any user while
+`who` is `everyone`) and an unexpired
 first-use intent; retained exact receipts replay without starting fresh work.
 Responses carry a fresh `X-Translation-Server-Now-Ms` even when receipt bodies
 retain their original clock.
+
+### AI subtitles settings
+
+One document, `subtitles.ai.v1`, controls AI subtitles. The queue's admission
+reads it whenever it admits AI subtitle work: `translate_text` admits text translation,
+`from_audio` admits speech translation, and `who` decides whether a non-admin's
+work is admitted (`everyone`) or only an admin's (`admins`). A non-admin holds
+at most two active AI subtitle operations or jobs at once; a further new start
+answers `429` with code `ai_subtitles_busy`, and a start refused by `who`
+answers `403` with code `ai_subtitles_admins_only`. Model install and verify
+stay admin-only.
+
+| Method | Path | Credential | Meaning |
+|---|---|---|---|
+| GET | `/api/v1/ai-subtitles/settings` | bearer | The document and its `revision`. Before the first save it is derived from the older text translation, speech translation and managed transcription switches. |
+| PUT | `/api/v1/ai-subtitles/settings` | admin bearer | Replace the document; the body is every field plus `expected_revision`. A stale revision is `409 configuration_conflict`. |
+
+The document is `{"version":1,"download_match":bool,"translate_text":bool,
+"from_audio":bool,"ahead_of_time":bool,"who":"everyone"|"admins",
+"quality":"fast"|"balanced"|"best"}`; unknown fields are refused. For one
+release a save also rewrites `subtitles.translation.config.v1` (`enabled` from
+`from_audio`) and `subtitles.text_translation.config.v1` (`enabled` from
+`translate_text`, next revision) in the same transaction, so a node on the
+previous release admits the same work during a rolling upgrade.
 
 ### Text subtitle translation and shared captions
 
@@ -2728,9 +2753,9 @@ existing import grant; it does not start work on the Source.
 | POST | `/api/v1/subtitle-text-translation/models/install` | admin bearer | Enqueue model installation. |
 | POST | `/api/v1/subtitle-text-translation/models/verify` | admin bearer | Enqueue model verification. |
 | GET | `/api/v1/files/{id}/subtitle-text-translation/options` | bearer | Current subtitle tracks, supported models and available results. |
-| POST | `/api/v1/files/{id}/subtitles/{index}/translation` | admin bearer | Create a durable text translation job. |
+| POST | `/api/v1/files/{id}/subtitles/{index}/translation` | bearer; `who` (see AI subtitles) | Create a durable text translation job. |
 | GET | `/api/v1/subtitle-text-translation/jobs/{id}` | bearer | Observe a translation job. |
-| POST | `/api/v1/subtitle-text-translation/jobs/{id}/retry` | admin bearer | Retry a failed job. |
+| POST | `/api/v1/subtitle-text-translation/jobs/{id}/retry` | bearer; `who` (see AI subtitles); admin for a model job | Retry a failed job. |
 | GET | `/api/v1/shared/imports/{import}/files/{locator}/captions` | import grant | Cursor page of committed captions for shared playback. |
 | GET | `/api/v1/shared/imports/{import}/files/{locator}/captions/{asset}/manifest` | import grant | Playback-window coverage and segment descriptors; requires `position_ms`. |
 | GET | `/api/v1/shared/imports/{import}/files/{locator}/captions/{asset}/segments/{segment}` | import grant | Bounded caption segment; requires the manifest `lease` query value. |

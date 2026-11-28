@@ -14,7 +14,24 @@ pub(super) fn catalog(conn: &rusqlite::Connection) -> Result<Vec<(String, String
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-pub(super) fn expected_catalog(live_titles: bool) -> Result<Vec<(String, String)>, StoreError> {
+/// The held-translation viewer view reads `subtitles.ai.v1` (AI subtitles T2).
+pub(super) const AI_AUTHORITY_MIGRATION: &str = include_str!("background_job_turns_v3.sql");
+/// Catalog generations, in order: v124 original, v136 live titles, v139 AI
+/// subtitles authority.
+pub(super) const ORIGINAL: u8 = 0;
+pub(super) const LIVE_TITLES: u8 = 1;
+pub(super) const AI_AUTHORITY: u8 = 2;
+pub(super) const CURRENT: u8 = AI_AUTHORITY;
+
+/// The migrations that lead from `generation` to [`CURRENT`].
+pub(super) fn migrations_after(generation: u8) -> Vec<&'static str> {
+    [LIVE_TITLE_MIGRATION, AI_AUTHORITY_MIGRATION]
+        .into_iter()
+        .skip(usize::from(generation))
+        .collect()
+}
+
+pub(super) fn expected_catalog(generation: u8) -> Result<Vec<(String, String)>, StoreError> {
     let conn = rusqlite::Connection::open_in_memory()?;
     conn.execute_batch(
         "CREATE TABLE background_jobs(id TEXT);
@@ -22,17 +39,20 @@ pub(super) fn expected_catalog(live_titles: bool) -> Result<Vec<(String, String)
         CREATE TABLE background_source_custody(custody_id TEXT);",
     )?;
     conn.execute_batch(SCHEMA)?;
-    if live_titles {
-        conn.execute_batch(LIVE_TITLE_MIGRATION)?;
+    for migration in [LIVE_TITLE_MIGRATION, AI_AUTHORITY_MIGRATION]
+        .into_iter()
+        .take(usize::from(generation))
+    {
+        conn.execute_batch(migration)?;
     }
     catalog(&conn)
 }
 
 pub(super) fn verify_catalog(
     conn: &rusqlite::Connection,
-    live_titles: bool,
+    generation: u8,
 ) -> Result<(), StoreError> {
-    if catalog(conn)? != expected_catalog(live_titles)? {
+    if catalog(conn)? != expected_catalog(generation)? {
         return Err(StoreError::Migration(
             "incompatible dispatch turn schema".into(),
         ));
@@ -145,7 +165,7 @@ mod tests {
             .expect("contended turn");
         assert_eq!(winner, "manual");
         SqliteStore::apply_next_migration_for_test(&db).expect("upgrade with pending work");
-        verify_catalog(&db, true).expect("exact upgraded catalog");
+        verify_catalog(&db, LIVE_TITLES).expect("exact upgraded catalog");
         db.execute(
             "UPDATE background_job_waiters SET deadline_ms=1000 WHERE request_id='viewer'",
             [],

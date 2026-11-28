@@ -79,6 +79,7 @@ pub use field_order_backfill::{
 mod file_grants;
 pub mod invitations;
 pub use invitations::InvitationStore;
+pub mod ai_subtitles;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_invitations;
 pub mod remote;

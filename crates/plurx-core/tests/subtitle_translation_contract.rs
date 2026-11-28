@@ -24,7 +24,7 @@ fn fixture() -> (tempfile::TempDir, SqliteStore, rusqlite::Connection) {
     let path = dir.path().join("store.db");
     let store = SqliteStore::open(&path).expect("real migration");
     let conn = rusqlite::Connection::open(path).expect("fixture connection");
-    conn.execute_batch("INSERT INTO users(id,username,password_hash,is_admin) VALUES(1,'admin','hash',1),(2,'viewer','hash',0); INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[\"/media\"]');INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','Movie','Movie'); INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(1,1,'/media/movie',100,20,'{}');INSERT INTO settings(key,value) VALUES('subtitles.translation.config.v1','{\"version\":1,\"enabled\":true}');").expect("catalog fixture");
+    conn.execute_batch("INSERT INTO users(id,username,password_hash,is_admin) VALUES(1,'admin','hash',1),(2,'viewer','hash',0); INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[\"/media\"]');INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','Movie','Movie'); INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(1,1,'/media/movie',100,20,'{}');INSERT INTO settings(key,value) VALUES('subtitles.translation.config.v1','{\"version\":1,\"enabled\":true}'); INSERT OR IGNORE INTO settings(key,value) VALUES('subtitles.ai.v1','{\"version\":1,\"download_match\":true,\"translate_text\":true,\"from_audio\":true,\"ahead_of_time\":false,\"who\":\"admins\",\"quality\":\"balanced\"}');").expect("catalog fixture");
     (dir, store, conn)
 }
 fn create(now: i64) -> TranslationMutation {
@@ -2485,4 +2485,126 @@ async fn late_create_upsert_never_revives_old_out_of_window_continuity_grant() {
 #[tokio::test]
 async fn continuity_uuid_aba_never_revives_an_already_withdrawn_attempt_grant() {
     withdrawn_continuity_never_revives_case(false, true).await;
+}
+
+fn set_ai_who(conn: &rusqlite::Connection, who: &str) {
+    conn.execute(
+        "UPDATE settings SET value=json_set(value,'$.who',?1) WHERE key='subtitles.ai.v1'",
+        [who],
+    )
+    .expect("AI subtitles who");
+}
+
+/// AI subtitles T2: `who` replaces `is_admin` in translation admission. A
+/// viewer (user 2) can start, prepare and claim a range only while
+/// `subtitles.ai.v1` says everyone; with admins-only the same range is not
+/// claimable and a new start is forbidden.
+#[tokio::test]
+async fn non_admin_translation_range_is_claimable_only_when_ai_subtitles_who_is_everyone() {
+    use plurx_core::store::background_jobs::{EnqueueJob, EnqueueOutcome, JobPayload, JobRequest};
+    let (_dir, store, conn) = fixture();
+    let viewer = |now| {
+        let mut input = create(now);
+        input.user_id = 2;
+        input
+    };
+    let refused = store
+        .mutate_subtitle_translation(viewer(1000))
+        .await
+        .expect("admins-only verdict");
+    assert_eq!(refused["outcome"], "forbidden", "{refused}");
+    set_ai_who(&conn, "everyone");
+    let recipe = prepared_from(&store, viewer(1000)).await;
+    let claimed = range(&store, &recipe, "viewer-core-0", 1300).await;
+    assert!(!claimed.id.is_empty());
+
+    let mut next = recipe.clone();
+    next.core_index = 1;
+    let operations = store
+        .read_subtitle_translation(plurx_core::store::subtitle_translation_read::TranslationRead {
+            user_id: 0,
+            now_ms: 1400,
+            query: plurx_core::store::subtitle_translation_read::TranslationQuery::WorkerOperations {
+                node_id: "worker".into(),
+                after: None,
+            },
+        })
+        .await
+        .expect("worker operations");
+    let producer = operations
+        .iter()
+        .find(|op| op["operation_id"] == recipe.operation_id)
+        .and_then(|op| op["preparation_job_id"].as_str())
+        .expect("producer")
+        .to_owned();
+    let id = uuid::Uuid::new_v4().to_string();
+    let outcome = store
+        .enqueue_job(EnqueueJob {
+            id: id.clone(),
+            payload: JobPayload::SubtitleTranslationRange {
+                file_id: 1,
+                recipe: next,
+                target_node_id: "worker".into(),
+                producer_preparation_job_id: producer,
+            },
+            dedupe_key: "translation-contract-viewer-core-1".into(),
+            priority: 1,
+            not_before_ms: 0,
+            now_ms: 1400,
+            request: JobRequest {
+                scope: "translation-contract".into(),
+                request_id: uuid::Uuid::new_v4().to_string(),
+                request_digest: "e".repeat(64),
+                consumer_kind: "subtitle_translation_range".into(),
+                consumer_ref: recipe.operation_id.clone(),
+                target_node_id: Some("worker".into()),
+                deadline_ms: None,
+                retain_identity: false,
+            },
+        })
+        .await
+        .expect("range enqueue");
+    assert!(
+        matches!(outcome, EnqueueOutcome::Accepted { .. }),
+        "{outcome:?}"
+    );
+    set_ai_who(&conn, "admins");
+    let queued = store
+        .background_job(&id)
+        .await
+        .expect("job")
+        .expect("queued");
+    let attempt = |revision| ClaimJob {
+        job_id: id.clone(),
+        expected_revision: revision,
+        node_id: "worker".into(),
+        boot_id: "00000000-0000-4000-8000-000000000002".into(),
+        claim_id: uuid::Uuid::new_v4().to_string(),
+        kind: JobKind::SubtitleTranslationRange,
+        payload_version: 1,
+        now_ms: 1401,
+        dispatched_at_ms: 1401,
+    };
+    let refused = store
+        .claim_artifact_job(attempt(queued.revision))
+        .await
+        .expect("admins-only claim");
+    assert!(
+        !matches!(refused, ClaimOutcome::Claimed { .. }),
+        "a non-admin's range is not claimable while AI subtitles are admins-only: {refused:?}"
+    );
+    set_ai_who(&conn, "everyone");
+    let queued = store
+        .background_job(&id)
+        .await
+        .expect("job")
+        .expect("still queued");
+    let claimed = store
+        .claim_artifact_job(attempt(queued.revision))
+        .await
+        .expect("everyone claim");
+    assert!(
+        matches!(claimed, ClaimOutcome::Claimed { .. }),
+        "{claimed:?}"
+    );
 }

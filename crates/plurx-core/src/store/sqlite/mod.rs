@@ -1378,6 +1378,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_managed_schema::FILE_ROOT_MIGRATION,
     // v138: a per-file analysis request reads only the library root holding its file.
     super::analysis_source_scope::SCHEMA,
+    // v139: a held translation's viewer follows `subtitles.ai.v1` authority.
+    super::background_job_turns::AI_AUTHORITY_MIGRATION,
+    // v140: translation continuity capture follows `subtitles.ai.v1` authority.
+    super::subtitle_translation_schema::AUTHORITY_MIGRATION,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1859,13 +1863,25 @@ impl SqliteStore {
                 super::subtitle_managed_schema::verify_publish_predecessor(&tx)?;
             }
             if version == 136 {
-                super::background_job_turns::verify_catalog(&tx, false)?;
+                super::background_job_turns::verify_catalog(
+                    &tx,
+                    super::background_job_turns::ORIGINAL,
+                )?;
             }
             if version == super::subtitle_managed_schema::FILE_ROOT_MIGRATION_VERSION {
                 super::subtitle_managed_schema::verify_file_root_predecessor(&tx)?;
             }
             if version == 138 {
                 super::analysis_source_scope::verify_predecessor(&tx)?;
+            }
+            if version == 139 {
+                super::background_job_turns::verify_catalog(
+                    &tx,
+                    super::background_job_turns::LIVE_TITLES,
+                )?;
+            }
+            if version == 140 {
+                super::subtitle_translation_schema::verify_authority_predecessor(&tx)?;
             }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
@@ -1956,7 +1972,7 @@ impl SqliteStore {
             tracing::info!(version, "applied schema migration");
         }
 
-        super::background_job_turns::verify_catalog(conn, true)?;
+        super::background_job_turns::verify_catalog(conn, super::background_job_turns::CURRENT)?;
         super::subtitle_managed_schema::verify_sqlite(conn)?;
         super::subtitle_translation_schema::verify_sqlite(conn)?;
         super::library_annotations_schema::verify_sqlite(conn)?;

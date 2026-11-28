@@ -14,7 +14,10 @@ use serde_json::{json, Value};
 const KEY: &str = "subtitles.opensubtitles.api_key";
 const USERNAME: &str = "subtitles.opensubtitles.username";
 const PASSWORD: &str = "subtitles.opensubtitles.password";
-const AUTO: &str = "subtitles.automatic";
+const AUTO: &str = AUTOMATIC_KEY;
+/// The automatic subtitle download switch; AI subtitles derives its
+/// `download_match` default from it.
+pub(crate) const AUTOMATIC_KEY: &str = "subtitles.automatic";
 const LANGUAGES: &str = "subtitles.languages";
 const CURSOR: &str = "subtitles.auto_cursor";
 const NEXT_RUN: &str = "subtitles.auto_next_run";

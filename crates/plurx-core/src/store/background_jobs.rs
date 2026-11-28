@@ -134,16 +134,22 @@ macro_rules! subtitle_advanced_admission { () => { r#"EXISTS (SELECT 1 FROM sett
 // shared live demand with the ordinary queue transaction. One viewer's seek
 // does not cancel another viewer's still-live interest in the same core.
 macro_rules! text_admission {
-    ($payload:literal, $now:literal) => { concat!(r#"EXISTS(SELECT 1 FROM users WHERE id=json_extract("#,$payload,r#",'$.admin_user_id') AND is_admin=1)
-    AND (json_extract("#,$payload,r#",'$.kind')='subtitle_text_model_operation' OR (
-    EXISTS(SELECT 1 FROM files WHERE id=json_extract("#,$payload,r#",'$.file_id') AND size=json_extract("#,$payload,r#",'$.source_size') AND mtime=json_extract("#,$payload,r#",'$.source_mtime') AND probe_json IS NOT NULL)
-    AND EXISTS(SELECT 1 FROM settings WHERE key='subtitles.text_translation.config.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.enabled')=1 ELSE 0 END)))"#) };
+    // `admin_user_id` is the requesting user (the field name predates AI
+    // subtitles opening to every user). Model setup stays admin-only; a
+    // translation needs that user to exist and to be an admin or allowed by
+    // `subtitles.ai.v1` who='everyone', and the document's translate_text.
+    ($payload:literal, $now:literal) => { concat!(r#"((json_extract("#,$payload,r#",'$.kind')='subtitle_text_model_operation'
+    AND EXISTS(SELECT 1 FROM users WHERE id=json_extract("#,$payload,r#",'$.admin_user_id') AND is_admin=1)) OR (
+    json_extract("#,$payload,r#",'$.kind')!='subtitle_text_model_operation'
+    AND EXISTS(SELECT 1 FROM users WHERE id=json_extract("#,$payload,r#",'$.admin_user_id') AND (is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END)))
+    AND EXISTS(SELECT 1 FROM files WHERE id=json_extract("#,$payload,r#",'$.file_id') AND size=json_extract("#,$payload,r#",'$.source_size') AND mtime=json_extract("#,$payload,r#",'$.source_mtime') AND probe_json IS NOT NULL)
+    AND EXISTS(SELECT 1 FROM settings WHERE key='subtitles.ai.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.version')=1 AND json_type(value,'$.translate_text')='true' ELSE 0 END)))"#) };
 }
 
 macro_rules! translation_admission {
     ($payload:literal,$now:literal,$job:literal) => { translation_admission!($payload,$now,$job,"0") };
     ($payload:literal,$now:literal,$job:literal,$fence:literal) => { concat!(r#"EXISTS (SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id
-      JOIN settings config ON config.key='subtitles.translation.config.v1'
+      JOIN settings config ON config.key='subtitles.ai.v1'
       WHERE op.id=COALESCE(json_extract("#,$payload,r#",'$.operation_id'),json_extract("#,$payload,r#",'$.recipe.operation_id'))
       AND op.operation_epoch=COALESCE(json_extract("#,$payload,r#",'$.operation_epoch'),json_extract("#,$payload,r#",'$.recipe.operation_epoch'))
       AND op.stopped=0 AND op.state NOT IN ('failed','stopped','complete')
@@ -154,10 +160,10 @@ macro_rules! translation_admission {
       AND f.id=json_extract("#,$payload,r#",'$.file_id') AND f.probe_json IS NOT NULL
       AND f.size=json_extract(op.source_json,'$.source_size') AND f.mtime=json_extract(op.source_json,'$.source_mtime')
       AND CASE WHEN json_valid(config.value) THEN json_extract(config.value,'$.version')=1
-        AND json_type(config.value,'$.enabled')='true' ELSE 0 END
+        AND json_type(config.value,'$.from_audio')='true' ELSE 0 END
       AND EXISTS (SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id
         WHERE d.operation_id=op.id AND d.operation_epoch=op.operation_epoch AND d.released=0
-        AND d.expires_at_ms>"#,$now,r#" AND u.is_admin=1
+        AND d.expires_at_ms>"#,$now,r#" AND (u.is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))
         AND (json_extract("#,$payload,r#",'$.kind')='subtitle_translation_prepare' OR
         json_extract("#,$payload,r#",'$.recipe.core_index') BETWEEN CAST(d.position_ms/json_extract(op.profile_json,'$.core_ms') AS INTEGER)
         AND CAST(d.position_ms/json_extract(op.profile_json,'$.core_ms') AS INTEGER)+min(2,CAST(d.playback_rate AS INTEGER)+1)
@@ -2888,6 +2894,14 @@ RETURNING result_json
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
     async fn maintain_translation_cache(&self, now_ms: i64) -> Result<(), StoreError>;
+    /// Non-terminal AI subtitle work one user is waiting on, across
+    /// progressive operations and text translation jobs.
+    async fn ai_subtitle_active_work(
+        &self,
+        user_id: i64,
+        exclude_operation_id: Option<&str>,
+        now_ms: i64,
+    ) -> Result<i64, StoreError>;
     async fn text_translation_request_receipt(
         &self,
         user_id: i64,
@@ -3836,6 +3850,14 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn ai_subtitle_active_work(
+        &self,
+        user_id: i64,
+        exclude_operation_id: Option<&str>,
+        now_ms: i64,
+    ) -> Result<i64, StoreError> {
+        super::ai_subtitles::active_work(self, user_id, exclude_operation_id, now_ms).await
+    }
     async fn text_translation_request_receipt(
         &self,
         user_id: i64,

@@ -4814,15 +4814,20 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let current = self.subtitle_translation_schema_version().await?;
-        if current == Some(2) {
+        if current == Some(3) {
             return Ok(());
         }
         let statements = match current {
             Some(0) => super::subtitle_translation_schema::retarget_statements()
                 .into_iter()
                 .chain(super::subtitle_translation_schema::continuity_statements())
+                .chain(super::subtitle_translation_schema::authority_statements())
                 .collect(),
-            Some(1) => super::subtitle_translation_schema::continuity_statements(),
+            Some(1) => super::subtitle_translation_schema::continuity_statements()
+                .into_iter()
+                .chain(super::subtitle_translation_schema::authority_statements())
+                .collect(),
+            Some(2) => super::subtitle_translation_schema::authority_statements(),
             _ => super::subtitle_translation_schema::statements(),
         }
         .into_iter()
@@ -4830,7 +4835,7 @@ impl HiqliteAuthStore {
         .collect::<Vec<_>>();
         admit_schema_migration(admission)?;
         let result = self.schema_migration_transaction(statements).await;
-        if self.subtitle_translation_schema_version().await? == Some(2) {
+        if self.subtitle_translation_schema_version().await? == Some(3) {
             return Ok(());
         }
         result?;

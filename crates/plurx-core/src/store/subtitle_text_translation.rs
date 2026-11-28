@@ -57,7 +57,7 @@ fn cue_body(cue: &TextTranslationCue) -> Result<String, StoreError> {
     }
     Ok(body)
 }
-const CURRENT:&str="EXISTS(SELECT 1 FROM files WHERE id=json_extract($1,'$.source.file_id') AND size=json_extract($1,'$.source.source_size') AND mtime=json_extract($1,'$.source.source_mtime') AND probe_json IS NOT NULL) AND EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.source.admin_user_id') AND is_admin=1) AND EXISTS(SELECT 1 FROM settings WHERE key='subtitles.text_translation.config.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.enabled')=1 ELSE 0 END)";
+const CURRENT:&str="EXISTS(SELECT 1 FROM files WHERE id=json_extract($1,'$.source.file_id') AND size=json_extract($1,'$.source.source_size') AND mtime=json_extract($1,'$.source.source_mtime') AND probe_json IS NOT NULL) AND EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.source.admin_user_id') AND (is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))) AND EXISTS(SELECT 1 FROM settings WHERE key='subtitles.ai.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.version')=1 AND json_type(value,'$.translate_text')='true' ELSE 0 END)";
 pub(super) async fn publish<T: QueueSql>(
     store: &T,
     input: PublishTextSlice,
@@ -121,7 +121,7 @@ pub(super) async fn receipt<T: QueueSql>(
     let body = encode(
         &json!({"user_id":user_id,"scope":format!("subtitle-text-user:{user_id}"),"request_id":request_id,"digest":digest}),
     )?;
-    let rows=store.queue_sql("SELECT CASE WHEN request_digest=json_extract($1,'$.digest') THEN json_object('outcome','existing','job_id',job_id) ELSE json_object('outcome','conflict') END AS result_json FROM background_job_waiters WHERE request_scope=json_extract($1,'$.scope') AND request_id=json_extract($1,'$.request_id') AND EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.user_id') AND is_admin=1)".into(),body,false,true).await?;
+    let rows=store.queue_sql("SELECT CASE WHEN request_digest=json_extract($1,'$.digest') THEN json_object('outcome','existing','job_id',job_id) ELSE json_object('outcome','conflict') END AS result_json FROM background_job_waiters WHERE request_scope=json_extract($1,'$.scope') AND request_id=json_extract($1,'$.request_id') AND EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.user_id') AND (is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END)))".into(),body,false,true).await?;
     rows.first().map(|row| decode(row)).transpose()
 }
 
@@ -172,7 +172,7 @@ mod tests {
         let path = dir.path().join("store.db");
         let store = SqliteStore::open(&path).expect("production migrations");
         let conn = rusqlite::Connection::open(path).expect("fixture connection");
-        conn.execute_batch("INSERT INTO users(id,username,password_hash,is_admin) VALUES(1,'admin','hash',1);INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[\"/media\"]');INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','Movie','Movie');INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(1,1,'/media/movie',100,20,'{}');INSERT INTO settings(key,value) VALUES('subtitles.text_translation.config.v1','{\"version\":1,\"enabled\":true}');").expect("catalog fixture");
+        conn.execute_batch("INSERT INTO users(id,username,password_hash,is_admin) VALUES(1,'admin','hash',1);INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[\"/media\"]');INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','Movie','Movie');INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(1,1,'/media/movie',100,20,'{}');INSERT INTO settings(key,value) VALUES('subtitles.text_translation.config.v1','{\"version\":1,\"enabled\":true}'); INSERT OR IGNORE INTO settings(key,value) VALUES('subtitles.ai.v1','{\"version\":1,\"download_match\":true,\"translate_text\":true,\"from_audio\":true,\"ahead_of_time\":false,\"who\":\"admins\",\"quality\":\"balanced\"}');").expect("catalog fixture");
         let id = uuid::Uuid::new_v4().to_string();
         store
             .enqueue_job(EnqueueJob {
@@ -471,5 +471,106 @@ mod tests {
             )
             .expect("retained inventory");
         assert_eq!(bytes, 64 * 1024 * 1024);
+    }
+
+    /// AI subtitles T2 (plan §3.3): a viewer-started text translation is the
+    /// artifact kind, which reads a stored subtitle and never the original
+    /// media. It holds no `source_io` requirement, so the maintenance-reader
+    /// guard (`claim_maintenance_reader!`) can never refuse it and it needs no
+    /// live-demand arm. A viewer's job is claimed with no source reader.
+    #[tokio::test]
+    async fn viewer_text_translation_holds_no_source_io_and_is_never_a_maintenance_reader() {
+        let (_dir, store, conn, _) = fixture().await;
+        conn.execute_batch("INSERT INTO users(id,username,password_hash,is_admin) VALUES(2,'viewer','hash',0); UPDATE settings SET value=json_set(value,'$.who','everyone') WHERE key='subtitles.ai.v1';")
+            .expect("viewer and everyone");
+        let JobPayload::SubtitleTextTranslate {
+            file_id,
+            source_size,
+            source_mtime,
+            subtitle_index,
+            input_sha256,
+            source_language,
+            target_language,
+            engine_sha256,
+            model_id,
+            model_sha256,
+            adapter_contract,
+            target_node_id,
+            ..
+        } = source()
+        else {
+            unreachable!("text fixture source")
+        };
+        let payload = JobPayload::SubtitleTextTranslateArtifact {
+            file_id,
+            source_size,
+            source_mtime,
+            subtitle_index,
+            input_sha256,
+            source_language,
+            target_language,
+            engine_sha256,
+            model_id,
+            model_sha256,
+            adapter_contract,
+            target_node_id,
+            admin_user_id: 2,
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .enqueue_job(EnqueueJob {
+                id: id.clone(),
+                payload,
+                dedupe_key: "viewer-text-artifact".into(),
+                priority: 1,
+                not_before_ms: 1000,
+                now_ms: 1000,
+                request: JobRequest {
+                    scope: "subtitle-text-user:2".into(),
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    request_digest: "d".repeat(64),
+                    consumer_kind: "subtitle_text_translation".into(),
+                    consumer_ref: "viewer".into(),
+                    target_node_id: Some("worker".into()),
+                    deadline_ms: Some(86400000),
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("viewer enqueue");
+        let required: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM background_job_required_resources WHERE job_id=?1 AND resource_key LIKE 'source_io%'",
+                [&id],
+                |row| row.get(0),
+            )
+            .expect("required resources");
+        assert_eq!(
+            required, 0,
+            "a viewer text translation reads no original media"
+        );
+        let queued = store
+            .background_job(&id)
+            .await
+            .expect("queued lookup")
+            .expect("queued job");
+        let claimed = store
+            .claim_artifact_job(ClaimJob {
+                job_id: id,
+                expected_revision: queued.revision,
+                node_id: "worker".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::SubtitleTextTranslateArtifact,
+                payload_version: 1,
+                now_ms: 1100,
+                dispatched_at_ms: 1100,
+            })
+            .await
+            .expect("claim");
+        assert!(
+            matches!(claimed, ClaimOutcome::Claimed { .. }),
+            "{claimed:?}"
+        );
     }
 }
