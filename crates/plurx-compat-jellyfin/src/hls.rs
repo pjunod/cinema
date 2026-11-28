@@ -12,6 +12,63 @@ pub enum Resource {
     Segment(String),
     SubtitlePlaylist(u32),
     SubtitleSegment(u32, String),
+    ChildPlaylist(Rendition),
+    ChildInit(Rendition, String),
+    ChildSegment(Rendition, u32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenditionRole {
+    Video,
+    Audio,
+}
+
+impl RenditionRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Video => "video",
+            Self::Audio => "audio",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rendition {
+    pub role: RenditionRole,
+    pub id: String,
+}
+
+fn media_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+impl Rendition {
+    fn parse(value: &str) -> Option<(Self, &str)> {
+        let (role, rest) = value.split_once('/')?;
+        let role = match role {
+            "video" => RenditionRole::Video,
+            "audio" => RenditionRole::Audio,
+            _ => return None,
+        };
+        let (id, resource) = rest.split_once('/')?;
+        if !media_digest(id) {
+            return None;
+        }
+        Some((
+            Self {
+                role,
+                id: id.to_owned(),
+            },
+            resource,
+        ))
+    }
+
+    fn path(&self, resource: &str) -> String {
+        format!("{}/{}/{resource}", self.role.as_str(), self.id)
+    }
 }
 
 fn decimal(value: &str) -> bool {
@@ -35,6 +92,21 @@ impl Resource {
         {
             return decimal(index).then(|| Self::Segment(index.to_owned()));
         }
+        if let Some((rendition, resource)) = Rendition::parse(value) {
+            return match resource {
+                "index.m3u8" => Some(Self::ChildPlaylist(rendition)),
+                value if value.starts_with("init/") => {
+                    let digest = value.strip_prefix("init/")?.strip_suffix(".mp4")?;
+                    media_digest(digest).then(|| Self::ChildInit(rendition, digest.to_owned()))
+                }
+                value => {
+                    let index = value.strip_prefix("segment/")?.strip_suffix(".m4s")?;
+                    let sequence: u32 = index.parse().ok()?;
+                    (sequence.to_string() == index)
+                        .then_some(Self::ChildSegment(rendition, sequence))
+                }
+            };
+        }
         let rest = value.strip_prefix("subs/")?;
         let (track, filename) = rest.split_once('/')?;
         if !decimal(track) {
@@ -56,7 +128,17 @@ impl Resource {
             Self::Segment(index) => format!("seg{index}.m4s"),
             Self::SubtitlePlaylist(track) => format!("subs/{track}/index.m3u8"),
             Self::SubtitleSegment(track, index) => format!("subs/{track}/seg{index}.vtt"),
+            Self::ChildPlaylist(rendition) => rendition.path("index.m3u8"),
+            Self::ChildInit(rendition, digest) => rendition.path(&format!("init/{digest}.mp4")),
+            Self::ChildSegment(rendition, index) => rendition.path(&format!("segment/{index}.m4s")),
         }
+    }
+
+    pub fn split_child(&self) -> bool {
+        matches!(
+            self,
+            Self::ChildPlaylist(_) | Self::ChildInit(..) | Self::ChildSegment(..)
+        )
     }
 
     fn public_path(&self, inline_init: bool) -> String {
@@ -111,6 +193,7 @@ fn resolve(uri: &str, parent: &Resource, native_session: &str) -> Option<Resourc
     match parent {
         Resource::SubtitlePlaylist(track) => Resource::parse(&format!("subs/{track}/{uri}")),
         Resource::Master | Resource::Media => Resource::parse(uri),
+        Resource::ChildPlaylist(rendition) => Resource::parse(&rendition.path(uri)),
         _ => None,
     }
 }
@@ -131,6 +214,45 @@ pub fn rewrite_manifest(
     public_query: Option<&str>,
     inline_init: bool,
 ) -> Result<String, &'static str> {
+    rewrite_manifest_inner(
+        input,
+        parent,
+        native_session,
+        public_base,
+        public_query,
+        inline_init,
+        false,
+    )
+}
+
+/// A negotiated fMP4 client can fetch separate audio and video resources.
+pub fn rewrite_split_manifest(
+    input: &str,
+    parent: &Resource,
+    native_session: &str,
+    public_base: &str,
+    public_query: Option<&str>,
+) -> Result<String, &'static str> {
+    rewrite_manifest_inner(
+        input,
+        parent,
+        native_session,
+        public_base,
+        public_query,
+        false,
+        true,
+    )
+}
+
+fn rewrite_manifest_inner(
+    input: &str,
+    parent: &Resource,
+    native_session: &str,
+    public_base: &str,
+    public_query: Option<&str>,
+    inline_init: bool,
+    split: bool,
+) -> Result<String, &'static str> {
     if public_query.is_some_and(|query| {
         query.is_empty()
             || query.len() > 256
@@ -150,7 +272,7 @@ pub fn rewrite_manifest(
         || !matches!(
             parent,
             Resource::Master | Resource::Media | Resource::SubtitlePlaylist(_)
-        )
+        ) && !(split && matches!(parent, Resource::ChildPlaylist(_)))
         || native_session.is_empty()
         || native_session.len() > 128
         || !native_session
@@ -168,6 +290,8 @@ pub fn rewrite_manifest(
     }
     let mut output = String::with_capacity(input.len());
     let mut map_seen = false;
+    let mut audio_groups = std::collections::BTreeSet::new();
+    let mut variant_audio = None;
     for line in input.lines() {
         if line.len() > 16 * 1024 {
             return Err("HLS line exceeds bound");
@@ -176,8 +300,17 @@ pub fn rewrite_manifest(
             let resource =
                 resolve(line, parent, native_session).ok_or("unsupported HLS resource")?;
             let legal = match (parent, &resource) {
-                (Resource::Master, Resource::Media) | (Resource::Media, Resource::Segment(_)) => {
-                    true
+                (Resource::Master, Resource::Media) => variant_audio.is_none(),
+                (Resource::Media, Resource::Segment(_)) => true,
+                (Resource::Master, Resource::ChildPlaylist(rendition)) => {
+                    split
+                        && rendition.role == RenditionRole::Video
+                        && variant_audio
+                            .take()
+                            .is_some_and(|group| audio_groups.contains(group))
+                }
+                (Resource::ChildPlaylist(parent), Resource::ChildSegment(child, _)) => {
+                    split && parent == child
                 }
                 // A subtitle playlist lists only its own track's cues, even
                 // when the native URI is absolute.
@@ -220,6 +353,12 @@ pub fn rewrite_manifest(
             if (tag == "#EXT-X-KEY" || tag == "#EXT-X-SESSION-KEY") && attributes != "METHOD=NONE" {
                 return Err("encrypted HLS unsupported");
             }
+            if split && tag == "#EXT-X-STREAM-INF" && matches!(parent, Resource::Master) {
+                if variant_audio.is_some() {
+                    return Err("missing split video playlist");
+                }
+                variant_audio = attribute(attribute_fields(attributes)?, "AUDIO")?;
+            }
             let attribute_tag = matches!(
                 tag,
                 "#EXT-X-MEDIA"
@@ -240,22 +379,36 @@ pub fn rewrite_manifest(
             if let Some(range) = uri {
                 let resource = resolve(&attributes[range.clone()], parent, native_session)
                     .ok_or("unsupported HLS resource")?;
-                let legal = matches!(
-                    (tag, parent, &resource),
+                let legal = match (tag, parent, &resource) {
+                    ("#EXT-X-MEDIA", Resource::Master, Resource::SubtitlePlaylist(_))
+                    | ("#EXT-X-MAP", Resource::Media, Resource::Init) => true,
+                    ("#EXT-X-MEDIA", Resource::Master, Resource::ChildPlaylist(child))
+                        if split && child.role == RenditionRole::Audio =>
+                    {
+                        let fields = attribute_fields(attributes)?;
+                        let kind = attribute(fields.iter().copied(), "TYPE")?;
+                        let group = attribute(fields.iter().copied(), "GROUP-ID")?;
+                        if kind == Some("AUDIO") {
+                            if let Some(group) = group {
+                                audio_groups.insert(group);
+                            }
+                        }
+                        kind == Some("AUDIO") && group.is_some()
+                    }
                     (
-                        "#EXT-X-MEDIA",
-                        Resource::Master,
-                        Resource::SubtitlePlaylist(_)
-                    ) | ("#EXT-X-MAP", Resource::Media, Resource::Init)
-                );
+                        "#EXT-X-MAP",
+                        Resource::ChildPlaylist(parent),
+                        Resource::ChildInit(child, _),
+                    ) => split && parent == child,
+                    _ => false,
+                };
                 if !legal {
                     return Err("unsupported HLS URI tag");
                 }
                 if tag == "#EXT-X-MAP" {
                     if map_seen
-                        || attributes != "URI=\"init.mp4\""
-                            && attributes
-                                != format!("URI=\"/api/v1/hls/{native_session}/init.mp4\"")
+                        || attributes.as_bytes().get(..5) != Some(b"URI=\"")
+                        || range.end + 1 != attributes.len()
                     {
                         return Err("unsupported HLS map");
                     }
@@ -291,8 +444,11 @@ pub fn rewrite_manifest(
         }
         output.push('\n');
     }
-    if matches!(parent, Resource::Media) && !map_seen {
+    if matches!(parent, Resource::Media | Resource::ChildPlaylist(_)) && !map_seen {
         return Err("native fMP4 initialization missing");
+    }
+    if variant_audio.is_some() {
+        return Err("missing split video playlist");
     }
     if output.contains(native_session) || output.contains("/api/v1/hls/") {
         return Err("private native HLS reference");
@@ -365,12 +521,72 @@ fn attribute_fields(list: &str) -> Result<Vec<(&str, &str)>, &'static str> {
     Ok(fields)
 }
 
+fn attribute<'a>(
+    fields: impl IntoIterator<Item = (&'a str, &'a str)>,
+    name: &str,
+) -> Result<Option<&'a str>, &'static str> {
+    let mut values = fields
+        .into_iter()
+        .filter_map(|(key, value)| (key == name).then_some(value));
+    let value = values.next();
+    if values.next().is_some() {
+        return Err("duplicate HLS attribute");
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     const BASE: &str =
         "/jellyfin/Videos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/hls/";
     const SESSION: &str = "native-private-session";
+
+    #[test]
+    fn negotiated_split_rewrites_only_its_own_video_and_audio_children() {
+        let video = "a".repeat(64);
+        let audio = "b".repeat(64);
+        let master = format!(
+            "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"Original\",URI=\"audio/{audio}/index.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=750000,AUDIO=\"aud\"\nvideo/{video}/index.m3u8\n"
+        );
+        let credential = Some("ApiKey=valid-key");
+        let playlist =
+            rewrite_split_manifest(&master, &Resource::Master, SESSION, BASE, credential)
+                .expect("split master");
+        assert!(playlist.contains(&format!("{BASE}audio/{audio}/index.m3u8?ApiKey=valid-key")));
+        assert!(playlist.contains(&format!("{BASE}video/{video}/index.m3u8?ApiKey=valid-key")));
+        assert!(
+            rewrite_manifest(&master, &Resource::Master, SESSION, BASE, credential, true).is_err()
+        );
+        assert!(rewrite_split_manifest(
+            &master.replace("AUDIO=\"aud\"", "AUDIO=\"other\""),
+            &Resource::Master,
+            SESSION,
+            BASE,
+            credential
+        )
+        .is_err());
+
+        let child = Resource::parse(&format!("audio/{audio}/index.m3u8")).expect("audio child");
+        let media =
+            format!("#EXTM3U\n#EXT-X-MAP:URI=\"init/{video}.mp4\"\n#EXTINF:4.0,\nsegment/5.m4s\n");
+        let rewritten = rewrite_split_manifest(&media, &child, SESSION, BASE, credential)
+            .expect("split audio media");
+        assert!(rewritten.contains(&format!(
+            "{BASE}audio/{audio}/init/{video}.mp4?ApiKey=valid-key"
+        )));
+        assert!(rewritten.contains(&format!(
+            "{BASE}audio/{audio}/segment/5.m4s?ApiKey=valid-key"
+        )));
+        let foreign = media.replace(
+            "segment/5.m4s",
+            &format!("/api/v1/hls/{SESSION}/video/{video}/segment/5.m4s"),
+        );
+        assert!(rewrite_split_manifest(&foreign, &child, SESSION, BASE, credential).is_err());
+        assert!(Resource::parse(&format!("audio/{audio}/init/{video}.mp4")).is_some());
+        assert!(Resource::parse(&format!("audio/{audio}/init/{video}/extra.mp4")).is_none());
+        assert!(Resource::parse(&format!("audio/{audio}/segment/05.m4s")).is_none());
+    }
 
     #[test]
     fn subtitle_free_master_drops_only_the_subtitle_group() {

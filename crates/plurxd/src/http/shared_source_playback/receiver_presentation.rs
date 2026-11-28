@@ -17,6 +17,16 @@ pub(crate) const RECEIVER_HEADER_VALUE: &str = "bounded-range-v1";
 /// Start it would refuse.
 pub(crate) const DOLBY_VISION_RECEIVER_HEADER: &str = "x-plurx-receiver-dynamic-range";
 pub(crate) const DOLBY_VISION_RECEIVER_HEADER_VALUE: &str = "dolby-vision-v1";
+pub(crate) const SPLIT_RECEIVER_HEADER: &str = "x-plurx-receiver-hls";
+pub(crate) const SPLIT_RECEIVER_HEADER_VALUE: &str = plurx_core::playback::HLS_SPLIT_AV_TRANSPORT;
+
+pub(crate) fn authenticated_receiver_split(headers: &axum::http::HeaderMap) -> bool {
+    let mut values = headers.get_all(SPLIT_RECEIVER_HEADER).iter();
+    values
+        .next()
+        .is_some_and(|value| value.as_bytes() == SPLIT_RECEIVER_HEADER_VALUE.as_bytes())
+        && values.next().is_none()
+}
 /// Exact server implementation affirmation for the optional processed successor wire.
 pub(crate) const PROCESSED_UPGRADE_RECEIVER_HEADER: &str = "x-plurx-receiver-processed-upgrade";
 pub(crate) const PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE: &str = "processed-upgrade-v1";
@@ -159,6 +169,18 @@ fn transport_values(value: &Value) -> Option<&Vec<Value>> {
         .get("transports")?
         .as_array()
 }
+pub(super) fn recipe_uses_split(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .is_some_and(|value| {
+            transport_values(&value).is_some_and(|transports| {
+                transports
+                    .iter()
+                    .any(|value| value.as_str() == Some(SPLIT_RECEIVER_HEADER_VALUE))
+            })
+        })
+}
+
 pub(super) fn has_reserved_tokens(bytes: &[u8]) -> bool {
     serde_json::from_slice::<Value>(bytes)
         .ok()
@@ -217,7 +239,23 @@ pub(super) fn normalize_wire_with_upgrade(
     dolby_vision: bool,
     processed_upgrade: bool,
 ) -> Result<Vec<u8>, ApiError> {
+    normalize_wire_for_receiver(bytes, ready, dolby_vision, processed_upgrade, false)
+}
+
+pub(super) fn normalize_wire_for_receiver(
+    bytes: &[u8],
+    ready: bool,
+    dolby_vision: bool,
+    processed_upgrade: bool,
+    split: bool,
+) -> Result<Vec<u8>, ApiError> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let split = split
+        && transport_values(&value).is_some_and(|transports| {
+            transports
+                .iter()
+                .any(|value| value.as_str() == Some(SPLIT_RECEIVER_HEADER_VALUE))
+        });
     let mut normalized = value.clone();
     let direct = value
         .get("session")
@@ -232,10 +270,7 @@ pub(super) fn normalize_wire_with_upgrade(
         values.retain(|value| {
             !value.as_str().is_some_and(|token| {
                 token.starts_with(RESERVED_RELAY_PREFIX)
-                    // A shared receiver's grammar admits only subtitle
-                    // groups, so a split presentation is never requested
-                    // through a Source relay (P62 S2 §3).
-                    || token == plurx_core::playback::HLS_SPLIT_AV_TRANSPORT
+                    || (!split || direct) && token == plurx_core::playback::HLS_SPLIT_AV_TRANSPORT
             })
         });
         if ready && supports && !direct {
@@ -251,6 +286,9 @@ pub(super) fn normalize_wire_with_upgrade(
         }
     }
     if let Some(session) = normalized.get_mut("session").and_then(Value::as_object_mut) {
+        if !split && session.get("split_audio") == Some(&Value::Bool(true)) {
+            session.remove("split_audio");
+        }
         if processed_upgrade && !direct {
             // A server-created successor is the sole writer of true; the
             // ordinary receiver-affirmed Start is represented by false.
@@ -354,7 +392,7 @@ pub(super) fn select_persisted_recipe(
     let processed_range = normalize_wire_with_upgrade(raw, true, false, true)?;
     let processed_dolby_vision = normalize_wire_with_upgrade(raw, false, true, true)?;
     let processed_range_dolby_vision = normalize_wire_with_upgrade(raw, true, true, true)?;
-    [
+    let mut candidates = vec![
         (raw.to_vec(), false, true),
         (legacy, false, false),
         (range, true, false),
@@ -364,26 +402,38 @@ pub(super) fn select_persisted_recipe(
         (processed_range, true, false),
         (processed_dolby_vision, false, false),
         (processed_range_dolby_vision, true, false),
-    ]
-    .into_iter()
-    .find(|(recipe, range, raw)| {
-        // A true successor can never join an ordinary route by stripping
-        // the request bit during persisted-recipe recovery.
-        let candidate_true =
-            serde_json::from_slice::<Value>(recipe)
-                .ok()
-                .is_some_and(|candidate| {
-                    candidate
-                        .get("session")
-                        .and_then(|session| session.get("processed_upgrade"))
-                        == Some(&Value::Bool(true))
-                });
-        true_successor == candidate_true
-            && (cleanup || !*raw || !has_reserved_tokens(recipe))
-            && super::ingress::fingerprint_recipe(recipe, *range) == stored
-    })
-    .map(|(recipe, _, _)| recipe)
-    .ok_or_else(|| super::SourceStartFailure::Conflict.response())
+    ];
+    for ready in [false, true] {
+        for dolby in [false, true] {
+            for processed in [false, true] {
+                candidates.push((
+                    normalize_wire_for_receiver(raw, ready, dolby, processed, true)?,
+                    ready,
+                    false,
+                ));
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|(recipe, range, raw)| {
+            // A true successor can never join an ordinary route by stripping
+            // the request bit during persisted-recipe recovery.
+            let candidate_true =
+                serde_json::from_slice::<Value>(recipe)
+                    .ok()
+                    .is_some_and(|candidate| {
+                        candidate
+                            .get("session")
+                            .and_then(|session| session.get("processed_upgrade"))
+                            == Some(&Value::Bool(true))
+                    });
+            true_successor == candidate_true
+                && (cleanup || !*raw || !has_reserved_tokens(recipe))
+                && super::ingress::fingerprint_recipe(recipe, *range) == stored
+        })
+        .map(|(recipe, _, _)| recipe)
+        .ok_or_else(|| super::SourceStartFailure::Conflict.response())
 }
 
 #[cfg(test)]

@@ -30,6 +30,7 @@ pub(super) struct Plan {
     pub fingerprint: String,
     pub bitrate: Option<u32>,
     pub inline_init: bool,
+    pub split_av: bool,
     /// The chosen output can carry VTT renditions in its master.
     pub manifest_capable: bool,
     /// The chosen output's master carries the source's text renditions.
@@ -164,7 +165,10 @@ fn ceiling(profile: &Value, requested: Option<i64>) -> Option<Result<Option<u32>
     Some(Ok(limits.into_iter().min().map(|v| v as u32)))
 }
 
-fn capabilities(rule: &TranscodingRule) -> Result<plurx_core::playback::DeviceCaps, ApiError> {
+fn capabilities(
+    rule: &TranscodingRule,
+    split_av: bool,
+) -> Result<plurx_core::playback::DeviceCaps, ApiError> {
     let split = |list: &Option<String>| {
         list.as_deref()
             .unwrap_or("")
@@ -180,9 +184,13 @@ fn capabilities(rule: &TranscodingRule) -> Result<plurx_core::playback::DeviceCa
     let audio = split(&rule.audio_codec);
     let audio_sinks = rule.max_audio_channels.as_deref().map(|channels|
         audio.iter().map(|codec| json!({"codec":codec,"max_channels":channels.parse::<u32>().unwrap_or(0)})).collect::<Vec<_>>()).unwrap_or_default();
+    let mut transports = vec!["hls"];
+    if split_av {
+        transports.push(plurx_core::playback::HLS_SPLIT_AV_TRANSPORT);
+    }
     serde_json::from_value(
         json!({"v":2,"video":video,"audio":audio,"audio_sinks":audio_sinks,
-        "containers":[rule.container],"transports":["hls"]}),
+        "containers":[rule.container],"transports":transports}),
     )
     .map_err(|_| ApiError::BadRequest("unsupported output capabilities".into()))
 }
@@ -308,7 +316,20 @@ pub(super) async fn negotiate(
         else {
             continue;
         };
-        let caps = capabilities(&rule)?;
+        // Jellyfin profiles without this Plurx extension preserve their
+        // original single-stream behavior, including inline-init playback.
+        let split_av = rule.container == "mp4"
+            && ask
+                .profile
+                .get("PlurxHlsTransports")
+                .and_then(Value::as_array)
+                .filter(|tokens| tokens.len() <= 8)
+                .is_some_and(|tokens| {
+                    tokens.iter().any(|token| {
+                        token.as_str() == Some(plurx_core::playback::HLS_SPLIT_AV_TRANSPORT)
+                    })
+                });
+        let caps = capabilities(&rule, split_av)?;
         super::super::stream::validate_device_caps(&caps)?;
         let profile = plurx_core::playback::DeviceProfile::from_caps_v2(&caps);
         let mut selected_file = file.clone();
@@ -464,6 +485,7 @@ pub(super) async fn negotiate(
                 fingerprint: resolved.intent_fingerprint,
                 bitrate,
                 inline_init: rule.container == "ts",
+                split_av,
                 manifest_capable,
                 manifest_subtitles,
             }));
@@ -606,7 +628,7 @@ mod tests {
         let mut six = facts;
         six.insert(Property::AudioChannels, Fact::Number(6.0));
         assert!(!accepts(&profile, &rules[0], "hevc", "aac", &six));
-        let caps = capabilities(&rules[0]).expect("one rule caps");
+        let caps = capabilities(&rules[0], false).expect("one rule caps");
         assert_eq!(caps.video.len(), 2);
         assert_eq!(caps.audio, vec!["aac"]);
         assert_eq!(caps.audio_sinks[0].max_channels, 2);

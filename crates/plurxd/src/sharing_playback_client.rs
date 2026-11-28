@@ -388,6 +388,10 @@ impl PeerConnection {
                 .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .header(crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE)
                 .header(
+                    crate::http::shared_source_playback::receiver_presentation::SPLIT_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::SPLIT_RECEIVER_HEADER_VALUE,
+                )
+                .header(
                     crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
                     crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
                 )
@@ -797,6 +801,10 @@ impl PeerConnection {
                 .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .header(crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE)
                 .header(
+                    crate::http::shared_source_playback::receiver_presentation::SPLIT_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::SPLIT_RECEIVER_HEADER_VALUE,
+                )
+                .header(
                     crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
                     crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
                 )
@@ -1005,14 +1013,26 @@ impl SourceResourceHead {
             return Err(PeerError::InvalidResponse);
         }
         let (mime, maximum, playlist, file) = match resource.kind() {
-            Kind::Master | Kind::Index | Kind::Video | Kind::SubtitlePlaylist { .. } => (
+            Kind::Master
+            | Kind::Index
+            | Kind::Video
+            | Kind::SubtitlePlaylist { .. }
+            | Kind::ChildPlaylist { .. } => (
                 "application/vnd.apple.mpegurl",
                 MAX_SHARING_PLAYLIST_BYTES as u64,
                 true,
                 false,
             ),
-            Kind::Init => ("video/mp4", 256 * 1024 * 1024, false, true),
-            Kind::MediaSegment => ("video/iso.segment", 256 * 1024 * 1024, false, true),
+            Kind::ChildInit {
+                role: plurx_core::sharing_resources::SharingHlsRole::Audio,
+            } => ("audio/mp4", 256 * 1024 * 1024, false, true),
+            Kind::ChildSegment {
+                role: plurx_core::sharing_resources::SharingHlsRole::Audio,
+            } => ("audio/iso.segment", 256 * 1024 * 1024, false, true),
+            Kind::Init | Kind::ChildInit { .. } => ("video/mp4", 256 * 1024 * 1024, false, true),
+            Kind::MediaSegment | Kind::ChildSegment { .. } => {
+                ("video/iso.segment", 256 * 1024 * 1024, false, true)
+            }
             Kind::SubtitleSegment { .. } => ("text/vtt", 2 * 1024 * 1024, false, false),
         };
         if length > maximum || single_header(headers, "content-type")? != mime {
@@ -1090,6 +1110,10 @@ impl PeerConnection {
                 .header("cinemashare-viewer", viewer)
                 .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .header(crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE)
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::SPLIT_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::SPLIT_RECEIVER_HEADER_VALUE,
+                )
                 .header(
                     crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
                     crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
@@ -2025,6 +2049,10 @@ impl PeerConnection {
                 .header("cinemashare-viewer", viewer)
                 .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .header(crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE)
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::SPLIT_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::SPLIT_RECEIVER_HEADER_VALUE,
+                )
                 .header(
                     crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
                     crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,

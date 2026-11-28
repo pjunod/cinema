@@ -911,7 +911,9 @@ pub(crate) fn resolve_live_delivery(
     } else {
         "aac".to_owned()
     };
-    let preferred_packaging = if video_action == LiveTrackAction::Copy && video_codec == "hevc" {
+    let preferred_packaging = if video_action == LiveTrackAction::Copy && video_codec == "hevc"
+        || caps.as_ref().is_some_and(DeviceCaps::plays_split_av) && audio_codec == "aac"
+    {
         LivePackaging::Fmp4
     } else {
         LivePackaging::Mpegts

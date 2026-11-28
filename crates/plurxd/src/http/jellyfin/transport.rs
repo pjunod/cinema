@@ -5,7 +5,9 @@ use axum::{
     extract::Query,
     http::{header, Method},
 };
-use plurx_compat_jellyfin::hls::{rewrite_manifest, without_subtitle_renditions, Resource};
+use plurx_compat_jellyfin::hls::{
+    rewrite_manifest, rewrite_split_manifest, without_subtitle_renditions, Resource,
+};
 use plurx_core::store::JellyfinPlay;
 
 pub(super) async fn route(state: &AppState, play: &JellyfinPlay) -> Result<String, ApiError> {
@@ -171,6 +173,37 @@ fn native_resource(
             Path((session, format!("seg{index}.m4s"))),
             headers,
         )),
+        Resource::ChildPlaylist(rendition) => Box::pin(super::super::hls::child_playlist(
+            State(state),
+            Path((
+                session,
+                rendition.role.as_str().to_owned(),
+                rendition.id.clone(),
+            )),
+            headers,
+        )),
+        Resource::ChildInit(rendition, digest) => Box::pin(super::super::hls::child_segment(
+            State(state),
+            Path((
+                session,
+                rendition.role.as_str().to_owned(),
+                rendition.id.clone(),
+                "init".to_owned(),
+                format!("{digest}.mp4"),
+            )),
+            headers,
+        )),
+        Resource::ChildSegment(rendition, index) => Box::pin(super::super::hls::child_segment(
+            State(state),
+            Path((
+                session,
+                rendition.role.as_str().to_owned(),
+                rendition.id.clone(),
+                "segment".to_owned(),
+                format!("{index}.m4s"),
+            )),
+            headers,
+        )),
         Resource::SubtitlePlaylist(track) => Box::pin(super::super::hls::subtitle_playlist(
             State(state),
             Path((session, i64::from(*track))),
@@ -197,6 +230,10 @@ async fn serve(
     let session = route(state, &play).await?;
     let selection: Value = serde_json::from_str(&play.negotiation.selection_json)?;
     let inline = selection["vod"]["inline_init"] == true;
+    let split_av = !inline && selection["vod"]["split_av"] == true;
+    if !split_av && resource.split_child() {
+        return Err(ApiError::NotFound("HLS rendition"));
+    }
     // The negotiated profile, not the file, decides whether the manifest
     // carries subtitles. Without manifest subtitles the client is never told
     // the HLS subtitle resources, so they do not exist for this play.
@@ -211,7 +248,10 @@ async fn serve(
     }
     let manifest = matches!(
         resource,
-        Resource::Master | Resource::Media | Resource::SubtitlePlaylist(_)
+        Resource::Master
+            | Resource::Media
+            | Resource::SubtitlePlaylist(_)
+            | Resource::ChildPlaylist(_)
     );
     let deadline = super::super::hls::response_publication_deadline();
     let owner = if manifest {
@@ -236,7 +276,15 @@ async fn serve(
     };
     let response = native_resource(state, &session, &resource, inline, query, headers).await?;
     // Native errors are typed locally; private capability-bearing response bodies are never relayed.
-    if !response.status().is_success() && response.status() != StatusCode::NOT_MODIFIED {
+    let unsatisfied = response.status() == StatusCode::RANGE_NOT_SATISFIABLE
+        && matches!(
+            resource,
+            Resource::ChildInit(..) | Resource::ChildSegment(..)
+        );
+    if !response.status().is_success()
+        && response.status() != StatusCode::NOT_MODIFIED
+        && !unsatisfied
+    {
         return Err(ApiError::ServiceUnavailable(
             "native media temporarily unavailable".into(),
         ));
@@ -278,14 +326,24 @@ async fn serve(
             .url_credential
             .as_deref()
             .map(|token| format!("ApiKey={token}"));
-        let rewritten = rewrite_manifest(
-            input,
-            &manifest_resource,
-            &session,
-            &base,
-            credential.as_deref(),
-            inline,
-        )
+        let rewritten = if split_av {
+            rewrite_split_manifest(
+                input,
+                &manifest_resource,
+                &session,
+                &base,
+                credential.as_deref(),
+            )
+        } else {
+            rewrite_manifest(
+                input,
+                &manifest_resource,
+                &session,
+                &base,
+                credential.as_deref(),
+                inline,
+            )
+        }
         .map_err(|_| {
             ApiError::ServiceUnavailable("native manifest representation unsupported".into())
         })?;
@@ -328,7 +386,10 @@ async fn serve(
     if route(state, &fresh).await? != session {
         return Err(ApiError::Conflict("native play replaced".into()));
     }
-    if method == Method::HEAD {
+    if unsatisfied {
+        response.headers_mut().remove(header::CONTENT_LENGTH);
+    }
+    if unsatisfied || method == Method::HEAD {
         *response.body_mut() = Body::empty();
     }
     Ok(response)

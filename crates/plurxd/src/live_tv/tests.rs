@@ -422,6 +422,7 @@ fn test_session(directory: PathBuf, generation: i64) -> Arc<LiveTvSession> {
             config_generation: generation,
             source_serving_generation: 0,
             playback: None,
+            split_ingress: true,
         },
         channel: LiveTvChannel {
             id: "7.1".into(),
@@ -451,6 +452,7 @@ fn test_session(directory: PathBuf, generation: i64) -> Arc<LiveTvSession> {
         changed: tokio::sync::Notify::new(),
         startup_waiters: AtomicUsize::new(0),
         worker: StdMutex::new(None),
+        split_projection: tokio::sync::Mutex::new(split::Projection::default()),
         resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
         process: tokio::sync::Mutex::new(None),
         decoder_unavailable: Arc::new(AtomicBool::new(false)),
@@ -554,6 +556,7 @@ async fn register_test_session_at(
         source_format_expires_at: Arc::new(AtomicI64::new(0)),
         tuner_bytes: Arc::new(AtomicU64::new(0)),
         codec_qualification_counted: AtomicBool::new(false),
+        split_projection: tokio::sync::Mutex::new(split::Projection::default()),
         resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
         signal_cache: tokio::sync::Mutex::new(None),
         transport: StdMutex::new(None),
@@ -5762,6 +5765,7 @@ fn live_playlist_accepts_only_the_closed_numeric_inventory() {
 fn the_start_is_answered_at_the_second_listed_segment() {
     let inventory =
         |listed: usize, listed_seconds: f64, target_duration: u64, files: usize| ScratchInventory {
+            split: None,
             playlist: Vec::new(),
             media_sequence: 10,
             listed,
@@ -5866,6 +5870,7 @@ fn progress_is_the_newest_listed_segment_not_the_window_sliding() {
         record_producer_inventory(
             &mut state,
             ScratchInventory {
+                split: None,
                 playlist: Vec::new(),
                 media_sequence,
                 listed,
@@ -7866,7 +7871,26 @@ fn start_request_with_id(request_id: &str) -> LiveTvStartRequest {
         config_generation: 1,
         source_serving_generation: 0,
         playback: None,
+        split_ingress: true,
     }
+}
+
+#[test]
+fn a_legacy_ingress_cannot_issue_live_split_with_a_capable_client() {
+    let mut request = start_request_with_id("0123456789abcdef0123456789abcdef");
+    request.playback = Some(
+        serde_json::from_value(serde_json::json!({
+            "v": 1,
+            "caps": {"v": 2, "transports": ["hls-split-av-v1"]}
+        }))
+        .expect("playback caps"),
+    );
+    assert!(request.allows_split());
+
+    // The JSON on the old internal start route has no ingress affirmation.
+    let legacy = LiveTvStartRequest::from(LiveTvStartRequestV2::from(&request));
+    assert!(!legacy.allows_split());
+    assert!(same_start(&request, &legacy));
 }
 
 /// The production failure, as a test. A client mints its request id from
@@ -7956,8 +7980,10 @@ async fn live_tv_http_writer_preserves_ts_and_fmp4_sliding_windows() {
         if packaging == LivePackaging::Fmp4 {
             delivery.output.container = "fmp4".into();
         }
-        let plan = LiveTvTranscodePlan::new(&system, delivery, Some(Encoder::Software), Some(2))
-            .expect("plan");
+        let mut plan =
+            LiveTvTranscodePlan::new(&system, delivery.clone(), Some(Encoder::Software), Some(2))
+                .expect("plan");
+        plan.split_av = packaging == LivePackaging::Fmp4;
         let command = live_ffmpeg_command_for_output(
             &system,
             &plan,
@@ -8043,6 +8069,42 @@ async fn live_tv_http_writer_preserves_ts_and_fmp4_sliding_windows() {
             "playlist must advance beyond startup"
         );
         assert_eq!(inventory.init.is_some(), packaging == LivePackaging::Fmp4);
+        if packaging == LivePackaging::Fmp4 {
+            let mut projection = split::Projection::default();
+            let window = projection
+                .observe(root.path(), &delivery, &inventory, true)
+                .await
+                .expect("inspect exact production fMP4 writer")
+                .expect("verified live split pair");
+            let master = window.master();
+            for (label, role) in [("video", split::Role::Video), ("audio", split::Role::Audio)] {
+                let needle = format!("{label}/");
+                let (_, suffix) = master
+                    .split_once(&needle)
+                    .expect("master publishes each role");
+                let (id, _) = suffix.split_once('/').expect("rendition resource ID");
+                let playlist = window.playlist(role, id).expect("issued child");
+                assert!(playlist.contains(&format!(
+                    "#EXT-X-MEDIA-SEQUENCE:{}",
+                    inventory.media_sequence
+                )));
+                assert!(window.object(role, id, None).is_some());
+                assert!(window.object(role, id, inventory.newest_listed()).is_some());
+                assert!(window.playlist(role, &"0".repeat(64)).is_none());
+            }
+
+            let mut fallback = split::Projection::default();
+            assert!(fallback
+                .observe(root.path(), &delivery, &inventory, false)
+                .await
+                .expect("old client keeps its muxed live output")
+                .is_none());
+            assert!(fallback
+                .observe(root.path(), &delivery, &inventory, true)
+                .await
+                .expect("published layout stays immutable")
+                .is_none());
+        }
     }
 }
 

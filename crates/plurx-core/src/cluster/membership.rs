@@ -205,6 +205,7 @@ const LEGACY_CACHE_ADMIN_REVOCATION_V2_CAPABILITY: &str = "cache_admin_revocatio
 /// proves the running process understands the v1 owner/snapshot protocol;
 /// runtime enablement remains off until every active node proves it.
 pub const LIVE_TV_CAPABILITY: &str = "live_tv_v1";
+const LIVE_TV_SPLIT_CAPABILITY: &str = "live_tv_split_hls_v1";
 /// A fresh heartbeat row proves the running binary counts source capacity
 /// on `source_leases` and no longer reads the v1 source-owner objects; the
 /// source-lease contract waits for it on every active node.
@@ -7682,6 +7683,18 @@ impl MembershipManager {
                 params!(inner.identity.node_id.as_str(), LIVE_TV_CAPABILITY, now),
             ),
             (
+                "INSERT INTO cluster_node_capabilities
+                     (node_id, capability, last_seen_at) VALUES ($1, $2, $3)
+                     ON CONFLICT(node_id, capability) DO UPDATE SET
+                       last_seen_at = excluded.last_seen_at"
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    LIVE_TV_SPLIT_CAPABILITY,
+                    now
+                ),
+            ),
+            (
                 "INSERT INTO cluster_node_capabilities \
                      (node_id, capability, last_seen_at) VALUES ($1, $2, $3) \
                      ON CONFLICT(node_id, capability) DO UPDATE SET \
@@ -12844,12 +12857,27 @@ impl MembershipManager {
     /// server is the whole serving set and supports the protocol by
     /// construction.
     pub async fn live_tv_protocol_pending_nodes(&self) -> Result<Vec<String>, MembershipError> {
+        self.live_tv_pending_nodes_for(LIVE_TV_CAPABILITY).await
+    }
+
+    /// Split child routes must work on any serving ingress, including one
+    /// selected after a transport reconnect during a rolling upgrade.
+    pub async fn live_tv_split_ready(&self) -> Result<bool, MembershipError> {
+        self.live_tv_pending_nodes_for(LIVE_TV_SPLIT_CAPABILITY)
+            .await
+            .map(|pending| pending.is_empty())
+    }
+
+    async fn live_tv_pending_nodes_for(
+        &self,
+        capability: &str,
+    ) -> Result<Vec<String>, MembershipError> {
         if !self.is_replicated() {
             return Ok(Vec::new());
         }
         let cutoff = unix_ms()?.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
         let (missing, absent) = tokio::try_join!(
-            self.nodes_missing_capability(LIVE_TV_CAPABILITY),
+            self.nodes_missing_capability(capability),
             self.absent_nodes(cutoff),
         )?;
         Ok(missing

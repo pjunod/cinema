@@ -18,6 +18,10 @@ pub(crate) use observed::{CopyMuxEvent, ObservedCopyMux, ObservedCopySegment};
 #[cfg(unix)]
 mod census_format;
 #[cfg(unix)]
+mod split;
+#[cfg(unix)]
+pub(crate) use split::SplitRangeRequest;
+#[cfg(unix)]
 mod storage;
 #[cfg(unix)]
 pub(crate) use storage::{CopyRangeFiles, CopyRangePublisher};

@@ -10,7 +10,7 @@ use crate::live_tv::{
     LiveTvActivateRequest, LiveTvResourceRequest, LiveTvResumeRequest, LiveTvRetireRequest,
     LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStartStateRequest, LiveTvStopRequest,
     SnapshotRequest, ACTIVATE_PATH, GUIDE_PATH, RESOURCE_PATH, RESUME_PATH, RETIRE_PATH,
-    SNAPSHOT_PATH, START_PATH, START_STATE_PATH, START_V2_PATH, STOP_PATH,
+    SNAPSHOT_PATH, START_PATH, START_SPLIT_PATH, START_STATE_PATH, START_V2_PATH, STOP_PATH,
 };
 use crate::state::AppState;
 
@@ -118,6 +118,23 @@ pub(crate) async fn start_v2(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    start_with_playback(state, headers, body, START_V2_PATH).await
+}
+
+pub(crate) async fn start_split(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    start_with_playback(state, headers, body, START_SPLIT_PATH).await
+}
+
+async fn start_with_playback(
+    state: AppState,
+    headers: HeaderMap,
+    body: Bytes,
+    path: &'static str,
+) -> Response {
     if let Err(status) = require_start_authority(&state).await {
         return status.into_response();
     }
@@ -128,26 +145,20 @@ pub(crate) async fn start_v2(
     if request.playback.validate().is_err() {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    if let Err(status) = authorize_voter(
-        &state,
-        &headers,
-        &body,
-        START_V2_PATH,
-        Some(&request.source_node_id),
-    )
-    .await
+    if let Err(status) =
+        authorize_voter(&state, &headers, &body, path, Some(&request.source_node_id)).await
     {
         return status.into_response();
     }
     let Some(_restart_admission) = state.cluster.try_restart_admission().await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    match state.live_tv.start_local(request.into()).await {
-        Ok(response) => {
-            signed_json_response(&state, &headers, START_V2_PATH, StatusCode::OK, &response)
-                .unwrap_or_else(IntoResponse::into_response)
-        }
-        Err(error) => signed_wire_error(&state, &headers, START_V2_PATH, error),
+    let mut request = LiveTvStartRequest::from(request);
+    request.split_ingress = path == START_SPLIT_PATH;
+    match state.live_tv.start_local(request).await {
+        Ok(response) => signed_json_response(&state, &headers, path, StatusCode::OK, &response)
+            .unwrap_or_else(IntoResponse::into_response),
+        Err(error) => signed_wire_error(&state, &headers, path, error),
     }
 }
 
@@ -193,8 +204,12 @@ pub(crate) async fn resource(
     let content_type = match &request {
         LiveTvResourceRequest::Segment { .. }
         | LiveTvResourceRequest::Fragment { .. }
-        | LiveTvResourceRequest::Init { .. } => None,
-        LiveTvResourceRequest::Playlist { .. } => Some("application/vnd.apple.mpegurl"),
+        | LiveTvResourceRequest::Init { .. }
+        | LiveTvResourceRequest::SplitInit { .. }
+        | LiveTvResourceRequest::SplitFragment { .. } => None,
+        LiveTvResourceRequest::Playlist { .. } | LiveTvResourceRequest::SplitPlaylist { .. } => {
+            Some("application/vnd.apple.mpegurl")
+        }
         _ => Some("application/json"),
     };
     let response = state.live_tv.resource_local(request).await;

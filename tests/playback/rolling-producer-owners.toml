@@ -1586,7 +1586,8 @@ pattern = "VodPublication"
 # ResponseOwner, beside the continuous master. It creates no producer or
 # response owner and transfers none.
 [module_symbols.occurrences]
-"crates/plurxd/src/vod/serve/delivery.rs" = 35
+# The finite Source child result keeps the exact VOD publication owner.
+"crates/plurxd/src/vod/serve/delivery.rs" = 38
 # Projected master, child playlists, and child bytes use the exact encoded owner.
 "crates/plurxd/src/vod/serve/encoded_split.rs" = 8
 "crates/plurxd/src/vod/serve/end.rs" = 2
@@ -2574,6 +2575,9 @@ pattern = "projection_deadline"
 [module_symbols.occurrences]
 "crates/plurxd/src/http/hls/create.rs" = 2
 "crates/plurxd/src/media_sessions.rs" = 10
+# Finite Source master and child paths share the authenticated response
+# deadline.
+"crates/plurxd/src/transcode/source_actor.rs" = 2
 
 [[module_symbols]]
 id = "m4-release-adoption-token"
@@ -3051,6 +3055,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/copyrange/observed.rs" = 2
 "crates/plurxd/src/copyrange/pipes.rs" = 2
 "crates/plurxd/src/copyrange/production.rs" = 3
+# Growing Source projection uses bounded proof and response credits.
+# Detached blocking jobs hold their custody and credits through
+# completion.
+"crates/plurxd/src/copyrange/split.rs" = 3
 "crates/plurxd/src/copyseg.rs" = 7
 "crates/plurxd/src/decode_facts.rs" = 7
 "crates/plurxd/src/decode_facts/tests.rs" = 8
@@ -3127,7 +3135,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/http/shared_source_direct_tests.rs" = 3
 "crates/plurxd/src/http/shared_source_forwarding_tests.rs" = 4
 "crates/plurxd/src/http/shared_source_playback.rs" = 9
-"crates/plurxd/src/http/shared_source_playback/tests.rs" = 38
+# Fixture-only server for authorized finite and growing split child
+# requests.
+"crates/plurxd/src/http/shared_source_playback/tests.rs" = 39
 "crates/plurxd/src/http/sharing_source_adapter_tests.rs" = 2
 "crates/plurxd/src/http/sharing_start_decode.rs" = 4
 "crates/plurxd/src/http/stream.rs" = 3
@@ -4942,7 +4952,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/http/jellyfin/tests.rs" = 3
 "crates/plurxd/src/http/jellyfin/transport.rs" = 1
 "crates/plurxd/src/http/library_channels.rs" = 3
-"crates/plurxd/src/http/live_tv.rs" = 3
+# Split negotiation bounds the existing quorum capability observation
+# inside the public start deadline.
+"crates/plurxd/src/http/live_tv.rs" = 4
 "crates/plurxd/src/http/mod.rs" = 1
 "crates/plurxd/src/http/playback_handoffs.rs" = 1
 "crates/plurxd/src/http/plex_census.rs" = 1
@@ -4972,7 +4984,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/http/shared_source_forwarding_tests.rs" = 9
 "crates/plurxd/src/http/shared_source_ingress.rs" = 8
 "crates/plurxd/src/http/shared_source_playback.rs" = 7
-"crates/plurxd/src/http/shared_source_playback/tests.rs" = 57
+# Fixture-only polling observes the committed terminal soundtrack flush.
+"crates/plurxd/src/http/shared_source_playback/tests.rs" = 59
 "crates/plurxd/src/http/sharing.rs" = 1
 "crates/plurxd/src/http/sharing_source_adapter_tests.rs" = 2
 "crates/plurxd/src/http/sharing_start_decode.rs" = 2
@@ -7599,7 +7612,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 "crates/plurxd/src/http/jellyfin/representation.rs" = 7
 "crates/plurxd/src/http/jellyfin/startup.rs" = 1
 "crates/plurxd/src/http/jellyfin/tests.rs" = 44
-"crates/plurxd/src/http/jellyfin/transport.rs" = 3
+# The typed child adaptation uses the one existing Jellyfin media-session
+# owner.
+"crates/plurxd/src/http/jellyfin/transport.rs" = 4
 "crates/plurxd/src/http/library_channels_http_tests.rs" = 1
 "crates/plurxd/src/http/live_tv.rs" = 5
 "crates/plurxd/src/http/live_tv_http_tests.rs" = 1
@@ -7634,7 +7649,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 "crates/plurxd/src/http/shared_source_forwarding_tests.rs" = 6
 "crates/plurxd/src/http/shared_source_ingress.rs" = 1
 "crates/plurxd/src/http/shared_source_playback.rs" = 8
-"crates/plurxd/src/http/shared_source_playback/tests.rs" = 72
+# Fixture-only split HTTP client.
+"crates/plurxd/src/http/shared_source_playback/tests.rs" = 73
 "crates/plurxd/src/http/sharing.rs" = 1
 "crates/plurxd/src/http/sharing_source_adapter_tests.rs" = 8
 "crates/plurxd/src/http/sharing_start_decode.rs" = 4

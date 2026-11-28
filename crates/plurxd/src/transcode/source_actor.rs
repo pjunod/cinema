@@ -1203,10 +1203,7 @@ impl SourceViewerActor {
         // growing segment wait does, so it is judged the same way: by whether
         // production advanced. Any other resource waits on no production,
         // and its deadline says nothing about the producer.
-        let segment = matches!(
-            resource.kind(),
-            SharingHlsResourceKind::Init | SharingHlsResourceKind::MediaSegment
-        );
+        let segment = resource.kind().media_object();
         #[cfg(unix)]
         let growing = match self.growing_backing().filter(|_| segment) {
             Some(backing) => {
@@ -1223,6 +1220,10 @@ impl SourceViewerActor {
         #[cfg(not(unix))]
         let frozen = true;
         let vod_segment = segment && self.0.direct.is_none() && frozen;
+        let split_object = matches!(
+            resource.kind(),
+            SharingHlsResourceKind::ChildInit { .. } | SharingHlsResourceKind::ChildSegment { .. }
+        );
         let actor = self.clone();
         let resource = resource.clone();
         let job = tokio::spawn(Box::pin(async move {
@@ -1238,7 +1239,9 @@ impl SourceViewerActor {
                 // Lock-free: the timed-out read may still hold the range.
                 Err(self.deadline_refusal(backing.production.stalled_since(waited)))
             }
-            Err(_) if vod_segment => Err(LiveRefusal::terminal(SourceWorkerError::Deadline)),
+            Err(_) if vod_segment && !split_object => {
+                Err(LiveRefusal::terminal(SourceWorkerError::Deadline))
+            }
             Err(_) => Err(LiveRefusal::transient(SourceWorkerError::Deadline)),
         }
     }
@@ -1347,7 +1350,79 @@ impl SourceViewerActor {
             Arc::clone(&guard),
             Arc::clone(&self.0.resource_hooks),
         );
+        let split_master = if kind == SharingHlsResourceKind::Master
+            && !facts.response_owner.is_scalar_playlist()
+        {
+            manager
+                .vod
+                .continuous_master_before(&session_id, deadline)
+                .await
+        } else {
+            None
+        };
         let (payload, owner) = match kind {
+            SharingHlsResourceKind::Master if split_master.is_some() => {
+                let publication = split_master.expect("split master publication");
+                let presentation = publication.result.map_err(|_| pending)?.ok_or(ended)?;
+                let bytes = crate::http::hls::source_split_master(
+                    presentation,
+                    &facts.file,
+                    native.as_ref().and_then(|tracks| tracks.selected()),
+                    &native
+                        .as_ref()
+                        .map(|tracks| tracks.indexes())
+                        .unwrap_or_default(),
+                )
+                .map_err(|_| unsupported)?;
+                (SourceResourcePayload::Playlist(bytes), publication.owner)
+            }
+            SharingHlsResourceKind::ChildPlaylist { .. } => {
+                let (role, id) = resource.rendition().ok_or(unsupported)?;
+                let publication = manager
+                    .vod
+                    .child_playlist_before(&session_id, role, id, deadline)
+                    .await
+                    .ok_or(unsupported)?;
+                (
+                    SourceResourcePayload::Playlist(
+                        publication
+                            .result
+                            .map_err(|_| pending)?
+                            .ok_or(unsupported)?,
+                    ),
+                    publication.owner,
+                )
+            }
+            SharingHlsResourceKind::ChildInit { .. }
+            | SharingHlsResourceKind::ChildSegment { .. } => {
+                let (role, id) = resource.rendition().ok_or(unsupported)?;
+                let (kind, object) = resource.child_object().ok_or(unsupported)?;
+                let child = crate::vodserve::ChildMediaRequest {
+                    role: role.to_owned(),
+                    rendition: id.to_owned(),
+                    kind: kind.to_owned(),
+                    object: object.to_owned(),
+                };
+                let publication = manager
+                    .vod
+                    .source_child_segment_before(&session_id, &child, deadline, &custody)
+                    .await
+                    .ok_or(unsupported)?;
+                (
+                    SourceResourcePayload::File(
+                        publication
+                            .result
+                            .map_err(|error| match error {
+                                crate::vodserve::VodError::Pending { .. }
+                                | crate::vodserve::VodError::CapacityUnavailable { .. }
+                                | crate::vodserve::VodError::Busy(_) => pending,
+                                _ => ended,
+                            })?
+                            .ok_or(unsupported)?,
+                    ),
+                    publication.owner,
+                )
+            }
             SharingHlsResourceKind::Index | SharingHlsResourceKind::Video => {
                 // A playlist not yet published, or not readable this once.
                 let publication = manager.vod.playlist(&session_id).await.ok_or(pending)?;
@@ -1394,7 +1469,12 @@ impl SourceViewerActor {
                     .expect("Source copy presentation")
                     .presentation_probe
                     .clone();
-                let publication = manager.vod.playlist(&session_id).await.ok_or(pending)?;
+                let publication = if kind == SharingHlsResourceKind::Master {
+                    manager.vod.playlist(&session_id).await
+                } else {
+                    manager.vod.source_subtitle_timeline(&session_id).await
+                }
+                .ok_or(pending)?;
                 let video = publication.result.map_err(|_| pending)?;
                 let facts = manager.vod.hls_facts(&session_id).await.ok_or(ended)?;
                 if facts.file.id.to_string() != self.0.assignment.binding().file_id().as_str()
@@ -1487,7 +1567,8 @@ impl SourceViewerActor {
 
         // Detached observation survives waiter timeout only to settle actual
         // jobs; an expired request cannot extend authority or viewer activity.
-        // A VOD segment past its deadline ends the request, as it always has.
+        // Split readers can retry a projection deadline without ending the
+        // already-issued Source attachment.
         if Instant::now() >= deadline {
             return Err(
                 if matches!(
@@ -2638,7 +2719,7 @@ impl TranscodeManager {
                     return Err(SourceWorkerError::Unavailable);
                 }
                 startup_stage = "vod_commit";
-                Box::pin(self.vod.commit_source_vod(
+                let attached = Box::pin(self.vod.commit_source_vod(
                     reservation,
                     &session_id,
                     &owner.gate,
@@ -2652,6 +2733,17 @@ impl TranscodeManager {
                     .map_err(|_| SourceWorkerError::Unavailable)?;
                 if !physical.matches(&owner.assignment) {
                     return Err(SourceWorkerError::Conflict);
+                }
+                if prepared.request().split_audio {
+                    let projection_deadline = deadline
+                        .checked_sub(Duration::from_millis(500))
+                        .unwrap_or(deadline);
+                    Box::pin(
+                        self.vod
+                            .settle_source_vod_split(attached, projection_deadline),
+                    )
+                    .await
+                    .map_err(|_| SourceWorkerError::Unavailable)?;
                 }
                 let members = owner
                     .gate

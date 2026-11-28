@@ -648,6 +648,18 @@ pub(crate) fn source_native_master(
     )
     .into_bytes()
 }
+pub(crate) fn source_split_master(
+    presentation: plurx_core::transcode::split_master::SplitPresentation,
+    file: &MediaFile,
+    selected: Option<i64>,
+    admitted: &std::collections::BTreeSet<u16>,
+) -> Result<Vec<u8>, String> {
+    let mut admitted_file = file.clone();
+    admitted_file
+        .subtitle_streams
+        .retain(|track| u16::try_from(track.index).is_ok_and(|index| admitted.contains(&index)));
+    split_master_with_subtitles(presentation, &admitted_file, selected)
+}
 pub(crate) fn source_native_playlist(video: &[u8]) -> Vec<u8> {
     subtitle_media_playlist(video).into_bytes()
 }

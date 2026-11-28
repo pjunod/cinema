@@ -553,6 +553,7 @@ pub(super) async fn direct_bytes(
                 std::sync::Arc::clone(&guard),
                 body_length,
                 Some(start),
+                None,
                 #[cfg(test)]
                 read_gate.map(|gate| gate.0),
             )

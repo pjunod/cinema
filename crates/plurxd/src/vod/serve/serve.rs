@@ -1037,7 +1037,7 @@ impl VodServe {
         .await
     }
 
-    async fn serve_segment_for_with_read_custody(
+    pub(super) async fn serve_segment_for_with_read_custody(
         &self,
         rendition: &Arc<Rendition>,
         reader: (&str, &str),
