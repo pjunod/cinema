@@ -1908,22 +1908,23 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
-        name: "foreground_source_owners",
+        name: "source_leases",
         columns: &[
-            "owner_id",
-            "identity_json",
-            "resource_keys_json",
+            "lease_id",
+            "owner_kind",
+            "work_id",
             "fence",
+            "node_id",
+            "owner_json",
+            "resource_keys_json",
             "phase",
             "projection_json",
             "started_at_ms",
-            "updated_at_ms",
-            "lease_expires_at_ms",
-            "settlement_proof",
-            "activation_id",
+            "renewed_at_ms",
+            "expires_at_ms",
         ],
-        order_by: "owner_id",
-        minimum_schema: super::background_jobs_resources::SOURCE_ARBITRATION_SQLITE_SCHEMA,
+        order_by: "lease_id",
+        minimum_schema: super::source_leases::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -1941,29 +1942,6 @@ const TABLES: &[TablePlan] = &[
             "paused_at_ms",
         ],
         order_by: "job_id",
-        minimum_schema: super::background_jobs_resources::SOURCE_ARBITRATION_SQLITE_SCHEMA,
-        import_filter: None,
-        sealed_columns: &[],
-        parent_first: false,
-    },
-    TablePlan {
-        name: "background_source_custody",
-        columns: &[
-            "custody_id",
-            "owner_key",
-            "owner_json",
-            "resource_keys_json",
-            "owner_kind",
-            "work_id",
-            "fence",
-            "phase",
-            "started_at_ms",
-            "updated_at_ms",
-            "lease_expires_at_ms",
-            "settlement_proof",
-            "activation_id",
-        ],
-        order_by: "custody_id",
         minimum_schema: super::background_jobs_resources::SOURCE_ARBITRATION_SQLITE_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
@@ -1990,6 +1968,15 @@ const TABLES: &[TablePlan] = &[
         ],
         order_by: "receipt_id",
         minimum_schema: super::background_jobs_resources::SOURCE_ARBITRATION_SQLITE_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "source_lease_receipt_sources",
+        columns: &["receipt_id", "lease_id", "library_id", "source_path"],
+        order_by: "receipt_id, lease_id",
+        minimum_schema: super::source_leases::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -3284,6 +3271,7 @@ fn open_validated_source(
     }
     verify_source(&source)?;
     verify_source_dv_recovery_guards(&source, schema_version)?;
+    verify_source_m7_history(&source)?;
     let (instance_id, instance_updated_at) = source
         .query_row(
             "SELECT value, updated_at FROM settings WHERE key = ?1",
@@ -3400,6 +3388,41 @@ fn source_count(
     source
         .query_row(&sql, [], |row| row.get(0))
         .map_err(|error| import_error(format!("counting source table {}: {error}", table.name)))
+}
+
+/// M7 outcomes use title revisions. Import cannot copy those records until
+/// it can carry the title demands and their revision allocator together.
+fn verify_source_m7_history(source: &Connection) -> Result<(), StoreError> {
+    for table in [
+        "dv_m7_candidate_attempts_v1",
+        "dv_m7_title_outcomes_v1",
+        "dv_m7_rate_supersessions_v1",
+    ] {
+        let exists: bool = source
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(|error| import_error(format!("checking M7 source table {table}: {error}")))?;
+        if exists {
+            let populated: bool = source
+                .query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM {table})"),
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| {
+                    import_error(format!("checking M7 source records in {table}: {error}"))
+                })?;
+            if populated {
+                return Err(import_error(format!(
+                    "SQLite backup contains M7 records in {table}; continue using the source SQLite installation until M7 history can be imported"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Count the source rows whose sealed columns are not envelopes this build can

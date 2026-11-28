@@ -36,6 +36,7 @@ pub mod progress;
 mod recipe;
 pub mod split_master;
 mod vod;
+mod vod_copy_layout;
 
 pub use avc_qualification::QualifiedSdrAvc;
 pub use decode::{
@@ -77,15 +78,18 @@ pub use macos::{
 };
 pub use pipeline::{Pipeline, ReconstructedPqInput, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
+pub(crate) use vod::VOD_AAC_MAX_SEGMENT_TICKS;
 pub use vod::{
     vod_audio_anchor, vod_completed_reconstructed_pipe_args, vod_pipe_args,
     vod_pipe_args_with_reorder, vod_pipe_args_with_source_clock, vod_reconstructed_pipe_args,
     vod_reconstructed_video_origin, vod_shared_audio_args, vod_shared_audio_plan,
     VodCopyVideoRendition, VodFrameGrid, VodPresentationFamily, VodRenditionBandwidth,
-    VodSharedAudioRecipe, VodSharedAudioRendition, VodSourceClock, VodSplitCopyFamily,
-    VodSplitSoundtrack, VodVideoFamily, VodVideoRung, VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE,
-    VOD_HEVC_SAMPLE_ENTRY, VOD_SHARED_AUDIO_CPU_THREADS,
+    VodSharedAudioRecipe, VodSharedAudioRendition, VodSourceAudio, VodSourceClock,
+    VodSplitCopyFamily, VodSplitSoundtrack, VodVideoFamily, VodVideoRung, VOD_AAC_FRAME_SAMPLES,
+    VOD_AUDIO_RATE, VOD_HEVC_SAMPLE_ENTRY, VOD_SHARED_AUDIO_CPU_THREADS,
 };
+
+pub use vod_copy_layout::{VodCopyLayout, VodSoundtrackIdentity, VodSplitVideoIdentity};
 
 use crate::domain::MediaFile;
 use std::path::PathBuf;

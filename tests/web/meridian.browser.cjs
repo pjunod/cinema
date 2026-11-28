@@ -5,6 +5,11 @@ const assert=require("node:assert/strict"),fs=require("node:fs"),path=require("n
 const root=path.resolve(__dirname,"../../crates/plurxd/src/web"),output=process.env.MERIDIAN_SCREENSHOTS;
 const names=["The Far Shore","Signal at Dawn","Northbound","Low Orbit","After the Rain","A Place Between"];
 const libs=[{id:1,name:"Movies",kind:"movies",item_count:80},{id:2,name:"Shows",kind:"shows",item_count:12},{id:3,name:"Books & photographs — a deliberately long library name",kind:"books",item_count:6}];
+const homeRows={
+ layout:["continue_watching","next_up","watchlist","favorites","recently_added","coming_soon","libraries"]
+  .map(key=>({key,kind:"builtin",row_id:null})),
+ rows:{},
+};
 const items=Array.from({length:80},(_,i)=>({id:i+1,library_id:1,kind:"movie",title:names[i%6]+(i>=6?" "+(i+1):""),year:2026,resolution:2160,runtime_ms:6480000,overview:"A cartographer returns to a forgotten coast, following a signal that should have faded years ago.",poster:"/fixture-art/"+(i%6)+".svg",backdrop:"/fixture-art/hero.svg",watch:{position_ms:i<4?1800000:0,duration_ms:6480000,watched:i%4===3}}));
 const files=id=>[{id:100+Number(id),filename:"Synthetic coast.mp4",available:true,duration_ms:6480000,video_codec:"h264",width:3840,height:2160,size:1024,audio_streams:[{index:0,language:"eng",codec:"aac"},{index:1,language:"fra",codec:"aac"}],subtitle_streams:[{index:2,language:"eng",codec:"subrip",text:true}],subtitle_generation_enabled:true}];
 const artwork=name=>`<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600"><defs><linearGradient id="sky" x2=".8" y2="1"><stop stop-color="#bb926c"/><stop offset=".5" stop-color="#426573"/><stop offset="1" stop-color="#183542"/></linearGradient></defs><rect width="960" height="600" fill="url(#sky)"/><circle cx="730" cy="110" r="65" fill="#ddc293"/><path d="M0 600L230 170 380 370 610 140 960 600Z" fill="#203f4c"/><path d="M0 600L360 330 600 500 810 280 960 600Z" fill="#152d3a"/><text x="60" y="535" fill="#fff" font-family="sans-serif" font-size="45" letter-spacing="6">${name.toUpperCase()}</text></svg>`;
@@ -29,6 +34,7 @@ async function fixture(browser,options={}){
   else if(key==="/features")data={live_tv:true,recordings:true,library_channels:true,shared_libraries:true};
   else if(key==="/libraries")data=libs;
   else if(key==="/hubs")data={continue_watching:items.slice(0,4),next_up:items.slice(6,12),recently_added:items.slice(12,24)};
+  else if(key==="/home/rows")data=homeRows;
   else if(key==="/home/previews")data={libraries:libs.map(l=>({library:l,items:items.slice(0,12).map(i=>({...i,library_id:l.id})),total:80}))};
   else if(key==="/coming-soon")data={configured:false,entries:[]};
   else if(/^\/libraries\/\d+\/items$/.test(key))data={items,total:items.length};

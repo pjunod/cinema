@@ -30,6 +30,8 @@ pub(crate) const QUALITY_CANDIDATES_PATH: &str = "/internal/v1/media/quality-can
 pub(crate) const QUALITY_CATALOG_DEADLINE: Duration =
     plurx_core::cluster::timing::pool::QUALITY_CATALOG_DEADLINE;
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
+/// Protocol 14 seals a VOD copy's issued layout and soundtrack identities
+/// in the strict worker contract before publishing the session (P62 S3).
 /// Protocol 13 adds the split-copy offer contract (`OFFER_SPLIT_COPY`): an
 /// offer for a predicted split copy names its audio-free video, so placement
 /// and cache reuse no longer depend on the selected soundtrack (P62 S2).
@@ -39,7 +41,7 @@ pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
 /// CandidateCatalogContext. Protocol 9 added resolved audio facts. Exact-version
 /// placement excludes older workers, so rolling upgrades retain an eligible
 /// owner in each cohort and drain old ingress/sessions before the last old node.
-pub(crate) const PROTOCOL_VERSION: i64 = 13;
+pub(crate) const PROTOCOL_VERSION: i64 = 14;
 /// The offer contract of every placement except a predicted split copy.
 pub(crate) const OFFER_MUXED: &str = "hls-mpegts-v1";
 /// A predicted split copy: one shared video-only rendition, with every

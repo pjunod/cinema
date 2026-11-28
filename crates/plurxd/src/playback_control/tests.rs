@@ -10144,6 +10144,7 @@ fn every_axis_is_prepared_and_names_itself() {
 fn session_request(kind: SessionKind) -> crate::transcode::SessionRequest {
     crate::transcode::SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -10766,6 +10767,7 @@ fn a_grade_intent_comes_off_the_request() {
     fn request(kind: SessionKind, hdr10: bool) -> SessionRequest {
         SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,

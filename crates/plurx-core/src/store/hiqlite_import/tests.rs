@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn sqlite_import_refuses_each_populated_m7_table() {
+    let source = Connection::open_in_memory().expect("source");
+    verify_source_m7_history(&source).expect("backup before M7");
+    let tables = [
+        "dv_m7_candidate_attempts_v1",
+        "dv_m7_title_outcomes_v1",
+        "dv_m7_rate_supersessions_v1",
+    ];
+    for table in tables {
+        source
+            .execute_batch(&format!("CREATE TABLE {table}(id INTEGER PRIMARY KEY)"))
+            .expect("empty M7 table");
+    }
+    verify_source_m7_history(&source).expect("empty M7 backup");
+    for table in tables {
+        source
+            .execute(&format!("INSERT INTO {table} VALUES (1)"), [])
+            .expect("seed M7 record");
+        let error = verify_source_m7_history(&source).expect_err("reject populated M7 backup");
+        assert!(error.to_string().contains(table));
+        source
+            .execute(&format!("DELETE FROM {table}"), [])
+            .expect("reset fixture");
+    }
+}
+
+#[test]
 fn source_guard_validation_rejects_every_malformed_link_and_allows_repairs() {
     let source = Connection::open_in_memory().expect("source");
     source
@@ -458,13 +485,16 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     // Playback handoff codes and tokens are durable account state.
     assert!(names.contains(&"playback_handoffs"));
     assert!(names.contains(&"playback_handoffs_tokens"));
-    // SQLite v122 preserves source reservations, suspended work and its service credits.
+    // SQLite v122 preserves source reservations, suspended work and its
+    // service credits; v133 replaces the two v1 owner tables with leases.
+    assert!(!names.contains(&"foreground_source_owners"));
+    assert!(!names.contains(&"background_source_custody"));
     for name in [
-        "foreground_source_owners",
+        "source_leases",
         "background_source_pauses",
-        "background_source_custody",
         "background_source_service_epochs",
         "background_source_service_grants",
+        "source_lease_receipt_sources",
         "analysis_source_checkpoints",
         "playback_analysis_suspensions",
     ] {
@@ -515,7 +545,9 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     // (SQLite v131), 109 with the scoped login clients, codes and grants
     // (SQLite v133; their schema marker is installed locally), 112 with the
     // F+ curve titles, scenes and outcomes (SQLite v134), 118 with the
-    // six curation tables (SQLite v135).
+    // six curation tables (SQLite v135). The source-lease table replaces the
+    // two v1 owner tables and receipt-to-lease provenance adds one (SQLite
+    // v140), leaving the count unchanged.
     assert_eq!(names.len(), 118, "review every imported durable table");
 }
 
@@ -1102,7 +1134,6 @@ async fn background_jobs_import_distinguishes_v70_legacy_from_v71_queue() {
                 "background_embeddings" => 80,
                 "background_artifact_repairs" => 82,
                 "background_source_pauses"
-                | "background_source_custody"
                 | "background_source_service_epochs"
                 | "background_source_service_grants" => 122,
                 "background_scan_request_v2" => 125,

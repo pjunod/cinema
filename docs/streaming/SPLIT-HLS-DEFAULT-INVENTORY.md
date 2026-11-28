@@ -1,7 +1,7 @@
 # Split HLS as the default — inventory, client matrix and baseline method
 
 **Status:** open — S1 of P62 (metrics, first copy-HLS baseline) merged; S2
-([contract](SPLIT-HLS-RENDITION-CONTRACT.md)) built; S3–S8 not started ·
+([contract](SPLIT-HLS-RENDITION-CONTRACT.md)) built; S3 in verification; S4–S8 pending ·
 **Owner:** Claude Opus 5.5 · **Effort:** `E-5F2C2E9EA4` ·
 **Written:** 2026-11-26 against `main` @ `8724851ba`
 
@@ -108,7 +108,7 @@ Each slice is one batched pull request into `main`.
 |---|---|---|
 | S1 | Metrics and muxed baselines (§5), this document | Baseline half of the capacity criterion; the matrix |
 | S2 | One rendition contract and one writer for every split master; caps v2 token `hls-split-av-v1` with `split_audio: false` as the muxed opt-out; one split eligibility predicate; protocol 13: a split copy offer names its audio-free video ([contract](SPLIT-HLS-RENDITION-CONTRACT.md)) | Contract, identity |
-| S3 | VOD copy split by default: audio copied or projected when decodable, AAC otherwise; AC-3/E-AC-3 init facts; audio segment boundaries on the AAC frame nearest each video boundary (moved from S2); lifts the 2–3 limit; atomic group publication; muxed admission fallback before exposure | Capacity, identity |
+| S3 | VOD copy split by default: audio copied or projected when decodable, AAC otherwise; AC-3/E-AC-3 init facts; audio cuts on the packet nearest each video boundary (moved from S2); lifts the 2–3 limit; atomic group publication; muxed admission fallback before exposure | Capacity, identity |
 | S4 | VOD transcode and processed DV/HDR windows on the contract | Contract |
 | S5 | Rolling copy and transcode, recovery, reopen, takeover, cross-node relay; seek and reopen onto the native splice | Identity, recovery |
 | S6 | Live TV, sharing and Jellyfin | Matrix |

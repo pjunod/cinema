@@ -14,7 +14,20 @@ use uuid::Uuid;
 /// Exact persisted revision vocabulary. Admission must regenerate this
 /// expression in its atomic transaction using these fixed f/i/s aliases.
 /// Caption bodies intentionally have their own future resource revisions.
-pub const FILE_REVISION_PROJECTION_SQL:&str="json_array(1,s.server_id,s.catalogue_epoch,CAST(i.library_id AS TEXT),CAST(i.id AS TEXT),CAST(f.id AS TEXT),f.path,f.size,f.mtime,f.duration_ms,f.container,f.video_codec,f.video_profile,f.video_codec_tag,f.field_order,f.width,f.height,f.bit_depth,f.hdr,f.hdr_format,f.bitrate,f.audio_streams,f.subtitle_streams,f.probe_json,f.scanned_at,f.audio_offset_ms,f.dv_profile,f.dv_level,f.dv_bl_compat_id,f.dv_el_present,f.dv_rpu_present,f.max_cll,f.max_fall,f.mastering_max_luminance,f.luminance_source,json((SELECT json_group_array(json_array(json_extract(c.value,'$.source_size'),json_extract(c.value,'$.source_mtime'),json_extract(c.value,'$.provider_file_id'),json_extract(c.value,'$.language'),json_extract(c.value,'$.title'),json_extract(c.value,'$.hearing_impaired'),json_extract(c.value,'$.forced'))) FROM json_each(coalesce(f.downloaded_subtitles,'[]')) c)))";
+///
+/// The HEVC parameter-set census (`transcode::hevc_census::PROBE_KEY`) is
+/// grafted into `probe_json` but is not a fact of the source: it is a
+/// measurement of the bytes `size` and `mtime` already name, so it is left
+/// out. Recording it — on a Source start or by a background index pass — then
+/// never changes the revision a grant was witnessed against. The probe is
+/// projected in SQLite's canonical (minified, order-kept) text, because the
+/// graft's `json_set` rewrites the stored document in that form: a scan's
+/// serde-minified probe is already canonical, and a pretty-printed one would
+/// otherwise change text, and revision, with the graft. The `CASE` fences the
+/// JSON functions from a non-JSON probe, and `||''` makes the result text, as
+/// the column is, rather than a JSON value `json_array` would embed as an
+/// object.
+pub const FILE_REVISION_PROJECTION_SQL:&str="json_array(1,s.server_id,s.catalogue_epoch,CAST(i.library_id AS TEXT),CAST(i.id AS TEXT),CAST(f.id AS TEXT),f.path,f.size,f.mtime,f.duration_ms,f.container,f.video_codec,f.video_profile,f.video_codec_tag,f.field_order,f.width,f.height,f.bit_depth,f.hdr,f.hdr_format,f.bitrate,f.audio_streams,f.subtitle_streams,CASE WHEN json_valid(f.probe_json) THEN json_remove(f.probe_json,'$.plurx_hevc_parameter_sets')||'' ELSE f.probe_json END,f.scanned_at,f.audio_offset_ms,f.dv_profile,f.dv_level,f.dv_bl_compat_id,f.dv_el_present,f.dv_rpu_present,f.max_cll,f.max_fall,f.mastering_max_luminance,f.luminance_source,json((SELECT json_group_array(json_array(json_extract(c.value,'$.source_size'),json_extract(c.value,'$.source_mtime'),json_extract(c.value,'$.provider_file_id'),json_extract(c.value,'$.language'),json_extract(c.value,'$.title'),json_extract(c.value,'$.hearing_impaired'),json_extract(c.value,'$.forced'))) FROM json_each(coalesce(f.downloaded_subtitles,'[]')) c)))";
 
 /// CASE, rather than optimizer-dependent AND evaluation, fences construction
 /// of the private projection behind raw-field and serialized-byte limits.
@@ -365,6 +378,157 @@ mod tests {
             _ => panic!("expected currently authorized witness"),
         }
     }
+    /// Recording the HEVC parameter-set census is not a change in the shared
+    /// file. A Source start that measures it, or a background index pass that
+    /// does, must leave the revision a grant was witnessed against standing;
+    /// before the census left the projection, the graft re-keyed the file and
+    /// a Source could only copy an uncensused title with its in-band
+    /// parameter sets deleted.
+    #[tokio::test]
+    async fn recording_the_hevc_census_keeps_the_shared_file_revision() {
+        use crate::store::MediaStore;
+        use crate::transcode::hevc_census::PROBE_KEY;
+        assert!(
+            FILE_REVISION_PROJECTION_SQL.contains(&format!("'$.{PROBE_KEY}'")),
+            "the projection names the census key it leaves out"
+        );
+        let store = SqliteStore::open_in_memory().expect("memory");
+        let identity = store.sharing_identity(1000).await.expect("identity");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Exported movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from("/synthetic")],
+                anime: false,
+            })
+            .await
+            .expect("library")
+            .id;
+        let grant = Uuid::new_v4();
+        let invitation = Uuid::new_v4();
+        store
+            .create_share_invitation(InvitationRecord {
+                id: invitation,
+                token_hash: "a".repeat(64),
+                library_ids: vec![library],
+                created_at_ms: 1000,
+                expires_at_ms: 2000,
+            })
+            .await
+            .expect("invitation");
+        store
+            .claim_share(ShareClaim {
+                invitation_id: invitation,
+                invitation_hash: "a".repeat(64),
+                claim_id: Uuid::new_v4(),
+                grant_id: grant,
+                recipient_server_id: Uuid::new_v4(),
+                recipient_name: "synthetic".into(),
+                credential_hash: "b".repeat(64),
+                now_ms: 1001,
+            })
+            .await
+            .expect("claim");
+        store.approve_share(grant, 1, 1002).await.expect("approve");
+        store
+            .sharing_txn(
+                super::super::sharing_catalogue_source::candidate_statements()
+                    .into_iter()
+                    .chain(
+                        super::super::sharing_catalogue_source::candidate_item_identity_statements(
+                        ),
+                    )
+                    .map(|sql| (sql, vec![]))
+                    .collect(),
+            )
+            .await
+            .expect("candidate qualified layout fixture");
+        // Stored the way a scan stores it: serde's minified text. A
+        // pretty-printed probe is checked below.
+        let probe = serde_json::json!({
+            "format": {"filename": "/private/synthetic.mkv", "duration": "7200.5"},
+            "streams": [{"codec_name": "hevc", "extradata_size": 2462, "width": 3840}],
+            "plurx_probe_reporter": "ffprobe version 8.1.2"
+        })
+        .to_string();
+        store.sharing_txn(vec![
+            ("INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(9007199254740993,$1,'movie','Movie','movie')".into(),vec![library.into()]),
+            ("INSERT INTO files(id,item_id,path,size,mtime,video_codec,probe_json) VALUES(9223372036854775807,9007199254740993,'/private/synthetic.mkv',20,1000,'hevc',$1)".into(),vec![probe.clone().into()]),
+        ]).await.expect("current HEVC file fixture");
+        let sealing = CredentialKey::from_bytes([17; 32]);
+        let envelope =
+            CatalogueRevisionKey::generate_sealed(&sealing, identity.clone()).expect("purpose key");
+        let key =
+            CatalogueRevisionKey::open(&sealing, identity.clone(), &envelope).expect("stable key");
+
+        let before = current(&store, grant).await;
+        let census = r#"{"revision":1,"verdict":"varying","size":20,"mtime":1000,"samples":7,"differing":3}"#;
+        assert!(store
+            .merge_file_probe_hevc_parameter_sets(9223372036854775807, 20, 1000, census)
+            .await
+            .expect("graft"));
+        let grafted = store
+            .get_file_probe_json(9223372036854775807)
+            .await
+            .expect("probe")
+            .expect("stored probe");
+        assert!(grafted.contains(PROBE_KEY), "the census was recorded");
+        let after = current(&store, grant).await;
+        assert_eq!(after.canonical_projection(), before.canonical_projection());
+        assert_eq!(
+            key.file_revision(&after).expect("revision").as_str(),
+            key.file_revision(&before).expect("revision").as_str()
+        );
+
+        // A re-measured census replaces the record and still keys nothing.
+        let constant = r#"{"revision":1,"verdict":"constant","size":20,"mtime":1000,"samples":7,"differing":0}"#;
+        assert!(store
+            .merge_file_probe_hevc_parameter_sets(9223372036854775807, 20, 1000, constant)
+            .await
+            .expect("graft"));
+        assert_eq!(
+            current(&store, grant).await.canonical_projection(),
+            before.canonical_projection()
+        );
+
+        // A probe stored pretty-printed is projected in the same canonical
+        // text, so the graft's rewrite of it does not re-key it either.
+        let document: serde_json::Value = serde_json::from_str(&probe).expect("probe");
+        store
+            .sharing_txn(vec![(
+                "UPDATE files SET probe_json=$1".into(),
+                vec![serde_json::to_string_pretty(&document)
+                    .expect("pretty probe")
+                    .into()],
+            )])
+            .await
+            .expect("pretty probe");
+        let pretty = current(&store, grant).await;
+        assert_eq!(pretty.canonical_projection(), before.canonical_projection());
+        assert!(store
+            .merge_file_probe_hevc_parameter_sets(9223372036854775807, 20, 1000, census)
+            .await
+            .expect("graft"));
+        assert_eq!(
+            current(&store, grant).await.canonical_projection(),
+            before.canonical_projection()
+        );
+
+        // Still a projection of the probe: a changed source fact beside the
+        // record is a new revision.
+        store
+            .sharing_txn(vec![(
+                "UPDATE files SET probe_json=json_set(probe_json,'$.streams[0].width',1920)".into(),
+                vec![],
+            )])
+            .await
+            .expect("changed fact");
+        assert_ne!(
+            current(&store, grant).await.canonical_projection(),
+            before.canonical_projection()
+        );
+    }
+
     #[tokio::test]
     async fn sharing_catalogue_file_witness_queries_current_authority_and_short_circuits_capacity()
     {

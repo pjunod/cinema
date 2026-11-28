@@ -116,6 +116,8 @@ async fn retained_fel_head_rebuild_skips_m7_and_preserves_fenced_title_settlemen
         playback_requested: false,
         playback_recipes: Vec::new(),
         scanner_digest: Some("scanner-fixture".into()),
+        scanner_generation: 1,
+        aggregate_current: true,
         fel_head_target: Some("title-node".into()),
         fel_head_recipe: None,
     };

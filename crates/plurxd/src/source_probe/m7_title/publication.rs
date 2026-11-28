@@ -386,6 +386,7 @@ impl FittedPublication {
             encoded_audio_anchor: None,
             encoded_frame_ticks: None,
             encoded_video_origin: None,
+            source_audio: None,
             identity,
             convert_dolby_vision: true,
             dv_refit: Some(Arc::clone(&self.table)),

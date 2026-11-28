@@ -183,9 +183,6 @@ def bind_selection(plan, base, candidate):
     dependency = dependencies.requirements(plan, candidate)
     if dependency is not None:
         plan['dependency_profile'] = dependency
-    if 'node_preflight' in plan:
-        from validation import selected_root_custody
-        plan['root_ownership'] = selected_root_custody.prepare(operations, candidate)
 
 
 def prepare(api, value, environment, root, mode):
@@ -221,7 +218,7 @@ def marker(plan, kind):
             'comparison': plan.get('comparison'),
             'dependency_profile': plan.get('dependency_profile'),
             'dependency_runtime': plan.get('dependency_runtime'),
-            **{key: plan[key] for key in ('root_ownership', 'formal_preflight', 'apple_preflight') if key in plan}}
+            **{key: plan[key] for key in ('formal_preflight', 'apple_preflight') if key in plan}}
 
 
 def current_outcomes(raw, plan, *, capture_runtime=False):
@@ -262,8 +259,8 @@ def current_outcomes(raw, plan, *, capture_runtime=False):
 
 def coverage_shape(value, bind, run, inventory=None):
     r.positive(run)
-    selected_fields = COVERAGE_FIELDS | {'node_coverage', 'root_ownership', 'formal_preflight',
-                                         'apple_preflight', 'current_ios_reader'}
+    selected_fields = COVERAGE_FIELDS | {'node_coverage', 'formal_preflight', 'apple_preflight',
+                                         'current_ios_reader'}
     r.require(isinstance(value, dict) and set(value) in (COVERAGE_FIELDS, selected_fields)
               and value['version'] == 1
               and value['head'] == bind['head_sha'] and value['base'] == bind['base_sha']
@@ -274,8 +271,6 @@ def coverage_shape(value, bind, run, inventory=None):
     if 'node_coverage' in value:
         from validation import selected_node_preflight
         selected_node_preflight.coverage_shape(value['node_coverage'])
-        from validation import selected_root_custody
-        selected_root_custody.coverage_shape(value['root_ownership'])
         r.require(isinstance(value['formal_preflight'], dict)
                   and set(value['formal_preflight']) == {'origin', 'receipt_sha256', 'mapping_sha256', 'input_sha256'},
                   'Missing selected worker-refinement coverage')
@@ -323,7 +318,7 @@ def final_coverage(api, value, environment, root):
     from validation import selected_node_preflight
     node = selected_node_preflight.coverage(raw, plan)
     if node is not None:
-        coverage.update(node_coverage=node, root_ownership=plan['root_ownership'],
+        coverage.update(node_coverage=node,
                         formal_preflight=plan['formal_preflight'], apple_preflight=plan['apple_preflight'])
         from validation import selected_apple_preflight
         coverage['current_ios_reader'] = selected_apple_preflight.reader_build_proof(

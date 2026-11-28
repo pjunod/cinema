@@ -75,12 +75,16 @@ pub(crate) const REFIT_MODE_VERSION: &str = "plurx-refit-mode-v3";
 pub(crate) const REFIT_MODE_SOURCES: &str =
     "f18bb061740d61d0c704eb102e70f63b0f7d84baaeb41de08a6ba88b9b40a449";
 
+/// Advance with each new title scanner release. All eligible workers must
+/// have the store guard before the first advance.
+pub(crate) const TITLE_SCANNER_GENERATION: i64 = 1;
+
 /// Title scanner digests whose settled verdicts the scanner built from this
 /// tree reproduces exactly. Title demand holding a complete aggregate such a
 /// scanner published is carried forward to this scanner in place
 /// (`carry_forward_dv_title_verdicts`) instead of read again, which would
-/// cost the whole library and drop every published aggregate until its title
-/// was read. Everything else, refusals included, rotates and is read again.
+/// reread the whole library. Everything else, refusals included, rotates
+/// and is read again.
 ///
 /// An entry holds only while every title its scanner accepted is accepted
 /// here with the same aggregate.
@@ -846,8 +850,8 @@ mod title_scanner_identity_tests {
         assert_eq!(
             hex::encode(sources.finalize()),
             TITLE_SCANNER_SOURCES,
-            "the title scanner changed: drop every TITLE_SCANNER_PREDECESSORS entry whose \
-             accepted aggregates or non-Matroska verdicts it no longer reproduces, then re-pin"
+            "the title scanner changed: advance TITLE_SCANNER_GENERATION, review which \
+             TITLE_SCANNER_PREDECESSORS results still match, then re-pin"
         );
         for predecessor in TITLE_SCANNER_PREDECESSORS {
             assert!(

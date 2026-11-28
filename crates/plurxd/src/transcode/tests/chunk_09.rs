@@ -2107,6 +2107,7 @@ fn audio_intent_fingerprint_keys_the_claim_not_a_refreshed_server_answer() {
     use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
     let mut request = SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2251,6 +2252,7 @@ async fn candidate_catalog_and_execution_share_typed_audio_recipe_identity() {
     };
     let mut request = SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2474,6 +2476,7 @@ async fn retained_audio_consumer_case(encoded: bool) {
     };
     let mut request = SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -3297,7 +3300,7 @@ async fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise
     };
     let unbound = revision(store.dv_title_demands(&scanner, 0, crate::media_sessions::unix_ms()).await.expect("demand"));
     let bound = store
-        .bind_dv_title_demand(unbound, &scanner)
+        .bind_dv_title_demand(unbound, &scanner, 1, 1_000)
         .await
         .expect("bind")
         .expect("bound");
@@ -3312,7 +3315,7 @@ async fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise
     let requested = revision(store.dv_title_demands(&scanner, 0, crate::media_sessions::unix_ms()).await.expect("demand"));
     assert!(requested > bound, "{bound} -> {requested}");
     let rebound = store
-        .bind_dv_title_demand(requested, &scanner)
+        .bind_dv_title_demand(requested, &scanner, 1, 1_000)
         .await
         .expect("bind")
         .expect("bound");

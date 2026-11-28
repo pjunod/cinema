@@ -887,7 +887,12 @@ async fn spawn_generation_with_input(
         return;
     }
     shared.pool.metrics_handle().count_producer_generation(
-        if rendition.recipe.encoding.is_some() {
+        if rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .is_some_and(|encoding| !encoding.is_source_copy())
+        {
             VodProducerKind::Encoded
         } else {
             VodProducerKind::Copy
@@ -1555,11 +1560,23 @@ async fn run_generation(
                 None
             }
         },
-        encoded_audio_anchor: rendition.recipe.encoding.as_ref().map(|_| {
-            let start = rendition.plan.entry(at).expect("spawn entry").start_ticks as f64
-                / f64::from(rendition.timescale);
-            plurx_core::transcode::vod_audio_anchor(start)
-        }),
+        encoded_audio_anchor: rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .filter(|encoding| !encoding.is_source_copy())
+            .map(|_| {
+                let start = rendition.plan.entry(at).expect("spawn entry").start_ticks as f64
+                    / f64::from(rendition.timescale);
+                plurx_core::transcode::vod_audio_anchor(start)
+            }),
+        source_audio: rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .and_then(|encoding| encoding.shared_audio.as_ref())
+            .and_then(plurx_core::transcode::VodSharedAudioRecipe::source_copy)
+            .cloned(),
         identity,
         start_entry: at,
         policy: rendition.policy,
@@ -1648,7 +1665,7 @@ fn report_sealed_init(shared: &Shared, recipe: &Recipe) {
 
 /// The identity half of a pre-read generation. `false` means the generation
 /// is over (drift handled or failure recorded) and the caller must return.
-async fn establish_or_verify(
+pub(super) async fn establish_or_verify(
     shared: &Shared,
     rendition: &Arc<Rendition>,
     muxer: &Init,

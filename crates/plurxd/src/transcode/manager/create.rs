@@ -1,3 +1,4 @@
+use crate::transcode::VodCopyLayout;
 use crate::vodserve::StagedProcessedPredecessor;
 
 /// Evidence and ownership retained together for one Source preparation.
@@ -67,10 +68,42 @@ fn native_fel_can_try_vod(error: &str, deadline: Option<tokio::time::Instant>) -
         && deadline.is_none_or(|deadline| tokio::time::Instant::now() < deadline)
 }
 
+#[derive(Clone, Copy)]
+enum LegacyVodPlaylist {
+    Unknown,
+    Media,
+    Master { has_query: bool },
+}
+
+fn legacy_vod_playlist(response_json: &str) -> LegacyVodPlaylist {
+    let Ok(response) = serde_json::from_str::<serde_json::Value>(response_json) else {
+        return LegacyVodPlaylist::Unknown;
+    };
+    let Some(url) = response
+        .get("playlist_url")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return LegacyVodPlaylist::Unknown;
+    };
+    let (path, query) = url
+        .split_once('?')
+        .map_or((url, None), |(path, query)| (path, Some(query)));
+    if path.ends_with("/index.m3u8") {
+        LegacyVodPlaylist::Media
+    } else if path.ends_with("/master.m3u8") {
+        LegacyVodPlaylist::Master {
+            has_query: query.is_some(),
+        }
+    } else {
+        LegacyVodPlaylist::Unknown
+    }
+}
+
 enum VodRecipeAttachment {
     Recovery {
         speculative: bool,
         bootstrap: bool,
+        legacy_playlist: LegacyVodPlaylist,
     },
     FirstPreparation {
         owner: PreparedVodOwner,
@@ -2163,8 +2196,7 @@ impl TranscodeManager {
             FelGate::Serve => Ok(()),
             FelGate::Decline(reason) => Err(reason),
             FelGate::Measure => {
-                self.request_fel_qualification(file.id, scanner, identity)
-                    .await;
+                self.request_fel_qualification(file.id, scanner).await;
                 Err(Self::fel_being_measured().into())
             }
         }
@@ -2326,12 +2358,7 @@ impl TranscodeManager {
     /// that cannot measure (no capable GPU) may pick the job up, and a play
     /// must not turn that into repeated full-title rescans.
     #[cfg(target_os = "linux")]
-    pub(crate) async fn request_fel_qualification(
-        &self,
-        file_id: i64,
-        scanner: &str,
-        identity: &str,
-    ) {
+    pub(crate) async fn request_fel_qualification(&self, file_id: i64, scanner: &str) {
         {
             let mut requests = self
                 .fel_requalification_requests
@@ -2344,11 +2371,13 @@ impl TranscodeManager {
             }
             requests.insert(file_id, now);
         }
-        let binding =
-            plurx_core::transcode::dv_fel_qualification::requalify_binding(scanner, identity);
         match self
             .store
-            .request_dv_fel_requalification(file_id, &binding)
+            .request_dv_fel_requalification(
+                file_id,
+                scanner,
+                crate::dv_tools::TITLE_SCANNER_GENERATION,
+            )
             .await
         {
             Ok(true) => {
@@ -3736,6 +3765,9 @@ impl TranscodeManager {
                 None => probe.await?,
             }
         };
+        let split_copy_audio = file.audio_streams.iter()
+            .find(|stream| Some(stream.index) == req.audio_index && split_soundtrack_should_copy(req, stream))
+            .and_then(|stream| Some((source.handle.try_clone().ok()?, stream)));
         note_phase("held_source_probe", phase_started);
         let clock_reporter = if let Some((evidence, _)) = source_evidence {
             evidence.clock_reporter().clone()
@@ -4409,7 +4441,7 @@ impl TranscodeManager {
             if copy_attempt && retained.4.is_none() { return Ok(None); }
             retained
         };
-        let encoding = Arc::new(crate::vodencode::Encoding {
+        let mut encoding = crate::vodencode::Encoding {
             source_clock,
             shared_audio,
             source_object_version,
@@ -4452,7 +4484,18 @@ impl TranscodeManager {
             last_refusal: std::sync::Mutex::new(None),
             handoff_claim: std::sync::Mutex::new(None),
             hooks: Box::new(crate::vodencode::NoopEncodingHooks),
-        });
+        };
+        if let Some((handle, stream)) = split_copy_audio {
+            if !encoding.prefer_split_source_audio(&handle, &held_probe, stream).await
+                && matches!(req.vod_copy_layout, Some(VodCopyLayout::SplitV1 { .. }))
+            {
+                return Err(vod_refusal_error(
+                    "vod_family_invalid",
+                    "the issued source soundtrack cannot be copied from this source",
+                ));
+            }
+        }
+        let encoding = Arc::new(encoding);
         if let Some((sink, _)) = prepared_admission.as_mut() { **sink = prepared_credit; }
         Ok(Some(encoding))
         }.await;
@@ -4582,35 +4625,50 @@ impl TranscodeManager {
             }));
             requests.push(audio);
         }
-        // Soundtracks are independent recipes over one held source: prepare
-        // them together so start waits for the slowest, not their sum.
-        let prepared = futures_util::future::join_all(
-            requests
-                .iter()
-                .map(|audio| self.prepare_vod_encoding(audio, file)),
-        )
-        .await;
+        // Bound both simultaneous packet probes and the evidence retained
+        // by this title. A fresh group can encode later tracks as AAC when
+        // its source proof would exceed the memory allowance.
+        let mut remaining_proof_bytes = 64_usize * 1024 * 1024;
         let mut soundtracks = Vec::with_capacity(requests.len());
-        for (audio, outcome) in requests.into_iter().zip(prepared) {
-            match outcome {
-                Ok(Some(soundtrack)) if soundtrack.shared_audio.is_some() => {
-                    soundtracks.push((audio, soundtrack))
+        for batch in requests.chunks(4) {
+            let mut preparations = Vec::with_capacity(batch.len());
+            for audio in batch {
+                preparations.push(self.prepare_vod_encoding(audio, file));
+            }
+            let outcomes = futures_util::future::join_all(preparations).await;
+            for (request, outcome) in batch.iter().zip(outcomes) {
+                let mut soundtrack = outcome
+                    .and_then(|encoding| {
+                        encoding
+                            .filter(|track| track.shared_audio.is_some())
+                            .ok_or("no shared soundtrack recipe was resolved".to_owned())
+                    })
+                    .inspect_err(|reason| {
+                        tracing::info!(
+                            target: "plurxd::transcode",
+                            file_id = file.id,
+                            audio_index = ?request.audio_index,
+                            %reason,
+                            "split copy soundtrack unavailable"
+                        )
+                    })?;
+                let audio = Arc::get_mut(&mut soundtrack)
+                    .and_then(|encoding| encoding.shared_audio.as_mut())
+                    .ok_or("unattached soundtrack recipe is already shared")?;
+                if let Some(proof) = audio.source_copy() {
+                    if let Some(remaining) =
+                        remaining_proof_bytes.checked_sub(proof.packet_evidence_bytes())
+                    {
+                        remaining_proof_bytes = remaining;
+                    } else if matches!(req.vod_copy_layout, Some(VodCopyLayout::PendingV1)) {
+                        audio.discard_source_copy();
+                    } else {
+                        return Err(
+                            "the issued soundtrack group exceeds its packet proof allowance".into(),
+                        );
+                    }
                 }
-                outcome => {
-                    let reason = match outcome {
-                        Err(error) => error,
-                        Ok(Some(_)) => "the soundtrack recipe is not shared AAC".to_owned(),
-                        Ok(None) => "no encoded soundtrack recipe was resolved".to_owned(),
-                    };
-                    tracing::info!(
-                        target: "plurxd::transcode",
-                        file_id = file.id,
-                        audio_index = ?audio.audio_index,
-                        %reason,
-                        "split copy soundtrack unavailable; serving the muxed copy"
-                    );
-                    return Err(reason);
-                }
+                soundtracks.push((request.clone(), soundtrack));
             }
         }
         Ok(soundtracks)
@@ -5211,11 +5269,34 @@ impl TranscodeManager {
         let soundtrack = self
             .prepare_vod_soundtrack(req, &file, encoding.as_ref())
             .await?;
-        let split_soundtracks = self
-            .prepare_vod_split_soundtracks(req, &file, encoding.as_ref())
-            .await
-            .unwrap_or_default();
-        let split_master = !split_soundtracks.is_empty();
+        let prepare_split = self.prepare_vod_split_soundtracks(req, &file, encoding.as_ref());
+        let split_soundtracks = if matches!(req.vod_copy_layout, Some(VodCopyLayout::PendingV1)) {
+            let budget = crate::media_pool::create_stage_deadline(crate::admission::QUEUE_WAIT);
+            // Keep a portion of the startup allowance for the muxed attempt if
+            // this source's optional packet census or child planning is slow.
+            let deadline = serving_admission.map_or(budget, |admission| {
+                budget.min(
+                    admission.deadline
+                        - admission
+                            .deadline
+                            .saturating_duration_since(tokio::time::Instant::now())
+                            / 2,
+                )
+            });
+            tokio::time::timeout_at(deadline, prepare_split)
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::info!(
+                        target: "plurxd::transcode",
+                        file_id = file.id,
+                        "split soundtrack planning timed out; preparing muxed copy"
+                    );
+                    Ok(Vec::new())
+                })
+                .unwrap_or_default()
+        } else {
+            prepare_split.await.unwrap_or_default()
+        };
         let companion = self.prepare_vod_companion(req, &file).await?;
         // A continuous family role executes a video-only or shared-AAC split of
         // its muxed catalog candidate, already verified against that catalog
@@ -5358,6 +5439,7 @@ impl TranscodeManager {
             );
         }
         Ok(StartInfo {
+            vod_copy_layout: start.vod_copy_layout,
             processed_dv_profile,
             processed_fel,
             degraded_processing,
@@ -5366,7 +5448,7 @@ impl TranscodeManager {
                 .and_then(|facts| facts.response_owner.retained_output_facts()),
             audio_delivery: response_facts.and_then(|facts| facts.audio_delivery),
             // A split copy's entry point is its family master.
-            playlist_url: if split_master {
+            playlist_url: if start.split {
                 format!("/api/v1/hls/{}/master.m3u8", start.session_id)
             } else {
                 format!("/api/v1/hls/{}/index.m3u8", start.session_id)
@@ -5782,7 +5864,10 @@ impl TranscodeManager {
             return false;
         };
         if response["prepared_output_capture_pending"] != true {
-            return true;
+            return !serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(
+                &preparation.recipe_json,
+            )
+            .is_ok_and(|remote| remote.request.vod_copy_layout == Some(VodCopyLayout::PendingV1));
         }
         let Ok(Some(route)) = self
             .store
@@ -5817,6 +5902,7 @@ impl TranscodeManager {
             deadline_ms: preparation.deadline_ms,
             now_ms: crate::media_sessions::unix_ms(),
             already_complete: true,
+            vod_copy_layout: remote.request.vod_copy_layout,
             retained_output: remote
                 .retained_output
                 .map(|proof| serde_json::to_value(proof).expect("private facts serialize")),
@@ -5874,6 +5960,7 @@ impl TranscodeManager {
             deadline_ms: preparation.deadline_ms,
             now_ms: crate::media_sessions::unix_ms(),
             already_complete: true,
+            vod_copy_layout: successor.request.vod_copy_layout.clone(),
             retained_output: Some(serde_json::to_value(output).ok()?),
         };
         if !self.store.prepared_output_sealed(&seal).await.ok()? {
@@ -5921,7 +6008,7 @@ impl TranscodeManager {
                 if gate.released.load(Acquire) {
                     return false;
                 }
-                let Ok(initial) =
+                let Ok(mut initial) =
                     serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(recipe_json)
                 else {
                     return false;
@@ -5995,6 +6082,13 @@ impl TranscodeManager {
                 {
                     return false;
                 }
+                if initial.request.vod_copy_layout != current_recipe.request.vod_copy_layout
+                    && !initial
+                        .request
+                        .seal_vod_copy_layout(current_recipe.request.vod_copy_layout.clone(), true)
+                {
+                    return false;
+                }
                 let Ok(mut incoming) = serde_json::to_value(&initial) else {
                     return false;
                 };
@@ -6046,6 +6140,9 @@ impl TranscodeManager {
                         successor_incarnation_id: route.incarnation_id.clone(),
                     });
                 if !pending && !complete {
+                    if current_recipe.request.vod_copy_layout == Some(VodCopyLayout::PendingV1) {
+                        return false;
+                    }
                     return self
                         .resurrect_vod_from_recipe_before(
                             &route.recipe_json,
@@ -6056,6 +6153,7 @@ impl TranscodeManager {
                             VodRecipeAttachment::Recovery {
                                 speculative: true,
                                 bootstrap,
+                                legacy_playlist: legacy_vod_playlist(&route.response_json),
                             },
                         )
                         .await;
@@ -6109,6 +6207,7 @@ impl TranscodeManager {
                                 VodRecipeAttachment::Recovery {
                                     speculative: true,
                                     bootstrap,
+                                    legacy_playlist: legacy_vod_playlist(&route.response_json),
                                 }
                             },
                         )
@@ -6156,6 +6255,17 @@ impl TranscodeManager {
                 {
                     return false;
                 }
+                if !self
+                    .vod
+                    .prepared_owner_matches(
+                        session_id,
+                        &facts.response_owner,
+                        &route.incarnation_id,
+                    )
+                    .await
+                {
+                    return false;
+                }
                 let output = preparation_owner.retained_output_facts();
                 self.hooks
                     .get()
@@ -6176,6 +6286,7 @@ impl TranscodeManager {
                     deadline_ms: route.lease_expires_at_ms,
                     now_ms: crate::media_sessions::unix_ms(),
                     already_complete: complete,
+                    vod_copy_layout: facts.vod_copy_layout,
                     retained_output: output.map(|output| {
                         serde_json::to_value(output).expect("output facts serialize")
                     }),
@@ -6227,11 +6338,11 @@ impl TranscodeManager {
     pub(crate) fn vod_resurrect_before<'a>(
         &'a self,
         recipe_json: &'a str,
+        response_json: &str,
         session_id: &'a str,
         user_id: i64,
         adoption: SessionAdoptionToken,
         deadline: Instant,
-        speculative: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         Box::pin(self.resurrect_vod_from_recipe_before(
             recipe_json,
@@ -6240,8 +6351,9 @@ impl TranscodeManager {
             adoption,
             deadline,
             VodRecipeAttachment::Recovery {
-                speculative,
+                speculative: false,
                 bootstrap: false,
+                legacy_playlist: legacy_vod_playlist(response_json),
             },
         ))
     }
@@ -6255,11 +6367,18 @@ impl TranscodeManager {
         deadline: Instant,
         purpose: VodRecipeAttachment,
     ) -> bool {
+        let legacy_playlist = match &purpose {
+            VodRecipeAttachment::Recovery {
+                legacy_playlist, ..
+            } => Some(*legacy_playlist),
+            VodRecipeAttachment::FirstPreparation { .. } => None,
+        };
         let (speculative, first_owner, bootstrap, processed_predecessor, attachment_owner) =
             match purpose {
                 VodRecipeAttachment::Recovery {
                     speculative,
                     bootstrap,
+                    ..
                 } => (speculative, None, bootstrap, None, None),
                 VodRecipeAttachment::FirstPreparation {
                     owner,
@@ -6367,6 +6486,16 @@ impl TranscodeManager {
                     None
                 };
             let mut req = remote.request;
+            if matches!(legacy_playlist, Some(LegacyVodPlaylist::Media))
+                && req.vod_copy_layout.is_none()
+            {
+                req.split_audio = false;
+            }
+            if !req.vod_copy_layout_valid()
+                || !first_capture && matches!(req.vod_copy_layout, Some(VodCopyLayout::PendingV1))
+            {
+                return false;
+            }
             let fresh_reuse = first_owner.as_ref().is_some_and(|owner| {
                 req.candidate_context.as_mut().is_some_and(|context| {
                     Self::bind_prepared_candidate_owner(context, &owner.node_id, eligible.as_ref())
@@ -6393,6 +6522,21 @@ impl TranscodeManager {
                 };
                 file
             };
+            if req.vod_copy_layout.is_none()
+                && split_copy_eligible(&req, &file)
+                && legacy_playlist.is_some_and(|playlist| {
+                    matches!(
+                        playlist,
+                        LegacyVodPlaylist::Unknown | LegacyVodPlaylist::Master { has_query: true }
+                    ) || matches!(playlist, LegacyVodPlaylist::Master { .. })
+                        && req.transport.as_deref() == Some("native")
+                })
+            {
+                // Historical native/subtitle masters could wrap either copy
+                // layout. Without the owner's verdict it is unsafe to turn
+                // that same public URL into a different family.
+                return false;
+            }
             file.audio_offset_ms = if file.audio_streams.is_empty() {
                 0
             } else {
@@ -6415,10 +6559,19 @@ impl TranscodeManager {
                 return false;
             };
             // A resurrected split copy keeps its soundtrack alternates.
-            let split_soundtracks = self
+            let split_soundtracks = match self
                 .prepare_vod_split_soundtracks(&req, &file, encoding.as_ref())
                 .await
-                .unwrap_or_default();
+            {
+                Ok(soundtracks) => soundtracks,
+                Err(_)
+                    if first_capture
+                        && matches!(req.vod_copy_layout, Some(VodCopyLayout::PendingV1)) =>
+                {
+                    Vec::new()
+                }
+                Err(_) => return false,
+            };
             let measured_candidate = if first_capture && root_admission.is_none() {
                 match self
                     .resolved_retained_candidate_binding(&req, &file, &encoding)
@@ -7068,6 +7221,11 @@ impl TranscodeManager {
             kind
         };
 
+        if !matches!(normalized.kind, SessionKind::Copy { .. }) {
+            normalized.vod_copy_layout = None;
+            normalized.split_audio = false;
+        }
+
         let target_height = if wedged {
             previous_height
         } else {
@@ -7180,7 +7338,15 @@ pub(crate) fn split_copy_eligible(
     req: &SessionRequest,
     file: &plurx_core::domain::MediaFile,
 ) -> bool {
-    req.split_audio
+    let soundtracks = file.audio_streams.len();
+    let eligible_count = match req.vod_copy_layout {
+        None => (2..=3).contains(&soundtracks),
+        Some(VodCopyLayout::Muxed) => false,
+        Some(VodCopyLayout::PendingV1 | VodCopyLayout::SplitV1 { .. }) => {
+            (1..=VodCopyLayout::MAX_SOUNDTRACKS).contains(&soundtracks)
+        }
+    };
+    eligible_count && req.split_audio
         // The split master describes an AVC copy; HEVC and Dolby Vision
         // copies keep the muxed presentation they already qualify.
         && matches!(
@@ -7195,9 +7361,36 @@ pub(crate) fn split_copy_eligible(
         && req.continuous_media.is_none()
         && req.subtitle_burn.is_none()
         && req.presentation == Presentation::Vod
-        // The family reserves every encoded role atomically; its group
-        // admission holds at most three. Larger sets stay muxed for now.
-        && (2..=3).contains(&file.audio_streams.len())
+}
+
+/// A new alternate uses its own stream and the negotiated decoder route.
+/// A previously issued alternate must reproduce its frozen production mode.
+fn split_soundtrack_should_copy(
+    req: &SessionRequest,
+    stream: &plurx_core::domain::AudioStream,
+) -> bool {
+    use plurx_core::playback::audio::{resolve_audio, AudioAction, AudioRoute};
+    if req.audio_offset_ms != 0
+        || !req
+            .continuous_media
+            .as_ref()
+            .is_some_and(|media| media.role == ContinuousMediaRole::SharedAudio)
+        || !matches!(stream.codec.as_str(), "aac" | "ac3" | "eac3")
+    {
+        return false;
+    }
+    match req.vod_copy_layout.as_ref() {
+        Some(VodCopyLayout::SplitV1 { soundtracks, .. }) => soundtracks
+            .iter()
+            .any(|track| track.source_index == stream.index && track.source_copy),
+        Some(VodCopyLayout::PendingV1) => req.audio_claim.as_ref().is_some_and(|claim| {
+            matches!(
+                resolve_audio(Some(stream), &claim.profile(), AudioRoute::RollingHls, 0).action,
+                AudioAction::Copy { .. }
+            )
+        }),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

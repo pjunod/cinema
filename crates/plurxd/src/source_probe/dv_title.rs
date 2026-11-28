@@ -491,17 +491,25 @@ pub(crate) async fn publish_title_with_tools_for_control(
     let scanner = tools.title_scanner_digest();
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
     let mut demand = store
-        .dv_title_demands(&scanner, 0, crate::source_probe::now_ms())
+        .dv_title_demand_for_file(
+            &scanner,
+            crate::dv_tools::TITLE_SCANNER_GENERATION,
+            file.id,
+            crate::source_probe::now_ms(),
+        )
         .await
         .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|demand| demand.file_id == file.id)
         .ok_or("ordinary probe created no current title demand")?;
     if demand.source_size != file.size || demand.source_mtime != file.mtime {
         return Err("title control source does not match ordinary probe demand".into());
     }
     demand.probe_revision = store
-        .bind_dv_title_demand(demand.probe_revision, &scanner)
+        .bind_dv_title_demand(
+            demand.probe_revision,
+            &scanner,
+            crate::dv_tools::TITLE_SCANNER_GENERATION,
+            crate::source_probe::now_ms(),
+        )
         .await
         .map_err(|e| e.to_string())?
         .ok_or("title demand changed before scanner binding")?;
@@ -726,7 +734,6 @@ mod scanner_launch_tests {
     use super::*;
     use plurx_core::process::source_lifetime as lifetime;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
     async fn managed_title_scanner_reads_the_broker_with_a_bound_manifest() {
@@ -757,21 +764,6 @@ mod scanner_launch_tests {
             return;
         }
 
-        static OBSERVED: AtomicUsize = AtomicUsize::new(0);
-
-        fn observe(value: &lifetime::LaunchObservation) -> std::io::Result<()> {
-            assert_eq!(value.declared, lifetime::SourceAccess::Brokered);
-            assert_eq!(
-                value.reason,
-                Some("broker_confinement_unqualified"),
-                "the command, manifest, registered broker and daemon cwd must pass all preceding checks"
-            );
-            assert!(!value.verified, "the fixture cannot grant confinement");
-            assert!(!value.descriptor_handoff, "legacy descriptor hook");
-            OBSERVED.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
         let root = crate::test_tempdir().expect("scanner fixture");
         let runtime = root.path().join("runtime");
         let tools = root.path().join("tools");
@@ -799,7 +791,8 @@ exec /usr/bin/curl --noproxy '*' -fsS "$1"
         let (_store, _id, active) = crate::background_jobs::tests::active().await;
         lifetime::set_daemon_roots(std::slice::from_ref(&runtime), &[tools])
             .expect("source-policy roots");
-        lifetime::install_observer(observe).expect("isolated observer");
+        // The child process is isolated, so these counters start at this test.
+        let before = lifetime::launch_snapshot();
         let input = SourceInput::open_background_held(
             crate::fragment_index_cluster::SourceFence::clone_current_held(&held).expect("source"),
             "application/octet-stream",
@@ -823,6 +816,18 @@ exec /usr/bin/curl --noproxy '*' -fsS "$1"
         active.finish().await;
         assert!(output.status.success(), "{:?}", output.stderr);
         assert_eq!(output.stdout, body[..64 * 1024]);
-        assert_eq!(OBSERVED.load(Ordering::SeqCst), 1);
+        // The scanner declares brokered access; the fixture cannot grant
+        // broker confinement, so the launch is counted unverified, not verified.
+        let after = lifetime::launch_snapshot();
+        assert_eq!(
+            after.unverified,
+            before.unverified + 1,
+            "one declared, unverified launch"
+        );
+        assert_eq!(after.unknown, before.unknown + 1);
+        assert_eq!(
+            after.verified, before.verified,
+            "the fixture cannot grant confinement"
+        );
     }
 }

@@ -82,7 +82,10 @@ fn canonical(rows: &[(String, String)]) -> Vec<(String, String)> {
 pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreError> {
     if canonical(shape) == canonical(&SHAPES.0) {
         Ok(None)
-    } else if canonical(shape) == canonical(&SHAPES.1) {
+    } else if super::source_leases::accepts_extension_shape(shape, &SHAPES.1) {
+        // The source-lease expand replaces this view with its root-keyed
+        // projection after the scope is installed. Recognize only the exact
+        // extension, or that projection as the expand or contract left it.
         Ok(Some(1))
     } else {
         Err(StoreError::Migration(

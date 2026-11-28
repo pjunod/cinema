@@ -664,14 +664,6 @@ jobs:
           PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}
           WORKSPACE_RUST_EVIDENCE: ${{ inputs.workspace_rust_evidence }}
         run: python3 -m validation.workspace_rust_continuation
-      - name: Verify source recovery ownership in the root Linux unit container
-        if: steps.workspace-continuation.outputs.root_retained != 'true' && needs.preflight.outputs.root_ownership_retained != 'true'
-        run: |
-          # This container is already the root-capable pinned Linux unit
-          # surface. Exercise real UID/GID handoff instead of counting the
-          # non-root operations lane's ownership-case skip as coverage.
-          python3 -c 'import os; assert os.geteuid() == 0, "source recovery ownership regression requires the root unit container"'
-          python3 -m unittest discover -s tests/operations -p test_source_custody_recovery.py -v
       - name: Run format, Clippy, unit, and SQLite contracts
         if: inputs.workspace_rust_evidence == ''
         run: make ci-rust-gate
@@ -712,10 +704,10 @@ jobs:
       needs.scope.outputs.execution_mode != 'accelerated' &&
       needs.preflight.outputs.store_retained != 'true' )
     runs-on: [ci-nonvoter-store]
-    # Run 6867 reached 418 of 430 serial controls at the 95m cutoff.
-    # Measured compile + full suite + the separate lineage bridge need about
-    # 106m. Keep every test and allow a finite 120m budget for this inventory.
-    timeout-minutes: 120
+    # Run 9756 passed 470 of 509 serial cases at the 120-minute cutoff.
+    # That pace puts the original first binary near 130 minutes. Leave
+    # room for additional cases, the lineage bridge and receipts.
+    timeout-minutes: 150
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

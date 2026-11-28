@@ -263,13 +263,17 @@ impl WorkingSet {
         if self.budget_bytes == 0 {
             return None;
         }
-        let release = self.budget_bytes / 2;
+        let release = self.release_limit();
         let enter = if self.held {
             release
         } else {
             self.budget_bytes
         };
         (self.used_bytes > enter).then(|| self.used_bytes.saturating_sub(release))
+    }
+
+    pub(crate) fn release_limit(&self) -> u64 {
+        self.budget_bytes / 2
     }
 }
 

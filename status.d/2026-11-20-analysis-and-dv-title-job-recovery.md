@@ -1,0 +1,1 @@
+- **2026-11-20 · Analysis and Dolby Vision title jobs:** Owner Codex. The scanner-generation guard retains source-valid results during rolling updates. Qualification and rollout verification are pending. [Title scan and rollout](docs/streaming/DV-TITLE-SCAN.md).

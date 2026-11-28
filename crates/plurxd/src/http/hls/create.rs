@@ -98,6 +98,25 @@ pub(crate) fn processed_candidate_kept<'a>(
     })
 }
 
+/// The start response's candidate list: every worker's dispatchable row
+/// (a partial row only from this node), one per candidate ID. Two workers
+/// offering the same recipe share its ID; `unique_public_candidates` keeps
+/// the worker row with the best evidence, the local one when evidence ties.
+pub(super) fn public_quality_candidates(
+    catalog: Option<&crate::media_pool::QualityCatalogResult>,
+    local_node: &str,
+) -> Vec<plurx_core::playback::candidate::QualityCandidate> {
+    plurx_core::playback::candidate::unique_public_candidates(
+        catalog
+            .into_iter()
+            .flat_map(|result| result.candidates.iter())
+            .filter(|entry| {
+                entry.dispatch_supported && (!entry.partial || entry.node_id == local_node)
+            })
+            .map(|entry| entry.candidate.clone()),
+    )
+}
+
 /// Replace one local descriptive row with its admitted executable facts.
 /// A shortened-ID collision is never an implicit recipe substitution.
 pub(super) fn upsert_processed_worker_candidate(
@@ -726,6 +745,7 @@ impl CreateSession {
         });
         crate::transcode::SessionRequest {
             split_audio: self.copy == Some(true) && split_requested,
+            vod_copy_layout: None,
             dv_processing_destination: None,
             // The player's per-playback choice; `SessionRequest` never
             // serializes it.
@@ -2789,6 +2809,14 @@ async fn resolve_plan_for_principal_with_local_evidence(
         )
         .await
         .map_err(ApiError::Internal)?;
+    }
+    if !passive_compatibility
+        && matches!(
+            principal,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { .. }
+        )
+    {
+        request.prepare_vod_copy_layout();
     }
     // Observational retained-output override follows the original intent hash
     // and full route/audio reconciliation. Advisory JSON cannot construct it.
@@ -5080,6 +5108,15 @@ async fn create_with_purpose_attempt(
         crate::transcode::SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
         crate::transcode::SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
     };
+    if !remote_request.request.seal_vod_copy_layout(
+        info.vod_copy_layout.clone(),
+        info.vod && matches!(info.kind, crate::transcode::SessionKind::Copy { .. }),
+    ) {
+        return Err(ApiError::ServiceUnavailable(
+            "the media worker did not seal the VOD copy layout".to_owned(),
+        ));
+    }
+    request.split_audio = remote_request.request.split_audio;
     let native_split_master = request.transport.as_deref() == Some("native")
         && request
             .candidate_context
@@ -5172,17 +5209,8 @@ async fn create_with_purpose_attempt(
         quality_catalog_status: quality_catalog.as_ref().map(
             |catalog| serde_json::json!({"complete": catalog.complete, "causes": catalog.causes}),
         ),
-        quality_candidates: quality_negotiated.then(|| {
-            quality_catalog
-                .as_ref()
-                .into_iter()
-                .flat_map(|result| result.candidates.iter())
-                .filter(|entry| {
-                    entry.dispatch_supported && (!entry.partial || entry.node_id == state.node_id)
-                })
-                .map(|entry| entry.candidate.clone())
-                .collect()
-        }),
+        quality_candidates: quality_negotiated
+            .then(|| public_quality_candidates(quality_catalog.as_ref(), &state.node_id)),
         session_id: info.session_id.clone(),
         playlist_url,
         duration_ms: info.duration_ms,
@@ -7084,17 +7112,7 @@ impl PreparedSourcePlayback {
                 .as_ref()
                 .map(|context| context.candidate_id),
             quality_candidates: quality_negotiated.then(|| {
-                self.resolved
-                    .quality_catalog
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|catalog| catalog.candidates.iter())
-                    .filter(|entry| {
-                        entry.dispatch_supported
-                            && (!entry.partial || entry.node_id == state.node_id)
-                    })
-                    .map(|entry| entry.candidate.clone())
-                    .collect()
+                public_quality_candidates(self.resolved.quality_catalog.as_ref(), &state.node_id)
             }),
             session_id: info.session_id.clone(),
             playlist_url,
@@ -7362,8 +7380,10 @@ pub(crate) async fn prepare_source_playback<
             "processed upgrades require a processing Source".into(),
         ));
     }
-    // Source preparation must not run the local census, which can change
-    // the revision being authorized and starts children outside its owner.
+    // Source preparation must not run the local census, which starts
+    // children outside any owner. The Source actor measures it under its own
+    // preparation authority (`hevc_census::ensure_source_census`) before it
+    // decides the copy; the census is not part of the file revision.
     let probe_json = snapshot.probe_json.as_deref();
     if probe_json.is_some_and(|probe| probe.len() > 1024 * 1024) {
         return Err(refused("stored_probe_bound"));

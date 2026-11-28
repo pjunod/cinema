@@ -498,6 +498,8 @@ of never storing it.
 |---|---|---|---|
 | GET | `/api/v1/settings` | admin | Full settings snapshot, from one store read |
 | PUT | `/api/v1/settings` | admin | Partial update; returns the new full snapshot |
+
+Source readers (source-lease plan step 4) are configured per library root. `source_readers_per_root` (1–16, default 2) is the cluster-wide default maintenance budget for each root, plus one separate slot for live demand; playback is not counted. `source_readers_root_overrides` maps canonical `library_id/UPPERCASE_HEX_UTF8_ROOT_PATH` IDs to 1–16 or null (restore default). Numeric overrides name configured roots; null can clear a removed root. `storage_domain_source_readers` maps domain IDs to optional aggregate limits (1–16 or null); unset is unlimited, so merely mapping roots to one NAS does not serialize them. Lowering a limit saves without stopping existing readers; new admissions wait. `GET /api/v1/analysis/summary` reports `source_capacity` with `per_root`, `roots` (root ID, library/name/path, effective readers, override flag, occupancy and waiting-to-apply), informational `nodes` occupancy, and optional `domains` caps. `source_io_holders` identifies each lease/key, node, priority and live demand; `counts_against` is `root`, `domain`, `unrooted` or `none`. Current-root projection keeps existing readers and playback visible after root edits while retaining admitted physical scopes until they close.
 | GET | `/api/v1/system` | admin | Environment diagnostics and counters |
 | PUT | `/api/v1/system/transcoder` | admin | Saves this node's backend preference for its next restart |
 | POST | `/api/v1/system/transcoder` | admin | Starts an idle-node capability check and benchmark |
@@ -514,7 +516,7 @@ of never storing it.
 | POST | `/api/v1/system/tone-map/census/stop` | admin | Stops a queued or running census, killing its child |
 | GET | `/api/v1/system/tone-map/census/stills/{name}` | admin | One PNG still from the stored census result |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
-| GET | `/api/v1/developer/source-recovery` | admin | Node-local reader support, bounded launch attempts and first-poisoning purposes, plus `roots_configured` and, when false, `roots_unconfigured_reason` (launches then run unverified; nothing is blocked). Diagnostic only; no field authorizes settlement. `poisoned: null` or `error` means unavailable, never a healthy zero. |
+| GET | `/api/v1/developer/source-launch` | admin | Node-local launch verification: `node_name`, bounded launch-attempt counts (`launches`), plus `roots_configured` and, when false, `roots_unconfigured_reason` (launches then run unverified; nothing is blocked). Diagnostic only. |
 | GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Analysis, Maintenance, Cluster and Developer settings; never gates controls |
 | GET | `/api/v1/developer/dv-refit/spool` | admin | Lists this node's F+ statistics spool (`entries`: `key`, `complete`, `bytes`, `modified_ms`; total `bytes`). Node-local; never replicated |
 | DELETE | `/api/v1/developer/dv-refit/spool` | admin | Deletes this node's F+ statistics spool and returns `removed`; stored curve tables are unaffected, and a later fit of a title decodes it again |
@@ -1718,7 +1720,8 @@ qualification; the design is
   `display_aware_auto_protocol`, `quality_candidate_id` and
   `quality_candidates` (`QualityCandidate`,
   `crates/plurx-core/src/playback/candidate.rs`); all three are omitted when
-  absent. Create sets the protocol only when a quality owner was negotiated
+  absent. `quality_candidates` lists each candidate ID once, however many
+  workers offer that recipe. Create sets the protocol only when a quality owner was negotiated
   (`crates/plurxd/src/http/hls/create.rs`). An optional candidate
   `planned_codec` describes its actual immutable output contract, such as
   `h264` or `hevc`; it is not selection authority. Absent values preserve
@@ -3891,7 +3894,7 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 |---|---|---|---|
 | POST | `/api/v1/cluster/join-tokens` | admin | Mints one single-use **voter** join token |
 | POST | `/api/v1/cluster/learner-join-tokens` | admin | The same, wire-distinct, for a **learner** |
-| GET | `/api/v1/cluster/work/storage-domains` | admin | Library roots, applied `mappings`, latest `pending` revision/state, `waiting_on` (at most 32 rows) and distinct `waiting_total`; two readers per domain and two library workers per provider |
+| GET | `/api/v1/cluster/work/storage-domains` | admin | Library roots, applied `mappings`, latest `pending` revision/state, `waiting_on` (at most 32 rows) and distinct `waiting_total`; each domain's background source readers are a setting (`storage_domain_source_readers` on `/api/v1/settings`, default 1, plus one for live demand) and two library workers per provider |
 | PUT | `/api/v1/cluster/work/storage-domains` | admin | Array of `{library_id, root_path, domain_id}` saves the desired revision immediately, at most 256 roots / 64 KiB. Empty IDs are omitted for the global fallback. Returns 200 with `saved`, `revision`, `applied`, latest `pending`, `waiting_on` and `waiting_total`; 400 for invalid input or a stale library root. Eligible nodes apply atomically when affected jobs and disturbed-domain readers no longer depend on the previous mapping. [Apply status](server/STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md) |
 | GET | `/api/v1/cluster/jobs` | admin | Optional `state`, `kind`, `node_id`, `limit` (1–100; default 100), and `cursor` query parameters; owner/destination filtering precedes pagination; at most 100 durable job summaries, bounded counts, next cursor and up to 64 recent repair plans; payloads, paths and ownership tokens omitted |
 | GET | `/api/v1/cluster/jobs/{id}` | admin | Durable summary, latest 16 attempts and first 100 interests. `more_waiters` identifies truncation. Add `?explain=true` to sample the first blocking store claim predicate on the serving node. An empty block with `evaluated=true` means these predicates passed. Placement, physical capability and turn arbitration are checked separately. |

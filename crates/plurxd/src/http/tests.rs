@@ -24243,6 +24243,231 @@ async fn get_it_back_asks_curator_and_says_what_it_answered() {
     assert_eq!(status, StatusCode::FORBIDDEN, "Get it back is for admins");
 }
 
+/// Per-root source readers are the normal settings surface. Each root has a
+/// default of two maintenance readers plus a live-demand slot; root overrides
+/// and explicit aggregate domain caps can be changed without stopping leases.
+#[tokio::test]
+async fn source_readers_per_root_setting_round_trips_and_rejects_only_bad_input() {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::store::background_jobs::{
+        ClaimJob, ClaimOutcome, EnqueueJob, JobKind, JobPayload, JobRequest,
+    };
+
+    let (app, state) = test_app_with_state();
+    let admin = setup_admin(&app).await;
+    let library = state
+        .store
+        .create_library(&NewLibrary {
+            name: "Source Capacity".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![std::path::PathBuf::from("/source-capacity")],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = state
+        .store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Capacity".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let file_id = state
+        .store
+        .upsert_file(
+            item,
+            "/source-capacity/capacity.mkv",
+            100,
+            1,
+            &ProbeResult::default(),
+        )
+        .await
+        .expect("file");
+    let roots = crate::source_custody::capacity::root_inventory(
+        &state.store.list_libraries().await.expect("libraries"),
+    );
+    let root_id = roots.first().expect("library root").id.clone();
+
+    let (_, before) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+    assert_eq!(before["source_readers_per_root"], 2);
+    assert_eq!(before["source_readers_root_overrides"], json!({}));
+
+    let (status, raised) = call(
+        &app,
+        put(
+            "/api/v1/settings",
+            Some(&admin),
+            json!({ "source_readers_per_root": 3 }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raised}");
+    let now = crate::state::clock_ms();
+    for index in 0..3 {
+        let id = uuid::Uuid::new_v4().to_string();
+        state
+            .store
+            .enqueue_job(EnqueueJob {
+                id: id.clone(),
+                payload: JobPayload::FragmentIndexBuild {
+                    file_id,
+                    source_generation: "source:1".into(),
+                    source_size: 100,
+                    source_mtime: 1,
+                    source_sha256: "d".repeat(64),
+                    cache_key: format!("{index:064}"),
+                    pipeline_digest: "a".repeat(64),
+                },
+                dedupe_key: format!("fragment:{index}"),
+                priority: 1,
+                not_before_ms: now,
+                now_ms: now,
+                request: JobRequest {
+                    scope: "user:1".into(),
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    request_digest: "b".repeat(64),
+                    consumer_kind: "analysis".into(),
+                    consumer_ref: format!("analysis:{index}"),
+                    target_node_id: None,
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("enqueue");
+        let outcome = state
+            .store
+            .claim_job(ClaimJob {
+                job_id: id,
+                expected_revision: 0,
+                node_id: state.node_id.clone(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::FragmentIndexBuild,
+                payload_version: 1,
+                now_ms: now,
+                dispatched_at_ms: now,
+            })
+            .await
+            .expect("claim");
+        assert!(
+            matches!(outcome, ClaimOutcome::Claimed { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    let (status, lowered) = call(
+        &app,
+        put(
+            "/api/v1/settings",
+            Some(&admin),
+            json!({ "source_readers_per_root": 1 }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "lowering never refuses: {lowered}");
+    assert_eq!(lowered["source_readers_per_root"], 1);
+    let (status, summary) = call(&app, get("/api/v1/analysis/summary", Some(&admin))).await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    let root = summary["source_capacity"]["roots"]
+        .as_array()
+        .and_then(|roots| {
+            roots
+                .iter()
+                .find(|root| root["root_id"] == root_id.as_str())
+        })
+        .cloned()
+        .expect("root capacity");
+    assert_eq!(root["maintenance"], 3, "{summary}");
+    assert_eq!(root["readers"], 1);
+    assert_eq!(root["waiting_to_apply"], true, "applies as readers finish");
+    let node = summary["source_capacity"]["nodes"]
+        .as_array()
+        .and_then(|nodes| {
+            nodes
+                .iter()
+                .find(|node| node["node_id"] == state.node_id.as_str())
+        })
+        .expect("informational node occupancy");
+    assert!(
+        node.get("readers").is_none(),
+        "node rows do not impose a cap"
+    );
+
+    let (status, overridden) = call(
+        &app,
+        put(
+            "/api/v1/settings",
+            Some(&admin),
+            json!({ "source_readers_root_overrides": { (root_id.clone()): 4 },
+                    "storage_domain_source_readers": { "nas": 2 } }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{overridden}");
+    assert_eq!(
+        overridden["source_readers_root_overrides"],
+        json!({(root_id.clone()): 4})
+    );
+    assert_eq!(
+        overridden["storage_domain_source_readers"],
+        json!({"nas": 2})
+    );
+
+    let (status, cleared) = call(
+        &app,
+        put(
+            "/api/v1/settings",
+            Some(&admin),
+            json!({
+                "source_readers_root_overrides": { (root_id.clone()): null },
+                "storage_domain_source_readers": { "nas": null }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert_eq!(
+        cleared["source_readers_root_overrides"],
+        json!({}),
+        "use default"
+    );
+    assert_eq!(
+        cleared["storage_domain_source_readers"],
+        json!({}),
+        "unlimited"
+    );
+
+    for body in [
+        json!({ "source_readers_per_root": 0 }),
+        json!({ "source_readers_per_root": 17 }),
+        json!({ "source_readers_root_overrides": { "node-x": 2 } }),
+        json!({ "source_readers_root_overrides": { "99/2F72656D6F766564": 2 } }),
+        json!({ "source_readers_root_overrides": { (root_id.clone()): 17 } }),
+        json!({ "storage_domain_source_readers": { "nas": 0 } }),
+    ] {
+        let (status, refused) =
+            call(&app, put("/api/v1/settings", Some(&admin), body.clone())).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{body} was accepted: {refused}"
+        );
+    }
+    let (_, after) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+    assert_eq!(
+        after["source_readers_per_root"], 1,
+        "a refused write changes nothing"
+    );
+    assert_eq!(after["source_readers_root_overrides"], json!({}));
+}
+
 // ---------------------------------------------------------------------------
 // Custom tags, rows and Home layout (docs/features/CUSTOM-TAGS-PLAN.md §3, §7)
 // ---------------------------------------------------------------------------
