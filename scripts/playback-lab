@@ -380,7 +380,7 @@ Usage:
                              [--case TEXT] [--exclude-case TEXT] [--observe SECONDS]
                              [--network-profile NAME] [--json PATH] [--junit PATH]
                              [--preparation-measurement] [--frame-diagnostics] [--d3-acquisition]
-                             [--server-metrics] [--hls-layout muxed|split]
+                             [--server-metrics] [--hls-layout muxed|split] [--warm-repeat]
                              [--fixtures DIR] [--server PATH]
                              [--chrome PATH] [--edge PATH]
                              [--firefox PATH] [--geckodriver PATH]
@@ -4898,6 +4898,8 @@ async function runSuite(manifest, options, dependencies = {}) {
   if (hlsLayout !== undefined && !["muxed", "split"].includes(hlsLayout)) {
     throw new Error("--hls-layout must be muxed or split");
   }
+  const warmRepeat = enabledOption(options.warm_repeat);
+  if (warmRepeat && !hlsLayout) throw new Error("--warm-repeat requires --hls-layout");
   const preparationMeasurement = enabledOption(options.preparation_measurement);
   const browserName = options.browser || "chrome";
   if (!new Set(["chrome", "safari", "edge", "firefox"]).has(browserName)) {
@@ -4923,6 +4925,12 @@ async function runSuite(manifest, options, dependencies = {}) {
     throw new Error(`suite ${suite} has shaped-cliff cases; pass --network-profile, e.g. 8mbps-to-1.5mbps`);
   }
   process.stdout.write("\n");
+  if (warmRepeat) {
+    plan.cases = plan.cases.flatMap((testCase) => [
+      { ...testCase, attachment: "first" },
+      { ...testCase, name: `${testCase.name} :: repeat`, attachment: "repeat" },
+    ]);
+  }
   const wanted = new Set(plan.cases.map((testCase) => testCase.fixture));
   const corpus = await (dependencies.buildFixtures || buildFixtures)(manifest, options, wanted);
   for (const testCase of shapedCases) {
@@ -5002,12 +5010,12 @@ async function runSuite(manifest, options, dependencies = {}) {
     browserInfo = await (dependencies.prepareBrowser || prepareBrowser)(driver, server.token);
     system = await (dependencies.api || api)(server.baseUrl, "/system", { token: server.token });
     process.stdout.write(`CAPS    ${browserInfo.browser}: video=${browserInfo.caps.vcodec} · audio=${browserInfo.caps.acodec} · hdr=${browserInfo.caps.hdr} · native_hls=${browserInfo.native_hls}\n\n`);
+    if (hlsLayout) await claimLabHlsLayout(driver, hlsLayout);
     for (let index = 0; index < plan.cases.length; index += 1) {
       const testCase = plan.cases[index];
       const fixture = plan.fixtures.get(testCase.fixture);
       process.stdout.write(`CASE    ${String(index + 1).padStart(2)}/${plan.cases.length} ${testCase.name}\n`);
       const caseLogStart = Date.now();
-      if (hlsLayout) await claimLabHlsLayout(driver, hlsLayout);
       const metricsBefore = (hlsLayout || enabledOption(options.server_metrics))
         ? await readServerMetrics(server).catch((error) => error)
         : null;
@@ -5029,6 +5037,7 @@ async function runSuite(manifest, options, dependencies = {}) {
         // Read once after the verdict has been computed, never at the sampling
         // cadence. Truncation and observer overhead are explicit diagnostics;
         // these records do not participate in any score or threshold.
+        if (result && testCase.attachment) result.hls_attachment = testCase.attachment;
         if (finishHlsResources) {
           const resources = await finishHlsResources();
           if (result) result.hls_resources = resources;
