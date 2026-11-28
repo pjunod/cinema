@@ -140,6 +140,9 @@ pub(crate) fn peer_router(state: AppState) -> Router {
             state.clone(),
             peer_guard,
         ))
+        .route_layer(axum::middleware::from_fn(
+            super::shared_source_playback::observe_source_start,
+        ))
         .fallback(peer_fallback)
         .layer(axum::middleware::from_fn(private_response))
         .with_state(state)

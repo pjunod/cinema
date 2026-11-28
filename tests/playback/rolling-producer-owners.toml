@@ -7529,6 +7529,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Shared private history guard: +1 `response.status()` read of an HTTP reply
 # in sharing_private_history_answers_pass_the_receiver_content_guard. No
 # process launch.
+# Shared Source Start refusal metrics: +8 HTTP `.status()` reads across the
+# body guard, forwarding, the observer, and their tests.
 [module_structures.occurrences]
 "crates/plurx-core/src/process/bounded.rs" = 2
 "crates/plurx-core/src/process/bounded/pause.rs" = 1
@@ -7619,7 +7621,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 "crates/plurxd/src/http/remote/live_fixture.rs" = 1
 "crates/plurxd/src/http/remote/tests.rs" = 1
 "crates/plurxd/src/http/shared_artwork.rs" = 4
-"crates/plurxd/src/http/shared_library.rs" = 2
+"crates/plurxd/src/http/shared_library.rs" = 4
 "crates/plurxd/src/http/shared_library/tests.rs" = 32
 "crates/plurxd/src/http/shared_playback.rs" = 2
 "crates/plurxd/src/http/shared_receiver_assets.rs" = 1
@@ -7634,11 +7636,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 "crates/plurxd/src/http/shared_receiver_playback.rs" = 2
 "crates/plurxd/src/http/shared_source_assets.rs" = 25
 "crates/plurxd/src/http/shared_source_direct_tests.rs" = 12
-"crates/plurxd/src/http/shared_source_forwarding.rs" = 10
+"crates/plurxd/src/http/shared_source_forwarding.rs" = 13
 "crates/plurxd/src/http/shared_source_forwarding_tests.rs" = 6
 "crates/plurxd/src/http/shared_source_ingress.rs" = 1
-"crates/plurxd/src/http/shared_source_playback.rs" = 8
-"crates/plurxd/src/http/shared_source_playback/tests.rs" = 72
+"crates/plurxd/src/http/shared_source_playback.rs" = 9
+"crates/plurxd/src/http/shared_source_playback/tests.rs" = 74
 "crates/plurxd/src/http/sharing.rs" = 1
 "crates/plurxd/src/http/sharing_source_adapter_tests.rs" = 8
 "crates/plurxd/src/http/sharing_start_decode.rs" = 4

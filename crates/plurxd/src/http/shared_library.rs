@@ -728,7 +728,16 @@ pub(super) async fn source_content_guard(
         .get::<crate::SharingConnectionCancellation>()
         .cloned();
     let response = next.run(request).await;
-    guard_source_response(state, connection, response).await
+    let content_returned = response.status().is_success();
+    let mut response = guard_source_response(state, connection, response).await;
+    if content_returned && !response.status().is_success() {
+        response
+            .extensions_mut()
+            .insert(super::shared_source_playback::SourceStartStage(
+                "body_guard",
+            ));
+    }
+    response
 }
 /// Source status can return either guarded live Start content or bounded
 /// cleanup-only facts. Only the former passes this same accepted-writer guard.

@@ -25,10 +25,18 @@ pub(crate) struct SourceSeekBootstrap(Arc<SourceSeekBootstrapState>);
 struct SourceSeekBootstrapState {
     bytes: u64,
     verified: std::sync::atomic::AtomicBool,
+    refused_read: std::sync::atomic::AtomicBool,
 }
 impl SourceSeekBootstrap {
+    #[cfg(test)]
     pub(crate) fn is_verified(&self) -> bool {
         self.0.verified.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub(crate) fn refused_read(&self) -> bool {
+        self.0
+            .refused_read
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && !self.0.verified.load(std::sync::atomic::Ordering::SeqCst)
     }
     pub(crate) fn verified_landing(&self) {
         self.0
@@ -630,6 +638,7 @@ impl SourceInput {
         let state = Arc::new(SourceSeekBootstrapState {
             bytes,
             verified: std::sync::atomic::AtomicBool::new(false),
+            refused_read: std::sync::atomic::AtomicBool::new(false),
         });
         self.state
             .seek_bootstrap
@@ -956,11 +965,11 @@ async fn read_source(
     state
         .cached_bytes
         .store(0, std::sync::atomic::Ordering::SeqCst);
-    let seek_ceiling = state
+    let seek_bootstrap = state
         .seek_bootstrap
         .get()
-        .filter(|bootstrap| !bootstrap.verified.load(std::sync::atomic::Ordering::SeqCst))
-        .map_or(u64::MAX, |bootstrap| bootstrap.bytes);
+        .filter(|bootstrap| !bootstrap.verified.load(std::sync::atomic::Ordering::SeqCst));
+    let seek_ceiling = seek_bootstrap.map_or(u64::MAX, |bootstrap| bootstrap.bytes);
     let wanted = remaining
         .min(state.len.saturating_sub(offset))
         .min(state.window_bytes.load(std::sync::atomic::Ordering::SeqCst) as u64)
@@ -972,6 +981,12 @@ async fn read_source(
                 .saturating_sub(budget.operation_used),
         );
     if wanted == 0 {
+        if let Some(bootstrap) = seek_bootstrap.filter(|limit| budget.operation_used >= limit.bytes)
+        {
+            bootstrap
+                .refused_read
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         return Err(std::io::Error::other(
             "source census byte ceiling exhausted",
         ));

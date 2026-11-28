@@ -5818,6 +5818,10 @@ detail.
 | `GET /metrics` | Prometheus text: process, playback, storage, Raft progress, and cached cluster-membership health |
 | `GET /api/v1/system/playback-events` | Admin-only node-local playback rows; filter by unix-ms `since`, exact `event`, and capped `limit` |
 
+`plurx_shared_source_start_refusals_total{stage,code}` counts peer Start
+refusals. Query its increase by stage. `code` uses HTTP status when the
+ingress has no recognized typed code.
+
 The image's `HEALTHCHECK` runs `plurxd healthcheck`, which probes `/readyz`.
 Docker therefore marks a process with no leader or usable replicated store
 unhealthy instead of accepting the shallower `/healthz` liveness answer. Keep

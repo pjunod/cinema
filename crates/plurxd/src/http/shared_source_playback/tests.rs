@@ -5975,7 +5975,7 @@ async fn actual_source_unclocked_start() {
 #[test]
 fn every_typed_source_start_refusal_is_relayable() {
     use SourceStartFailure as F;
-    fn every() -> [F; 16] {
+    fn every() -> [F; 17] {
         // Compile-time completeness: adding a variant breaks this match.
         let _ = |failure: F| match failure {
             F::Unavailable
@@ -5987,6 +5987,7 @@ fn every_typed_source_start_refusal_is_relayable() {
             | F::CopySyncUnverified
             | F::CopyInputLimit
             | F::CopyOutputSkew
+            | F::CopyHevcInspectionFailed
             | F::HevcConfigurationUnsupported
             | F::Capacity
             | F::Conflict
@@ -6005,6 +6006,7 @@ fn every_typed_source_start_refusal_is_relayable() {
             F::CopySyncUnverified,
             F::CopyInputLimit,
             F::CopyOutputSkew,
+            F::CopyHevcInspectionFailed,
             F::HevcConfigurationUnsupported,
             F::Capacity,
             F::Conflict,
@@ -6029,6 +6031,77 @@ fn every_typed_source_start_refusal_is_relayable() {
         super::SOURCE_START_REFUSAL_CODES.iter().copied().collect();
     assert_eq!(answered, listed);
     assert_eq!(listed.len(), super::SOURCE_START_REFUSAL_CODES.len());
+}
+
+#[test]
+fn source_start_refusals_expose_stage_and_response_code() {
+    let counts = super::SourceStartRefusals::default();
+    let producer = crate::transcode::source_actor::SourceWorkerError::CopyHevcInspectionFailed;
+    let mut inspection = SourceStartFailure::from(producer)
+        .response()
+        .into_response();
+    assert_eq!(inspection.status(), StatusCode::SERVICE_UNAVAILABLE);
+    inspection
+        .extensions_mut()
+        .insert(super::SourceStartStage("wait_ready"));
+    for _ in 0..2 {
+        counts.record(&inspection);
+    }
+    inspection
+        .extensions_mut()
+        .insert(super::SourceStartStage("prepare"));
+    counts.record(&inspection);
+    counts.record(&ApiError::Unauthorized.into_response());
+    counts.record(&StatusCode::OK.into_response());
+    let exposition = counts.prometheus();
+    assert_eq!(
+        exposition.lines().skip(1).collect::<Vec<_>>(),
+        [
+            "# TYPE plurx_shared_source_start_refusals_total counter",
+            "plurx_shared_source_start_refusals_total{stage=\"peer_guard\",code=\"401\"} 1",
+            "plurx_shared_source_start_refusals_total{stage=\"prepare\",code=\"copy_hevc_inspection_failed\"} 1",
+            "plurx_shared_source_start_refusals_total{stage=\"wait_ready\",code=\"copy_hevc_inspection_failed\"} 2",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn source_start_observer_counts_the_final_post_response_once() {
+    use tower::ServiceExt as _;
+    async fn answer() -> axum::response::Response {
+        let mut response = ApiError::typed(
+            StatusCode::TOO_MANY_REQUESTS,
+            "sharing_body_capacity",
+            "sharing body capacity",
+        )
+        .into_response();
+        response
+            .extensions_mut()
+            .insert(super::SourceStartStage("test_start_observer"));
+        response
+    }
+    let app = axum::Router::new()
+        .route(
+            super::forwarding::INGRESS_ROUTE,
+            axum::routing::post(answer).get(answer),
+        )
+        .route_layer(axum::middleware::from_fn(super::observe_source_start));
+    for method in ["GET", "POST"] {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri("/sharing/v1/items/item/files/file/sessions")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+    assert!(super::source_start_refusals_prometheus().lines().any(|line|
+        line == "plurx_shared_source_start_refusals_total{stage=\"test_start_observer\",code=\"sharing_body_capacity\"} 1"));
 }
 
 /// Avatar 6751 (2026-11-23): the viewer was told `copy_sync_unverified` for a

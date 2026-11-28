@@ -352,6 +352,7 @@ pub(crate) enum SourceWorkerError {
     /// The copy's child wrote one output pipe far ahead of the other: a
     /// fault of its output protocol, the same on every repeat.
     CopyOutputSkew,
+    CopyHevcInspectionFailed,
     HevcConfigurationUnsupported,
     Capacity,
     Conflict,
@@ -439,6 +440,10 @@ mod live_refusal_tests {
         assert_eq!(E::copy_failure("copy_range_input_limit"), E::CopyInputLimit);
         assert_eq!(E::copy_failure("copy_observation_skew"), E::CopyOutputSkew);
         assert_eq!(
+            E::copy_failure("copy_hevc_inspection_failed"),
+            E::CopyHevcInspectionFailed
+        );
+        assert_eq!(
             E::copy_failure("hevc_configuration_unsupported"),
             E::HevcConfigurationUnsupported
         );
@@ -504,6 +509,7 @@ impl SourceWorkerError {
             "copy_sync_unverified" => Self::CopySyncUnverified,
             "copy_range_input_limit" => Self::CopyInputLimit,
             "copy_observation_skew" => Self::CopyOutputSkew,
+            "copy_hevc_inspection_failed" => Self::CopyHevcInspectionFailed,
             "hevc_configuration_unsupported" => Self::HevcConfigurationUnsupported,
             "copy_init_contract_changed" | "copy_head_init_changed" => {
                 Self::CopyInitContractChanged
