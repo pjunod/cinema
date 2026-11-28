@@ -800,6 +800,7 @@ async fn insert_control_session(
         Session {
             requested_audio_index: None,
             vod_copy_layout: None,
+            encoded_projection: None,
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -935,6 +936,7 @@ async fn insert_terminal_session(
         Session {
             requested_audio_index: None,
             vod_copy_layout: None,
+            encoded_projection: None,
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
