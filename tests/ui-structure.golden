@@ -1,34 +1,3 @@
-# plurx UI structural golden — the portable tier of scripts/ui-baseline.
-#
-#   regenerate   scripts/ui-baseline --self-host --update
-#   verify       make ui-check
-#
-# COMMITTED ON PURPOSE, and pixel-free on purpose. A PNG hash depends on the
-# Chromium build, the rasteriser and the path the fixture library sits at, so a
-# committed pixel manifest is red on every machine but the one that wrote it.
-# Everything below is a fact about the DOM the app builds, and is therefore the
-# same on a Mac, in the sandbox and on a CI runner. Pixel hashes stay in
-# target/ui-baseline/pixels.txt and are compared with --baseline, never here.
-#
-# Format, one fact per line:
-#
-#   <layout>|<route>@<w>x<h>|<kind>|<key>|<value>
-#
-#   layout   dark|light etc. are NOT dimensions here — one theme, every layout.
-#            `*` marks a fact about the registry rather than about a capture.
-#   kind     layout   a registered layout and the surfaces it declares
-#            surface  which surfaceClass() a viewport resolves to
-#            dom      a structural signature `parent > self`, and how many of
-#                     them the route rendered. Tags, ids, sorted classes, role,
-#                     tabindex, ARIA state and a bare `text` flag — never text
-#                     content, inline style, href, src or value.
-#            focus    the Nth tab stop, zero-padded so the order sorts
-#            req      an API call the route made, method + path, and how often
-#
-# Regeneration must be a deliberate act with a diff, never a side effect of a
-# normal run — that is why `--update` exists and why a plain run writes only
-# into target/. If this file changed and you did not mean it to, the app
-# changed.
 *|*|layout|catalog|desktop mobile tv
 *|*|layout|classic|desktop mobile tv
 *|*|layout|meridian|desktop mobile tv
@@ -756,6 +725,9 @@ catalog|category@1280x860|dom|div.library-group-head > h2#library-row-B-title[ta
 catalog|category@1280x860|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 catalog|category@1280x860|dom|div.library-group-head > h2#library-row-S-title[tabindex=-1 text]|1
 catalog|category@1280x860|dom|div.library-group-head > span.library-group-count.muted[text]|3
+catalog|category@1280x860|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+catalog|category@1280x860|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+catalog|category@1280x860|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 catalog|category@1280x860|dom|div.meta > div.s|4
 catalog|category@1280x860|dom|div.meta > div.t[text]|4
 catalog|category@1280x860|dom|div.pagehead > div.phnav|1
@@ -796,6 +768,7 @@ catalog|category@1280x860|dom|main#main > div#libpager|1
 catalog|category@1280x860|dom|main#main > div#library-group-detail|1
 catalog|category@1280x860|dom|main#main > div#library-load-error[role=status]|1
 catalog|category@1280x860|dom|main#main > div.libbar.px-libbar|1
+catalog|category@1280x860|dom|main#main > div.library-tag-tools.search-tools|1
 catalog|category@1280x860|dom|main#main > div.pagehead|1
 catalog|category@1280x860|dom|main#main > div.px-libwrap|1
 catalog|category@1280x860|dom|main#main > div.search-tools|1
@@ -852,23 +825,25 @@ catalog|category@1280x860|focus|022|select#library-scope "All libraries in this 
 catalog|category@1280x860|focus|023|input#library-find "Title…"
 catalog|category@1280x860|focus|024|select "Small Medium Large Extra large"
 catalog|category@1280x860|focus|025|button.ghost.sm "Clear filters"
-catalog|category@1280x860|focus|026|button.ghost.sm "B"
-catalog|category@1280x860|focus|027|button.ghost.sm "H"
-catalog|category@1280x860|focus|028|button.ghost.sm "S"
-catalog|category@1280x860|focus|029|button.ghost.sm "View all B items"
-catalog|category@1280x860|focus|030|button.ghost.sm "Scroll B left"
-catalog|category@1280x860|focus|031|button.ghost.sm "Scroll B right"
-catalog|category@1280x860|focus|032|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-catalog|category@1280x860|focus|033|button.ghost.sm "View all H items"
-catalog|category@1280x860|focus|034|button.ghost.sm "Scroll H left"
-catalog|category@1280x860|focus|035|button.ghost.sm "Scroll H right"
-catalog|category@1280x860|focus|036|div.poster.k-movie "H Heat 1995 180p"
-catalog|category@1280x860|focus|037|button.ghost.sm "View all S items"
-catalog|category@1280x860|focus|038|button.ghost.sm "Scroll S left"
-catalog|category@1280x860|focus|039|button.ghost.sm "Scroll S right"
-catalog|category@1280x860|focus|040|div.poster.k-movie.unw "TS The Signal 2021 180p"
-catalog|category@1280x860|focus|041|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-catalog|category@1280x860|focus|042|<wrap>
+catalog|category@1280x860|focus|026|button#library-tag-button.ghost.sm "Tags ▾"
+catalog|category@1280x860|focus|027|button#library-select-button.ghost.sm "Select"
+catalog|category@1280x860|focus|028|button.ghost.sm "B"
+catalog|category@1280x860|focus|029|button.ghost.sm "H"
+catalog|category@1280x860|focus|030|button.ghost.sm "S"
+catalog|category@1280x860|focus|031|button.ghost.sm "View all B items"
+catalog|category@1280x860|focus|032|button.ghost.sm "Scroll B left"
+catalog|category@1280x860|focus|033|button.ghost.sm "Scroll B right"
+catalog|category@1280x860|focus|034|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+catalog|category@1280x860|focus|035|button.ghost.sm "View all H items"
+catalog|category@1280x860|focus|036|button.ghost.sm "Scroll H left"
+catalog|category@1280x860|focus|037|button.ghost.sm "Scroll H right"
+catalog|category@1280x860|focus|038|div.poster.k-movie "H Heat 1995 180p"
+catalog|category@1280x860|focus|039|button.ghost.sm "View all S items"
+catalog|category@1280x860|focus|040|button.ghost.sm "Scroll S left"
+catalog|category@1280x860|focus|041|button.ghost.sm "Scroll S right"
+catalog|category@1280x860|focus|042|div.poster.k-movie.unw "TS The Signal 2021 180p"
+catalog|category@1280x860|focus|043|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+catalog|category@1280x860|focus|044|<wrap>
 catalog|category@1280x860|req|GET /api/v1/activity|2
 catalog|category@1280x860|req|GET /api/v1/features|1
 catalog|category@1280x860|req|GET /api/v1/libraries/<id>/items|2
@@ -924,6 +899,9 @@ catalog|category@390x780|dom|div.library-group-head > h2#library-row-B-title[tab
 catalog|category@390x780|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 catalog|category@390x780|dom|div.library-group-head > h2#library-row-S-title[tabindex=-1 text]|1
 catalog|category@390x780|dom|div.library-group-head > span.library-group-count.muted[text]|3
+catalog|category@390x780|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+catalog|category@390x780|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+catalog|category@390x780|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 catalog|category@390x780|dom|div.meta > div.s|4
 catalog|category@390x780|dom|div.meta > div.t[text]|4
 catalog|category@390x780|dom|div.pagehead > div.phnav|1
@@ -964,6 +942,7 @@ catalog|category@390x780|dom|main#main > div#libpager|1
 catalog|category@390x780|dom|main#main > div#library-group-detail|1
 catalog|category@390x780|dom|main#main > div#library-load-error[role=status]|1
 catalog|category@390x780|dom|main#main > div.libbar.px-libbar|1
+catalog|category@390x780|dom|main#main > div.library-tag-tools.search-tools|1
 catalog|category@390x780|dom|main#main > div.pagehead|1
 catalog|category@390x780|dom|main#main > div.px-libwrap|1
 catalog|category@390x780|dom|main#main > div.search-tools|1
@@ -1010,24 +989,26 @@ catalog|category@390x780|focus|012|select#library-scope "All libraries in this v
 catalog|category@390x780|focus|013|input#library-find "Title…"
 catalog|category@390x780|focus|014|select "Small Medium Large Extra large"
 catalog|category@390x780|focus|015|button.ghost.sm "Clear filters"
-catalog|category@390x780|focus|016|button.ghost.sm "B"
-catalog|category@390x780|focus|017|button.ghost.sm "H"
-catalog|category@390x780|focus|018|button.ghost.sm "S"
-catalog|category@390x780|focus|019|button.ghost.sm "View all B items"
-catalog|category@390x780|focus|020|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-catalog|category@390x780|focus|021|button.ghost.sm "View all H items"
-catalog|category@390x780|focus|022|div.poster.k-movie "H Heat 1995 180p"
-catalog|category@390x780|focus|023|button.ghost.sm "View all S items"
-catalog|category@390x780|focus|024|div.poster.k-movie.unw "TS The Signal 2021 180p"
-catalog|category@390x780|focus|025|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-catalog|category@390x780|focus|026|a.px-tab "Home"
-catalog|category@390x780|focus|027|a.px-tab "Channels"
-catalog|category@390x780|focus|028|a.px-tab "Recordings"
-catalog|category@390x780|focus|029|button.px-tab "Libraries"
-catalog|category@390x780|focus|030|button.px-tab "Search"
-catalog|category@390x780|focus|031|a.px-tab "Shared"
-catalog|category@390x780|focus|032|a.px-tab "Activity"
-catalog|category@390x780|focus|033|<wrap>
+catalog|category@390x780|focus|016|button#library-tag-button.ghost.sm "Tags ▾"
+catalog|category@390x780|focus|017|button#library-select-button.ghost.sm "Select"
+catalog|category@390x780|focus|018|button.ghost.sm "B"
+catalog|category@390x780|focus|019|button.ghost.sm "H"
+catalog|category@390x780|focus|020|button.ghost.sm "S"
+catalog|category@390x780|focus|021|button.ghost.sm "View all B items"
+catalog|category@390x780|focus|022|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+catalog|category@390x780|focus|023|button.ghost.sm "View all H items"
+catalog|category@390x780|focus|024|div.poster.k-movie "H Heat 1995 180p"
+catalog|category@390x780|focus|025|button.ghost.sm "View all S items"
+catalog|category@390x780|focus|026|div.poster.k-movie.unw "TS The Signal 2021 180p"
+catalog|category@390x780|focus|027|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+catalog|category@390x780|focus|028|a.px-tab "Home"
+catalog|category@390x780|focus|029|a.px-tab "Channels"
+catalog|category@390x780|focus|030|a.px-tab "Recordings"
+catalog|category@390x780|focus|031|button.px-tab "Libraries"
+catalog|category@390x780|focus|032|button.px-tab "Search"
+catalog|category@390x780|focus|033|a.px-tab "Shared"
+catalog|category@390x780|focus|034|a.px-tab "Activity"
+catalog|category@390x780|focus|035|<wrap>
 catalog|category@390x780|req|GET /api/v1/activity|2
 catalog|category@390x780|req|GET /api/v1/features|1
 catalog|category@390x780|req|GET /api/v1/libraries/<id>/items|2
@@ -1057,6 +1038,7 @@ catalog|home@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type
 catalog|home@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|home@1280x860|dom|button.px-tab[type=button] > span[text]|1
 catalog|home@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
+catalog|home@1280x860|dom|div > div.home-customize|1
 catalog|home@1280x860|dom|div > div.libbar|1
 catalog|home@1280x860|dom|div > div.railbox|5
 catalog|home@1280x860|dom|div > h2.section[text]|5
@@ -1072,6 +1054,7 @@ catalog|home@1280x860|dom|div#pxshell.px-shell > main#main|1
 catalog|home@1280x860|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
 catalog|home@1280x860|dom|div.artbox > div.art.ph[text]|12
 catalog|home@1280x860|dom|div.artbox > span.badge[text]|1
+catalog|home@1280x860|dom|div.home-customize > button.ghost.sm[text]|1
 catalog|home@1280x860|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.artbox|1
 catalog|home@1280x860|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.meta|1
 catalog|home@1280x860|dom|div.k-episode.poster[role=link tabindex=0] > div.artbox|1
@@ -1115,7 +1098,7 @@ catalog|home@1280x860|dom|div.rowscroll > div.k-show.poster.unw[role=link tabind
 catalog|home@1280x860|dom|div.s > span.resbadge.resgrad[text]|9
 catalog|home@1280x860|dom|div.s > span.stxt[text]|12
 catalog|home@1280x860|dom|h2.section[text] > a.px-seeall[text]|2
-catalog|home@1280x860|dom|main#main > div|3
+catalog|home@1280x860|dom|main#main > div|9
 catalog|home@1280x860|dom|nav.px-nav > a|2
 catalog|home@1280x860|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|home@1280x860|dom|nav.px-nav[aria-label=*] > a|6
@@ -1141,26 +1124,28 @@ catalog|home@1280x860|focus|010|a "Settings"
 catalog|home@1280x860|focus|011|button.ghost.sm.lookbtn "Appearance"
 catalog|home@1280x860|focus|012|button.ghost.sm.profile "Account"
 catalog|home@1280x860|focus|013|button#cinema-local-pair-entry.ghost "Pair a phone"
-catalog|home@1280x860|focus|014|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
-catalog|home@1280x860|focus|015|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
-catalog|home@1280x860|focus|016|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-catalog|home@1280x860|focus|017|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
-catalog|home@1280x860|focus|018|div.poster.k-movie "H Heat 1995 180p"
-catalog|home@1280x860|focus|019|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-catalog|home@1280x860|focus|020|div.poster.k-movie.unw "TS The Signal 2021 180p"
-catalog|home@1280x860|focus|021|select "Category Share name"
-catalog|home@1280x860|focus|022|a.px-seeall "See all 4"
-catalog|home@1280x860|focus|023|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-catalog|home@1280x860|focus|024|div.poster.k-movie.unw "TS The Signal 2021 180p"
-catalog|home@1280x860|focus|025|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-catalog|home@1280x860|focus|026|div.poster.k-movie "H Heat 1995 180p"
-catalog|home@1280x860|focus|027|a.px-seeall "See all 1"
-catalog|home@1280x860|focus|028|div.poster.k-show.unw "SH Signal Hill 2019"
-catalog|home@1280x860|focus|029|<wrap>
+catalog|home@1280x860|focus|014|button.ghost.sm "Customize Home"
+catalog|home@1280x860|focus|015|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
+catalog|home@1280x860|focus|016|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
+catalog|home@1280x860|focus|017|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+catalog|home@1280x860|focus|018|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
+catalog|home@1280x860|focus|019|div.poster.k-movie "H Heat 1995 180p"
+catalog|home@1280x860|focus|020|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+catalog|home@1280x860|focus|021|div.poster.k-movie.unw "TS The Signal 2021 180p"
+catalog|home@1280x860|focus|022|select "Category Share name"
+catalog|home@1280x860|focus|023|a.px-seeall "See all 4"
+catalog|home@1280x860|focus|024|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+catalog|home@1280x860|focus|025|div.poster.k-movie.unw "TS The Signal 2021 180p"
+catalog|home@1280x860|focus|026|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+catalog|home@1280x860|focus|027|div.poster.k-movie "H Heat 1995 180p"
+catalog|home@1280x860|focus|028|a.px-seeall "See all 1"
+catalog|home@1280x860|focus|029|div.poster.k-show.unw "SH Signal Hill 2019"
+catalog|home@1280x860|focus|030|<wrap>
 catalog|home@1280x860|req|GET /api/v1/activity|2
 catalog|home@1280x860|req|GET /api/v1/coming-soon|1
 catalog|home@1280x860|req|GET /api/v1/features|1
 catalog|home@1280x860|req|GET /api/v1/home/previews|1
+catalog|home@1280x860|req|GET /api/v1/home/rows|1
 catalog|home@1280x860|req|GET /api/v1/hubs|1
 catalog|home@1280x860|req|GET /api/v1/lists/favorite|1
 catalog|home@1280x860|req|GET /api/v1/lists/watchlist|1
@@ -1190,6 +1175,7 @@ catalog|home@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=
 catalog|home@390x780|dom|button.px-tab[type=button] > span[text]|1
 catalog|home@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|home@390x780|dom|div > div.can-r.railbox|2
+catalog|home@390x780|dom|div > div.home-customize|1
 catalog|home@390x780|dom|div > div.libbar|1
 catalog|home@390x780|dom|div > div.railbox|3
 catalog|home@390x780|dom|div > h2.section[text]|5
@@ -1208,6 +1194,7 @@ catalog|home@390x780|dom|div.artbox > span.badge[text]|1
 catalog|home@390x780|dom|div.can-r.railbox > button.l.railarrow[aria-label=* text]|2
 catalog|home@390x780|dom|div.can-r.railbox > button.r.railarrow[aria-label=* text]|2
 catalog|home@390x780|dom|div.can-r.railbox > div.rowscroll|2
+catalog|home@390x780|dom|div.home-customize > button.ghost.sm[text]|1
 catalog|home@390x780|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.artbox|1
 catalog|home@390x780|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.meta|1
 catalog|home@390x780|dom|div.k-episode.poster[role=link tabindex=0] > div.artbox|1
@@ -1251,7 +1238,7 @@ catalog|home@390x780|dom|div.rowscroll > div.k-show.poster.unw[role=link tabinde
 catalog|home@390x780|dom|div.s > span.resbadge.resgrad[text]|9
 catalog|home@390x780|dom|div.s > span.stxt[text]|12
 catalog|home@390x780|dom|h2.section[text] > a.px-seeall[text]|2
-catalog|home@390x780|dom|main#main > div|3
+catalog|home@390x780|dom|main#main > div|9
 catalog|home@390x780|dom|nav.px-nav > a|2
 catalog|home@390x780|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|home@390x780|dom|nav.px-nav[aria-label=*] > a|6
@@ -1268,33 +1255,35 @@ catalog|home@390x780|focus|001|input#q.search "Search cinema"
 catalog|home@390x780|focus|002|button.ghost.sm.lookbtn "Appearance"
 catalog|home@390x780|focus|003|button.ghost.sm.profile "Account"
 catalog|home@390x780|focus|004|button#cinema-local-pair-entry.ghost "Pair a phone"
-catalog|home@390x780|focus|005|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
-catalog|home@390x780|focus|006|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
-catalog|home@390x780|focus|007|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-catalog|home@390x780|focus|008|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
-catalog|home@390x780|focus|009|div.poster.k-movie "H Heat 1995 180p"
-catalog|home@390x780|focus|010|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-catalog|home@390x780|focus|011|div.poster.k-movie.unw "TS The Signal 2021 180p"
-catalog|home@390x780|focus|012|select "Category Share name"
-catalog|home@390x780|focus|013|a.px-seeall "See all 4"
-catalog|home@390x780|focus|014|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-catalog|home@390x780|focus|015|div.poster.k-movie.unw "TS The Signal 2021 180p"
-catalog|home@390x780|focus|016|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-catalog|home@390x780|focus|017|div.poster.k-movie "H Heat 1995 180p"
-catalog|home@390x780|focus|018|a.px-seeall "See all 1"
-catalog|home@390x780|focus|019|div.poster.k-show.unw "SH Signal Hill 2019"
-catalog|home@390x780|focus|020|a.px-tab.on "Home"
-catalog|home@390x780|focus|021|a.px-tab "Channels"
-catalog|home@390x780|focus|022|a.px-tab "Recordings"
-catalog|home@390x780|focus|023|button.px-tab "Libraries"
-catalog|home@390x780|focus|024|button.px-tab "Search"
-catalog|home@390x780|focus|025|a.px-tab "Shared"
-catalog|home@390x780|focus|026|a.px-tab "Activity"
-catalog|home@390x780|focus|027|<wrap>
+catalog|home@390x780|focus|005|button.ghost.sm "Customize Home"
+catalog|home@390x780|focus|006|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
+catalog|home@390x780|focus|007|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
+catalog|home@390x780|focus|008|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+catalog|home@390x780|focus|009|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
+catalog|home@390x780|focus|010|div.poster.k-movie "H Heat 1995 180p"
+catalog|home@390x780|focus|011|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+catalog|home@390x780|focus|012|div.poster.k-movie.unw "TS The Signal 2021 180p"
+catalog|home@390x780|focus|013|select "Category Share name"
+catalog|home@390x780|focus|014|a.px-seeall "See all 4"
+catalog|home@390x780|focus|015|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+catalog|home@390x780|focus|016|div.poster.k-movie.unw "TS The Signal 2021 180p"
+catalog|home@390x780|focus|017|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+catalog|home@390x780|focus|018|div.poster.k-movie "H Heat 1995 180p"
+catalog|home@390x780|focus|019|a.px-seeall "See all 1"
+catalog|home@390x780|focus|020|div.poster.k-show.unw "SH Signal Hill 2019"
+catalog|home@390x780|focus|021|a.px-tab.on "Home"
+catalog|home@390x780|focus|022|a.px-tab "Channels"
+catalog|home@390x780|focus|023|a.px-tab "Recordings"
+catalog|home@390x780|focus|024|button.px-tab "Libraries"
+catalog|home@390x780|focus|025|button.px-tab "Search"
+catalog|home@390x780|focus|026|a.px-tab "Shared"
+catalog|home@390x780|focus|027|a.px-tab "Activity"
+catalog|home@390x780|focus|028|<wrap>
 catalog|home@390x780|req|GET /api/v1/activity|2
 catalog|home@390x780|req|GET /api/v1/coming-soon|1
 catalog|home@390x780|req|GET /api/v1/features|1
 catalog|home@390x780|req|GET /api/v1/home/previews|1
+catalog|home@390x780|req|GET /api/v1/home/rows|1
 catalog|home@390x780|req|GET /api/v1/hubs|1
 catalog|home@390x780|req|GET /api/v1/lists/favorite|1
 catalog|home@390x780|req|GET /api/v1/lists/watchlist|1
@@ -1341,6 +1330,8 @@ catalog|item@1280x860|dom|div > h2[text]|2
 catalog|item@1280x860|dom|div > h3[text]|10
 catalog|item@1280x860|dom|div > p[text]|11
 catalog|item@1280x860|dom|div#app > div#pxshell.px-shell|1
+catalog|item@1280x860|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
+catalog|item@1280x860|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
 catalog|item@1280x860|dom|div#prep-file-2.prep-status > details.prep-group|5
 catalog|item@1280x860|dom|div#prep-file-2.prep-status > div.prep-overview[role=status text]|1
 catalog|item@1280x860|dom|div#prep-file-2.prep-status > p.prep-checked[text]|1
@@ -1366,6 +1357,7 @@ catalog|item@1280x860|dom|div.chips > span[text]|2
 catalog|item@1280x860|dom|div.crumbs > a[text]|1
 catalog|item@1280x860|dom|div.crumbs > span.cur[text]|1
 catalog|item@1280x860|dom|div.crumbs > span.sep[text]|1
+catalog|item@1280x860|dom|div.dhead > div#item-tags.item-tags|1
 catalog|item@1280x860|dom|div.dhead > div.actions|1
 catalog|item@1280x860|dom|div.dhead > div.chips|1
 catalog|item@1280x860|dom|div.dhead > div.pagehead|1
@@ -1459,31 +1451,34 @@ catalog|item@1280x860|focus|013|button.ghost.sm.profile "Account"
 catalog|item@1280x860|focus|014|a.pgback "Back to Home"
 catalog|item@1280x860|focus|015|a "Home"
 catalog|item@1280x860|focus|016|button.ghost.sm.px-admin "Refresh artwork"
-catalog|item@1280x860|focus|017|button.btnplay "▶ Resume · 7s"
-catalog|item@1280x860|focus|018|button.ghost "Start over"
-catalog|item@1280x860|focus|019|button.ghost.sm "Mark watched"
-catalog|item@1280x860|focus|020|button.ghost.sm.listtoggle "Watchlist"
-catalog|item@1280x860|focus|021|button.ghost.sm.listtoggle.fav "Add to favorites"
-catalog|item@1280x860|focus|022|button.ghost.sm "Refresh status"
-catalog|item@1280x860|focus|023|summary "Pending 3"
-catalog|item@1280x860|focus|024|summary "On demand 1"
-catalog|item@1280x860|focus|025|summary "Done & ready 1"
-catalog|item@1280x860|focus|026|summary "Off 3"
-catalog|item@1280x860|focus|027|summary "Not needed 2"
-catalog|item@1280x860|focus|028|button.ghost.sm "Analyze now"
-catalog|item@1280x860|focus|029|a.ghost.sm "View queue"
-catalog|item@1280x860|focus|030|button.ghost.sm "Find subtitles"
-catalog|item@1280x860|focus|031|button.ghost.sm "Generate subtitles"
-catalog|item@1280x860|focus|032|summary "More actions"
-catalog|item@1280x860|focus|033|<wrap>
+catalog|item@1280x860|focus|017|button.ghost.sm.tag-add "+ Add tag"
+catalog|item@1280x860|focus|018|button.btnplay "▶ Resume · 7s"
+catalog|item@1280x860|focus|019|button.ghost "Start over"
+catalog|item@1280x860|focus|020|button.ghost.sm "Mark watched"
+catalog|item@1280x860|focus|021|button.ghost.sm.listtoggle "Watchlist"
+catalog|item@1280x860|focus|022|button.ghost.sm.listtoggle.fav "Add to favorites"
+catalog|item@1280x860|focus|023|button.ghost.sm "Refresh status"
+catalog|item@1280x860|focus|024|summary "Pending 3"
+catalog|item@1280x860|focus|025|summary "On demand 1"
+catalog|item@1280x860|focus|026|summary "Done & ready 1"
+catalog|item@1280x860|focus|027|summary "Off 3"
+catalog|item@1280x860|focus|028|summary "Not needed 2"
+catalog|item@1280x860|focus|029|button.ghost.sm "Analyze now"
+catalog|item@1280x860|focus|030|a.ghost.sm "View queue"
+catalog|item@1280x860|focus|031|button.ghost.sm "Find subtitles"
+catalog|item@1280x860|focus|032|button.ghost.sm "Generate subtitles"
+catalog|item@1280x860|focus|033|summary "More actions"
+catalog|item@1280x860|focus|034|<wrap>
 catalog|item@1280x860|req|GET /api/v1/activity|2
 catalog|item@1280x860|req|GET /api/v1/features|1
 catalog|item@1280x860|req|GET /api/v1/files/<id>/preparation|1
 catalog|item@1280x860|req|GET /api/v1/items/<id>/annotations|1
+catalog|item@1280x860|req|GET /api/v1/items/<id>/tags|1
 catalog|item@1280x860|req|GET /api/v1/items/<id>|1
 catalog|item@1280x860|req|GET /api/v1/libraries|1
 catalog|item@1280x860|req|GET /api/v1/me|1
 catalog|item@1280x860|req|GET /api/v1/server|1
+catalog|item@1280x860|req|GET /api/v1/tags|1
 catalog|item@390x780|dom|^ > div#app|1
 catalog|item@390x780|dom|a > span.px-lbl[text]|10
 catalog|item@390x780|dom|a > svg.px-ico[aria-hidden=true]|10
@@ -1516,6 +1511,7 @@ catalog|item@390x780|dom|dd > div.trks[text]|1
 catalog|item@390x780|dom|dd > div.trks|1
 catalog|item@390x780|dom|dd > span.live.mode-chip[text]|1
 catalog|item@390x780|dom|dd > span.mode-detail[text]|1
+catalog|item@390x780|dom|dd > ul.plays-on|1
 catalog|item@390x780|dom|details.prep-group > div.prep-group-items|5
 catalog|item@390x780|dom|details.prep-group > summary|5
 catalog|item@390x780|dom|details.px-admin.setdetails.th-admin > div.setdetails-body|1
@@ -1525,6 +1521,8 @@ catalog|item@390x780|dom|div > h2[text]|2
 catalog|item@390x780|dom|div > h3[text]|10
 catalog|item@390x780|dom|div > p[text]|11
 catalog|item@390x780|dom|div#app > div#pxshell.px-shell|1
+catalog|item@390x780|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
+catalog|item@390x780|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
 catalog|item@390x780|dom|div#prep-file-2.prep-status > details.prep-group|5
 catalog|item@390x780|dom|div#prep-file-2.prep-status > div.prep-overview[role=status text]|1
 catalog|item@390x780|dom|div#prep-file-2.prep-status > p.prep-checked[text]|1
@@ -1550,6 +1548,7 @@ catalog|item@390x780|dom|div.chips > span[text]|2
 catalog|item@390x780|dom|div.crumbs > a[text]|1
 catalog|item@390x780|dom|div.crumbs > span.cur[text]|1
 catalog|item@390x780|dom|div.crumbs > span.sep[text]|1
+catalog|item@390x780|dom|div.dhead > div#item-tags.item-tags|1
 catalog|item@390x780|dom|div.dhead > div.actions|1
 catalog|item@390x780|dom|div.dhead > div.chips|1
 catalog|item@390x780|dom|div.dhead > div.pagehead|1
@@ -1599,9 +1598,10 @@ catalog|item@390x780|dom|div.version > details.px-admin.setdetails.th-admin|1
 catalog|item@390x780|dom|div.version > div.media-preparation-layout|1
 catalog|item@390x780|dom|dl.specs > dd.fn[text]|1
 catalog|item@390x780|dom|dl.specs > dd[text]|1
-catalog|item@390x780|dom|dl.specs > dd|3
-catalog|item@390x780|dom|dl.specs > dt[text]|5
+catalog|item@390x780|dom|dl.specs > dd|4
+catalog|item@390x780|dom|dl.specs > dt[text]|6
 catalog|item@390x780|dom|h1[text] > button.ghost.px-admin.sm[aria-label=* text]|1
+catalog|item@390x780|dom|li > span[text]|2
 catalog|item@390x780|dom|main#main > div.hero.px-hero.px-noart|1
 catalog|item@390x780|dom|main#main > div.px-detail|1
 catalog|item@390x780|dom|nav.px-nav > a|3
@@ -1626,6 +1626,7 @@ catalog|item@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|item@390x780|dom|svg.px-ico[aria-hidden=true] > path|14
 catalog|item@390x780|dom|svg.px-ico[aria-hidden=true] > rect|18
 catalog|item@390x780|dom|svg[aria-hidden=true] > path|2
+catalog|item@390x780|dom|ul.plays-on > li|1
 catalog|item@390x780|focus|000|a.logo "cinema"
 catalog|item@390x780|focus|001|input#q.search "Search cinema"
 catalog|item@390x780|focus|002|button.ghost.sm.lookbtn "Appearance"
@@ -1633,38 +1634,41 @@ catalog|item@390x780|focus|003|button.ghost.sm.profile "Account"
 catalog|item@390x780|focus|004|a.pgback "Back to Home"
 catalog|item@390x780|focus|005|a "Home"
 catalog|item@390x780|focus|006|button.ghost.sm.px-admin "Refresh artwork"
-catalog|item@390x780|focus|007|button.btnplay "▶ Resume · 7s"
-catalog|item@390x780|focus|008|button.ghost "Start over"
-catalog|item@390x780|focus|009|button.ghost.sm "Mark watched"
-catalog|item@390x780|focus|010|button.ghost.sm.listtoggle "Watchlist"
-catalog|item@390x780|focus|011|button.ghost.sm.listtoggle.fav "Add to favorites"
-catalog|item@390x780|focus|012|button.ghost.sm "Refresh status"
-catalog|item@390x780|focus|013|summary "Pending 3"
-catalog|item@390x780|focus|014|summary "On demand 1"
-catalog|item@390x780|focus|015|summary "Done & ready 1"
-catalog|item@390x780|focus|016|summary "Off 3"
-catalog|item@390x780|focus|017|summary "Not needed 2"
-catalog|item@390x780|focus|018|button.ghost.sm "Analyze now"
-catalog|item@390x780|focus|019|a.ghost.sm "View queue"
-catalog|item@390x780|focus|020|button.ghost.sm "Find subtitles"
-catalog|item@390x780|focus|021|button.ghost.sm "Generate subtitles"
-catalog|item@390x780|focus|022|summary "More actions"
-catalog|item@390x780|focus|023|a.px-tab "Home"
-catalog|item@390x780|focus|024|a.px-tab "Channels"
-catalog|item@390x780|focus|025|a.px-tab "Recordings"
-catalog|item@390x780|focus|026|button.px-tab "Libraries"
-catalog|item@390x780|focus|027|button.px-tab "Search"
-catalog|item@390x780|focus|028|a.px-tab "Shared"
-catalog|item@390x780|focus|029|a.px-tab "Activity"
-catalog|item@390x780|focus|030|<wrap>
+catalog|item@390x780|focus|007|button.ghost.sm.tag-add "+ Add tag"
+catalog|item@390x780|focus|008|button.btnplay "▶ Resume · 7s"
+catalog|item@390x780|focus|009|button.ghost "Start over"
+catalog|item@390x780|focus|010|button.ghost.sm "Mark watched"
+catalog|item@390x780|focus|011|button.ghost.sm.listtoggle "Watchlist"
+catalog|item@390x780|focus|012|button.ghost.sm.listtoggle.fav "Add to favorites"
+catalog|item@390x780|focus|013|button.ghost.sm "Refresh status"
+catalog|item@390x780|focus|014|summary "Pending 3"
+catalog|item@390x780|focus|015|summary "On demand 1"
+catalog|item@390x780|focus|016|summary "Done & ready 1"
+catalog|item@390x780|focus|017|summary "Off 3"
+catalog|item@390x780|focus|018|summary "Not needed 2"
+catalog|item@390x780|focus|019|button.ghost.sm "Analyze now"
+catalog|item@390x780|focus|020|a.ghost.sm "View queue"
+catalog|item@390x780|focus|021|button.ghost.sm "Find subtitles"
+catalog|item@390x780|focus|022|button.ghost.sm "Generate subtitles"
+catalog|item@390x780|focus|023|summary "More actions"
+catalog|item@390x780|focus|024|a.px-tab "Home"
+catalog|item@390x780|focus|025|a.px-tab "Channels"
+catalog|item@390x780|focus|026|a.px-tab "Recordings"
+catalog|item@390x780|focus|027|button.px-tab "Libraries"
+catalog|item@390x780|focus|028|button.px-tab "Search"
+catalog|item@390x780|focus|029|a.px-tab "Shared"
+catalog|item@390x780|focus|030|a.px-tab "Activity"
+catalog|item@390x780|focus|031|<wrap>
 catalog|item@390x780|req|GET /api/v1/activity|2
 catalog|item@390x780|req|GET /api/v1/features|1
 catalog|item@390x780|req|GET /api/v1/files/<id>/preparation|1
 catalog|item@390x780|req|GET /api/v1/items/<id>/annotations|1
+catalog|item@390x780|req|GET /api/v1/items/<id>/tags|1
 catalog|item@390x780|req|GET /api/v1/items/<id>|1
 catalog|item@390x780|req|GET /api/v1/libraries|1
 catalog|item@390x780|req|GET /api/v1/me|1
 catalog|item@390x780|req|GET /api/v1/server|1
+catalog|item@390x780|req|GET /api/v1/tags|1
 catalog|library@1280x860|dom|^ > div#app|1
 catalog|library@1280x860|dom|a > span.px-lbl[text]|9
 catalog|library@1280x860|dom|a > svg.px-ico[aria-hidden=true]|9
@@ -1714,6 +1718,9 @@ catalog|library@1280x860|dom|div.library-group-head > div.library-group-actions|
 catalog|library@1280x860|dom|div.library-group-head > h2#library-row-B-title[tabindex=-1 text]|1
 catalog|library@1280x860|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 catalog|library@1280x860|dom|div.library-group-head > span.library-group-count.muted[text]|2
+catalog|library@1280x860|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+catalog|library@1280x860|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+catalog|library@1280x860|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 catalog|library@1280x860|dom|div.meta > div.s|2
 catalog|library@1280x860|dom|div.meta > div.t[text]|2
 catalog|library@1280x860|dom|div.pagehead > div.phnav|1
@@ -1754,6 +1761,7 @@ catalog|library@1280x860|dom|main#main > div#libpager|1
 catalog|library@1280x860|dom|main#main > div#library-group-detail|1
 catalog|library@1280x860|dom|main#main > div#library-load-error[role=status]|1
 catalog|library@1280x860|dom|main#main > div.libbar.px-libbar|1
+catalog|library@1280x860|dom|main#main > div.library-tag-tools.search-tools|1
 catalog|library@1280x860|dom|main#main > div.pagehead|1
 catalog|library@1280x860|dom|main#main > div.px-libwrap|1
 catalog|library@1280x860|dom|main#main > div.search-tools|1
@@ -1809,17 +1817,19 @@ catalog|library@1280x860|focus|022|select#library-scope "All libraries in this v
 catalog|library@1280x860|focus|023|input#library-find "Title…"
 catalog|library@1280x860|focus|024|select "Small Medium Large Extra large"
 catalog|library@1280x860|focus|025|button.ghost.sm "Clear filters"
-catalog|library@1280x860|focus|026|button.ghost.sm "B"
-catalog|library@1280x860|focus|027|button.ghost.sm "H"
-catalog|library@1280x860|focus|028|button.ghost.sm "View all B items"
-catalog|library@1280x860|focus|029|button.ghost.sm "Scroll B left"
-catalog|library@1280x860|focus|030|button.ghost.sm "Scroll B right"
-catalog|library@1280x860|focus|031|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-catalog|library@1280x860|focus|032|button.ghost.sm "View all H items"
-catalog|library@1280x860|focus|033|button.ghost.sm "Scroll H left"
-catalog|library@1280x860|focus|034|button.ghost.sm "Scroll H right"
-catalog|library@1280x860|focus|035|div.poster.k-movie "H Heat 1995 180p"
-catalog|library@1280x860|focus|036|<wrap>
+catalog|library@1280x860|focus|026|button#library-tag-button.ghost.sm "Tags ▾"
+catalog|library@1280x860|focus|027|button#library-select-button.ghost.sm "Select"
+catalog|library@1280x860|focus|028|button.ghost.sm "B"
+catalog|library@1280x860|focus|029|button.ghost.sm "H"
+catalog|library@1280x860|focus|030|button.ghost.sm "View all B items"
+catalog|library@1280x860|focus|031|button.ghost.sm "Scroll B left"
+catalog|library@1280x860|focus|032|button.ghost.sm "Scroll B right"
+catalog|library@1280x860|focus|033|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+catalog|library@1280x860|focus|034|button.ghost.sm "View all H items"
+catalog|library@1280x860|focus|035|button.ghost.sm "Scroll H left"
+catalog|library@1280x860|focus|036|button.ghost.sm "Scroll H right"
+catalog|library@1280x860|focus|037|div.poster.k-movie "H Heat 1995 180p"
+catalog|library@1280x860|focus|038|<wrap>
 catalog|library@1280x860|req|GET /api/v1/activity|2
 catalog|library@1280x860|req|GET /api/v1/features|1
 catalog|library@1280x860|req|GET /api/v1/libraries/<id>/items|1
@@ -1875,6 +1885,9 @@ catalog|library@390x780|dom|div.library-group-head > div.library-group-actions|2
 catalog|library@390x780|dom|div.library-group-head > h2#library-row-B-title[tabindex=-1 text]|1
 catalog|library@390x780|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 catalog|library@390x780|dom|div.library-group-head > span.library-group-count.muted[text]|2
+catalog|library@390x780|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+catalog|library@390x780|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+catalog|library@390x780|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 catalog|library@390x780|dom|div.meta > div.s|2
 catalog|library@390x780|dom|div.meta > div.t[text]|2
 catalog|library@390x780|dom|div.pagehead > div.phnav|1
@@ -1915,6 +1928,7 @@ catalog|library@390x780|dom|main#main > div#libpager|1
 catalog|library@390x780|dom|main#main > div#library-group-detail|1
 catalog|library@390x780|dom|main#main > div#library-load-error[role=status]|1
 catalog|library@390x780|dom|main#main > div.libbar.px-libbar|1
+catalog|library@390x780|dom|main#main > div.library-tag-tools.search-tools|1
 catalog|library@390x780|dom|main#main > div.pagehead|1
 catalog|library@390x780|dom|main#main > div.px-libwrap|1
 catalog|library@390x780|dom|main#main > div.search-tools|1
@@ -1960,20 +1974,22 @@ catalog|library@390x780|focus|012|select#library-scope "All libraries in this vi
 catalog|library@390x780|focus|013|input#library-find "Title…"
 catalog|library@390x780|focus|014|select "Small Medium Large Extra large"
 catalog|library@390x780|focus|015|button.ghost.sm "Clear filters"
-catalog|library@390x780|focus|016|button.ghost.sm "B"
-catalog|library@390x780|focus|017|button.ghost.sm "H"
-catalog|library@390x780|focus|018|button.ghost.sm "View all B items"
-catalog|library@390x780|focus|019|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-catalog|library@390x780|focus|020|button.ghost.sm "View all H items"
-catalog|library@390x780|focus|021|div.poster.k-movie "H Heat 1995 180p"
-catalog|library@390x780|focus|022|a.px-tab "Home"
-catalog|library@390x780|focus|023|a.px-tab "Channels"
-catalog|library@390x780|focus|024|a.px-tab "Recordings"
-catalog|library@390x780|focus|025|button.px-tab "Libraries"
-catalog|library@390x780|focus|026|button.px-tab "Search"
-catalog|library@390x780|focus|027|a.px-tab "Shared"
-catalog|library@390x780|focus|028|a.px-tab "Activity"
-catalog|library@390x780|focus|029|<wrap>
+catalog|library@390x780|focus|016|button#library-tag-button.ghost.sm "Tags ▾"
+catalog|library@390x780|focus|017|button#library-select-button.ghost.sm "Select"
+catalog|library@390x780|focus|018|button.ghost.sm "B"
+catalog|library@390x780|focus|019|button.ghost.sm "H"
+catalog|library@390x780|focus|020|button.ghost.sm "View all B items"
+catalog|library@390x780|focus|021|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+catalog|library@390x780|focus|022|button.ghost.sm "View all H items"
+catalog|library@390x780|focus|023|div.poster.k-movie "H Heat 1995 180p"
+catalog|library@390x780|focus|024|a.px-tab "Home"
+catalog|library@390x780|focus|025|a.px-tab "Channels"
+catalog|library@390x780|focus|026|a.px-tab "Recordings"
+catalog|library@390x780|focus|027|button.px-tab "Libraries"
+catalog|library@390x780|focus|028|button.px-tab "Search"
+catalog|library@390x780|focus|029|a.px-tab "Shared"
+catalog|library@390x780|focus|030|a.px-tab "Activity"
+catalog|library@390x780|focus|031|<wrap>
 catalog|library@390x780|req|GET /api/v1/activity|2
 catalog|library@390x780|req|GET /api/v1/features|1
 catalog|library@390x780|req|GET /api/v1/libraries/<id>/items|1
@@ -2659,10 +2675,12 @@ catalog|player@1280x860|req|GET /api/v1/features|1
 catalog|player@1280x860|req|GET /api/v1/files/<id>/direct|1
 catalog|player@1280x860|req|GET /api/v1/files/<id>/preparation|1
 catalog|player@1280x860|req|GET /api/v1/items/<id>/annotations|1
+catalog|player@1280x860|req|GET /api/v1/items/<id>/tags|1
 catalog|player@1280x860|req|GET /api/v1/items/<id>|1
 catalog|player@1280x860|req|GET /api/v1/libraries|1
 catalog|player@1280x860|req|GET /api/v1/me|1
 catalog|player@1280x860|req|GET /api/v1/server|1
+catalog|player@1280x860|req|GET /api/v1/tags|1
 catalog|player@1280x860|req|POST /api/v1/client-log|7
 catalog|player@1280x860|req|POST /api/v1/files/<id>/decision|1
 catalog|player@1280x860|req|POST /api/v1/items/<id>/progress|1
@@ -2843,10 +2861,12 @@ catalog|player@390x780|req|GET /api/v1/features|1
 catalog|player@390x780|req|GET /api/v1/files/<id>/direct|1
 catalog|player@390x780|req|GET /api/v1/files/<id>/preparation|1
 catalog|player@390x780|req|GET /api/v1/items/<id>/annotations|1
+catalog|player@390x780|req|GET /api/v1/items/<id>/tags|1
 catalog|player@390x780|req|GET /api/v1/items/<id>|1
 catalog|player@390x780|req|GET /api/v1/libraries|1
 catalog|player@390x780|req|GET /api/v1/me|1
 catalog|player@390x780|req|GET /api/v1/server|1
+catalog|player@390x780|req|GET /api/v1/tags|1
 catalog|player@390x780|req|POST /api/v1/client-log|7
 catalog|player@390x780|req|POST /api/v1/files/<id>/decision|1
 catalog|player@390x780|req|POST /api/v1/items/<id>/progress|1
@@ -4245,6 +4265,9 @@ classic|category@1280x860|dom|div.library-group-head > h2#library-row-B-title[ta
 classic|category@1280x860|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 classic|category@1280x860|dom|div.library-group-head > h2#library-row-S-title[tabindex=-1 text]|1
 classic|category@1280x860|dom|div.library-group-head > span.library-group-count.muted[text]|3
+classic|category@1280x860|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+classic|category@1280x860|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+classic|category@1280x860|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 classic|category@1280x860|dom|div.meta > div.s|4
 classic|category@1280x860|dom|div.meta > div.t[text]|4
 classic|category@1280x860|dom|div.pagehead > div.phnav|1
@@ -4282,6 +4305,7 @@ classic|category@1280x860|dom|main#main > div#librail|1
 classic|category@1280x860|dom|main#main > div#library-group-detail|1
 classic|category@1280x860|dom|main#main > div#library-load-error[role=status]|1
 classic|category@1280x860|dom|main#main > div.libbar|1
+classic|category@1280x860|dom|main#main > div.library-tag-tools.search-tools|1
 classic|category@1280x860|dom|main#main > div.pagehead|1
 classic|category@1280x860|dom|main#main > div.search-tools|1
 classic|category@1280x860|dom|main#main > nav#library-group-index[aria-label=*]|1
@@ -4322,23 +4346,25 @@ classic|category@1280x860|focus|018|select#library-scope "All libraries in this 
 classic|category@1280x860|focus|019|input#library-find "Title…"
 classic|category@1280x860|focus|020|select "Small Medium Large Extra large"
 classic|category@1280x860|focus|021|button.ghost.sm "Clear filters"
-classic|category@1280x860|focus|022|button.ghost.sm "B"
-classic|category@1280x860|focus|023|button.ghost.sm "H"
-classic|category@1280x860|focus|024|button.ghost.sm "S"
-classic|category@1280x860|focus|025|button.ghost.sm "View all B items"
-classic|category@1280x860|focus|026|button.ghost.sm "Scroll B left"
-classic|category@1280x860|focus|027|button.ghost.sm "Scroll B right"
-classic|category@1280x860|focus|028|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-classic|category@1280x860|focus|029|button.ghost.sm "View all H items"
-classic|category@1280x860|focus|030|button.ghost.sm "Scroll H left"
-classic|category@1280x860|focus|031|button.ghost.sm "Scroll H right"
-classic|category@1280x860|focus|032|div.poster.k-movie "H Heat 1995 180p"
-classic|category@1280x860|focus|033|button.ghost.sm "View all S items"
-classic|category@1280x860|focus|034|button.ghost.sm "Scroll S left"
-classic|category@1280x860|focus|035|button.ghost.sm "Scroll S right"
-classic|category@1280x860|focus|036|div.poster.k-movie.unw "TS The Signal 2021 180p"
-classic|category@1280x860|focus|037|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-classic|category@1280x860|focus|038|<wrap>
+classic|category@1280x860|focus|022|button#library-tag-button.ghost.sm "Tags ▾"
+classic|category@1280x860|focus|023|button#library-select-button.ghost.sm "Select"
+classic|category@1280x860|focus|024|button.ghost.sm "B"
+classic|category@1280x860|focus|025|button.ghost.sm "H"
+classic|category@1280x860|focus|026|button.ghost.sm "S"
+classic|category@1280x860|focus|027|button.ghost.sm "View all B items"
+classic|category@1280x860|focus|028|button.ghost.sm "Scroll B left"
+classic|category@1280x860|focus|029|button.ghost.sm "Scroll B right"
+classic|category@1280x860|focus|030|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|category@1280x860|focus|031|button.ghost.sm "View all H items"
+classic|category@1280x860|focus|032|button.ghost.sm "Scroll H left"
+classic|category@1280x860|focus|033|button.ghost.sm "Scroll H right"
+classic|category@1280x860|focus|034|div.poster.k-movie "H Heat 1995 180p"
+classic|category@1280x860|focus|035|button.ghost.sm "View all S items"
+classic|category@1280x860|focus|036|button.ghost.sm "Scroll S left"
+classic|category@1280x860|focus|037|button.ghost.sm "Scroll S right"
+classic|category@1280x860|focus|038|div.poster.k-movie.unw "TS The Signal 2021 180p"
+classic|category@1280x860|focus|039|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+classic|category@1280x860|focus|040|<wrap>
 classic|category@1280x860|req|GET /api/v1/activity|2
 classic|category@1280x860|req|GET /api/v1/features|1
 classic|category@1280x860|req|GET /api/v1/libraries/<id>/items|2
@@ -4380,6 +4406,9 @@ classic|category@390x780|dom|div.library-group-head > h2#library-row-B-title[tab
 classic|category@390x780|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 classic|category@390x780|dom|div.library-group-head > h2#library-row-S-title[tabindex=-1 text]|1
 classic|category@390x780|dom|div.library-group-head > span.library-group-count.muted[text]|3
+classic|category@390x780|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+classic|category@390x780|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+classic|category@390x780|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 classic|category@390x780|dom|div.meta > div.s|4
 classic|category@390x780|dom|div.meta > div.t[text]|4
 classic|category@390x780|dom|div.pagehead > div.phnav|1
@@ -4417,6 +4446,7 @@ classic|category@390x780|dom|main#main > div#librail|1
 classic|category@390x780|dom|main#main > div#library-group-detail|1
 classic|category@390x780|dom|main#main > div#library-load-error[role=status]|1
 classic|category@390x780|dom|main#main > div.libbar|1
+classic|category@390x780|dom|main#main > div.library-tag-tools.search-tools|1
 classic|category@390x780|dom|main#main > div.pagehead|1
 classic|category@390x780|dom|main#main > div.search-tools|1
 classic|category@390x780|dom|main#main > nav#library-group-index[aria-label=*]|1
@@ -4457,17 +4487,19 @@ classic|category@390x780|focus|018|select#library-scope "All libraries in this v
 classic|category@390x780|focus|019|input#library-find "Title…"
 classic|category@390x780|focus|020|select "Small Medium Large Extra large"
 classic|category@390x780|focus|021|button.ghost.sm "Clear filters"
-classic|category@390x780|focus|022|button.ghost.sm "B"
-classic|category@390x780|focus|023|button.ghost.sm "H"
-classic|category@390x780|focus|024|button.ghost.sm "S"
-classic|category@390x780|focus|025|button.ghost.sm "View all B items"
-classic|category@390x780|focus|026|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-classic|category@390x780|focus|027|button.ghost.sm "View all H items"
-classic|category@390x780|focus|028|div.poster.k-movie "H Heat 1995 180p"
-classic|category@390x780|focus|029|button.ghost.sm "View all S items"
-classic|category@390x780|focus|030|div.poster.k-movie.unw "TS The Signal 2021 180p"
-classic|category@390x780|focus|031|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-classic|category@390x780|focus|032|<wrap>
+classic|category@390x780|focus|022|button#library-tag-button.ghost.sm "Tags ▾"
+classic|category@390x780|focus|023|button#library-select-button.ghost.sm "Select"
+classic|category@390x780|focus|024|button.ghost.sm "B"
+classic|category@390x780|focus|025|button.ghost.sm "H"
+classic|category@390x780|focus|026|button.ghost.sm "S"
+classic|category@390x780|focus|027|button.ghost.sm "View all B items"
+classic|category@390x780|focus|028|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|category@390x780|focus|029|button.ghost.sm "View all H items"
+classic|category@390x780|focus|030|div.poster.k-movie "H Heat 1995 180p"
+classic|category@390x780|focus|031|button.ghost.sm "View all S items"
+classic|category@390x780|focus|032|div.poster.k-movie.unw "TS The Signal 2021 180p"
+classic|category@390x780|focus|033|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+classic|category@390x780|focus|034|<wrap>
 classic|category@390x780|req|GET /api/v1/activity|2
 classic|category@390x780|req|GET /api/v1/features|1
 classic|category@390x780|req|GET /api/v1/libraries/<id>/items|2
@@ -4485,6 +4517,7 @@ classic|home@1280x860|dom|div > button.ghost.profile.sm|1
 classic|home@1280x860|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|home@1280x860|dom|div > div#profilemenu.amenu|1
 classic|home@1280x860|dom|div > div.grid|2
+classic|home@1280x860|dom|div > div.home-customize|1
 classic|home@1280x860|dom|div > div.libbar|1
 classic|home@1280x860|dom|div > div.railbox|3
 classic|home@1280x860|dom|div > h2.section[text]|5
@@ -4494,6 +4527,7 @@ classic|home@1280x860|dom|div.artbox > span.badge[text]|1
 classic|home@1280x860|dom|div.grid > div.k-movie.poster.unw[role=link tabindex=0]|3
 classic|home@1280x860|dom|div.grid > div.k-movie.poster[role=link tabindex=0]|1
 classic|home@1280x860|dom|div.grid > div.k-show.poster.unw[role=link tabindex=0]|1
+classic|home@1280x860|dom|div.home-customize > button.ghost.sm[text]|1
 classic|home@1280x860|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.artbox|1
 classic|home@1280x860|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.meta|1
 classic|home@1280x860|dom|div.k-episode.poster[role=link tabindex=0] > div.artbox|1
@@ -4535,7 +4569,7 @@ classic|home@1280x860|dom|header.top > nav|1
 classic|home@1280x860|dom|header.top > span#activity.activity|1
 classic|home@1280x860|dom|header.top > span.spacer|1
 classic|home@1280x860|dom|main#main > div.versionstamp[text]|1
-classic|home@1280x860|dom|main#main > div|3
+classic|home@1280x860|dom|main#main > div|9
 classic|home@1280x860|dom|nav > a.active[text]|1
 classic|home@1280x860|dom|nav > a[text]|6
 classic|home@1280x860|dom|select > option[text]|2
@@ -4551,26 +4585,28 @@ classic|home@1280x860|focus|008|input#q.search "Search cinema"
 classic|home@1280x860|focus|009|button.ghost.sm.lookbtn "Appearance"
 classic|home@1280x860|focus|010|button.ghost.sm.profile "Account"
 classic|home@1280x860|focus|011|button#cinema-local-pair-entry.ghost "Pair a phone"
-classic|home@1280x860|focus|012|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
-classic|home@1280x860|focus|013|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
-classic|home@1280x860|focus|014|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-classic|home@1280x860|focus|015|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
-classic|home@1280x860|focus|016|div.poster.k-movie "H Heat 1995 180p"
-classic|home@1280x860|focus|017|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-classic|home@1280x860|focus|018|div.poster.k-movie.unw "TS The Signal 2021 180p"
-classic|home@1280x860|focus|019|select "Category Share name"
-classic|home@1280x860|focus|020|a.muted "· view all (4)"
-classic|home@1280x860|focus|021|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-classic|home@1280x860|focus|022|div.poster.k-movie.unw "TS The Signal 2021 180p"
-classic|home@1280x860|focus|023|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-classic|home@1280x860|focus|024|div.poster.k-movie "H Heat 1995 180p"
-classic|home@1280x860|focus|025|a.muted "· view all (1)"
-classic|home@1280x860|focus|026|div.poster.k-show.unw "SH Signal Hill 2019"
-classic|home@1280x860|focus|027|<wrap>
+classic|home@1280x860|focus|012|button.ghost.sm "Customize Home"
+classic|home@1280x860|focus|013|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
+classic|home@1280x860|focus|014|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
+classic|home@1280x860|focus|015|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|home@1280x860|focus|016|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
+classic|home@1280x860|focus|017|div.poster.k-movie "H Heat 1995 180p"
+classic|home@1280x860|focus|018|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+classic|home@1280x860|focus|019|div.poster.k-movie.unw "TS The Signal 2021 180p"
+classic|home@1280x860|focus|020|select "Category Share name"
+classic|home@1280x860|focus|021|a.muted "· view all (4)"
+classic|home@1280x860|focus|022|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+classic|home@1280x860|focus|023|div.poster.k-movie.unw "TS The Signal 2021 180p"
+classic|home@1280x860|focus|024|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|home@1280x860|focus|025|div.poster.k-movie "H Heat 1995 180p"
+classic|home@1280x860|focus|026|a.muted "· view all (1)"
+classic|home@1280x860|focus|027|div.poster.k-show.unw "SH Signal Hill 2019"
+classic|home@1280x860|focus|028|<wrap>
 classic|home@1280x860|req|GET /api/v1/activity|2
 classic|home@1280x860|req|GET /api/v1/coming-soon|1
 classic|home@1280x860|req|GET /api/v1/features|1
 classic|home@1280x860|req|GET /api/v1/home/previews|1
+classic|home@1280x860|req|GET /api/v1/home/rows|1
 classic|home@1280x860|req|GET /api/v1/hubs|1
 classic|home@1280x860|req|GET /api/v1/lists/favorite|1
 classic|home@1280x860|req|GET /api/v1/lists/watchlist|1
@@ -4588,6 +4624,7 @@ classic|home@390x780|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|home@390x780|dom|div > div#profilemenu.amenu|1
 classic|home@390x780|dom|div > div.can-r.railbox|1
 classic|home@390x780|dom|div > div.grid|2
+classic|home@390x780|dom|div > div.home-customize|1
 classic|home@390x780|dom|div > div.libbar|1
 classic|home@390x780|dom|div > div.railbox|2
 classic|home@390x780|dom|div > h2.section[text]|5
@@ -4600,6 +4637,7 @@ classic|home@390x780|dom|div.can-r.railbox > div.rowscroll|1
 classic|home@390x780|dom|div.grid > div.k-movie.poster.unw[role=link tabindex=0]|3
 classic|home@390x780|dom|div.grid > div.k-movie.poster[role=link tabindex=0]|1
 classic|home@390x780|dom|div.grid > div.k-show.poster.unw[role=link tabindex=0]|1
+classic|home@390x780|dom|div.home-customize > button.ghost.sm[text]|1
 classic|home@390x780|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.artbox|1
 classic|home@390x780|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.meta|1
 classic|home@390x780|dom|div.k-episode.poster[role=link tabindex=0] > div.artbox|1
@@ -4641,7 +4679,7 @@ classic|home@390x780|dom|header.top > nav|1
 classic|home@390x780|dom|header.top > span#activity.activity|1
 classic|home@390x780|dom|header.top > span.spacer|1
 classic|home@390x780|dom|main#main > div.versionstamp[text]|1
-classic|home@390x780|dom|main#main > div|3
+classic|home@390x780|dom|main#main > div|9
 classic|home@390x780|dom|nav > a.active[text]|1
 classic|home@390x780|dom|nav > a[text]|6
 classic|home@390x780|dom|select > option[text]|2
@@ -4657,26 +4695,28 @@ classic|home@390x780|focus|008|button.ghost.sm.mobile-search "Search"
 classic|home@390x780|focus|009|button.ghost.sm.lookbtn "Appearance"
 classic|home@390x780|focus|010|button.ghost.sm.profile "Account"
 classic|home@390x780|focus|011|button#cinema-local-pair-entry.ghost "Pair a phone"
-classic|home@390x780|focus|012|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
-classic|home@390x780|focus|013|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
-classic|home@390x780|focus|014|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-classic|home@390x780|focus|015|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
-classic|home@390x780|focus|016|div.poster.k-movie "H Heat 1995 180p"
-classic|home@390x780|focus|017|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-classic|home@390x780|focus|018|div.poster.k-movie.unw "TS The Signal 2021 180p"
-classic|home@390x780|focus|019|select "Category Share name"
-classic|home@390x780|focus|020|a.muted "· view all (4)"
-classic|home@390x780|focus|021|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-classic|home@390x780|focus|022|div.poster.k-movie.unw "TS The Signal 2021 180p"
-classic|home@390x780|focus|023|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-classic|home@390x780|focus|024|div.poster.k-movie "H Heat 1995 180p"
-classic|home@390x780|focus|025|a.muted "· view all (1)"
-classic|home@390x780|focus|026|div.poster.k-show.unw "SH Signal Hill 2019"
-classic|home@390x780|focus|027|<wrap>
+classic|home@390x780|focus|012|button.ghost.sm "Customize Home"
+classic|home@390x780|focus|013|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
+classic|home@390x780|focus|014|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
+classic|home@390x780|focus|015|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|home@390x780|focus|016|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
+classic|home@390x780|focus|017|div.poster.k-movie "H Heat 1995 180p"
+classic|home@390x780|focus|018|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+classic|home@390x780|focus|019|div.poster.k-movie.unw "TS The Signal 2021 180p"
+classic|home@390x780|focus|020|select "Category Share name"
+classic|home@390x780|focus|021|a.muted "· view all (4)"
+classic|home@390x780|focus|022|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+classic|home@390x780|focus|023|div.poster.k-movie.unw "TS The Signal 2021 180p"
+classic|home@390x780|focus|024|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|home@390x780|focus|025|div.poster.k-movie "H Heat 1995 180p"
+classic|home@390x780|focus|026|a.muted "· view all (1)"
+classic|home@390x780|focus|027|div.poster.k-show.unw "SH Signal Hill 2019"
+classic|home@390x780|focus|028|<wrap>
 classic|home@390x780|req|GET /api/v1/activity|2
 classic|home@390x780|req|GET /api/v1/coming-soon|1
 classic|home@390x780|req|GET /api/v1/features|1
 classic|home@390x780|req|GET /api/v1/home/previews|1
+classic|home@390x780|req|GET /api/v1/home/rows|1
 classic|home@390x780|req|GET /api/v1/hubs|1
 classic|home@390x780|req|GET /api/v1/lists/favorite|1
 classic|home@390x780|req|GET /api/v1/lists/watchlist|1
@@ -4703,6 +4743,7 @@ classic|item@1280x860|dom|dd > div.trks[text]|1
 classic|item@1280x860|dom|dd > div.trks|1
 classic|item@1280x860|dom|dd > span.live.mode-chip[text]|1
 classic|item@1280x860|dom|dd > span.mode-detail[text]|1
+classic|item@1280x860|dom|dd > ul.plays-on|1
 classic|item@1280x860|dom|details.prep-group > div.prep-group-items|5
 classic|item@1280x860|dom|details.prep-group > summary|5
 classic|item@1280x860|dom|details.px-admin.setdetails.th-admin > div.setdetails-body|1
@@ -4716,6 +4757,8 @@ classic|item@1280x860|dom|div > h2[text]|2
 classic|item@1280x860|dom|div > h3[text]|10
 classic|item@1280x860|dom|div > p[text]|11
 classic|item@1280x860|dom|div#app > div.layout-frame|1
+classic|item@1280x860|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
+classic|item@1280x860|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
 classic|item@1280x860|dom|div#prep-file-2.prep-status > details.prep-group|5
 classic|item@1280x860|dom|div#prep-file-2.prep-status > div.prep-overview[role=status text]|1
 classic|item@1280x860|dom|div#prep-file-2.prep-status > p.prep-checked[text]|1
@@ -4732,6 +4775,7 @@ classic|item@1280x860|dom|div.chips > span[text]|3
 classic|item@1280x860|dom|div.crumbs > a[text]|1
 classic|item@1280x860|dom|div.crumbs > span.cur[text]|1
 classic|item@1280x860|dom|div.crumbs > span.sep[text]|1
+classic|item@1280x860|dom|div.dhead > div#item-tags.item-tags|1
 classic|item@1280x860|dom|div.dhead > div.actions|1
 classic|item@1280x860|dom|div.dhead > div.chips|1
 classic|item@1280x860|dom|div.dhead > div.pagehead|1
@@ -4770,8 +4814,8 @@ classic|item@1280x860|dom|div.version > details.px-admin.setdetails.th-admin|1
 classic|item@1280x860|dom|div.version > div.media-preparation-layout|1
 classic|item@1280x860|dom|dl.specs > dd.fn[text]|1
 classic|item@1280x860|dom|dl.specs > dd[text]|1
-classic|item@1280x860|dom|dl.specs > dd|3
-classic|item@1280x860|dom|dl.specs > dt[text]|5
+classic|item@1280x860|dom|dl.specs > dd|4
+classic|item@1280x860|dom|dl.specs > dt[text]|6
 classic|item@1280x860|dom|h1[text] > button.ghost.sm[aria-label=* text]|1
 classic|item@1280x860|dom|header.top > a.logo[text]|1
 classic|item@1280x860|dom|header.top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -4780,6 +4824,7 @@ classic|item@1280x860|dom|header.top > input#q.search[aria-label=* type=search]|
 classic|item@1280x860|dom|header.top > nav|1
 classic|item@1280x860|dom|header.top > span#activity.activity|1
 classic|item@1280x860|dom|header.top > span.spacer|1
+classic|item@1280x860|dom|li > span[text]|2
 classic|item@1280x860|dom|main#main > div.hero|1
 classic|item@1280x860|dom|nav > a.active[text]|1
 classic|item@1280x860|dom|nav > a[text]|6
@@ -4797,6 +4842,7 @@ classic|item@1280x860|dom|summary > span.prep-count[aria-label=* text]|5
 classic|item@1280x860|dom|summary > span[text]|5
 classic|item@1280x860|dom|svg.material-icon[aria-hidden=true] > path|2
 classic|item@1280x860|dom|svg[aria-hidden=true] > path|2
+classic|item@1280x860|dom|ul.plays-on > li|1
 classic|item@1280x860|focus|000|a.logo "cinema"
 classic|item@1280x860|focus|001|a.active "home"
 classic|item@1280x860|focus|002|a "shared libraries"
@@ -4811,32 +4857,35 @@ classic|item@1280x860|focus|010|button.ghost.sm.profile "Account"
 classic|item@1280x860|focus|011|a.pgback "Back to Home"
 classic|item@1280x860|focus|012|a "Home"
 classic|item@1280x860|focus|013|button.ghost.sm "Refresh artwork"
-classic|item@1280x860|focus|014|button.btnplay "▶ Resume · 7s"
-classic|item@1280x860|focus|015|button.ghost "Start over"
-classic|item@1280x860|focus|016|button.ghost.sm "Mark watched"
-classic|item@1280x860|focus|017|button.ghost.sm.listtoggle "Watchlist"
-classic|item@1280x860|focus|018|button.ghost.sm.listtoggle.fav "Add to favorites"
-classic|item@1280x860|focus|019|button.ghost "Make a channel"
-classic|item@1280x860|focus|020|button.ghost.sm "Refresh status"
-classic|item@1280x860|focus|021|summary "Pending 3"
-classic|item@1280x860|focus|022|summary "On demand 1"
-classic|item@1280x860|focus|023|summary "Done & ready 1"
-classic|item@1280x860|focus|024|summary "Off 3"
-classic|item@1280x860|focus|025|summary "Not needed 2"
-classic|item@1280x860|focus|026|button.ghost.sm "Analyze now"
-classic|item@1280x860|focus|027|a.ghost.sm "View queue"
-classic|item@1280x860|focus|028|button.ghost.sm "Find subtitles"
-classic|item@1280x860|focus|029|button.ghost.sm "Generate subtitles"
-classic|item@1280x860|focus|030|summary "More actions"
-classic|item@1280x860|focus|031|<wrap>
+classic|item@1280x860|focus|014|button.ghost.sm.tag-add "+ Add tag"
+classic|item@1280x860|focus|015|button.btnplay "▶ Resume · 7s"
+classic|item@1280x860|focus|016|button.ghost "Start over"
+classic|item@1280x860|focus|017|button.ghost.sm "Mark watched"
+classic|item@1280x860|focus|018|button.ghost.sm.listtoggle "Watchlist"
+classic|item@1280x860|focus|019|button.ghost.sm.listtoggle.fav "Add to favorites"
+classic|item@1280x860|focus|020|button.ghost "Make a channel"
+classic|item@1280x860|focus|021|button.ghost.sm "Refresh status"
+classic|item@1280x860|focus|022|summary "Pending 3"
+classic|item@1280x860|focus|023|summary "On demand 1"
+classic|item@1280x860|focus|024|summary "Done & ready 1"
+classic|item@1280x860|focus|025|summary "Off 3"
+classic|item@1280x860|focus|026|summary "Not needed 2"
+classic|item@1280x860|focus|027|button.ghost.sm "Analyze now"
+classic|item@1280x860|focus|028|a.ghost.sm "View queue"
+classic|item@1280x860|focus|029|button.ghost.sm "Find subtitles"
+classic|item@1280x860|focus|030|button.ghost.sm "Generate subtitles"
+classic|item@1280x860|focus|031|summary "More actions"
+classic|item@1280x860|focus|032|<wrap>
 classic|item@1280x860|req|GET /api/v1/activity|2
 classic|item@1280x860|req|GET /api/v1/features|1
 classic|item@1280x860|req|GET /api/v1/files/<id>/preparation|1
 classic|item@1280x860|req|GET /api/v1/items/<id>/annotations|1
+classic|item@1280x860|req|GET /api/v1/items/<id>/tags|1
 classic|item@1280x860|req|GET /api/v1/items/<id>|1
 classic|item@1280x860|req|GET /api/v1/libraries|1
 classic|item@1280x860|req|GET /api/v1/me|1
 classic|item@1280x860|req|GET /api/v1/server|1
+classic|item@1280x860|req|GET /api/v1/tags|1
 classic|item@390x780|dom|^ > div#app|1
 classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
 classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
@@ -4858,6 +4907,7 @@ classic|item@390x780|dom|dd > div.trks[text]|1
 classic|item@390x780|dom|dd > div.trks|1
 classic|item@390x780|dom|dd > span.live.mode-chip[text]|1
 classic|item@390x780|dom|dd > span.mode-detail[text]|1
+classic|item@390x780|dom|dd > ul.plays-on|1
 classic|item@390x780|dom|details.prep-group > div.prep-group-items|5
 classic|item@390x780|dom|details.prep-group > summary|5
 classic|item@390x780|dom|details.px-admin.setdetails.th-admin > div.setdetails-body|1
@@ -4871,6 +4921,8 @@ classic|item@390x780|dom|div > h2[text]|2
 classic|item@390x780|dom|div > h3[text]|10
 classic|item@390x780|dom|div > p[text]|11
 classic|item@390x780|dom|div#app > div.layout-frame|1
+classic|item@390x780|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
+classic|item@390x780|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
 classic|item@390x780|dom|div#prep-file-2.prep-status > details.prep-group|5
 classic|item@390x780|dom|div#prep-file-2.prep-status > div.prep-overview[role=status text]|1
 classic|item@390x780|dom|div#prep-file-2.prep-status > p.prep-checked[text]|1
@@ -4887,6 +4939,7 @@ classic|item@390x780|dom|div.chips > span[text]|3
 classic|item@390x780|dom|div.crumbs > a[text]|1
 classic|item@390x780|dom|div.crumbs > span.cur[text]|1
 classic|item@390x780|dom|div.crumbs > span.sep[text]|1
+classic|item@390x780|dom|div.dhead > div#item-tags.item-tags|1
 classic|item@390x780|dom|div.dhead > div.actions|1
 classic|item@390x780|dom|div.dhead > div.chips|1
 classic|item@390x780|dom|div.dhead > div.pagehead|1
@@ -4925,8 +4978,8 @@ classic|item@390x780|dom|div.version > details.px-admin.setdetails.th-admin|1
 classic|item@390x780|dom|div.version > div.media-preparation-layout|1
 classic|item@390x780|dom|dl.specs > dd.fn[text]|1
 classic|item@390x780|dom|dl.specs > dd[text]|1
-classic|item@390x780|dom|dl.specs > dd|3
-classic|item@390x780|dom|dl.specs > dt[text]|5
+classic|item@390x780|dom|dl.specs > dd|4
+classic|item@390x780|dom|dl.specs > dt[text]|6
 classic|item@390x780|dom|h1[text] > button.ghost.sm[aria-label=* text]|1
 classic|item@390x780|dom|header.top > a.logo[text]|1
 classic|item@390x780|dom|header.top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -4935,6 +4988,7 @@ classic|item@390x780|dom|header.top > input#q.search[aria-label=* type=search]|1
 classic|item@390x780|dom|header.top > nav|1
 classic|item@390x780|dom|header.top > span#activity.activity|1
 classic|item@390x780|dom|header.top > span.spacer|1
+classic|item@390x780|dom|li > span[text]|2
 classic|item@390x780|dom|main#main > div.hero|1
 classic|item@390x780|dom|nav > a.active[text]|1
 classic|item@390x780|dom|nav > a[text]|6
@@ -4952,6 +5006,7 @@ classic|item@390x780|dom|summary > span.prep-count[aria-label=* text]|5
 classic|item@390x780|dom|summary > span[text]|5
 classic|item@390x780|dom|svg.material-icon[aria-hidden=true] > path|2
 classic|item@390x780|dom|svg[aria-hidden=true] > path|2
+classic|item@390x780|dom|ul.plays-on > li|1
 classic|item@390x780|focus|000|a.logo "cinema"
 classic|item@390x780|focus|001|a.active "home"
 classic|item@390x780|focus|002|a "shared libraries"
@@ -4966,32 +5021,35 @@ classic|item@390x780|focus|010|button.ghost.sm.profile "Account"
 classic|item@390x780|focus|011|a.pgback "Back to Home"
 classic|item@390x780|focus|012|a "Home"
 classic|item@390x780|focus|013|button.ghost.sm "Refresh artwork"
-classic|item@390x780|focus|014|button.btnplay "▶ Resume · 7s"
-classic|item@390x780|focus|015|button.ghost "Start over"
-classic|item@390x780|focus|016|button.ghost.sm "Mark watched"
-classic|item@390x780|focus|017|button.ghost.sm.listtoggle "Watchlist"
-classic|item@390x780|focus|018|button.ghost.sm.listtoggle.fav "Add to favorites"
-classic|item@390x780|focus|019|button.ghost "Make a channel"
-classic|item@390x780|focus|020|button.ghost.sm "Refresh status"
-classic|item@390x780|focus|021|summary "Pending 3"
-classic|item@390x780|focus|022|summary "On demand 1"
-classic|item@390x780|focus|023|summary "Done & ready 1"
-classic|item@390x780|focus|024|summary "Off 3"
-classic|item@390x780|focus|025|summary "Not needed 2"
-classic|item@390x780|focus|026|button.ghost.sm "Analyze now"
-classic|item@390x780|focus|027|a.ghost.sm "View queue"
-classic|item@390x780|focus|028|button.ghost.sm "Find subtitles"
-classic|item@390x780|focus|029|button.ghost.sm "Generate subtitles"
-classic|item@390x780|focus|030|summary "More actions"
-classic|item@390x780|focus|031|<wrap>
+classic|item@390x780|focus|014|button.ghost.sm.tag-add "+ Add tag"
+classic|item@390x780|focus|015|button.btnplay "▶ Resume · 7s"
+classic|item@390x780|focus|016|button.ghost "Start over"
+classic|item@390x780|focus|017|button.ghost.sm "Mark watched"
+classic|item@390x780|focus|018|button.ghost.sm.listtoggle "Watchlist"
+classic|item@390x780|focus|019|button.ghost.sm.listtoggle.fav "Add to favorites"
+classic|item@390x780|focus|020|button.ghost "Make a channel"
+classic|item@390x780|focus|021|button.ghost.sm "Refresh status"
+classic|item@390x780|focus|022|summary "Pending 3"
+classic|item@390x780|focus|023|summary "On demand 1"
+classic|item@390x780|focus|024|summary "Done & ready 1"
+classic|item@390x780|focus|025|summary "Off 3"
+classic|item@390x780|focus|026|summary "Not needed 2"
+classic|item@390x780|focus|027|button.ghost.sm "Analyze now"
+classic|item@390x780|focus|028|a.ghost.sm "View queue"
+classic|item@390x780|focus|029|button.ghost.sm "Find subtitles"
+classic|item@390x780|focus|030|button.ghost.sm "Generate subtitles"
+classic|item@390x780|focus|031|summary "More actions"
+classic|item@390x780|focus|032|<wrap>
 classic|item@390x780|req|GET /api/v1/activity|2
 classic|item@390x780|req|GET /api/v1/features|1
 classic|item@390x780|req|GET /api/v1/files/<id>/preparation|1
 classic|item@390x780|req|GET /api/v1/items/<id>/annotations|1
+classic|item@390x780|req|GET /api/v1/items/<id>/tags|1
 classic|item@390x780|req|GET /api/v1/items/<id>|1
 classic|item@390x780|req|GET /api/v1/libraries|1
 classic|item@390x780|req|GET /api/v1/me|1
 classic|item@390x780|req|GET /api/v1/server|1
+classic|item@390x780|req|GET /api/v1/tags|1
 classic|library@1280x860|dom|^ > div#app|1
 classic|library@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 classic|library@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
@@ -5025,6 +5083,9 @@ classic|library@1280x860|dom|div.library-group-head > div.library-group-actions|
 classic|library@1280x860|dom|div.library-group-head > h2#library-row-B-title[tabindex=-1 text]|1
 classic|library@1280x860|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 classic|library@1280x860|dom|div.library-group-head > span.library-group-count.muted[text]|2
+classic|library@1280x860|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+classic|library@1280x860|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+classic|library@1280x860|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 classic|library@1280x860|dom|div.meta > div.s|2
 classic|library@1280x860|dom|div.meta > div.t[text]|2
 classic|library@1280x860|dom|div.pagehead > div.phnav|1
@@ -5062,6 +5123,7 @@ classic|library@1280x860|dom|main#main > div#librail|1
 classic|library@1280x860|dom|main#main > div#library-group-detail|1
 classic|library@1280x860|dom|main#main > div#library-load-error[role=status]|1
 classic|library@1280x860|dom|main#main > div.libbar|1
+classic|library@1280x860|dom|main#main > div.library-tag-tools.search-tools|1
 classic|library@1280x860|dom|main#main > div.pagehead|1
 classic|library@1280x860|dom|main#main > div.search-tools|1
 classic|library@1280x860|dom|main#main > nav#library-group-index[aria-label=*]|1
@@ -5100,17 +5162,19 @@ classic|library@1280x860|focus|018|select#library-scope "All libraries in this v
 classic|library@1280x860|focus|019|input#library-find "Title…"
 classic|library@1280x860|focus|020|select "Small Medium Large Extra large"
 classic|library@1280x860|focus|021|button.ghost.sm "Clear filters"
-classic|library@1280x860|focus|022|button.ghost.sm "B"
-classic|library@1280x860|focus|023|button.ghost.sm "H"
-classic|library@1280x860|focus|024|button.ghost.sm "View all B items"
-classic|library@1280x860|focus|025|button.ghost.sm "Scroll B left"
-classic|library@1280x860|focus|026|button.ghost.sm "Scroll B right"
-classic|library@1280x860|focus|027|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-classic|library@1280x860|focus|028|button.ghost.sm "View all H items"
-classic|library@1280x860|focus|029|button.ghost.sm "Scroll H left"
-classic|library@1280x860|focus|030|button.ghost.sm "Scroll H right"
-classic|library@1280x860|focus|031|div.poster.k-movie "H Heat 1995 180p"
-classic|library@1280x860|focus|032|<wrap>
+classic|library@1280x860|focus|022|button#library-tag-button.ghost.sm "Tags ▾"
+classic|library@1280x860|focus|023|button#library-select-button.ghost.sm "Select"
+classic|library@1280x860|focus|024|button.ghost.sm "B"
+classic|library@1280x860|focus|025|button.ghost.sm "H"
+classic|library@1280x860|focus|026|button.ghost.sm "View all B items"
+classic|library@1280x860|focus|027|button.ghost.sm "Scroll B left"
+classic|library@1280x860|focus|028|button.ghost.sm "Scroll B right"
+classic|library@1280x860|focus|029|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|library@1280x860|focus|030|button.ghost.sm "View all H items"
+classic|library@1280x860|focus|031|button.ghost.sm "Scroll H left"
+classic|library@1280x860|focus|032|button.ghost.sm "Scroll H right"
+classic|library@1280x860|focus|033|div.poster.k-movie "H Heat 1995 180p"
+classic|library@1280x860|focus|034|<wrap>
 classic|library@1280x860|req|GET /api/v1/activity|2
 classic|library@1280x860|req|GET /api/v1/features|1
 classic|library@1280x860|req|GET /api/v1/libraries/<id>/items|1
@@ -5150,6 +5214,9 @@ classic|library@390x780|dom|div.library-group-head > div.library-group-actions|2
 classic|library@390x780|dom|div.library-group-head > h2#library-row-B-title[tabindex=-1 text]|1
 classic|library@390x780|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 classic|library@390x780|dom|div.library-group-head > span.library-group-count.muted[text]|2
+classic|library@390x780|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+classic|library@390x780|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+classic|library@390x780|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 classic|library@390x780|dom|div.meta > div.s|2
 classic|library@390x780|dom|div.meta > div.t[text]|2
 classic|library@390x780|dom|div.pagehead > div.phnav|1
@@ -5187,6 +5254,7 @@ classic|library@390x780|dom|main#main > div#librail|1
 classic|library@390x780|dom|main#main > div#library-group-detail|1
 classic|library@390x780|dom|main#main > div#library-load-error[role=status]|1
 classic|library@390x780|dom|main#main > div.libbar|1
+classic|library@390x780|dom|main#main > div.library-tag-tools.search-tools|1
 classic|library@390x780|dom|main#main > div.pagehead|1
 classic|library@390x780|dom|main#main > div.search-tools|1
 classic|library@390x780|dom|main#main > nav#library-group-index[aria-label=*]|1
@@ -5225,13 +5293,15 @@ classic|library@390x780|focus|018|select#library-scope "All libraries in this vi
 classic|library@390x780|focus|019|input#library-find "Title…"
 classic|library@390x780|focus|020|select "Small Medium Large Extra large"
 classic|library@390x780|focus|021|button.ghost.sm "Clear filters"
-classic|library@390x780|focus|022|button.ghost.sm "B"
-classic|library@390x780|focus|023|button.ghost.sm "H"
-classic|library@390x780|focus|024|button.ghost.sm "View all B items"
-classic|library@390x780|focus|025|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-classic|library@390x780|focus|026|button.ghost.sm "View all H items"
-classic|library@390x780|focus|027|div.poster.k-movie "H Heat 1995 180p"
-classic|library@390x780|focus|028|<wrap>
+classic|library@390x780|focus|022|button#library-tag-button.ghost.sm "Tags ▾"
+classic|library@390x780|focus|023|button#library-select-button.ghost.sm "Select"
+classic|library@390x780|focus|024|button.ghost.sm "B"
+classic|library@390x780|focus|025|button.ghost.sm "H"
+classic|library@390x780|focus|026|button.ghost.sm "View all B items"
+classic|library@390x780|focus|027|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+classic|library@390x780|focus|028|button.ghost.sm "View all H items"
+classic|library@390x780|focus|029|div.poster.k-movie "H Heat 1995 180p"
+classic|library@390x780|focus|030|<wrap>
 classic|library@390x780|req|GET /api/v1/activity|2
 classic|library@390x780|req|GET /api/v1/features|1
 classic|library@390x780|req|GET /api/v1/libraries/<id>/items|1
@@ -5801,10 +5871,12 @@ classic|player@1280x860|req|GET /api/v1/features|1
 classic|player@1280x860|req|GET /api/v1/files/<id>/direct|1
 classic|player@1280x860|req|GET /api/v1/files/<id>/preparation|1
 classic|player@1280x860|req|GET /api/v1/items/<id>/annotations|1
+classic|player@1280x860|req|GET /api/v1/items/<id>/tags|1
 classic|player@1280x860|req|GET /api/v1/items/<id>|1
 classic|player@1280x860|req|GET /api/v1/libraries|1
 classic|player@1280x860|req|GET /api/v1/me|1
 classic|player@1280x860|req|GET /api/v1/server|1
+classic|player@1280x860|req|GET /api/v1/tags|1
 classic|player@1280x860|req|POST /api/v1/client-log|7
 classic|player@1280x860|req|POST /api/v1/files/<id>/decision|1
 classic|player@1280x860|req|POST /api/v1/items/<id>/progress|1
@@ -5961,10 +6033,12 @@ classic|player@390x780|req|GET /api/v1/features|1
 classic|player@390x780|req|GET /api/v1/files/<id>/direct|1
 classic|player@390x780|req|GET /api/v1/files/<id>/preparation|1
 classic|player@390x780|req|GET /api/v1/items/<id>/annotations|1
+classic|player@390x780|req|GET /api/v1/items/<id>/tags|1
 classic|player@390x780|req|GET /api/v1/items/<id>|1
 classic|player@390x780|req|GET /api/v1/libraries|1
 classic|player@390x780|req|GET /api/v1/me|1
 classic|player@390x780|req|GET /api/v1/server|1
+classic|player@390x780|req|GET /api/v1/tags|1
 classic|player@390x780|req|POST /api/v1/client-log|7
 classic|player@390x780|req|POST /api/v1/files/<id>/decision|1
 classic|player@390x780|req|POST /api/v1/items/<id>/progress|1
@@ -7290,12 +7364,16 @@ meridian|category@1280x860|dom|div.library-group-head > h2#library-row-B-title[t
 meridian|category@1280x860|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 meridian|category@1280x860|dom|div.library-group-head > h2#library-row-S-title[tabindex=-1 text]|1
 meridian|category@1280x860|dom|div.library-group-head > span.library-group-count.muted[text]|3
+meridian|category@1280x860|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+meridian|category@1280x860|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+meridian|category@1280x860|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 meridian|category@1280x860|dom|div.md-library > div#libbody.library-rows|1
 meridian|category@1280x860|dom|div.md-library > div#libpager|1
 meridian|category@1280x860|dom|div.md-library > div#librail|1
 meridian|category@1280x860|dom|div.md-library > div#library-group-detail|1
 meridian|category@1280x860|dom|div.md-library > div#library-load-error[role=status]|1
 meridian|category@1280x860|dom|div.md-library > div.libbar|1
+meridian|category@1280x860|dom|div.md-library > div.library-tag-tools.search-tools|1
 meridian|category@1280x860|dom|div.md-library > div.pagehead|1
 meridian|category@1280x860|dom|div.md-library > div.search-tools|1
 meridian|category@1280x860|dom|div.md-library > nav#library-group-index[aria-label=*]|1
@@ -7386,23 +7464,25 @@ meridian|category@1280x860|focus|022|select#library-scope "All libraries in this
 meridian|category@1280x860|focus|023|input#library-find "Title…"
 meridian|category@1280x860|focus|024|select "Small Medium Large Extra large"
 meridian|category@1280x860|focus|025|button.ghost.sm "Clear filters"
-meridian|category@1280x860|focus|026|button.ghost.sm "B"
-meridian|category@1280x860|focus|027|button.ghost.sm "H"
-meridian|category@1280x860|focus|028|button.ghost.sm "S"
-meridian|category@1280x860|focus|029|button.ghost.sm "View all B items"
-meridian|category@1280x860|focus|030|button.ghost.sm "Scroll B left"
-meridian|category@1280x860|focus|031|button.ghost.sm "Scroll B right"
-meridian|category@1280x860|focus|032|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-meridian|category@1280x860|focus|033|button.ghost.sm "View all H items"
-meridian|category@1280x860|focus|034|button.ghost.sm "Scroll H left"
-meridian|category@1280x860|focus|035|button.ghost.sm "Scroll H right"
-meridian|category@1280x860|focus|036|div.poster.k-movie "H Heat 1995 180p"
-meridian|category@1280x860|focus|037|button.ghost.sm "View all S items"
-meridian|category@1280x860|focus|038|button.ghost.sm "Scroll S left"
-meridian|category@1280x860|focus|039|button.ghost.sm "Scroll S right"
-meridian|category@1280x860|focus|040|div.poster.k-movie.unw "TS The Signal 2021 180p"
-meridian|category@1280x860|focus|041|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-meridian|category@1280x860|focus|042|<wrap>
+meridian|category@1280x860|focus|026|button#library-tag-button.ghost.sm "Tags ▾"
+meridian|category@1280x860|focus|027|button#library-select-button.ghost.sm "Select"
+meridian|category@1280x860|focus|028|button.ghost.sm "B"
+meridian|category@1280x860|focus|029|button.ghost.sm "H"
+meridian|category@1280x860|focus|030|button.ghost.sm "S"
+meridian|category@1280x860|focus|031|button.ghost.sm "View all B items"
+meridian|category@1280x860|focus|032|button.ghost.sm "Scroll B left"
+meridian|category@1280x860|focus|033|button.ghost.sm "Scroll B right"
+meridian|category@1280x860|focus|034|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+meridian|category@1280x860|focus|035|button.ghost.sm "View all H items"
+meridian|category@1280x860|focus|036|button.ghost.sm "Scroll H left"
+meridian|category@1280x860|focus|037|button.ghost.sm "Scroll H right"
+meridian|category@1280x860|focus|038|div.poster.k-movie "H Heat 1995 180p"
+meridian|category@1280x860|focus|039|button.ghost.sm "View all S items"
+meridian|category@1280x860|focus|040|button.ghost.sm "Scroll S left"
+meridian|category@1280x860|focus|041|button.ghost.sm "Scroll S right"
+meridian|category@1280x860|focus|042|div.poster.k-movie.unw "TS The Signal 2021 180p"
+meridian|category@1280x860|focus|043|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+meridian|category@1280x860|focus|044|<wrap>
 meridian|category@1280x860|req|GET /api/v1/activity|2
 meridian|category@1280x860|req|GET /api/v1/features|1
 meridian|category@1280x860|req|GET /api/v1/libraries/<id>/items|2
@@ -7450,12 +7530,16 @@ meridian|category@390x780|dom|div.library-group-head > h2#library-row-B-title[ta
 meridian|category@390x780|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 meridian|category@390x780|dom|div.library-group-head > h2#library-row-S-title[tabindex=-1 text]|1
 meridian|category@390x780|dom|div.library-group-head > span.library-group-count.muted[text]|3
+meridian|category@390x780|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+meridian|category@390x780|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+meridian|category@390x780|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 meridian|category@390x780|dom|div.md-library > div#libbody.library-rows|1
 meridian|category@390x780|dom|div.md-library > div#libpager|1
 meridian|category@390x780|dom|div.md-library > div#librail|1
 meridian|category@390x780|dom|div.md-library > div#library-group-detail|1
 meridian|category@390x780|dom|div.md-library > div#library-load-error[role=status]|1
 meridian|category@390x780|dom|div.md-library > div.libbar|1
+meridian|category@390x780|dom|div.md-library > div.library-tag-tools.search-tools|1
 meridian|category@390x780|dom|div.md-library > div.pagehead|1
 meridian|category@390x780|dom|div.md-library > div.search-tools|1
 meridian|category@390x780|dom|div.md-library > nav#library-group-index[aria-label=*]|1
@@ -7534,21 +7618,23 @@ meridian|category@390x780|focus|010|select#library-scope "All libraries in this 
 meridian|category@390x780|focus|011|input#library-find "Title…"
 meridian|category@390x780|focus|012|select "Small Medium Large Extra large"
 meridian|category@390x780|focus|013|button.ghost.sm "Clear filters"
-meridian|category@390x780|focus|014|button.ghost.sm "B"
-meridian|category@390x780|focus|015|button.ghost.sm "H"
-meridian|category@390x780|focus|016|button.ghost.sm "S"
-meridian|category@390x780|focus|017|button.ghost.sm "View all B items"
-meridian|category@390x780|focus|018|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-meridian|category@390x780|focus|019|button.ghost.sm "View all H items"
-meridian|category@390x780|focus|020|div.poster.k-movie "H Heat 1995 180p"
-meridian|category@390x780|focus|021|button.ghost.sm "View all S items"
-meridian|category@390x780|focus|022|div.poster.k-movie.unw "TS The Signal 2021 180p"
-meridian|category@390x780|focus|023|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-meridian|category@390x780|focus|024|a "Home"
-meridian|category@390x780|focus|025|button.ghost "Libraries"
-meridian|category@390x780|focus|026|button.ghost "Search"
-meridian|category@390x780|focus|027|button.ghost "More"
-meridian|category@390x780|focus|028|<wrap>
+meridian|category@390x780|focus|014|button#library-tag-button.ghost.sm "Tags ▾"
+meridian|category@390x780|focus|015|button#library-select-button.ghost.sm "Select"
+meridian|category@390x780|focus|016|button.ghost.sm "B"
+meridian|category@390x780|focus|017|button.ghost.sm "H"
+meridian|category@390x780|focus|018|button.ghost.sm "S"
+meridian|category@390x780|focus|019|button.ghost.sm "View all B items"
+meridian|category@390x780|focus|020|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+meridian|category@390x780|focus|021|button.ghost.sm "View all H items"
+meridian|category@390x780|focus|022|div.poster.k-movie "H Heat 1995 180p"
+meridian|category@390x780|focus|023|button.ghost.sm "View all S items"
+meridian|category@390x780|focus|024|div.poster.k-movie.unw "TS The Signal 2021 180p"
+meridian|category@390x780|focus|025|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+meridian|category@390x780|focus|026|a "Home"
+meridian|category@390x780|focus|027|button.ghost "Libraries"
+meridian|category@390x780|focus|028|button.ghost "Search"
+meridian|category@390x780|focus|029|button.ghost "More"
+meridian|category@390x780|focus|030|<wrap>
 meridian|category@390x780|req|GET /api/v1/activity|2
 meridian|category@390x780|req|GET /api/v1/features|1
 meridian|category@390x780|req|GET /api/v1/libraries/<id>/items|2
@@ -7573,6 +7659,7 @@ meridian|home@1280x860|dom|button.ghost[aria-label=* type=button] > span.md-labe
 meridian|home@1280x860|dom|button.ghost[aria-label=* type=button] > svg.px-ico[aria-hidden=true]|3
 meridian|home@1280x860|dom|button.ghost[type=button] > span[text]|3
 meridian|home@1280x860|dom|button.ghost[type=button] > svg.px-ico[aria-hidden=true]|3
+meridian|home@1280x860|dom|div > div.home-customize|1
 meridian|home@1280x860|dom|div > div.libbar|1
 meridian|home@1280x860|dom|div > div.railbox|5
 meridian|home@1280x860|dom|div > h2.section[text]|5
@@ -7582,6 +7669,7 @@ meridian|home@1280x860|dom|div.actions > button.btnplay[text]|1
 meridian|home@1280x860|dom|div.actions > button.ghost[text]|1
 meridian|home@1280x860|dom|div.artbox > div.art.ph[text]|12
 meridian|home@1280x860|dom|div.artbox > span.badge[text]|1
+meridian|home@1280x860|dom|div.home-customize > button.ghost.sm[text]|1
 meridian|home@1280x860|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.artbox|1
 meridian|home@1280x860|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.meta|1
 meridian|home@1280x860|dom|div.k-episode.poster[role=link tabindex=0] > div.artbox|1
@@ -7630,7 +7718,7 @@ meridian|home@1280x860|dom|div.th-fg > h1.th-title[text]|1
 meridian|home@1280x860|dom|div.th-hprog[role=progressbar aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=*] > i|1
 meridian|home@1280x860|dom|div.th-meta > div.cleft[text]|1
 meridian|home@1280x860|dom|div.th-meta > span[text]|1
-meridian|home@1280x860|dom|div.th-rails > div|3
+meridian|home@1280x860|dom|div.th-rails > div|9
 meridian|home@1280x860|dom|h2.section[text] > a.muted[text]|2
 meridian|home@1280x860|dom|header.md-top > a.logo.md-mobile-brand[text]|1
 meridian|home@1280x860|dom|header.md-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -7671,26 +7759,28 @@ meridian|home@1280x860|focus|014|button.ghost.profile "Account"
 meridian|home@1280x860|focus|015|button#cinema-local-pair-entry.ghost "Pair a phone"
 meridian|home@1280x860|focus|016|button.btnplay "▶ Resume"
 meridian|home@1280x860|focus|017|button.ghost "ⓘ Details"
-meridian|home@1280x860|focus|018|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
-meridian|home@1280x860|focus|019|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
-meridian|home@1280x860|focus|020|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-meridian|home@1280x860|focus|021|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
-meridian|home@1280x860|focus|022|div.poster.k-movie "H Heat 1995 180p"
-meridian|home@1280x860|focus|023|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-meridian|home@1280x860|focus|024|div.poster.k-movie.unw "TS The Signal 2021 180p"
-meridian|home@1280x860|focus|025|select "Category Share name"
-meridian|home@1280x860|focus|026|a.muted "· view all (4)"
-meridian|home@1280x860|focus|027|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-meridian|home@1280x860|focus|028|div.poster.k-movie.unw "TS The Signal 2021 180p"
-meridian|home@1280x860|focus|029|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-meridian|home@1280x860|focus|030|div.poster.k-movie "H Heat 1995 180p"
-meridian|home@1280x860|focus|031|a.muted "· view all (1)"
-meridian|home@1280x860|focus|032|div.poster.k-show.unw "SH Signal Hill 2019"
-meridian|home@1280x860|focus|033|<wrap>
+meridian|home@1280x860|focus|018|button.ghost.sm "Customize Home"
+meridian|home@1280x860|focus|019|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
+meridian|home@1280x860|focus|020|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
+meridian|home@1280x860|focus|021|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+meridian|home@1280x860|focus|022|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
+meridian|home@1280x860|focus|023|div.poster.k-movie "H Heat 1995 180p"
+meridian|home@1280x860|focus|024|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+meridian|home@1280x860|focus|025|div.poster.k-movie.unw "TS The Signal 2021 180p"
+meridian|home@1280x860|focus|026|select "Category Share name"
+meridian|home@1280x860|focus|027|a.muted "· view all (4)"
+meridian|home@1280x860|focus|028|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+meridian|home@1280x860|focus|029|div.poster.k-movie.unw "TS The Signal 2021 180p"
+meridian|home@1280x860|focus|030|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+meridian|home@1280x860|focus|031|div.poster.k-movie "H Heat 1995 180p"
+meridian|home@1280x860|focus|032|a.muted "· view all (1)"
+meridian|home@1280x860|focus|033|div.poster.k-show.unw "SH Signal Hill 2019"
+meridian|home@1280x860|focus|034|<wrap>
 meridian|home@1280x860|req|GET /api/v1/activity|2
 meridian|home@1280x860|req|GET /api/v1/coming-soon|1
 meridian|home@1280x860|req|GET /api/v1/features|1
 meridian|home@1280x860|req|GET /api/v1/home/previews|1
+meridian|home@1280x860|req|GET /api/v1/home/rows|1
 meridian|home@1280x860|req|GET /api/v1/hubs|1
 meridian|home@1280x860|req|GET /api/v1/lists/favorite|1
 meridian|home@1280x860|req|GET /api/v1/lists/watchlist|1
@@ -7715,6 +7805,7 @@ meridian|home@390x780|dom|button.ghost[aria-label=* type=button] > svg.px-ico[ar
 meridian|home@390x780|dom|button.ghost[type=button] > span[text]|3
 meridian|home@390x780|dom|button.ghost[type=button] > svg.px-ico[aria-hidden=true]|3
 meridian|home@390x780|dom|div > div.can-r.railbox|2
+meridian|home@390x780|dom|div > div.home-customize|1
 meridian|home@390x780|dom|div > div.libbar|1
 meridian|home@390x780|dom|div > div.railbox|3
 meridian|home@390x780|dom|div > h2.section[text]|5
@@ -7727,6 +7818,7 @@ meridian|home@390x780|dom|div.artbox > span.badge[text]|1
 meridian|home@390x780|dom|div.can-r.railbox > button.l.railarrow[aria-label=* text]|2
 meridian|home@390x780|dom|div.can-r.railbox > button.r.railarrow[aria-label=* text]|2
 meridian|home@390x780|dom|div.can-r.railbox > div.rowscroll|2
+meridian|home@390x780|dom|div.home-customize > button.ghost.sm[text]|1
 meridian|home@390x780|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.artbox|1
 meridian|home@390x780|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.meta|1
 meridian|home@390x780|dom|div.k-episode.poster[role=link tabindex=0] > div.artbox|1
@@ -7775,7 +7867,7 @@ meridian|home@390x780|dom|div.th-fg > h1.th-title[text]|1
 meridian|home@390x780|dom|div.th-hprog[role=progressbar aria-valuemin=0 aria-valuemax=100 aria-label=* aria-valuenow=*] > i|1
 meridian|home@390x780|dom|div.th-meta > div.cleft[text]|1
 meridian|home@390x780|dom|div.th-meta > span[text]|1
-meridian|home@390x780|dom|div.th-rails > div|3
+meridian|home@390x780|dom|div.th-rails > div|9
 meridian|home@390x780|dom|h2.section[text] > a.muted[text]|2
 meridian|home@390x780|dom|header.md-top > a.logo.md-mobile-brand[text]|1
 meridian|home@390x780|dom|header.md-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -7804,30 +7896,32 @@ meridian|home@390x780|focus|002|button.ghost.profile "Account"
 meridian|home@390x780|focus|003|button#cinema-local-pair-entry.ghost "Pair a phone"
 meridian|home@390x780|focus|004|button.btnplay "▶ Resume"
 meridian|home@390x780|focus|005|button.ghost "ⓘ Details"
-meridian|home@390x780|focus|006|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
-meridian|home@390x780|focus|007|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
-meridian|home@390x780|focus|008|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-meridian|home@390x780|focus|009|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
-meridian|home@390x780|focus|010|div.poster.k-movie "H Heat 1995 180p"
-meridian|home@390x780|focus|011|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-meridian|home@390x780|focus|012|div.poster.k-movie.unw "TS The Signal 2021 180p"
-meridian|home@390x780|focus|013|select "Category Share name"
-meridian|home@390x780|focus|014|a.muted "· view all (4)"
-meridian|home@390x780|focus|015|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-meridian|home@390x780|focus|016|div.poster.k-movie.unw "TS The Signal 2021 180p"
-meridian|home@390x780|focus|017|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-meridian|home@390x780|focus|018|div.poster.k-movie "H Heat 1995 180p"
-meridian|home@390x780|focus|019|a.muted "· view all (1)"
-meridian|home@390x780|focus|020|div.poster.k-show.unw "SH Signal Hill 2019"
-meridian|home@390x780|focus|021|a "Home"
-meridian|home@390x780|focus|022|button.ghost "Libraries"
-meridian|home@390x780|focus|023|button.ghost "Search"
-meridian|home@390x780|focus|024|button.ghost "More"
-meridian|home@390x780|focus|025|<wrap>
+meridian|home@390x780|focus|006|button.ghost.sm "Customize Home"
+meridian|home@390x780|focus|007|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
+meridian|home@390x780|focus|008|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
+meridian|home@390x780|focus|009|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+meridian|home@390x780|focus|010|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
+meridian|home@390x780|focus|011|div.poster.k-movie "H Heat 1995 180p"
+meridian|home@390x780|focus|012|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+meridian|home@390x780|focus|013|div.poster.k-movie.unw "TS The Signal 2021 180p"
+meridian|home@390x780|focus|014|select "Category Share name"
+meridian|home@390x780|focus|015|a.muted "· view all (4)"
+meridian|home@390x780|focus|016|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+meridian|home@390x780|focus|017|div.poster.k-movie.unw "TS The Signal 2021 180p"
+meridian|home@390x780|focus|018|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+meridian|home@390x780|focus|019|div.poster.k-movie "H Heat 1995 180p"
+meridian|home@390x780|focus|020|a.muted "· view all (1)"
+meridian|home@390x780|focus|021|div.poster.k-show.unw "SH Signal Hill 2019"
+meridian|home@390x780|focus|022|a "Home"
+meridian|home@390x780|focus|023|button.ghost "Libraries"
+meridian|home@390x780|focus|024|button.ghost "Search"
+meridian|home@390x780|focus|025|button.ghost "More"
+meridian|home@390x780|focus|026|<wrap>
 meridian|home@390x780|req|GET /api/v1/activity|2
 meridian|home@390x780|req|GET /api/v1/coming-soon|1
 meridian|home@390x780|req|GET /api/v1/features|1
 meridian|home@390x780|req|GET /api/v1/home/previews|1
+meridian|home@390x780|req|GET /api/v1/home/rows|1
 meridian|home@390x780|req|GET /api/v1/hubs|1
 meridian|home@390x780|req|GET /api/v1/lists/favorite|1
 meridian|home@390x780|req|GET /api/v1/lists/watchlist|1
@@ -7866,6 +7960,7 @@ meridian|item@1280x860|dom|dd > div.trks[text]|1
 meridian|item@1280x860|dom|dd > div.trks|1
 meridian|item@1280x860|dom|dd > span.live.mode-chip[text]|1
 meridian|item@1280x860|dom|dd > span.mode-detail[text]|1
+meridian|item@1280x860|dom|dd > ul.plays-on|1
 meridian|item@1280x860|dom|details.prep-group > div.prep-group-items|5
 meridian|item@1280x860|dom|details.prep-group > summary|5
 meridian|item@1280x860|dom|details.px-admin.setdetails.th-admin > div.setdetails-body|1
@@ -7875,6 +7970,8 @@ meridian|item@1280x860|dom|div > h2[text]|2
 meridian|item@1280x860|dom|div > h3[text]|10
 meridian|item@1280x860|dom|div > p[text]|11
 meridian|item@1280x860|dom|div#app > div.md-shell|1
+meridian|item@1280x860|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
+meridian|item@1280x860|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
 meridian|item@1280x860|dom|div#prep-file-2.prep-status > details.prep-group|5
 meridian|item@1280x860|dom|div#prep-file-2.prep-status > div.prep-overview[role=status text]|1
 meridian|item@1280x860|dom|div#prep-file-2.prep-status > p.prep-checked[text]|1
@@ -7891,6 +7988,7 @@ meridian|item@1280x860|dom|div.chips > span[text]|3
 meridian|item@1280x860|dom|div.crumbs > a[text]|1
 meridian|item@1280x860|dom|div.crumbs > span.cur[text]|1
 meridian|item@1280x860|dom|div.crumbs > span.sep[text]|1
+meridian|item@1280x860|dom|div.dhead > div#item-tags.item-tags|1
 meridian|item@1280x860|dom|div.dhead > div.actions|1
 meridian|item@1280x860|dom|div.dhead > div.chips|1
 meridian|item@1280x860|dom|div.dhead > div.pagehead|1
@@ -7934,8 +8032,8 @@ meridian|item@1280x860|dom|div.version > details.px-admin.setdetails.th-admin|1
 meridian|item@1280x860|dom|div.version > div.media-preparation-layout|1
 meridian|item@1280x860|dom|dl.specs > dd.fn[text]|1
 meridian|item@1280x860|dom|dl.specs > dd[text]|1
-meridian|item@1280x860|dom|dl.specs > dd|3
-meridian|item@1280x860|dom|dl.specs > dt[text]|5
+meridian|item@1280x860|dom|dl.specs > dd|4
+meridian|item@1280x860|dom|dl.specs > dt[text]|6
 meridian|item@1280x860|dom|h1[text] > button.ghost.sm[aria-label=* text]|1
 meridian|item@1280x860|dom|header.md-top > a.logo.md-mobile-brand[text]|1
 meridian|item@1280x860|dom|header.md-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -7944,6 +8042,7 @@ meridian|item@1280x860|dom|header.md-top > div.md-pop|2
 meridian|item@1280x860|dom|header.md-top > input#q.search[aria-label=* type=search]|1
 meridian|item@1280x860|dom|header.md-top > span#activity.activity|1
 meridian|item@1280x860|dom|header.md-top > span.spacer|1
+meridian|item@1280x860|dom|li > span[text]|2
 meridian|item@1280x860|dom|main#main > div.md-detail|1
 meridian|item@1280x860|dom|nav#meridian-nav.md-nav[aria-label=*] > a[aria-current=page]|1
 meridian|item@1280x860|dom|nav#meridian-nav.md-nav[aria-label=*] > a|5
@@ -7969,6 +8068,7 @@ meridian|item@1280x860|dom|svg.px-ico[aria-hidden=true] > circle|2
 meridian|item@1280x860|dom|svg.px-ico[aria-hidden=true] > path|11
 meridian|item@1280x860|dom|svg.px-ico[aria-hidden=true] > rect|13
 meridian|item@1280x860|dom|svg[aria-hidden=true] > path|2
+meridian|item@1280x860|dom|ul.plays-on > li|1
 meridian|item@1280x860|focus|000|a.logo.md-brand "cinema"
 meridian|item@1280x860|focus|001|a "Home"
 meridian|item@1280x860|focus|002|button.ghost "Search"
@@ -7987,32 +8087,35 @@ meridian|item@1280x860|focus|014|button.ghost.profile "Account"
 meridian|item@1280x860|focus|015|a.pgback "Back to Home"
 meridian|item@1280x860|focus|016|a "Home"
 meridian|item@1280x860|focus|017|button.ghost.sm "Refresh artwork"
-meridian|item@1280x860|focus|018|button.btnplay "▶ Resume · 7s"
-meridian|item@1280x860|focus|019|button.ghost "Start over"
-meridian|item@1280x860|focus|020|button.ghost.sm "Mark watched"
-meridian|item@1280x860|focus|021|button.ghost.sm.listtoggle "Watchlist"
-meridian|item@1280x860|focus|022|button.ghost.sm.listtoggle.fav "Add to favorites"
-meridian|item@1280x860|focus|023|button.ghost "Make a channel"
-meridian|item@1280x860|focus|024|button.ghost.sm "Refresh status"
-meridian|item@1280x860|focus|025|summary "Pending 3"
-meridian|item@1280x860|focus|026|summary "On demand 1"
-meridian|item@1280x860|focus|027|summary "Done & ready 1"
-meridian|item@1280x860|focus|028|summary "Off 3"
-meridian|item@1280x860|focus|029|summary "Not needed 2"
-meridian|item@1280x860|focus|030|button.ghost.sm "Analyze now"
-meridian|item@1280x860|focus|031|a.ghost.sm "View queue"
-meridian|item@1280x860|focus|032|button.ghost.sm "Find subtitles"
-meridian|item@1280x860|focus|033|button.ghost.sm "Generate subtitles"
-meridian|item@1280x860|focus|034|summary "More actions"
-meridian|item@1280x860|focus|035|<wrap>
+meridian|item@1280x860|focus|018|button.ghost.sm.tag-add "+ Add tag"
+meridian|item@1280x860|focus|019|button.btnplay "▶ Resume · 7s"
+meridian|item@1280x860|focus|020|button.ghost "Start over"
+meridian|item@1280x860|focus|021|button.ghost.sm "Mark watched"
+meridian|item@1280x860|focus|022|button.ghost.sm.listtoggle "Watchlist"
+meridian|item@1280x860|focus|023|button.ghost.sm.listtoggle.fav "Add to favorites"
+meridian|item@1280x860|focus|024|button.ghost "Make a channel"
+meridian|item@1280x860|focus|025|button.ghost.sm "Refresh status"
+meridian|item@1280x860|focus|026|summary "Pending 3"
+meridian|item@1280x860|focus|027|summary "On demand 1"
+meridian|item@1280x860|focus|028|summary "Done & ready 1"
+meridian|item@1280x860|focus|029|summary "Off 3"
+meridian|item@1280x860|focus|030|summary "Not needed 2"
+meridian|item@1280x860|focus|031|button.ghost.sm "Analyze now"
+meridian|item@1280x860|focus|032|a.ghost.sm "View queue"
+meridian|item@1280x860|focus|033|button.ghost.sm "Find subtitles"
+meridian|item@1280x860|focus|034|button.ghost.sm "Generate subtitles"
+meridian|item@1280x860|focus|035|summary "More actions"
+meridian|item@1280x860|focus|036|<wrap>
 meridian|item@1280x860|req|GET /api/v1/activity|2
 meridian|item@1280x860|req|GET /api/v1/features|1
 meridian|item@1280x860|req|GET /api/v1/files/<id>/preparation|1
 meridian|item@1280x860|req|GET /api/v1/items/<id>/annotations|1
+meridian|item@1280x860|req|GET /api/v1/items/<id>/tags|1
 meridian|item@1280x860|req|GET /api/v1/items/<id>|1
 meridian|item@1280x860|req|GET /api/v1/libraries|1
 meridian|item@1280x860|req|GET /api/v1/me|1
 meridian|item@1280x860|req|GET /api/v1/server|1
+meridian|item@1280x860|req|GET /api/v1/tags|1
 meridian|item@390x780|dom|^ > div#app|1
 meridian|item@390x780|dom|a > span.md-label[text]|5
 meridian|item@390x780|dom|a > svg.px-ico[aria-hidden=true]|5
@@ -8046,6 +8149,7 @@ meridian|item@390x780|dom|dd > div.trks[text]|1
 meridian|item@390x780|dom|dd > div.trks|1
 meridian|item@390x780|dom|dd > span.live.mode-chip[text]|1
 meridian|item@390x780|dom|dd > span.mode-detail[text]|1
+meridian|item@390x780|dom|dd > ul.plays-on|1
 meridian|item@390x780|dom|details.prep-group > div.prep-group-items|5
 meridian|item@390x780|dom|details.prep-group > summary|5
 meridian|item@390x780|dom|details.px-admin.setdetails.th-admin > div.setdetails-body|1
@@ -8055,6 +8159,8 @@ meridian|item@390x780|dom|div > h2[text]|2
 meridian|item@390x780|dom|div > h3[text]|10
 meridian|item@390x780|dom|div > p[text]|11
 meridian|item@390x780|dom|div#app > div.md-shell|1
+meridian|item@390x780|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
+meridian|item@390x780|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
 meridian|item@390x780|dom|div#prep-file-2.prep-status > details.prep-group|5
 meridian|item@390x780|dom|div#prep-file-2.prep-status > div.prep-overview[role=status text]|1
 meridian|item@390x780|dom|div#prep-file-2.prep-status > p.prep-checked[text]|1
@@ -8071,6 +8177,7 @@ meridian|item@390x780|dom|div.chips > span[text]|3
 meridian|item@390x780|dom|div.crumbs > a[text]|1
 meridian|item@390x780|dom|div.crumbs > span.cur[text]|1
 meridian|item@390x780|dom|div.crumbs > span.sep[text]|1
+meridian|item@390x780|dom|div.dhead > div#item-tags.item-tags|1
 meridian|item@390x780|dom|div.dhead > div.actions|1
 meridian|item@390x780|dom|div.dhead > div.chips|1
 meridian|item@390x780|dom|div.dhead > div.pagehead|1
@@ -8114,8 +8221,8 @@ meridian|item@390x780|dom|div.version > details.px-admin.setdetails.th-admin|1
 meridian|item@390x780|dom|div.version > div.media-preparation-layout|1
 meridian|item@390x780|dom|dl.specs > dd.fn[text]|1
 meridian|item@390x780|dom|dl.specs > dd[text]|1
-meridian|item@390x780|dom|dl.specs > dd|3
-meridian|item@390x780|dom|dl.specs > dt[text]|5
+meridian|item@390x780|dom|dl.specs > dd|4
+meridian|item@390x780|dom|dl.specs > dt[text]|6
 meridian|item@390x780|dom|h1[text] > button.ghost.sm[aria-label=* text]|1
 meridian|item@390x780|dom|header.md-top > a.logo.md-mobile-brand[text]|1
 meridian|item@390x780|dom|header.md-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -8124,6 +8231,7 @@ meridian|item@390x780|dom|header.md-top > div.md-pop|2
 meridian|item@390x780|dom|header.md-top > input#q.search[aria-label=* type=search]|1
 meridian|item@390x780|dom|header.md-top > span#activity.activity|1
 meridian|item@390x780|dom|header.md-top > span.spacer|1
+meridian|item@390x780|dom|li > span[text]|2
 meridian|item@390x780|dom|main#main > div.md-detail|1
 meridian|item@390x780|dom|nav#meridian-nav.md-nav[aria-label=*] > a[aria-current=page]|1
 meridian|item@390x780|dom|nav#meridian-nav.md-nav[aria-label=*] > a|5
@@ -8149,42 +8257,46 @@ meridian|item@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
 meridian|item@390x780|dom|svg.px-ico[aria-hidden=true] > path|11
 meridian|item@390x780|dom|svg.px-ico[aria-hidden=true] > rect|13
 meridian|item@390x780|dom|svg[aria-hidden=true] > path|2
+meridian|item@390x780|dom|ul.plays-on > li|1
 meridian|item@390x780|focus|000|a.logo.md-mobile-brand "cinema"
 meridian|item@390x780|focus|001|button.ghost.sm.lookbtn "Appearance"
 meridian|item@390x780|focus|002|button.ghost.profile "Account"
 meridian|item@390x780|focus|003|a.pgback "Back to Home"
 meridian|item@390x780|focus|004|a "Home"
 meridian|item@390x780|focus|005|button.ghost.sm "Refresh artwork"
-meridian|item@390x780|focus|006|button.btnplay "▶ Resume · 7s"
-meridian|item@390x780|focus|007|button.ghost "Start over"
-meridian|item@390x780|focus|008|button.ghost.sm "Mark watched"
-meridian|item@390x780|focus|009|button.ghost.sm.listtoggle "Watchlist"
-meridian|item@390x780|focus|010|button.ghost.sm.listtoggle.fav "Add to favorites"
-meridian|item@390x780|focus|011|button.ghost "Make a channel"
-meridian|item@390x780|focus|012|button.ghost.sm "Refresh status"
-meridian|item@390x780|focus|013|summary "Pending 3"
-meridian|item@390x780|focus|014|summary "On demand 1"
-meridian|item@390x780|focus|015|summary "Done & ready 1"
-meridian|item@390x780|focus|016|summary "Off 3"
-meridian|item@390x780|focus|017|summary "Not needed 2"
-meridian|item@390x780|focus|018|button.ghost.sm "Analyze now"
-meridian|item@390x780|focus|019|a.ghost.sm "View queue"
-meridian|item@390x780|focus|020|button.ghost.sm "Find subtitles"
-meridian|item@390x780|focus|021|button.ghost.sm "Generate subtitles"
-meridian|item@390x780|focus|022|summary "More actions"
-meridian|item@390x780|focus|023|a "Home"
-meridian|item@390x780|focus|024|button.ghost "Libraries"
-meridian|item@390x780|focus|025|button.ghost "Search"
-meridian|item@390x780|focus|026|button.ghost "More"
-meridian|item@390x780|focus|027|<wrap>
+meridian|item@390x780|focus|006|button.ghost.sm.tag-add "+ Add tag"
+meridian|item@390x780|focus|007|button.btnplay "▶ Resume · 7s"
+meridian|item@390x780|focus|008|button.ghost "Start over"
+meridian|item@390x780|focus|009|button.ghost.sm "Mark watched"
+meridian|item@390x780|focus|010|button.ghost.sm.listtoggle "Watchlist"
+meridian|item@390x780|focus|011|button.ghost.sm.listtoggle.fav "Add to favorites"
+meridian|item@390x780|focus|012|button.ghost "Make a channel"
+meridian|item@390x780|focus|013|button.ghost.sm "Refresh status"
+meridian|item@390x780|focus|014|summary "Pending 3"
+meridian|item@390x780|focus|015|summary "On demand 1"
+meridian|item@390x780|focus|016|summary "Done & ready 1"
+meridian|item@390x780|focus|017|summary "Off 3"
+meridian|item@390x780|focus|018|summary "Not needed 2"
+meridian|item@390x780|focus|019|button.ghost.sm "Analyze now"
+meridian|item@390x780|focus|020|a.ghost.sm "View queue"
+meridian|item@390x780|focus|021|button.ghost.sm "Find subtitles"
+meridian|item@390x780|focus|022|button.ghost.sm "Generate subtitles"
+meridian|item@390x780|focus|023|summary "More actions"
+meridian|item@390x780|focus|024|a "Home"
+meridian|item@390x780|focus|025|button.ghost "Libraries"
+meridian|item@390x780|focus|026|button.ghost "Search"
+meridian|item@390x780|focus|027|button.ghost "More"
+meridian|item@390x780|focus|028|<wrap>
 meridian|item@390x780|req|GET /api/v1/activity|2
 meridian|item@390x780|req|GET /api/v1/features|1
 meridian|item@390x780|req|GET /api/v1/files/<id>/preparation|1
 meridian|item@390x780|req|GET /api/v1/items/<id>/annotations|1
+meridian|item@390x780|req|GET /api/v1/items/<id>/tags|1
 meridian|item@390x780|req|GET /api/v1/items/<id>|1
 meridian|item@390x780|req|GET /api/v1/libraries|1
 meridian|item@390x780|req|GET /api/v1/me|1
 meridian|item@390x780|req|GET /api/v1/server|1
+meridian|item@390x780|req|GET /api/v1/tags|1
 meridian|library@1280x860|dom|^ > div#app|1
 meridian|library@1280x860|dom|a > span.md-label[text]|5
 meridian|library@1280x860|dom|a > span[text]|1
@@ -8226,12 +8338,16 @@ meridian|library@1280x860|dom|div.library-group-head > div.library-group-actions
 meridian|library@1280x860|dom|div.library-group-head > h2#library-row-B-title[tabindex=-1 text]|1
 meridian|library@1280x860|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 meridian|library@1280x860|dom|div.library-group-head > span.library-group-count.muted[text]|2
+meridian|library@1280x860|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+meridian|library@1280x860|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+meridian|library@1280x860|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 meridian|library@1280x860|dom|div.md-library > div#libbody.library-rows|1
 meridian|library@1280x860|dom|div.md-library > div#libpager|1
 meridian|library@1280x860|dom|div.md-library > div#librail|1
 meridian|library@1280x860|dom|div.md-library > div#library-group-detail|1
 meridian|library@1280x860|dom|div.md-library > div#library-load-error[role=status]|1
 meridian|library@1280x860|dom|div.md-library > div.libbar|1
+meridian|library@1280x860|dom|div.md-library > div.library-tag-tools.search-tools|1
 meridian|library@1280x860|dom|div.md-library > div.pagehead|1
 meridian|library@1280x860|dom|div.md-library > div.search-tools|1
 meridian|library@1280x860|dom|div.md-library > nav#library-group-index[aria-label=*]|1
@@ -8321,17 +8437,19 @@ meridian|library@1280x860|focus|022|select#library-scope "All libraries in this 
 meridian|library@1280x860|focus|023|input#library-find "Title…"
 meridian|library@1280x860|focus|024|select "Small Medium Large Extra large"
 meridian|library@1280x860|focus|025|button.ghost.sm "Clear filters"
-meridian|library@1280x860|focus|026|button.ghost.sm "B"
-meridian|library@1280x860|focus|027|button.ghost.sm "H"
-meridian|library@1280x860|focus|028|button.ghost.sm "View all B items"
-meridian|library@1280x860|focus|029|button.ghost.sm "Scroll B left"
-meridian|library@1280x860|focus|030|button.ghost.sm "Scroll B right"
-meridian|library@1280x860|focus|031|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-meridian|library@1280x860|focus|032|button.ghost.sm "View all H items"
-meridian|library@1280x860|focus|033|button.ghost.sm "Scroll H left"
-meridian|library@1280x860|focus|034|button.ghost.sm "Scroll H right"
-meridian|library@1280x860|focus|035|div.poster.k-movie "H Heat 1995 180p"
-meridian|library@1280x860|focus|036|<wrap>
+meridian|library@1280x860|focus|026|button#library-tag-button.ghost.sm "Tags ▾"
+meridian|library@1280x860|focus|027|button#library-select-button.ghost.sm "Select"
+meridian|library@1280x860|focus|028|button.ghost.sm "B"
+meridian|library@1280x860|focus|029|button.ghost.sm "H"
+meridian|library@1280x860|focus|030|button.ghost.sm "View all B items"
+meridian|library@1280x860|focus|031|button.ghost.sm "Scroll B left"
+meridian|library@1280x860|focus|032|button.ghost.sm "Scroll B right"
+meridian|library@1280x860|focus|033|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+meridian|library@1280x860|focus|034|button.ghost.sm "View all H items"
+meridian|library@1280x860|focus|035|button.ghost.sm "Scroll H left"
+meridian|library@1280x860|focus|036|button.ghost.sm "Scroll H right"
+meridian|library@1280x860|focus|037|div.poster.k-movie "H Heat 1995 180p"
+meridian|library@1280x860|focus|038|<wrap>
 meridian|library@1280x860|req|GET /api/v1/activity|2
 meridian|library@1280x860|req|GET /api/v1/features|1
 meridian|library@1280x860|req|GET /api/v1/libraries/<id>/items|1
@@ -8379,12 +8497,16 @@ meridian|library@390x780|dom|div.library-group-head > div.library-group-actions|
 meridian|library@390x780|dom|div.library-group-head > h2#library-row-B-title[tabindex=-1 text]|1
 meridian|library@390x780|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 meridian|library@390x780|dom|div.library-group-head > span.library-group-count.muted[text]|2
+meridian|library@390x780|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+meridian|library@390x780|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+meridian|library@390x780|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 meridian|library@390x780|dom|div.md-library > div#libbody.library-rows|1
 meridian|library@390x780|dom|div.md-library > div#libpager|1
 meridian|library@390x780|dom|div.md-library > div#librail|1
 meridian|library@390x780|dom|div.md-library > div#library-group-detail|1
 meridian|library@390x780|dom|div.md-library > div#library-load-error[role=status]|1
 meridian|library@390x780|dom|div.md-library > div.libbar|1
+meridian|library@390x780|dom|div.md-library > div.library-tag-tools.search-tools|1
 meridian|library@390x780|dom|div.md-library > div.pagehead|1
 meridian|library@390x780|dom|div.md-library > div.search-tools|1
 meridian|library@390x780|dom|div.md-library > nav#library-group-index[aria-label=*]|1
@@ -8462,17 +8584,19 @@ meridian|library@390x780|focus|010|select#library-scope "All libraries in this v
 meridian|library@390x780|focus|011|input#library-find "Title…"
 meridian|library@390x780|focus|012|select "Small Medium Large Extra large"
 meridian|library@390x780|focus|013|button.ghost.sm "Clear filters"
-meridian|library@390x780|focus|014|button.ghost.sm "B"
-meridian|library@390x780|focus|015|button.ghost.sm "H"
-meridian|library@390x780|focus|016|button.ghost.sm "View all B items"
-meridian|library@390x780|focus|017|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-meridian|library@390x780|focus|018|button.ghost.sm "View all H items"
-meridian|library@390x780|focus|019|div.poster.k-movie "H Heat 1995 180p"
-meridian|library@390x780|focus|020|a "Home"
-meridian|library@390x780|focus|021|button.ghost "Libraries"
-meridian|library@390x780|focus|022|button.ghost "Search"
-meridian|library@390x780|focus|023|button.ghost "More"
-meridian|library@390x780|focus|024|<wrap>
+meridian|library@390x780|focus|014|button#library-tag-button.ghost.sm "Tags ▾"
+meridian|library@390x780|focus|015|button#library-select-button.ghost.sm "Select"
+meridian|library@390x780|focus|016|button.ghost.sm "B"
+meridian|library@390x780|focus|017|button.ghost.sm "H"
+meridian|library@390x780|focus|018|button.ghost.sm "View all B items"
+meridian|library@390x780|focus|019|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+meridian|library@390x780|focus|020|button.ghost.sm "View all H items"
+meridian|library@390x780|focus|021|div.poster.k-movie "H Heat 1995 180p"
+meridian|library@390x780|focus|022|a "Home"
+meridian|library@390x780|focus|023|button.ghost "Libraries"
+meridian|library@390x780|focus|024|button.ghost "Search"
+meridian|library@390x780|focus|025|button.ghost "More"
+meridian|library@390x780|focus|026|<wrap>
 meridian|library@390x780|req|GET /api/v1/activity|2
 meridian|library@390x780|req|GET /api/v1/features|1
 meridian|library@390x780|req|GET /api/v1/libraries/<id>/items|1
@@ -9128,10 +9252,12 @@ meridian|player@1280x860|req|GET /api/v1/features|1
 meridian|player@1280x860|req|GET /api/v1/files/<id>/direct|1
 meridian|player@1280x860|req|GET /api/v1/files/<id>/preparation|1
 meridian|player@1280x860|req|GET /api/v1/items/<id>/annotations|1
+meridian|player@1280x860|req|GET /api/v1/items/<id>/tags|1
 meridian|player@1280x860|req|GET /api/v1/items/<id>|1
 meridian|player@1280x860|req|GET /api/v1/libraries|1
 meridian|player@1280x860|req|GET /api/v1/me|1
 meridian|player@1280x860|req|GET /api/v1/server|1
+meridian|player@1280x860|req|GET /api/v1/tags|1
 meridian|player@1280x860|req|POST /api/v1/client-log|7
 meridian|player@1280x860|req|POST /api/v1/files/<id>/decision|1
 meridian|player@1280x860|req|POST /api/v1/items/<id>/progress|1
@@ -9308,10 +9434,12 @@ meridian|player@390x780|req|GET /api/v1/features|1
 meridian|player@390x780|req|GET /api/v1/files/<id>/direct|1
 meridian|player@390x780|req|GET /api/v1/files/<id>/preparation|1
 meridian|player@390x780|req|GET /api/v1/items/<id>/annotations|1
+meridian|player@390x780|req|GET /api/v1/items/<id>/tags|1
 meridian|player@390x780|req|GET /api/v1/items/<id>|1
 meridian|player@390x780|req|GET /api/v1/libraries|1
 meridian|player@390x780|req|GET /api/v1/me|1
 meridian|player@390x780|req|GET /api/v1/server|1
+meridian|player@390x780|req|GET /api/v1/tags|1
 meridian|player@390x780|req|POST /api/v1/client-log|7
 meridian|player@390x780|req|POST /api/v1/files/<id>/decision|1
 meridian|player@390x780|req|POST /api/v1/items/<id>/progress|1
@@ -10673,6 +10801,9 @@ theater|category@1280x860|dom|div.library-group-head > h2#library-row-B-title[ta
 theater|category@1280x860|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 theater|category@1280x860|dom|div.library-group-head > h2#library-row-S-title[tabindex=-1 text]|1
 theater|category@1280x860|dom|div.library-group-head > span.library-group-count.muted[text]|3
+theater|category@1280x860|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+theater|category@1280x860|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+theater|category@1280x860|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 theater|category@1280x860|dom|div.meta > div.s|4
 theater|category@1280x860|dom|div.meta > div.t[text]|4
 theater|category@1280x860|dom|div.pagehead > div.phnav|1
@@ -10708,6 +10839,7 @@ theater|category@1280x860|dom|main#main > div#librail|1
 theater|category@1280x860|dom|main#main > div#library-group-detail|1
 theater|category@1280x860|dom|main#main > div#library-load-error[role=status]|1
 theater|category@1280x860|dom|main#main > div.libbar.th-chips|1
+theater|category@1280x860|dom|main#main > div.library-tag-tools.search-tools|1
 theater|category@1280x860|dom|main#main > div.pagehead|1
 theater|category@1280x860|dom|main#main > div.search-tools|1
 theater|category@1280x860|dom|main#main > div.th-grid|1
@@ -10751,23 +10883,25 @@ theater|category@1280x860|focus|018|select#library-scope "All libraries in this 
 theater|category@1280x860|focus|019|input#library-find "Title…"
 theater|category@1280x860|focus|020|select "Small Medium Large Extra large"
 theater|category@1280x860|focus|021|button.ghost.sm "Clear filters"
-theater|category@1280x860|focus|022|button.ghost.sm "B"
-theater|category@1280x860|focus|023|button.ghost.sm "H"
-theater|category@1280x860|focus|024|button.ghost.sm "S"
-theater|category@1280x860|focus|025|button.ghost.sm "View all B items"
-theater|category@1280x860|focus|026|button.ghost.sm "Scroll B left"
-theater|category@1280x860|focus|027|button.ghost.sm "Scroll B right"
-theater|category@1280x860|focus|028|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-theater|category@1280x860|focus|029|button.ghost.sm "View all H items"
-theater|category@1280x860|focus|030|button.ghost.sm "Scroll H left"
-theater|category@1280x860|focus|031|button.ghost.sm "Scroll H right"
-theater|category@1280x860|focus|032|div.poster.k-movie "H Heat 1995 180p"
-theater|category@1280x860|focus|033|button.ghost.sm "View all S items"
-theater|category@1280x860|focus|034|button.ghost.sm "Scroll S left"
-theater|category@1280x860|focus|035|button.ghost.sm "Scroll S right"
-theater|category@1280x860|focus|036|div.poster.k-movie.unw "TS The Signal 2021 180p"
-theater|category@1280x860|focus|037|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-theater|category@1280x860|focus|038|<wrap>
+theater|category@1280x860|focus|022|button#library-tag-button.ghost.sm "Tags ▾"
+theater|category@1280x860|focus|023|button#library-select-button.ghost.sm "Select"
+theater|category@1280x860|focus|024|button.ghost.sm "B"
+theater|category@1280x860|focus|025|button.ghost.sm "H"
+theater|category@1280x860|focus|026|button.ghost.sm "S"
+theater|category@1280x860|focus|027|button.ghost.sm "View all B items"
+theater|category@1280x860|focus|028|button.ghost.sm "Scroll B left"
+theater|category@1280x860|focus|029|button.ghost.sm "Scroll B right"
+theater|category@1280x860|focus|030|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+theater|category@1280x860|focus|031|button.ghost.sm "View all H items"
+theater|category@1280x860|focus|032|button.ghost.sm "Scroll H left"
+theater|category@1280x860|focus|033|button.ghost.sm "Scroll H right"
+theater|category@1280x860|focus|034|div.poster.k-movie "H Heat 1995 180p"
+theater|category@1280x860|focus|035|button.ghost.sm "View all S items"
+theater|category@1280x860|focus|036|button.ghost.sm "Scroll S left"
+theater|category@1280x860|focus|037|button.ghost.sm "Scroll S right"
+theater|category@1280x860|focus|038|div.poster.k-movie.unw "TS The Signal 2021 180p"
+theater|category@1280x860|focus|039|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+theater|category@1280x860|focus|040|<wrap>
 theater|category@1280x860|req|GET /api/v1/activity|2
 theater|category@1280x860|req|GET /api/v1/features|1
 theater|category@1280x860|req|GET /api/v1/libraries/<id>/items|2
@@ -10809,6 +10943,9 @@ theater|category@390x780|dom|div.library-group-head > h2#library-row-B-title[tab
 theater|category@390x780|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 theater|category@390x780|dom|div.library-group-head > h2#library-row-S-title[tabindex=-1 text]|1
 theater|category@390x780|dom|div.library-group-head > span.library-group-count.muted[text]|3
+theater|category@390x780|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+theater|category@390x780|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+theater|category@390x780|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 theater|category@390x780|dom|div.meta > div.s|4
 theater|category@390x780|dom|div.meta > div.t[text]|4
 theater|category@390x780|dom|div.pagehead > div.phnav|1
@@ -10844,6 +10981,7 @@ theater|category@390x780|dom|main#main > div#librail|1
 theater|category@390x780|dom|main#main > div#library-group-detail|1
 theater|category@390x780|dom|main#main > div#library-load-error[role=status]|1
 theater|category@390x780|dom|main#main > div.libbar.th-chips|1
+theater|category@390x780|dom|main#main > div.library-tag-tools.search-tools|1
 theater|category@390x780|dom|main#main > div.pagehead|1
 theater|category@390x780|dom|main#main > div.search-tools|1
 theater|category@390x780|dom|main#main > div.th-grid|1
@@ -10880,24 +11018,26 @@ theater|category@390x780|focus|011|select#library-scope "All libraries in this v
 theater|category@390x780|focus|012|input#library-find "Title…"
 theater|category@390x780|focus|013|select "Small Medium Large Extra large"
 theater|category@390x780|focus|014|button.ghost.sm "Clear filters"
-theater|category@390x780|focus|015|button.ghost.sm "B"
-theater|category@390x780|focus|016|button.ghost.sm "H"
-theater|category@390x780|focus|017|button.ghost.sm "S"
-theater|category@390x780|focus|018|button.ghost.sm "View all B items"
-theater|category@390x780|focus|019|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-theater|category@390x780|focus|020|button.ghost.sm "View all H items"
-theater|category@390x780|focus|021|div.poster.k-movie "H Heat 1995 180p"
-theater|category@390x780|focus|022|button.ghost.sm "View all S items"
-theater|category@390x780|focus|023|div.poster.k-movie.unw "TS The Signal 2021 180p"
-theater|category@390x780|focus|024|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-theater|category@390x780|focus|025|a "Home"
-theater|category@390x780|focus|026|a "Shared libraries"
-theater|category@390x780|focus|027|a "Live TV"
-theater|category@390x780|focus|028|a "Recordings"
-theater|category@390x780|focus|029|a "Library channels"
-theater|category@390x780|focus|030|a "Activity"
-theater|category@390x780|focus|031|a "Settings"
-theater|category@390x780|focus|032|<wrap>
+theater|category@390x780|focus|015|button#library-tag-button.ghost.sm "Tags ▾"
+theater|category@390x780|focus|016|button#library-select-button.ghost.sm "Select"
+theater|category@390x780|focus|017|button.ghost.sm "B"
+theater|category@390x780|focus|018|button.ghost.sm "H"
+theater|category@390x780|focus|019|button.ghost.sm "S"
+theater|category@390x780|focus|020|button.ghost.sm "View all B items"
+theater|category@390x780|focus|021|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+theater|category@390x780|focus|022|button.ghost.sm "View all H items"
+theater|category@390x780|focus|023|div.poster.k-movie "H Heat 1995 180p"
+theater|category@390x780|focus|024|button.ghost.sm "View all S items"
+theater|category@390x780|focus|025|div.poster.k-movie.unw "TS The Signal 2021 180p"
+theater|category@390x780|focus|026|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+theater|category@390x780|focus|027|a "Home"
+theater|category@390x780|focus|028|a "Shared libraries"
+theater|category@390x780|focus|029|a "Live TV"
+theater|category@390x780|focus|030|a "Recordings"
+theater|category@390x780|focus|031|a "Library channels"
+theater|category@390x780|focus|032|a "Activity"
+theater|category@390x780|focus|033|a "Settings"
+theater|category@390x780|focus|034|<wrap>
 theater|category@390x780|req|GET /api/v1/activity|2
 theater|category@390x780|req|GET /api/v1/features|1
 theater|category@390x780|req|GET /api/v1/libraries/<id>/items|2
@@ -10910,6 +11050,7 @@ theater|home@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=
 theater|home@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|home@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|home@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
+theater|home@1280x860|dom|div > div.home-customize|1
 theater|home@1280x860|dom|div > div.libbar|1
 theater|home@1280x860|dom|div > div.railbox|5
 theater|home@1280x860|dom|div > h2.section[text]|5
@@ -10919,6 +11060,7 @@ theater|home@1280x860|dom|div.actions > button.btnplay[text]|1
 theater|home@1280x860|dom|div.actions > button.ghost[text]|1
 theater|home@1280x860|dom|div.artbox > div.art.ph[text]|12
 theater|home@1280x860|dom|div.artbox > span.badge[text]|1
+theater|home@1280x860|dom|div.home-customize > button.ghost.sm[text]|1
 theater|home@1280x860|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.artbox|1
 theater|home@1280x860|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.meta|1
 theater|home@1280x860|dom|div.k-episode.poster[role=link tabindex=0] > div.artbox|1
@@ -10964,7 +11106,7 @@ theater|home@1280x860|dom|div.th-pop > button.ghost.lookbtn.sm[aria-haspopup=men
 theater|home@1280x860|dom|div.th-pop > button.ghost.profile.sm|1
 theater|home@1280x860|dom|div.th-pop > div#lookmenu.amenu.lookmenu|1
 theater|home@1280x860|dom|div.th-pop > div#profilemenu.amenu|1
-theater|home@1280x860|dom|div.th-rails > div|3
+theater|home@1280x860|dom|div.th-rails > div|9
 theater|home@1280x860|dom|h2.section[text] > a.muted[text]|2
 theater|home@1280x860|dom|header.th-top > a.logo[text]|1
 theater|home@1280x860|dom|header.th-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -10996,26 +11138,28 @@ theater|home@1280x860|focus|010|button.ghost.sm.profile "Account"
 theater|home@1280x860|focus|011|button#cinema-local-pair-entry.ghost "Pair a phone"
 theater|home@1280x860|focus|012|button.btnplay "▶ Resume"
 theater|home@1280x860|focus|013|button.ghost "ⓘ Details"
-theater|home@1280x860|focus|014|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
-theater|home@1280x860|focus|015|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
-theater|home@1280x860|focus|016|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-theater|home@1280x860|focus|017|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
-theater|home@1280x860|focus|018|div.poster.k-movie "H Heat 1995 180p"
-theater|home@1280x860|focus|019|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-theater|home@1280x860|focus|020|div.poster.k-movie.unw "TS The Signal 2021 180p"
-theater|home@1280x860|focus|021|select "Category Share name"
-theater|home@1280x860|focus|022|a.muted "· VIEW ALL (4)"
-theater|home@1280x860|focus|023|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-theater|home@1280x860|focus|024|div.poster.k-movie.unw "TS The Signal 2021 180p"
-theater|home@1280x860|focus|025|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-theater|home@1280x860|focus|026|div.poster.k-movie "H Heat 1995 180p"
-theater|home@1280x860|focus|027|a.muted "· VIEW ALL (1)"
-theater|home@1280x860|focus|028|div.poster.k-show.unw "SH Signal Hill 2019"
-theater|home@1280x860|focus|029|<wrap>
+theater|home@1280x860|focus|014|button.ghost.sm "Customize Home"
+theater|home@1280x860|focus|015|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
+theater|home@1280x860|focus|016|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
+theater|home@1280x860|focus|017|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+theater|home@1280x860|focus|018|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
+theater|home@1280x860|focus|019|div.poster.k-movie "H Heat 1995 180p"
+theater|home@1280x860|focus|020|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+theater|home@1280x860|focus|021|div.poster.k-movie.unw "TS The Signal 2021 180p"
+theater|home@1280x860|focus|022|select "Category Share name"
+theater|home@1280x860|focus|023|a.muted "· VIEW ALL (4)"
+theater|home@1280x860|focus|024|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+theater|home@1280x860|focus|025|div.poster.k-movie.unw "TS The Signal 2021 180p"
+theater|home@1280x860|focus|026|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+theater|home@1280x860|focus|027|div.poster.k-movie "H Heat 1995 180p"
+theater|home@1280x860|focus|028|a.muted "· VIEW ALL (1)"
+theater|home@1280x860|focus|029|div.poster.k-show.unw "SH Signal Hill 2019"
+theater|home@1280x860|focus|030|<wrap>
 theater|home@1280x860|req|GET /api/v1/activity|2
 theater|home@1280x860|req|GET /api/v1/coming-soon|1
 theater|home@1280x860|req|GET /api/v1/features|1
 theater|home@1280x860|req|GET /api/v1/home/previews|1
+theater|home@1280x860|req|GET /api/v1/home/rows|1
 theater|home@1280x860|req|GET /api/v1/hubs|1
 theater|home@1280x860|req|GET /api/v1/lists/favorite|1
 theater|home@1280x860|req|GET /api/v1/lists/watchlist|1
@@ -11028,6 +11172,7 @@ theater|home@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|home@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|home@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
 theater|home@390x780|dom|div > div.can-r.railbox|2
+theater|home@390x780|dom|div > div.home-customize|1
 theater|home@390x780|dom|div > div.libbar|1
 theater|home@390x780|dom|div > div.railbox|3
 theater|home@390x780|dom|div > h2.section[text]|5
@@ -11040,6 +11185,7 @@ theater|home@390x780|dom|div.artbox > span.badge[text]|1
 theater|home@390x780|dom|div.can-r.railbox > button.l.railarrow[aria-label=* text]|2
 theater|home@390x780|dom|div.can-r.railbox > button.r.railarrow[aria-label=* text]|2
 theater|home@390x780|dom|div.can-r.railbox > div.rowscroll|2
+theater|home@390x780|dom|div.home-customize > button.ghost.sm[text]|1
 theater|home@390x780|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.artbox|1
 theater|home@390x780|dom|div.k-episode.poster.unw[role=link tabindex=0] > div.meta|1
 theater|home@390x780|dom|div.k-episode.poster[role=link tabindex=0] > div.artbox|1
@@ -11085,7 +11231,7 @@ theater|home@390x780|dom|div.th-pop > button.ghost.lookbtn.sm[aria-haspopup=menu
 theater|home@390x780|dom|div.th-pop > button.ghost.profile.sm|1
 theater|home@390x780|dom|div.th-pop > div#lookmenu.amenu.lookmenu|1
 theater|home@390x780|dom|div.th-pop > div#profilemenu.amenu|1
-theater|home@390x780|dom|div.th-rails > div|3
+theater|home@390x780|dom|div.th-rails > div|9
 theater|home@390x780|dom|h2.section[text] > a.muted[text]|2
 theater|home@390x780|dom|header.th-top > a.logo[text]|1
 theater|home@390x780|dom|header.th-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -11110,33 +11256,35 @@ theater|home@390x780|focus|003|button.ghost.sm.profile "Account"
 theater|home@390x780|focus|004|button#cinema-local-pair-entry.ghost "Pair a phone"
 theater|home@390x780|focus|005|button.btnplay "▶ Resume"
 theater|home@390x780|focus|006|button.ghost "ⓘ Details"
-theater|home@390x780|focus|007|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
-theater|home@390x780|focus|008|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
-theater|home@390x780|focus|009|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-theater|home@390x780|focus|010|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
-theater|home@390x780|focus|011|div.poster.k-movie "H Heat 1995 180p"
-theater|home@390x780|focus|012|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-theater|home@390x780|focus|013|div.poster.k-movie.unw "TS The Signal 2021 180p"
-theater|home@390x780|focus|014|select "Category Share name"
-theater|home@390x780|focus|015|a.muted "· VIEW ALL (4)"
-theater|home@390x780|focus|016|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
-theater|home@390x780|focus|017|div.poster.k-movie.unw "TS The Signal 2021 180p"
-theater|home@390x780|focus|018|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-theater|home@390x780|focus|019|div.poster.k-movie "H Heat 1995 180p"
-theater|home@390x780|focus|020|a.muted "· VIEW ALL (1)"
-theater|home@390x780|focus|021|div.poster.k-show.unw "SH Signal Hill 2019"
-theater|home@390x780|focus|022|a.on "Home"
-theater|home@390x780|focus|023|a "Shared libraries"
-theater|home@390x780|focus|024|a "Live TV"
-theater|home@390x780|focus|025|a "Recordings"
-theater|home@390x780|focus|026|a "Library channels"
-theater|home@390x780|focus|027|a "Activity"
-theater|home@390x780|focus|028|a "Settings"
-theater|home@390x780|focus|029|<wrap>
+theater|home@390x780|focus|007|button.ghost.sm "Customize Home"
+theater|home@390x780|focus|008|div.poster.k-movie "H Heat 1995 180p 5s left · ends ~12:00 P
+theater|home@390x780|focus|009|div.poster.k-episode.unw "TH Signal Hill S1E2 · The Handoff"
+theater|home@390x780|focus|010|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+theater|home@390x780|focus|011|div.poster.k-episode "CO ✓ Signal Hill S1E1 · Cold Open"
+theater|home@390x780|focus|012|div.poster.k-movie "H Heat 1995 180p"
+theater|home@390x780|focus|013|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+theater|home@390x780|focus|014|div.poster.k-movie.unw "TS The Signal 2021 180p"
+theater|home@390x780|focus|015|select "Category Share name"
+theater|home@390x780|focus|016|a.muted "· VIEW ALL (4)"
+theater|home@390x780|focus|017|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
+theater|home@390x780|focus|018|div.poster.k-movie.unw "TS The Signal 2021 180p"
+theater|home@390x780|focus|019|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+theater|home@390x780|focus|020|div.poster.k-movie "H Heat 1995 180p"
+theater|home@390x780|focus|021|a.muted "· VIEW ALL (1)"
+theater|home@390x780|focus|022|div.poster.k-show.unw "SH Signal Hill 2019"
+theater|home@390x780|focus|023|a.on "Home"
+theater|home@390x780|focus|024|a "Shared libraries"
+theater|home@390x780|focus|025|a "Live TV"
+theater|home@390x780|focus|026|a "Recordings"
+theater|home@390x780|focus|027|a "Library channels"
+theater|home@390x780|focus|028|a "Activity"
+theater|home@390x780|focus|029|a "Settings"
+theater|home@390x780|focus|030|<wrap>
 theater|home@390x780|req|GET /api/v1/activity|2
 theater|home@390x780|req|GET /api/v1/coming-soon|1
 theater|home@390x780|req|GET /api/v1/features|1
 theater|home@390x780|req|GET /api/v1/home/previews|1
+theater|home@390x780|req|GET /api/v1/home/rows|1
 theater|home@390x780|req|GET /api/v1/hubs|1
 theater|home@390x780|req|GET /api/v1/lists/favorite|1
 theater|home@390x780|req|GET /api/v1/lists/watchlist|1
@@ -11163,6 +11311,7 @@ theater|item@1280x860|dom|dd > div.trks[text]|1
 theater|item@1280x860|dom|dd > div.trks|1
 theater|item@1280x860|dom|dd > span.live.mode-chip[text]|1
 theater|item@1280x860|dom|dd > span.mode-detail[text]|1
+theater|item@1280x860|dom|dd > ul.plays-on|1
 theater|item@1280x860|dom|details.prep-group > div.prep-group-items|5
 theater|item@1280x860|dom|details.prep-group > summary|5
 theater|item@1280x860|dom|details.px-admin.setdetails.th-admin > div.setdetails-body|1
@@ -11172,6 +11321,8 @@ theater|item@1280x860|dom|div > h2[text]|2
 theater|item@1280x860|dom|div > h3[text]|10
 theater|item@1280x860|dom|div > p[text]|11
 theater|item@1280x860|dom|div#app > div.layout-frame|1
+theater|item@1280x860|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
+theater|item@1280x860|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
 theater|item@1280x860|dom|div#prep-file-2.prep-status > details.prep-group|5
 theater|item@1280x860|dom|div#prep-file-2.prep-status > div.prep-overview[role=status text]|1
 theater|item@1280x860|dom|div#prep-file-2.prep-status > p.prep-checked[text]|1
@@ -11212,6 +11363,7 @@ theater|item@1280x860|dom|div.th-detail.th-hero.th-noart > div.th-scrim[aria-hid
 theater|item@1280x860|dom|div.th-dposter > div.art.ph[text]|1
 theater|item@1280x860|dom|div.th-dwrap > div.th-dposter|1
 theater|item@1280x860|dom|div.th-dwrap > div.th-fg|1
+theater|item@1280x860|dom|div.th-fg > div#item-tags.item-tags|1
 theater|item@1280x860|dom|div.th-fg > div.actions|1
 theater|item@1280x860|dom|div.th-fg > div.chips|1
 theater|item@1280x860|dom|div.th-fg > div.pagehead|1
@@ -11232,8 +11384,8 @@ theater|item@1280x860|dom|div.version > details.px-admin.setdetails.th-admin|1
 theater|item@1280x860|dom|div.version > div.media-preparation-layout|1
 theater|item@1280x860|dom|dl.specs > dd.fn[text]|1
 theater|item@1280x860|dom|dl.specs > dd[text]|1
-theater|item@1280x860|dom|dl.specs > dd|3
-theater|item@1280x860|dom|dl.specs > dt[text]|5
+theater|item@1280x860|dom|dl.specs > dd|4
+theater|item@1280x860|dom|dl.specs > dt[text]|6
 theater|item@1280x860|dom|h1[text] > button.ghost.sm.th-admin[aria-label=* text]|1
 theater|item@1280x860|dom|header.th-top > a.logo[text]|1
 theater|item@1280x860|dom|header.th-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -11242,6 +11394,7 @@ theater|item@1280x860|dom|header.th-top > input#q.search[aria-label=* type=searc
 theater|item@1280x860|dom|header.th-top > nav.th-nav[aria-label=*]|1
 theater|item@1280x860|dom|header.th-top > span#activity.activity|1
 theater|item@1280x860|dom|header.th-top > span.spacer|1
+theater|item@1280x860|dom|li > span[text]|2
 theater|item@1280x860|dom|main#main > div.th-detail.th-hero.th-noart|1
 theater|item@1280x860|dom|main#main > div.th-rest|1
 theater|item@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|7
@@ -11260,6 +11413,7 @@ theater|item@1280x860|dom|summary > span.prep-count[aria-label=* text]|5
 theater|item@1280x860|dom|summary > span[text]|5
 theater|item@1280x860|dom|svg.material-icon[aria-hidden=true] > path|2
 theater|item@1280x860|dom|svg[aria-hidden=true] > path|2
+theater|item@1280x860|dom|ul.plays-on > li|1
 theater|item@1280x860|focus|000|a.logo "cinema"
 theater|item@1280x860|focus|001|a "Home"
 theater|item@1280x860|focus|002|a "Shared libraries"
@@ -11274,31 +11428,34 @@ theater|item@1280x860|focus|010|button.ghost.sm.profile "Account"
 theater|item@1280x860|focus|011|a.pgback "Back to Home"
 theater|item@1280x860|focus|012|a "Home"
 theater|item@1280x860|focus|013|button.ghost.sm.th-admin "Refresh artwork"
-theater|item@1280x860|focus|014|button.btnplay "▶ Resume · 7s"
-theater|item@1280x860|focus|015|button.ghost "Start over"
-theater|item@1280x860|focus|016|button.ghost.sm "Mark watched"
-theater|item@1280x860|focus|017|button.ghost.sm.listtoggle "Watchlist"
-theater|item@1280x860|focus|018|button.ghost.sm.listtoggle.fav "Add to favorites"
-theater|item@1280x860|focus|019|button.ghost.sm "Refresh status"
-theater|item@1280x860|focus|020|summary "Pending 3"
-theater|item@1280x860|focus|021|summary "On demand 1"
-theater|item@1280x860|focus|022|summary "Done & ready 1"
-theater|item@1280x860|focus|023|summary "Off 3"
-theater|item@1280x860|focus|024|summary "Not needed 2"
-theater|item@1280x860|focus|025|button.ghost.sm "Analyze now"
-theater|item@1280x860|focus|026|a.ghost.sm "View queue"
-theater|item@1280x860|focus|027|button.ghost.sm "Find subtitles"
-theater|item@1280x860|focus|028|button.ghost.sm "Generate subtitles"
-theater|item@1280x860|focus|029|summary "More actions"
-theater|item@1280x860|focus|030|<wrap>
+theater|item@1280x860|focus|014|button.ghost.sm.tag-add "+ Add tag"
+theater|item@1280x860|focus|015|button.btnplay "▶ Resume · 7s"
+theater|item@1280x860|focus|016|button.ghost "Start over"
+theater|item@1280x860|focus|017|button.ghost.sm "Mark watched"
+theater|item@1280x860|focus|018|button.ghost.sm.listtoggle "Watchlist"
+theater|item@1280x860|focus|019|button.ghost.sm.listtoggle.fav "Add to favorites"
+theater|item@1280x860|focus|020|button.ghost.sm "Refresh status"
+theater|item@1280x860|focus|021|summary "Pending 3"
+theater|item@1280x860|focus|022|summary "On demand 1"
+theater|item@1280x860|focus|023|summary "Done & ready 1"
+theater|item@1280x860|focus|024|summary "Off 3"
+theater|item@1280x860|focus|025|summary "Not needed 2"
+theater|item@1280x860|focus|026|button.ghost.sm "Analyze now"
+theater|item@1280x860|focus|027|a.ghost.sm "View queue"
+theater|item@1280x860|focus|028|button.ghost.sm "Find subtitles"
+theater|item@1280x860|focus|029|button.ghost.sm "Generate subtitles"
+theater|item@1280x860|focus|030|summary "More actions"
+theater|item@1280x860|focus|031|<wrap>
 theater|item@1280x860|req|GET /api/v1/activity|2
 theater|item@1280x860|req|GET /api/v1/features|1
 theater|item@1280x860|req|GET /api/v1/files/<id>/preparation|1
 theater|item@1280x860|req|GET /api/v1/items/<id>/annotations|1
+theater|item@1280x860|req|GET /api/v1/items/<id>/tags|1
 theater|item@1280x860|req|GET /api/v1/items/<id>|1
 theater|item@1280x860|req|GET /api/v1/libraries|1
 theater|item@1280x860|req|GET /api/v1/me|1
 theater|item@1280x860|req|GET /api/v1/server|1
+theater|item@1280x860|req|GET /api/v1/tags|1
 theater|item@390x780|dom|^ > div#app|1
 theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
 theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
@@ -11320,6 +11477,7 @@ theater|item@390x780|dom|dd > div.trks[text]|1
 theater|item@390x780|dom|dd > div.trks|1
 theater|item@390x780|dom|dd > span.live.mode-chip[text]|1
 theater|item@390x780|dom|dd > span.mode-detail[text]|1
+theater|item@390x780|dom|dd > ul.plays-on|1
 theater|item@390x780|dom|details.prep-group > div.prep-group-items|5
 theater|item@390x780|dom|details.prep-group > summary|5
 theater|item@390x780|dom|details.px-admin.setdetails.th-admin > div.setdetails-body|1
@@ -11329,6 +11487,8 @@ theater|item@390x780|dom|div > h2[text]|2
 theater|item@390x780|dom|div > h3[text]|10
 theater|item@390x780|dom|div > p[text]|11
 theater|item@390x780|dom|div#app > div.layout-frame|1
+theater|item@390x780|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
+theater|item@390x780|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
 theater|item@390x780|dom|div#prep-file-2.prep-status > details.prep-group|5
 theater|item@390x780|dom|div#prep-file-2.prep-status > div.prep-overview[role=status text]|1
 theater|item@390x780|dom|div#prep-file-2.prep-status > p.prep-checked[text]|1
@@ -11369,6 +11529,7 @@ theater|item@390x780|dom|div.th-detail.th-hero.th-noart > div.th-scrim[aria-hidd
 theater|item@390x780|dom|div.th-dposter > div.art.ph[text]|1
 theater|item@390x780|dom|div.th-dwrap > div.th-dposter|1
 theater|item@390x780|dom|div.th-dwrap > div.th-fg|1
+theater|item@390x780|dom|div.th-fg > div#item-tags.item-tags|1
 theater|item@390x780|dom|div.th-fg > div.actions|1
 theater|item@390x780|dom|div.th-fg > div.chips|1
 theater|item@390x780|dom|div.th-fg > div.pagehead|1
@@ -11389,8 +11550,8 @@ theater|item@390x780|dom|div.version > details.px-admin.setdetails.th-admin|1
 theater|item@390x780|dom|div.version > div.media-preparation-layout|1
 theater|item@390x780|dom|dl.specs > dd.fn[text]|1
 theater|item@390x780|dom|dl.specs > dd[text]|1
-theater|item@390x780|dom|dl.specs > dd|3
-theater|item@390x780|dom|dl.specs > dt[text]|5
+theater|item@390x780|dom|dl.specs > dd|4
+theater|item@390x780|dom|dl.specs > dt[text]|6
 theater|item@390x780|dom|h1[text] > button.ghost.sm.th-admin[aria-label=* text]|1
 theater|item@390x780|dom|header.th-top > a.logo[text]|1
 theater|item@390x780|dom|header.th-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -11399,6 +11560,7 @@ theater|item@390x780|dom|header.th-top > input#q.search[aria-label=* type=search
 theater|item@390x780|dom|header.th-top > nav.th-nav[aria-label=*]|1
 theater|item@390x780|dom|header.th-top > span#activity.activity|1
 theater|item@390x780|dom|header.th-top > span.spacer|1
+theater|item@390x780|dom|li > span[text]|2
 theater|item@390x780|dom|main#main > div.th-detail.th-hero.th-noart|1
 theater|item@390x780|dom|main#main > div.th-rest|1
 theater|item@390x780|dom|nav.th-nav[aria-label=*] > a[text]|7
@@ -11417,6 +11579,7 @@ theater|item@390x780|dom|summary > span.prep-count[aria-label=* text]|5
 theater|item@390x780|dom|summary > span[text]|5
 theater|item@390x780|dom|svg.material-icon[aria-hidden=true] > path|2
 theater|item@390x780|dom|svg[aria-hidden=true] > path|2
+theater|item@390x780|dom|ul.plays-on > li|1
 theater|item@390x780|focus|000|a.logo "cinema"
 theater|item@390x780|focus|001|input#q.search "Search cinema"
 theater|item@390x780|focus|002|button.ghost.sm.lookbtn "Appearance"
@@ -11424,38 +11587,41 @@ theater|item@390x780|focus|003|button.ghost.sm.profile "Account"
 theater|item@390x780|focus|004|a.pgback "Back to Home"
 theater|item@390x780|focus|005|a "Home"
 theater|item@390x780|focus|006|button.ghost.sm.th-admin "Refresh artwork"
-theater|item@390x780|focus|007|button.btnplay "▶ Resume · 7s"
-theater|item@390x780|focus|008|button.ghost "Start over"
-theater|item@390x780|focus|009|button.ghost.sm "Mark watched"
-theater|item@390x780|focus|010|button.ghost.sm.listtoggle "Watchlist"
-theater|item@390x780|focus|011|button.ghost.sm.listtoggle.fav "Add to favorites"
-theater|item@390x780|focus|012|button.ghost.sm "Refresh status"
-theater|item@390x780|focus|013|summary "Pending 3"
-theater|item@390x780|focus|014|summary "On demand 1"
-theater|item@390x780|focus|015|summary "Done & ready 1"
-theater|item@390x780|focus|016|summary "Off 3"
-theater|item@390x780|focus|017|summary "Not needed 2"
-theater|item@390x780|focus|018|button.ghost.sm "Analyze now"
-theater|item@390x780|focus|019|a.ghost.sm "View queue"
-theater|item@390x780|focus|020|button.ghost.sm "Find subtitles"
-theater|item@390x780|focus|021|button.ghost.sm "Generate subtitles"
-theater|item@390x780|focus|022|summary "More actions"
-theater|item@390x780|focus|023|a "Home"
-theater|item@390x780|focus|024|a "Shared libraries"
-theater|item@390x780|focus|025|a "Live TV"
-theater|item@390x780|focus|026|a "Recordings"
-theater|item@390x780|focus|027|a "Library channels"
-theater|item@390x780|focus|028|a "Activity"
-theater|item@390x780|focus|029|a "Settings"
-theater|item@390x780|focus|030|<wrap>
+theater|item@390x780|focus|007|button.ghost.sm.tag-add "+ Add tag"
+theater|item@390x780|focus|008|button.btnplay "▶ Resume · 7s"
+theater|item@390x780|focus|009|button.ghost "Start over"
+theater|item@390x780|focus|010|button.ghost.sm "Mark watched"
+theater|item@390x780|focus|011|button.ghost.sm.listtoggle "Watchlist"
+theater|item@390x780|focus|012|button.ghost.sm.listtoggle.fav "Add to favorites"
+theater|item@390x780|focus|013|button.ghost.sm "Refresh status"
+theater|item@390x780|focus|014|summary "Pending 3"
+theater|item@390x780|focus|015|summary "On demand 1"
+theater|item@390x780|focus|016|summary "Done & ready 1"
+theater|item@390x780|focus|017|summary "Off 3"
+theater|item@390x780|focus|018|summary "Not needed 2"
+theater|item@390x780|focus|019|button.ghost.sm "Analyze now"
+theater|item@390x780|focus|020|a.ghost.sm "View queue"
+theater|item@390x780|focus|021|button.ghost.sm "Find subtitles"
+theater|item@390x780|focus|022|button.ghost.sm "Generate subtitles"
+theater|item@390x780|focus|023|summary "More actions"
+theater|item@390x780|focus|024|a "Home"
+theater|item@390x780|focus|025|a "Shared libraries"
+theater|item@390x780|focus|026|a "Live TV"
+theater|item@390x780|focus|027|a "Recordings"
+theater|item@390x780|focus|028|a "Library channels"
+theater|item@390x780|focus|029|a "Activity"
+theater|item@390x780|focus|030|a "Settings"
+theater|item@390x780|focus|031|<wrap>
 theater|item@390x780|req|GET /api/v1/activity|2
 theater|item@390x780|req|GET /api/v1/features|1
 theater|item@390x780|req|GET /api/v1/files/<id>/preparation|1
 theater|item@390x780|req|GET /api/v1/items/<id>/annotations|1
+theater|item@390x780|req|GET /api/v1/items/<id>/tags|1
 theater|item@390x780|req|GET /api/v1/items/<id>|1
 theater|item@390x780|req|GET /api/v1/libraries|1
 theater|item@390x780|req|GET /api/v1/me|1
 theater|item@390x780|req|GET /api/v1/server|1
+theater|item@390x780|req|GET /api/v1/tags|1
 theater|library@1280x860|dom|^ > div#app|1
 theater|library@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 theater|library@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
@@ -11489,6 +11655,9 @@ theater|library@1280x860|dom|div.library-group-head > div.library-group-actions|
 theater|library@1280x860|dom|div.library-group-head > h2#library-row-B-title[tabindex=-1 text]|1
 theater|library@1280x860|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 theater|library@1280x860|dom|div.library-group-head > span.library-group-count.muted[text]|2
+theater|library@1280x860|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+theater|library@1280x860|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+theater|library@1280x860|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 theater|library@1280x860|dom|div.meta > div.s|2
 theater|library@1280x860|dom|div.meta > div.t[text]|2
 theater|library@1280x860|dom|div.pagehead > div.phnav|1
@@ -11524,6 +11693,7 @@ theater|library@1280x860|dom|main#main > div#librail|1
 theater|library@1280x860|dom|main#main > div#library-group-detail|1
 theater|library@1280x860|dom|main#main > div#library-load-error[role=status]|1
 theater|library@1280x860|dom|main#main > div.libbar.th-chips|1
+theater|library@1280x860|dom|main#main > div.library-tag-tools.search-tools|1
 theater|library@1280x860|dom|main#main > div.pagehead|1
 theater|library@1280x860|dom|main#main > div.search-tools|1
 theater|library@1280x860|dom|main#main > div.th-grid|1
@@ -11565,17 +11735,19 @@ theater|library@1280x860|focus|018|select#library-scope "All libraries in this v
 theater|library@1280x860|focus|019|input#library-find "Title…"
 theater|library@1280x860|focus|020|select "Small Medium Large Extra large"
 theater|library@1280x860|focus|021|button.ghost.sm "Clear filters"
-theater|library@1280x860|focus|022|button.ghost.sm "B"
-theater|library@1280x860|focus|023|button.ghost.sm "H"
-theater|library@1280x860|focus|024|button.ghost.sm "View all B items"
-theater|library@1280x860|focus|025|button.ghost.sm "Scroll B left"
-theater|library@1280x860|focus|026|button.ghost.sm "Scroll B right"
-theater|library@1280x860|focus|027|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-theater|library@1280x860|focus|028|button.ghost.sm "View all H items"
-theater|library@1280x860|focus|029|button.ghost.sm "Scroll H left"
-theater|library@1280x860|focus|030|button.ghost.sm "Scroll H right"
-theater|library@1280x860|focus|031|div.poster.k-movie "H Heat 1995 180p"
-theater|library@1280x860|focus|032|<wrap>
+theater|library@1280x860|focus|022|button#library-tag-button.ghost.sm "Tags ▾"
+theater|library@1280x860|focus|023|button#library-select-button.ghost.sm "Select"
+theater|library@1280x860|focus|024|button.ghost.sm "B"
+theater|library@1280x860|focus|025|button.ghost.sm "H"
+theater|library@1280x860|focus|026|button.ghost.sm "View all B items"
+theater|library@1280x860|focus|027|button.ghost.sm "Scroll B left"
+theater|library@1280x860|focus|028|button.ghost.sm "Scroll B right"
+theater|library@1280x860|focus|029|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+theater|library@1280x860|focus|030|button.ghost.sm "View all H items"
+theater|library@1280x860|focus|031|button.ghost.sm "Scroll H left"
+theater|library@1280x860|focus|032|button.ghost.sm "Scroll H right"
+theater|library@1280x860|focus|033|div.poster.k-movie "H Heat 1995 180p"
+theater|library@1280x860|focus|034|<wrap>
 theater|library@1280x860|req|GET /api/v1/activity|2
 theater|library@1280x860|req|GET /api/v1/features|1
 theater|library@1280x860|req|GET /api/v1/libraries/<id>/items|1
@@ -11615,6 +11787,9 @@ theater|library@390x780|dom|div.library-group-head > div.library-group-actions|2
 theater|library@390x780|dom|div.library-group-head > h2#library-row-B-title[tabindex=-1 text]|1
 theater|library@390x780|dom|div.library-group-head > h2#library-row-H-title[tabindex=-1 text]|1
 theater|library@390x780|dom|div.library-group-head > span.library-group-count.muted[text]|2
+theater|library@390x780|dom|div.library-tag-tools.search-tools > button#library-select-button.ghost.sm[text]|1
+theater|library@390x780|dom|div.library-tag-tools.search-tools > button#library-tag-button.ghost.sm[aria-haspopup=dialog text]|1
+theater|library@390x780|dom|div.library-tag-tools.search-tools > span#library-tag-chips.row|1
 theater|library@390x780|dom|div.meta > div.s|2
 theater|library@390x780|dom|div.meta > div.t[text]|2
 theater|library@390x780|dom|div.pagehead > div.phnav|1
@@ -11650,6 +11825,7 @@ theater|library@390x780|dom|main#main > div#librail|1
 theater|library@390x780|dom|main#main > div#library-group-detail|1
 theater|library@390x780|dom|main#main > div#library-load-error[role=status]|1
 theater|library@390x780|dom|main#main > div.libbar.th-chips|1
+theater|library@390x780|dom|main#main > div.library-tag-tools.search-tools|1
 theater|library@390x780|dom|main#main > div.pagehead|1
 theater|library@390x780|dom|main#main > div.search-tools|1
 theater|library@390x780|dom|main#main > div.th-grid|1
@@ -11684,20 +11860,22 @@ theater|library@390x780|focus|011|select#library-scope "All libraries in this vi
 theater|library@390x780|focus|012|input#library-find "Title…"
 theater|library@390x780|focus|013|select "Small Medium Large Extra large"
 theater|library@390x780|focus|014|button.ghost.sm "Clear filters"
-theater|library@390x780|focus|015|button.ghost.sm "B"
-theater|library@390x780|focus|016|button.ghost.sm "H"
-theater|library@390x780|focus|017|button.ghost.sm "View all B items"
-theater|library@390x780|focus|018|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
-theater|library@390x780|focus|019|button.ghost.sm "View all H items"
-theater|library@390x780|focus|020|div.poster.k-movie "H Heat 1995 180p"
-theater|library@390x780|focus|021|a "Home"
-theater|library@390x780|focus|022|a "Shared libraries"
-theater|library@390x780|focus|023|a "Live TV"
-theater|library@390x780|focus|024|a "Recordings"
-theater|library@390x780|focus|025|a "Library channels"
-theater|library@390x780|focus|026|a "Activity"
-theater|library@390x780|focus|027|a "Settings"
-theater|library@390x780|focus|028|<wrap>
+theater|library@390x780|focus|015|button#library-tag-button.ghost.sm "Tags ▾"
+theater|library@390x780|focus|016|button#library-select-button.ghost.sm "Select"
+theater|library@390x780|focus|017|button.ghost.sm "B"
+theater|library@390x780|focus|018|button.ghost.sm "H"
+theater|library@390x780|focus|019|button.ghost.sm "View all B items"
+theater|library@390x780|focus|020|div.poster.k-movie.unw "BR Blade Runner 1982 180p"
+theater|library@390x780|focus|021|button.ghost.sm "View all H items"
+theater|library@390x780|focus|022|div.poster.k-movie "H Heat 1995 180p"
+theater|library@390x780|focus|023|a "Home"
+theater|library@390x780|focus|024|a "Shared libraries"
+theater|library@390x780|focus|025|a "Live TV"
+theater|library@390x780|focus|026|a "Recordings"
+theater|library@390x780|focus|027|a "Library channels"
+theater|library@390x780|focus|028|a "Activity"
+theater|library@390x780|focus|029|a "Settings"
+theater|library@390x780|focus|030|<wrap>
 theater|library@390x780|req|GET /api/v1/activity|2
 theater|library@390x780|req|GET /api/v1/features|1
 theater|library@390x780|req|GET /api/v1/libraries/<id>/items|1
@@ -12271,10 +12449,12 @@ theater|player@1280x860|req|GET /api/v1/features|1
 theater|player@1280x860|req|GET /api/v1/files/<id>/direct|1
 theater|player@1280x860|req|GET /api/v1/files/<id>/preparation|1
 theater|player@1280x860|req|GET /api/v1/items/<id>/annotations|1
+theater|player@1280x860|req|GET /api/v1/items/<id>/tags|1
 theater|player@1280x860|req|GET /api/v1/items/<id>|1
 theater|player@1280x860|req|GET /api/v1/libraries|1
 theater|player@1280x860|req|GET /api/v1/me|1
 theater|player@1280x860|req|GET /api/v1/server|1
+theater|player@1280x860|req|GET /api/v1/tags|1
 theater|player@1280x860|req|POST /api/v1/client-log|7
 theater|player@1280x860|req|POST /api/v1/files/<id>/decision|1
 theater|player@1280x860|req|POST /api/v1/items/<id>/progress|1
@@ -12431,10 +12611,12 @@ theater|player@390x780|req|GET /api/v1/features|1
 theater|player@390x780|req|GET /api/v1/files/<id>/direct|1
 theater|player@390x780|req|GET /api/v1/files/<id>/preparation|1
 theater|player@390x780|req|GET /api/v1/items/<id>/annotations|1
+theater|player@390x780|req|GET /api/v1/items/<id>/tags|1
 theater|player@390x780|req|GET /api/v1/items/<id>|1
 theater|player@390x780|req|GET /api/v1/libraries|1
 theater|player@390x780|req|GET /api/v1/me|1
 theater|player@390x780|req|GET /api/v1/server|1
+theater|player@390x780|req|GET /api/v1/tags|1
 theater|player@390x780|req|POST /api/v1/client-log|7
 theater|player@390x780|req|POST /api/v1/files/<id>/decision|1
 theater|player@390x780|req|POST /api/v1/items/<id>/progress|1

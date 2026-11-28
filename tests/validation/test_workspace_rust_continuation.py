@@ -1,4 +1,5 @@
 """Only actual, applicable target-qualified passes can skip a Rust body."""
+from validation import mirror_guard
 import unittest
 from unittest.mock import patch
 
@@ -81,7 +82,7 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
     def test_changed_native_environment_or_global_compiler_flags_cannot_reuse_passes(self):
         from pathlib import Path
-        current = Path('.github/workflows/ci.yml').read_text()
+        current = mirror_guard.read_file('.github/workflows/ci.yml')
         proof.check_workflow_environment(current,proof.CURRENT_JOB)
         for changed in (current.replace('CARGO_TERM_COLOR: always','CARGO_TERM_COLOR: always\n  RUSTFLAGS: -Copt-level=3'),
                         current.replace('RUST_TEST_THREADS: "2"','RUST_TEST_THREADS: "4"'),
@@ -119,7 +120,7 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
     def test_reviewed_historical_jobs_do_not_relax_current_admission(self):
         from pathlib import Path
-        current = Path('.github/workflows/ci.yml').read_text()
+        current = mirror_guard.read_file('.github/workflows/ci.yml')
         self.assertEqual(proof.HISTORICAL_JOBS, (proof.ORIGINAL_JOB, proof.PRE_NONVOTER_JOB, proof.NONVOTER_JOB, proof.CGROUP_PARSE_JOB, proof.TIMEOUT_180_JOB, proof.IMAGE_6A989B4D_JOB, proof.CURRENT_JOB))
         self.assertEqual(len(set(proof.HISTORICAL_JOBS)), 7)
         for identity in proof.HISTORICAL_JOBS:

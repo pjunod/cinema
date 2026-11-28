@@ -4967,16 +4967,16 @@ impl HiqliteAuthStore {
             .map(|r| (r.name, r.sql))
             .collect::<Vec<_>>();
         let version = super::dv_title_jobs_schema::version(&shape)?;
-        if matches!(version, Some(1 | 2)) {
+        if matches!(version, Some(1..=3)) {
             // authority: exact committed extension marker, not a local cache.
             let rows = self
                 .client()
                 .query_consistent_map::<CountRow, _>(
                     "dv_title_jobs_schema_version",
-                    if version == Some(1) {
-                        super::dv_title_jobs_schema::MARKER_SQL_V1
-                    } else {
-                        super::dv_title_jobs_schema::MARKER_SQL
+                    match version {
+                        Some(1) => super::dv_title_jobs_schema::MARKER_SQL_V1,
+                        Some(2) => super::dv_title_jobs_schema::MARKER_SQL_V2,
+                        _ => super::dv_title_jobs_schema::MARKER_SQL,
                     },
                     params!(),
                 )
@@ -4994,20 +4994,16 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let version = self.dv_title_jobs_schema_version().await?;
-        if version == Some(2) {
+        if version == Some(3) {
             return Ok(());
         }
-        let statements = (if version == Some(1) {
-            super::dv_title_jobs_schema::migration_statements()
-        } else {
-            super::dv_title_jobs_schema::statements()
-        })
-        .into_iter()
-        .map(|sql| (sql, params!()))
-        .collect::<Vec<_>>();
+        let statements = super::dv_title_jobs_schema::migration_statements(version)
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
         admit_schema_migration(admission)?;
         let result = self.schema_migration_transaction(statements).await;
-        if self.dv_title_jobs_schema_version().await? == Some(2) {
+        if self.dv_title_jobs_schema_version().await? == Some(3) {
             return Ok(());
         }
         result?;

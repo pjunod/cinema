@@ -1,4 +1,5 @@
 """Only a proven exact-head manual gate can suppress duplicate automatic work."""
+from validation import mirror_guard
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -34,7 +35,7 @@ class ManualSourceGuardTests(unittest.TestCase):
         authenticate.assert_called_once()
 
     def test_projection_removes_only_scope_token_plumbing_not_test_recipe(self):
-        raw = Path('.github/workflows/main-fast-lane.yml').read_bytes()
+        raw = mirror_guard.read_file('.github/workflows/main-fast-lane.yml', binary=True)
         projected = source.projected_main_workflow(raw)
         self.assertEqual(source.retention.digest(projected), source.HARNESS['.github/workflows/main-fast-lane.yml'])
         with self.assertRaises(r.ReceiptError):
@@ -46,7 +47,8 @@ class ManualSourceGuardTests(unittest.TestCase):
         # A harness edit without its re-pin refuses every source-gate and
         # nextest continuation on the next PR (b4a5d0517).
         for path, digest in source.HARNESS.items():
-            raw = Path(path).read_bytes()
+            raw = (mirror_guard.read_file(path, binary=True) if mirror_guard.is_ci_workflow(path)
+                   else Path(path).read_bytes())
             if path == '.github/workflows/main-fast-lane.yml':
                 raw = source.projected_main_workflow(raw)
             with self.subTest(path=path):

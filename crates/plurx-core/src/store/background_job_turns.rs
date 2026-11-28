@@ -16,7 +16,7 @@ pub(super) fn catalog(conn: &rusqlite::Connection) -> Result<Vec<(String, String
 
 /// The held-translation viewer view reads `subtitles.ai.v1` (AI subtitles T2).
 pub(super) const AI_AUTHORITY_MIGRATION: &str = include_str!("background_job_turns_v3.sql");
-/// Catalog generations, in order: v124 original, v136 live titles, v139 AI
+/// Catalog generations, in order: v124 original, v136 live titles, v140 AI
 /// subtitles authority.
 pub(super) const ORIGINAL: u8 = 0;
 pub(super) const LIVE_TITLES: u8 = 1;

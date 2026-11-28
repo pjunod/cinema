@@ -29,6 +29,7 @@ import urllib.request
 import zipfile
 import zlib
 
+from validation import mirror_guard
 from validation.apple_simulator_runtime import runtime_identifier
 from validation.main_preflight_adoption import (
     UNADOPTABLE, api_context, bind_event, commit_available, git, input_digest,
@@ -111,6 +112,9 @@ BUILD_SPECS = {
     # P62 S1 adds only `node --test tests/playback/server-metrics.test.js`
     # to the web-unit-check recipe (a Node playback-lab test); no native
     # recipe changes.
+    # plurx#1979 changes only the docker-up deploy recipe (fleet-image
+    # pull/push around `docker compose up`) and its comment; no native recipe
+    # changes.
     # AI subtitles adds its Node regression to web-unit-check. Native recipes are unchanged.
     'Makefile': '1187c1c880a4d4c97a3396e9bafc6a3741617d8795e3fa3a2fa583735135df6e',
     # Reviewed raw project spec with derived build numbers: the placeholder
@@ -150,8 +154,8 @@ def native_block(workflow):
 
 
 def producer(commit, current):
-    old = native_block(git('show', commit + ':' + WORKFLOW))
-    now = native_block(git('show', current + ':' + WORKFLOW))
+    old = native_block(mirror_guard.strip(git('show', commit + ':' + WORKFLOW)))
+    now = native_block(mirror_guard.strip(git('show', current + ':' + WORKFLOW)))
     require(hashlib.sha256(old.encode()).hexdigest() in (LEGACY_JOB_SHA256, CASE_LEGACY_JOB_SHA256,
                                                          RETENTION90_JOB_SHA256) or old == now,
             'Unknown native workflow producer')

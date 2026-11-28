@@ -151,7 +151,7 @@ pub(crate) fn read_metadata(
         .filter(|size| *size > 0 && *size <= limit)
         .ok_or("text_model_invalid")?;
     let identity = || {
-        plurx_core::fs_secure::std_file_identity(&model.handle)
+        plurx_core::fs_secure::local_file_identity(&model.handle)
             .map_err(|_| "model_changed".to_owned())
     };
     if identity()? != model.identity {
@@ -194,7 +194,7 @@ mod metadata_tests {
         let path = dir.path().join("vocab.json");
         std::fs::write(&path, b"verified vocabulary").expect("fixture bytes");
         let handle = std::fs::File::open(&path).expect("held metadata");
-        let identity = plurx_core::fs_secure::std_file_identity(&handle).expect("held identity");
+        let identity = plurx_core::fs_secure::local_file_identity(&handle).expect("held identity");
         (
             dir,
             ManagedModel {

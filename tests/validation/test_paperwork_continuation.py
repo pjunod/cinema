@@ -1,4 +1,5 @@
 """Paperwork adopts authentic method coverage and never credits deferred cases."""
+from validation import mirror_guard
 import copy
 import json
 import os
@@ -82,7 +83,7 @@ class PaperworkContinuationTests(unittest.TestCase):
         main = {'commit': {'id': 'b' * 40}}
         api.get.side_effect = lambda path: repo if path == '' else (main if path == '/branches/main'
                            else run if path == '/actions/runs/9' else pull)
-        workflow = (Path(__file__).resolve().parents[2] / '.github/workflows/main-fast-lane.yml').read_bytes()
+        workflow = mirror_guard.read_file(Path(__file__).resolve().parents[2] / '.github/workflows/main-fast-lane.yml', binary=True)
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'event.json'; path.write_text(json.dumps(event))
             env = {'GITHUB_RUN_ID': '9', 'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_SHA': 'a' * 40,
@@ -104,7 +105,7 @@ class PaperworkContinuationTests(unittest.TestCase):
 
     def test_workflow_projection_allows_only_the_paperwork_environment_line(self):
         from validation import nextest_shard_continuation as n
-        raw = (Path(__file__).resolve().parents[2] / '.github/workflows/main-fast-lane.yml').read_bytes()
+        raw = mirror_guard.read_file(Path(__file__).resolve().parents[2] / '.github/workflows/main-fast-lane.yml', binary=True)
         projected = n.projected_main_workflow(raw)
         self.assertEqual(pc.retention.digest(projected), n.HARNESS['.github/workflows/main-fast-lane.yml'])
         line = b'          PLURX_PAPERWORK_CONTINUATION: preliminary\n'

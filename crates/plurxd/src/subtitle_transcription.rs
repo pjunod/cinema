@@ -141,7 +141,7 @@ async fn open_model(path: &str) -> Result<Model, StoreError> {
     if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_MODEL_BYTES {
         return Err(StoreError::Task("transcription model exceeds bound".into()));
     }
-    let identity = plurx_core::fs_secure::std_file_identity(&handle)
+    let identity = plurx_core::fs_secure::local_file_identity(&handle)
         .map_err(|_| StoreError::Task("model identity unavailable".into()))?;
     let mut reader = tokio::fs::File::from_std(
         handle
@@ -181,7 +181,7 @@ async fn open_model(path: &str) -> Result<Model, StoreError> {
         hash.update(&buffer[..read]);
     }
     if bytes != meta.len()
-        || plurx_core::fs_secure::std_file_identity(&handle)
+        || plurx_core::fs_secure::local_file_identity(&handle)
             .ok()
             .as_ref()
             != Some(&identity)
@@ -395,7 +395,7 @@ async fn transcribe_selected(
     decoder: &str,
     audio_index: i64,
 ) -> Result<String, StoreError> {
-    if plurx_core::fs_secure::std_file_identity(&model.handle).ok() != Some(model.identity) {
+    if plurx_core::fs_secure::local_file_identity(&model.handle).ok() != Some(model.identity) {
         return Err(StoreError::Task("transcription model changed".into()));
     }
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None)
@@ -418,7 +418,7 @@ async fn transcribe_selected(
     })
     .await?;
     if !source.unchanged().await
-        || plurx_core::fs_secure::std_file_identity(&model.handle).ok() != Some(model.identity)
+        || plurx_core::fs_secure::local_file_identity(&model.handle).ok() != Some(model.identity)
     {
         return Err(StoreError::Task(
             "transcription source or model changed".into(),
@@ -658,7 +658,7 @@ async fn decoded_pcm(path: &Path, cancel: &CancellationToken) -> Result<(bool, u
 impl EngineInvocation {
     pub(crate) fn unchanged(&self) -> bool {
         self.staged.as_ref().is_none_or(|(file, identity)| {
-            plurx_core::fs_secure::std_file_identity(file).ok() == Some(*identity)
+            plurx_core::fs_secure::local_file_identity(file).ok() == Some(*identity)
         })
     }
 }
@@ -704,7 +704,8 @@ pub(crate) async fn engine_invocation(
             }
             if expected_identity.size == 0
                 || expected_identity.size > 64 * 1024 * 1024
-                || plurx_core::fs_secure::std_file_identity(&source).ok() != Some(expected_identity)
+                || plurx_core::fs_secure::local_file_identity(&source).ok()
+                    != Some(expected_identity)
             {
                 return Err("packaged_engine_changed");
             }
@@ -754,7 +755,8 @@ pub(crate) async fn engine_invocation(
             }
             if bytes != expected_identity.size
                 || hex::encode(digest.finalize()) != expected_digest
-                || plurx_core::fs_secure::std_file_identity(&source).ok() != Some(expected_identity)
+                || plurx_core::fs_secure::local_file_identity(&source).ok()
+                    != Some(expected_identity)
             {
                 return Err("packaged_engine_changed");
             }
@@ -789,7 +791,7 @@ pub(crate) async fn engine_invocation(
             if unsafe { libc::fchmod(output.as_raw_fd(), 0o500) } != 0 {
                 return Err("engine_staging_failed");
             }
-            let identity = plurx_core::fs_secure::std_file_identity(&output)
+            let identity = plurx_core::fs_secure::local_file_identity(&output)
                 .map_err(|_| "engine_staging_failed")?;
             drop(output);
             // Execution must not retain an open-for-writing description.
@@ -805,7 +807,7 @@ pub(crate) async fn engine_invocation(
                 return Err("engine_staging_failed");
             }
             let readonly = unsafe { std::fs::File::from_raw_fd(fd) };
-            if plurx_core::fs_secure::std_file_identity(&readonly).ok() != Some(identity) {
+            if plurx_core::fs_secure::local_file_identity(&readonly).ok() != Some(identity) {
                 return Err("engine_staging_failed");
             }
             Ok((readonly, identity))
@@ -820,8 +822,8 @@ pub(crate) async fn engine_invocation(
             .map_err(|_| StoreError::Task("engine_staging_failed".into()))?
             .into_std()
             .await;
-        if plurx_core::fs_secure::std_file_identity(&reopened).ok() != Some(identity)
-            || plurx_core::fs_secure::std_file_identity(&engine.handle).ok()
+        if plurx_core::fs_secure::local_file_identity(&reopened).ok() != Some(identity)
+            || plurx_core::fs_secure::local_file_identity(&engine.handle).ok()
                 != Some(engine.identity)
         {
             return Err(StoreError::Task("packaged_engine_changed".into()));
@@ -865,9 +867,10 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
         ..
     } = &input;
     input.observe(SubtitlePhase::Decoding).await?;
-    let source_identity =
-        plurx_core::fs_secure::std_file_identity(source).map_err(|_| input.source_failure())?;
-    let model_identity = plurx_core::fs_secure::std_file_identity(model).map_err(|_| {
+    let source_identity = plurx_core::media_io::identity(source)
+        .await
+        .map_err(|_| input.source_failure())?;
+    let model_identity = plurx_core::fs_secure::local_file_identity(model).map_err(|_| {
         input.failure(
             "artifact_digest_mismatch",
             "transcription model unavailable",
@@ -1148,18 +1151,18 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
         return Err(StoreError::Task("packaged_engine_changed".into()));
     }
     if input.engine.is_some_and(|engine| {
-        plurx_core::fs_secure::std_file_identity(&engine.handle).ok() != Some(engine.identity)
+        plurx_core::fs_secure::local_file_identity(&engine.handle).ok() != Some(engine.identity)
     }) {
         return Err(StoreError::Task("packaged_engine_changed".into()));
     }
-    if plurx_core::fs_secure::std_file_identity(model).ok() != Some(model_identity) {
+    if plurx_core::fs_secure::local_file_identity(model).ok() != Some(model_identity) {
         return Err(StoreError::Task(if input.engine.is_some() {
             "artifact_digest_mismatch".into()
         } else {
             "transcription model changed".into()
         }));
     }
-    if plurx_core::fs_secure::std_file_identity(source).ok() != Some(source_identity) {
+    if plurx_core::media_io::identity(source).await.ok() != Some(source_identity) {
         return Err(input.source_failure());
     }
     let path = output_base.with_extension("vtt");
@@ -1244,13 +1247,13 @@ pub(crate) async fn model_languages(path: &str) -> Vec<String> {
         let Ok(mut file) = plurx_core::fs_secure::open_read_nofollow_blocking(&path) else {
             return vec![];
         };
-        let Ok(identity) = plurx_core::fs_secure::std_file_identity(&file) else {
+        let Ok(identity) = plurx_core::fs_secure::local_file_identity(&file) else {
             return vec![];
         };
         let mut header = [0_u8; 8];
         if file.read_exact(&mut header).is_err()
             || identity.size > MAX_MODEL_BYTES
-            || plurx_core::fs_secure::std_file_identity(&file).ok() != Some(identity)
+            || plurx_core::fs_secure::local_file_identity(&file).ok() != Some(identity)
             || u32::from_le_bytes(header[..4].try_into().expect("header width")) != 0x67676d6c
         {
             return vec![];
@@ -1302,10 +1305,10 @@ pub(crate) fn managed_artifacts_unchanged(
     engine: &crate::subtitle_models::artifacts::Engine,
     model: &crate::subtitle_models::artifacts::ManagedModel,
 ) -> Result<(), StoreError> {
-    if plurx_core::fs_secure::std_file_identity(&engine.handle).ok() != Some(engine.identity) {
+    if plurx_core::fs_secure::local_file_identity(&engine.handle).ok() != Some(engine.identity) {
         return Err(StoreError::Task("packaged_engine_changed".into()));
     }
-    if plurx_core::fs_secure::std_file_identity(&model.handle).ok() != Some(model.identity) {
+    if plurx_core::fs_secure::local_file_identity(&model.handle).ok() != Some(model.identity) {
         return Err(StoreError::Task("artifact_digest_mismatch".into()));
     }
     Ok(())
@@ -1434,7 +1437,7 @@ pub(crate) async fn self_test_managed(
         != hex::encode(Sha256::digest(include_bytes!(
             "subtitle_models/self-test.wav"
         )))
-        || plurx_core::fs_secure::std_file_identity(&engine.self_test_handle).ok()
+        || plurx_core::fs_secure::local_file_identity(&engine.self_test_handle).ok()
             != Some(engine.self_test_identity)
     {
         return Err(StoreError::Task("packaged_engine_companion_changed".into()));
@@ -1467,7 +1470,7 @@ pub(crate) async fn self_test_managed(
     })
     .await?;
     managed_artifacts_unchanged(engine, model)?;
-    if plurx_core::fs_secure::std_file_identity(&engine.self_test_handle).ok()
+    if plurx_core::fs_secure::local_file_identity(&engine.self_test_handle).ok()
         != Some(engine.self_test_identity)
     {
         return Err(StoreError::Task("packaged_engine_companion_changed".into()));
@@ -1891,10 +1894,11 @@ mod tests {
         .expect("recognizer");
         std::fs::set_permissions(&whisper, std::fs::Permissions::from_mode(0o700)).expect("mode");
         let handle = std::fs::File::open(&whisper).expect("held engine");
-        let identity = plurx_core::fs_secure::std_file_identity(&handle).expect("engine identity");
+        let identity =
+            plurx_core::fs_secure::local_file_identity(&handle).expect("engine identity");
         let source = std::fs::File::open(&file.path).expect("source");
         let source_identity =
-            plurx_core::fs_secure::std_file_identity(&source).expect("source identity");
+            plurx_core::fs_secure::local_file_identity(&source).expect("source identity");
         let engine = crate::subtitle_models::artifacts::Engine {
             handle,
             identity,
@@ -2672,10 +2676,10 @@ mod tests {
                 .expect("executable");
         }
         let handle = std::fs::File::open(&whisper).expect("held engine");
-        let identity = plurx_core::fs_secure::std_file_identity(&handle).expect("identity");
+        let identity = plurx_core::fs_secure::local_file_identity(&handle).expect("identity");
         let fixture = std::fs::File::open(&file.path).expect("held source");
         let fixture_identity =
-            plurx_core::fs_secure::std_file_identity(&fixture).expect("fixture identity");
+            plurx_core::fs_secure::local_file_identity(&fixture).expect("fixture identity");
         let engine = crate::subtitle_models::artifacts::Engine {
             handle,
             identity,
@@ -2813,7 +2817,7 @@ mod tests {
         );
         managed_artifacts_unchanged(&engine, &model).expect("held artifacts unchanged");
         assert_eq!(
-            plurx_core::fs_secure::std_file_identity(&engine.self_test_handle).expect("fixture"),
+            plurx_core::fs_secure::local_file_identity(&engine.self_test_handle).expect("fixture"),
             engine.self_test_identity
         );
     }
@@ -3041,13 +3045,13 @@ mod tests {
             .expect("recognizer mode");
         let handle = std::fs::File::open(&whisper).expect("held recognizer");
         let identity =
-            plurx_core::fs_secure::std_file_identity(&handle).expect("recognizer identity");
+            plurx_core::fs_secure::local_file_identity(&handle).expect("recognizer identity");
         let fixture = root.path().join("self-test.wav");
         let fixture_bytes = include_bytes!("subtitle_models/self-test.wav");
         std::fs::write(&fixture, fixture_bytes).expect("speech fixture");
         let fixture = std::fs::File::open(fixture).expect("held fixture");
         let fixture_identity =
-            plurx_core::fs_secure::std_file_identity(&fixture).expect("fixture identity");
+            plurx_core::fs_secure::local_file_identity(&fixture).expect("fixture identity");
         let engine = crate::subtitle_models::artifacts::Engine {
             handle,
             path: whisper,
@@ -3063,7 +3067,7 @@ mod tests {
         std::fs::write(&model_path, b"model").expect("model");
         let model_handle = std::fs::File::open(&model_path).expect("held model");
         let model = crate::subtitle_models::artifacts::ManagedModel {
-            identity: plurx_core::fs_secure::std_file_identity(&model_handle)
+            identity: plurx_core::fs_secure::local_file_identity(&model_handle)
                 .expect("model identity"),
             handle: model_handle,
             path: model_path,

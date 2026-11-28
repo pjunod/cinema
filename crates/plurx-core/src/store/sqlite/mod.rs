@@ -1378,11 +1378,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_managed_schema::FILE_ROOT_MIGRATION,
     // v138: a per-file analysis request reads only the library root holding its file.
     super::analysis_source_scope::SCHEMA,
-    // v139: a held translation's viewer follows `subtitles.ai.v1` authority.
+    // v139: monotonic scanner authority and aggregate provenance.
+    super::dv_title_jobs::MIGRATION_V3,
+    // v140: a held translation's viewer follows `subtitles.ai.v1` authority.
     super::background_job_turns::AI_AUTHORITY_MIGRATION,
-    // v140: translation continuity capture follows `subtitles.ai.v1` authority.
+    // v141: translation continuity capture follows `subtitles.ai.v1` authority.
     super::subtitle_translation_schema::AUTHORITY_MIGRATION,
-    // v141: each new AI audio start can finish independently of live viewers.
+    // v142: each new AI audio start can finish independently of live viewers.
     super::subtitle_translation_schema::FINISH_MIGRATION,
 ];
 
@@ -1879,21 +1881,21 @@ impl SqliteStore {
             if version == 138 {
                 super::analysis_source_scope::verify_predecessor(&tx)?;
             }
-            if version == 139 {
+            if version == 140 {
                 super::background_job_turns::verify_catalog(
                     &tx,
                     super::background_job_turns::LIVE_TITLES,
                 )?;
             }
-            if version == 140 {
+            if version == 141 {
                 super::subtitle_translation_schema::verify_authority_predecessor(&tx)?;
             }
-            if version == 141 {
+            if version == 142 {
                 super::subtitle_translation_schema::verify_finish_predecessor(&tx)?;
             }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
-            if version == 141 {
+            if version == 142 {
                 tx.execute(
                     super::subtitle_translation_schema::SUPERSEDE_LEGACY_JOBS,
                     [],

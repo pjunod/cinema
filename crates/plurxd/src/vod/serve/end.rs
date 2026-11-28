@@ -605,8 +605,15 @@ impl VodServe {
     /// What a lease renewal reports for one live session: the film-time end,
     /// in ms, of the last segment it was served (0 before the first). `None`
     /// for unknown/tombstoned.
+    ///
+    /// A family session (split copy, continuous media) serves its primary
+    /// picture through a private child reader on that same rendition. Reading
+    /// only the session id would report 0 for the whole session, and a lost
+    /// owner would then send the viewer back to the start of the film. The
+    /// public reader still answers when a client fetched the primary through
+    /// the session's own segment route and the child has served nothing.
     pub async fn frontier_ms(&self, session_id: &str) -> Option<i64> {
-        let rendition = {
+        let (rendition, child_reader) = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(session_id)?;
             if session.tombstone.is_some() {
@@ -615,13 +622,21 @@ impl VodServe {
             if let Some(grant) = session.passive_grant.as_ref() {
                 return grant.frontier();
             }
-            session.live_rendition().map(Arc::clone)?
+            let rendition = session.live_rendition().map(Arc::clone)?;
+            let child_reader = session
+                .children
+                .iter()
+                .find(|child| Arc::ptr_eq(&child.rendition, &rendition))
+                .map(|child| child.reader_id.clone());
+            (rendition, child_reader)
         };
         let last_served = {
             let readers = rendition.readers.lock().await;
-            readers
-                .get(session_id)
-                .and_then(|reader| reader.last_served)
+            let served = |id: &str| readers.get(id).and_then(|reader| reader.last_served);
+            child_reader
+                .as_deref()
+                .and_then(served)
+                .or_else(|| served(session_id))
         };
         Some(match last_served {
             None => 0,

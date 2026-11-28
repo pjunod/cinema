@@ -115,11 +115,14 @@ async fn automatic_language_is_resolved_by_fenced_preparation_before_asset_publi
             user_id: 1,
             now_ms: 1300,
             query: TranslationQuery::Operation {
-                operation_id: receipt["operation_id"].as_str().unwrap().into(),
+                operation_id: receipt["operation_id"]
+                    .as_str()
+                    .expect("accepted operation ID")
+                    .into(),
             },
         })
         .await
-        .unwrap();
+        .expect("read the English operation");
     assert_eq!(rows[0]["spoken_language"], "en");
     assert_eq!(rows[0]["output_language"], "en");
     assert_eq!(rows[0]["task"], "transcribe");
@@ -163,7 +166,7 @@ async fn ai_intent_pins_the_route_and_viewer_release_is_scoped_to_its_playback()
             },
         )
         .await
-        .unwrap()
+        .expect("reserve subtitle intent")
         .expect("reserved intent");
     assert_eq!(reserved.route, IntentRoute::Audio);
     let replayed = store
@@ -180,14 +183,14 @@ async fn ai_intent_pins_the_route_and_viewer_release_is_scoped_to_its_playback()
             },
         )
         .await
-        .unwrap()
+        .expect("read the existing subtitle intent")
         .expect("original intent");
     assert_eq!(replayed.id, initial.id);
     assert_eq!(replayed.route, IntentRoute::Audio);
     assert!(store
         .ai_subtitle_intent(2, 20_000, IntentAccess::Operation { id: initial.id })
         .await
-        .unwrap()
+        .expect("check another account cannot read the intent")
         .is_none());
     let update = |playback_id: String, time, window| Viewer {
         operation_id: recipe.operation_id.clone(),
@@ -200,12 +203,12 @@ async fn ai_intent_pins_the_route_and_viewer_release_is_scoped_to_its_playback()
         assert!(store
             .ai_subtitle_viewer(update(playback.clone(), 20_000, Some((0, 1.0))))
             .await
-            .unwrap());
+            .expect("join viewer demand"));
     }
     assert!(store
         .ai_subtitle_viewer(update(first, 20_001, None))
         .await
-        .unwrap());
+        .expect("release the first viewer"));
     let demands = store
         .read_subtitle_translation(TranslationRead {
             user_id: 0,
@@ -216,7 +219,7 @@ async fn ai_intent_pins_the_route_and_viewer_release_is_scoped_to_its_playback()
             },
         })
         .await
-        .unwrap();
+        .expect("read remaining active viewers");
     assert_eq!(demands.len(), 1);
     assert_eq!(demands[0]["playback_id"], second);
 }
@@ -691,20 +694,34 @@ async fn prepared(store: &SqliteStore) -> plurx_core::store::subtitle_translatio
 async fn vad_asset_identity_separates_producers_and_survives_retries() {
     let (_dir, store, _) = fixture();
     let mut recipe = prepared(&store).await;
-    let old = recipe.expected_asset_id().unwrap();
+    let old = recipe.expected_asset_id().expect("legacy asset identity");
     recipe.operation_id = uuid::Uuid::new_v4().to_string();
     assert_eq!(
-        recipe.expected_asset_id().unwrap(),
+        recipe
+            .expected_asset_id()
+            .expect("same legacy asset identity"),
         old,
         "published legacy asset IDs stay readable"
     );
     for pipeline in ["translation-window-v2", "translation-window-v2-fast"] {
         recipe.profile.pipeline_revision = pipeline.into();
-        let first = recipe.expected_asset_id().unwrap();
+        let first = recipe
+            .expected_asset_id()
+            .expect("first VAD asset identity");
         recipe.operation_epoch += 1;
-        assert_eq!(recipe.expected_asset_id().unwrap(), first);
+        assert_eq!(
+            recipe
+                .expected_asset_id()
+                .expect("VAD identity after retry"),
+            first
+        );
         recipe.operation_id = uuid::Uuid::new_v4().to_string();
-        assert_ne!(recipe.expected_asset_id().unwrap(), first);
+        assert_ne!(
+            recipe
+                .expected_asset_id()
+                .expect("VAD identity for another producer"),
+            first
+        );
     }
 }
 
@@ -744,7 +761,7 @@ async fn finish_demand_publishes_each_core_after_the_viewer_leaves() {
         store
             .ai_subtitle_active_work(1, None, first_background_pass)
             .await
-            .unwrap(),
+            .expect("count background work before completion"),
         1
     );
     let finish_core = TranslationQuery::FinishCore {
@@ -800,17 +817,21 @@ async fn finish_demand_publishes_each_core_after_the_viewer_leaves() {
         store
             .ai_subtitle_active_work(1, None, 21_000)
             .await
-            .unwrap(),
+            .expect("count background work after completion"),
         0
     );
-    let file = store.get_file(1).await.unwrap().expect("current file");
+    let file = store
+        .get_file(1)
+        .await
+        .expect("read the completed file")
+        .expect("current file");
     let caption = file.downloaded_subtitle(0).expect("completed stored track");
     assert!(caption.vtt.contains("Finished &lt;caption&gt;"));
     assert!(plurx_core::store::valid_downloaded_vtt(&caption.vtt));
     assert!(caption
         .transcription
         .as_ref()
-        .unwrap()
+        .expect("completed caption provenance")
         .progressive_asset_id
         .is_none());
 
@@ -829,8 +850,8 @@ async fn finish_demand_publishes_each_core_after_the_viewer_leaves() {
     assert!(store
         .get_file(1)
         .await
-        .unwrap()
-        .unwrap()
+        .expect("read the file after deletion")
+        .expect("file survives caption deletion")
         .downloaded_subtitle(0)
         .is_none());
     let stopped = store
@@ -860,9 +881,9 @@ async fn finish_demand_publishes_each_core_after_the_viewer_leaves() {
                 expected_operation_epoch: recipe.operation_epoch,
                 expected_view_revision: stopped[0]["view_revision"]
                     .as_str()
-                    .unwrap()
+                    .expect("stopped operation revision")
                     .parse()
-                    .unwrap(),
+                    .expect("numeric stopped operation revision"),
                 expected_state: "stopped".into(),
                 playback_id: String::new(),
                 position_ms: 0,
@@ -896,7 +917,7 @@ async fn finish_demand_publishes_each_core_after_the_viewer_leaves() {
     let refreshed = store
         .get_file(1)
         .await
-        .unwrap()
+        .expect("read regenerated file")
         .expect("current file after retry");
     let restored = refreshed.downloaded_subtitle(0).expect("restored captions");
     assert_eq!(restored.stable_id(), track_id);
@@ -946,8 +967,9 @@ async fn four_hour_caption_over_the_inline_cap_retains_a_stored_track() {
     for core_index in 0..preceding_cores {
         recipe.core_index = core_index;
         let segment = draft(&recipe, 1, &text);
-        let body = String::from_utf8(segment.canonical_body().unwrap()).unwrap();
-        accepted_bytes += i64::try_from(body.len()).unwrap();
+        let body = String::from_utf8(segment.canonical_body().expect("canonical segment body"))
+            .expect("decode canonical segment JSON");
+        accepted_bytes += i64::try_from(body.len()).expect("segment byte count fits storage");
         tx.execute(
             "INSERT INTO subtitle_translation_segments
              (asset_id,core_index,segment_id,publication_id,digest,body,start_ms,end_ms,accepted_revision,created_at_ms)
@@ -980,7 +1002,7 @@ async fn four_hour_caption_over_the_inline_cap_retains_a_stored_track() {
             [],
             |r| r.get(0),
         )
-        .unwrap();
+        .expect("read inline subtitle storage");
     assert_eq!(inline, "[]");
 
     let reopened = SqliteStore::open(&dir.path().join("store.db")).expect("reopened catalog");
@@ -988,7 +1010,11 @@ async fn four_hour_caption_over_the_inline_cap_retains_a_stored_track() {
         .maintain_translation_cache(90_000_000)
         .await
         .expect("idle cache sweep");
-    let file = reopened.get_file(1).await.unwrap().expect("file");
+    let file = reopened
+        .get_file(1)
+        .await
+        .expect("read the file after reopening")
+        .expect("file");
     let caption = file
         .downloaded_subtitle(0)
         .expect("asset-backed stored track");
@@ -997,7 +1023,7 @@ async fn four_hour_caption_over_the_inline_cap_retains_a_stored_track() {
         caption
             .transcription
             .as_ref()
-            .unwrap()
+            .expect("stored progressive caption provenance")
             .progressive_asset_id
             .as_deref(),
         Some(recipe.asset_id.as_str())
@@ -1037,13 +1063,13 @@ async fn scheduled_finish_needs_no_viewer_and_respects_the_saved_choice() {
         store
             .mutate_subtitle_translation(request.clone())
             .await
-            .unwrap()["outcome"],
+            .expect("request disabled scheduled work")["outcome"],
         "disabled"
     );
     conn.execute(
         "UPDATE settings SET value=json_set(value,'$.ahead_of_time',json('true')) WHERE key='subtitles.ai.v1'",
         [],
-    ).unwrap();
+    ).expect("enable ahead-of-time subtitles");
     request.request_id = uuid::Uuid::new_v4().to_string();
     let result = store
         .mutate_subtitle_translation(request)
@@ -1052,7 +1078,11 @@ async fn scheduled_finish_needs_no_viewer_and_respects_the_saved_choice() {
     assert_eq!(result["outcome"], "accepted");
     assert!(result["demand_id"].is_null());
     let id = result["job_id"].as_str().expect("preparation job");
-    let job = store.background_job(id).await.unwrap().unwrap();
+    let job = store
+        .background_job(id)
+        .await
+        .expect("read scheduled preparation job")
+        .expect("scheduled preparation job exists");
     assert_eq!(job.priority, 0);
     assert_eq!(
         claim(&store, id, JobKind::SubtitleTranslationPrepare, 1100)

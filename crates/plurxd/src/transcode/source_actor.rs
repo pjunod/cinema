@@ -1968,6 +1968,14 @@ impl TranscodeManager {
             return Err(SourceWorkerError::Unsupported);
         };
         let authority = owner.gate.current_preparation(&owner.assignment).await?;
+        // The index identity carries the census's retention decision, so it
+        // is measured first ([`crate::hevc_census::ensure_source_census`]).
+        Box::pin(crate::hevc_census::ensure_source_census(
+            self.store.as_ref(),
+            file,
+        ))
+        .await
+        .map_err(|_| SourceWorkerError::Unresolved)?;
         let stored_probe = self
             .store
             .source_index_probe_evidence(&authority)

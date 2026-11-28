@@ -17,6 +17,7 @@ import io
 
 from validation import main_preflight_adoption as adoption
 from validation import main_unit_receipts
+from validation import mirror_guard
 from validation import python_unit_receipts as receipts
 
 
@@ -41,7 +42,10 @@ SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def invocation_digests(commit: str, workspace: Path) -> dict:
-    """Hash actual bounded Git blobs, preserving every byte including newlines."""
+    """Hash actual bounded Git blobs, preserving every byte including newlines.
+
+    A CI workflow is hashed without its public-mirror gate (validation/mirror_guard.py).
+    """
     receipts.require(isinstance(commit, str) and COMMIT.fullmatch(commit) is not None,
                      "Invocation commit must be a full lowercase Git commit")
     def raw(*arguments):
@@ -63,6 +67,8 @@ def invocation_digests(commit: str, workspace: Path) -> dict:
         receipts.require(raw("cat-file", "-t", ref).strip() == b"blob", "Invocation path is not a blob")
         data = raw("show", ref)
         receipts.require(len(data) == size, "Invocation blob size changed")
+        if mirror_guard.is_ci_workflow(path):
+            data = mirror_guard.strip(data)
         result[path] = hashlib.sha256(data).hexdigest()
     return result
 

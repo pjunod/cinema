@@ -184,3 +184,114 @@ async fn split_copy_video_converges_after_a_crash_before_rename_without_touching
     assert_eq!(std::fs::read(rendition.dir.path().join(segment_name(0))).expect("seg 0"), vec![1; 4096]);
     rendition.detach_media_reader(&serve.shared.pool, "english").await;
 }
+
+/// P49 AC-5, found by the live failover canary: a split copy serves its shared
+/// video through a private child reader, never under the public session id.
+/// The lease frontier, and with it the film position a lost owner hands the
+/// player in `media_owner_lost`, must follow that reader, or a viewer whose
+/// node is lost is reopened at the start of the film.
+#[tokio::test]
+async fn a_split_family_frontier_follows_its_private_video_reader() {
+    let base = crate::test_tempdir().expect("base");
+    let serve = bare_serve(base.path());
+    let video = synthetic_rendition(base.path()).await;
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let child_id = uuid::Uuid::new_v4().to_string();
+    insert_control_session(&serve, &session_id, Arc::clone(&video), Instant::now()).await;
+    video.attach_reader(&child_id, 0).await;
+    serve
+        .shared
+        .sessions
+        .lock()
+        .await
+        .get_mut(&session_id)
+        .expect("session")
+        .children
+        .push(ParentMediaReader {
+            versioned_family: true,
+            companion_bootstrap: false,
+            controlled: false,
+            candidate_id: None,
+            reader_id: child_id.clone(),
+            rendition: Arc::clone(&video),
+            _reservation: None,
+        });
+    assert_eq!(serve.frontier_ms(&session_id).await, Some(0), "0 before the first served segment");
+
+    video
+        .readers
+        .lock()
+        .await
+        .get_mut(&child_id)
+        .expect("private video reader")
+        .served(3);
+    let expected = ticks_to_ms(
+        video.plan.entry(3).expect("entry 3").end_ticks(),
+        video.timescale,
+    );
+    assert!(expected > 0);
+    assert_eq!(
+        serve.frontier_ms(&session_id).await,
+        Some(expected),
+        "the frontier is the film-time end of the picture the family was served"
+    );
+    // The child is the reader production advances for a family; once it has
+    // served, an older public-route position never overrides it.
+    video
+        .readers
+        .lock()
+        .await
+        .get_mut(&session_id)
+        .expect("public reader")
+        .served(5);
+    assert_eq!(
+        serve.frontier_ms(&session_id).await,
+        Some(expected),
+        "the child's served picture wins over the public route"
+    );
+    assert!(serve.end(&session_id, Terminal::Deleted).await);
+    assert_eq!(serve.frontier_ms(&session_id).await, None);
+}
+
+/// A family whose primary was fetched only through the session's own segment
+/// route still reports that position: the child has served nothing.
+#[tokio::test]
+async fn a_family_frontier_falls_back_to_the_public_reader() {
+    let base = crate::test_tempdir().expect("base");
+    let serve = bare_serve(base.path());
+    let video = synthetic_rendition(base.path()).await;
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let child_id = uuid::Uuid::new_v4().to_string();
+    insert_control_session(&serve, &session_id, Arc::clone(&video), Instant::now()).await;
+    video.attach_reader(&child_id, 0).await;
+    serve
+        .shared
+        .sessions
+        .lock()
+        .await
+        .get_mut(&session_id)
+        .expect("session")
+        .children
+        .push(ParentMediaReader {
+            versioned_family: true,
+            companion_bootstrap: false,
+            controlled: false,
+            candidate_id: None,
+            reader_id: child_id.clone(),
+            rendition: Arc::clone(&video),
+            _reservation: None,
+        });
+    video
+        .readers
+        .lock()
+        .await
+        .get_mut(&session_id)
+        .expect("public reader")
+        .served(2);
+    let expected = ticks_to_ms(
+        video.plan.entry(2).expect("entry 2").end_ticks(),
+        video.timescale,
+    );
+    assert_eq!(serve.frontier_ms(&session_id).await, Some(expected));
+    assert!(serve.end(&session_id, Terminal::Deleted).await);
+}

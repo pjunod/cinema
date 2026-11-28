@@ -98,6 +98,25 @@ pub(crate) fn processed_candidate_kept<'a>(
     })
 }
 
+/// The start response's candidate list: every worker's dispatchable row
+/// (a partial row only from this node), one per candidate ID. Two workers
+/// offering the same recipe share its ID; `unique_public_candidates` keeps
+/// the worker row with the best evidence, the local one when evidence ties.
+pub(super) fn public_quality_candidates(
+    catalog: Option<&crate::media_pool::QualityCatalogResult>,
+    local_node: &str,
+) -> Vec<plurx_core::playback::candidate::QualityCandidate> {
+    plurx_core::playback::candidate::unique_public_candidates(
+        catalog
+            .into_iter()
+            .flat_map(|result| result.candidates.iter())
+            .filter(|entry| {
+                entry.dispatch_supported && (!entry.partial || entry.node_id == local_node)
+            })
+            .map(|entry| entry.candidate.clone()),
+    )
+}
+
 /// Replace one local descriptive row with its admitted executable facts.
 /// A shortened-ID collision is never an implicit recipe substitution.
 pub(super) fn upsert_processed_worker_candidate(
@@ -269,7 +288,11 @@ pub struct CreateSession {
     /// With `copy`: this client selects soundtracks itself (hls.js alternate
     /// audio). The server may answer with one shared video-only rendition and
     /// every soundtrack as an alternate audio rendition; the session response
-    /// says which presentation it chose. Absent keeps the muxed copy.
+    /// says which presentation it chose.
+    ///
+    /// The legacy spelling of the caps token `hls-split-av-v1`. Absent defers
+    /// to the token; `false` is the explicit muxed request (a client retrying
+    /// without alternates), and it wins over the token.
     pub split_audio: Option<bool>,
     /// With `copy`: retain Dolby Vision signaling and dynamic metadata because
     /// the decision established that this client supports the source profile.
@@ -715,8 +738,13 @@ impl CreateSession {
         let transport = self
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
+        let split_requested = self.split_audio.unwrap_or_else(|| {
+            self.caps
+                .as_ref()
+                .is_some_and(plurx_core::playback::DeviceCaps::plays_split_av)
+        });
         crate::transcode::SessionRequest {
-            split_audio: self.copy == Some(true) && self.split_audio == Some(true),
+            split_audio: self.copy == Some(true) && split_requested,
             dv_processing_destination: None,
             // The player's per-playback choice; `SessionRequest` never
             // serializes it.
@@ -4650,13 +4678,15 @@ async fn create_with_purpose_attempt(
     {
         vec![state.node_id.clone()]
     } else {
+        let offer_source = source.as_ref().ok_or(ApiError::NotFound("file"))?;
         match MediaOfferRequest::new(
-            source.as_ref().ok_or(ApiError::NotFound("file"))?,
+            offer_source,
             height,
             (request.start_seconds * 1_000.0).round().max(0.0) as i64,
             request.audio_index,
             request.subtitle_burn,
             request.hdr10,
+            crate::transcode::split_copy_eligible(&request, offer_source),
         ) {
             Ok(offer_request) => state
                 .media_pool
@@ -5161,17 +5191,8 @@ async fn create_with_purpose_attempt(
         quality_catalog_status: quality_catalog.as_ref().map(
             |catalog| serde_json::json!({"complete": catalog.complete, "causes": catalog.causes}),
         ),
-        quality_candidates: quality_negotiated.then(|| {
-            quality_catalog
-                .as_ref()
-                .into_iter()
-                .flat_map(|result| result.candidates.iter())
-                .filter(|entry| {
-                    entry.dispatch_supported && (!entry.partial || entry.node_id == state.node_id)
-                })
-                .map(|entry| entry.candidate.clone())
-                .collect()
-        }),
+        quality_candidates: quality_negotiated
+            .then(|| public_quality_candidates(quality_catalog.as_ref(), &state.node_id)),
         session_id: info.session_id.clone(),
         playlist_url,
         duration_ms: info.duration_ms,
@@ -7073,17 +7094,7 @@ impl PreparedSourcePlayback {
                 .as_ref()
                 .map(|context| context.candidate_id),
             quality_candidates: quality_negotiated.then(|| {
-                self.resolved
-                    .quality_catalog
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|catalog| catalog.candidates.iter())
-                    .filter(|entry| {
-                        entry.dispatch_supported
-                            && (!entry.partial || entry.node_id == state.node_id)
-                    })
-                    .map(|entry| entry.candidate.clone())
-                    .collect()
+                public_quality_candidates(self.resolved.quality_catalog.as_ref(), &state.node_id)
             }),
             session_id: info.session_id.clone(),
             playlist_url,
@@ -7351,8 +7362,10 @@ pub(crate) async fn prepare_source_playback<
             "processed upgrades require a processing Source".into(),
         ));
     }
-    // Source preparation must not run the local census, which can change
-    // the revision being authorized and starts children outside its owner.
+    // Source preparation must not run the local census, which starts
+    // children outside any owner. The Source actor measures it under its own
+    // preparation authority (`hevc_census::ensure_source_census`) before it
+    // decides the copy; the census is not part of the file revision.
     let probe_json = snapshot.probe_json.as_deref();
     if probe_json.is_some_and(|probe| probe.len() > 1024 * 1024) {
         return Err(refused("stored_probe_bound"));

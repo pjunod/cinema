@@ -13536,7 +13536,7 @@ async fn replicated_source_tail_drops(
         .chain(validated_source_tail_drops(
             &source_shape,
             &source_counts,
-            139,
+            140,
             remove,
         ))
         .collect()
@@ -13740,14 +13740,14 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         &tail_counts,
         &tail_markers,
     );
-    require_replicated_fixture_marker(client, "dv_title_jobs_schema", 2).await;
+    require_replicated_fixture_marker(client, "dv_title_jobs_schema", 3).await;
     require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_managed_schema", 7).await;
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
-            "SELECT count(*) AS value FROM dv_title_jobs_schema WHERE singleton=1 AND version=2",
+            "SELECT count(*) AS value FROM dv_title_jobs_schema WHERE singleton=1 AND version=3",
             hiqlite::params!(),
         )
         .await
@@ -13759,7 +13759,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_eq!(title_data.len(), 1);
     let title_drops = queue_fixture::validated_empty_title_rewind(
         &title_shape,
-        2,
+        3,
         title_marker[0].value,
         title_data[0].value,
     );

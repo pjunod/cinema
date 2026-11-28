@@ -2163,8 +2163,7 @@ impl TranscodeManager {
             FelGate::Serve => Ok(()),
             FelGate::Decline(reason) => Err(reason),
             FelGate::Measure => {
-                self.request_fel_qualification(file.id, scanner, identity)
-                    .await;
+                self.request_fel_qualification(file.id, scanner).await;
                 Err(Self::fel_being_measured().into())
             }
         }
@@ -2326,12 +2325,7 @@ impl TranscodeManager {
     /// that cannot measure (no capable GPU) may pick the job up, and a play
     /// must not turn that into repeated full-title rescans.
     #[cfg(target_os = "linux")]
-    pub(crate) async fn request_fel_qualification(
-        &self,
-        file_id: i64,
-        scanner: &str,
-        identity: &str,
-    ) {
+    pub(crate) async fn request_fel_qualification(&self, file_id: i64, scanner: &str) {
         {
             let mut requests = self
                 .fel_requalification_requests
@@ -2344,11 +2338,13 @@ impl TranscodeManager {
             }
             requests.insert(file_id, now);
         }
-        let binding =
-            plurx_core::transcode::dv_fel_qualification::requalify_binding(scanner, identity);
         match self
             .store
-            .request_dv_fel_requalification(file_id, &binding)
+            .request_dv_fel_requalification(
+                file_id,
+                scanner,
+                crate::dv_tools::TITLE_SCANNER_GENERATION,
+            )
             .await
         {
             Ok(true) => {
@@ -4555,27 +4551,7 @@ impl TranscodeManager {
         file: &plurx_core::domain::MediaFile,
         encoding: Option<&Arc<crate::vodencode::Encoding>>,
     ) -> Result<Vec<(SessionRequest, Arc<crate::vodencode::Encoding>)>, String> {
-        if !req.split_audio
-            || encoding.is_some()
-            // The split master describes an AVC copy; HEVC and Dolby Vision
-            // copies keep the muxed presentation they already qualify.
-            || !matches!(
-                req.kind,
-                SessionKind::Copy {
-                    preserve_dolby_vision: false,
-                    convert_dolby_vision: false,
-                    ..
-                }
-            )
-            || !matches!(file.video_codec.as_deref(), Some("h264" | "avc" | "avc1"))
-            || req.continuous_media.is_some()
-            || req.subtitle_burn.is_some()
-            || req.presentation != Presentation::Vod
-            || file.audio_streams.len() < 2
-            // The family reserves every encoded role atomically; its group
-            // admission holds at most three. Larger sets stay muxed for now.
-            || file.audio_streams.len() > 3
-        {
+        if encoding.is_some() || !split_copy_eligible(req, file) {
             return Ok(Vec::new());
         }
         let height = file.height.unwrap_or(0).max(2);
@@ -5690,11 +5666,18 @@ impl TranscodeManager {
             })
     }
 
+    /// Whether this node holds a live shared video of a split copy of `file`.
+    pub(crate) async fn vod_holds_split_video(&self, file: &plurx_core::domain::MediaFile) -> bool {
+        self.vod.holds_split_video(file).await
+    }
+
     pub(crate) async fn vod_continuous_master_before(
         &self,
         session_id: &str,
         deadline: Instant,
-    ) -> Option<VodResponsePublication<Option<Vec<u8>>>> {
+    ) -> Option<
+        VodResponsePublication<Option<plurx_core::transcode::split_master::SplitPresentation>>,
+    > {
         self.vod
             .continuous_master_before(session_id, deadline)
             .await
@@ -7180,6 +7163,37 @@ pub(super) fn constrain_finite_vod_rate(
     options.video_bitrate_kbps = options.video_bitrate_kbps.min(video_kbps as u32);
     options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
     Ok(())
+}
+
+/// The one rule for whether a request is served as a split copy (P62 S2,
+/// `docs/streaming/SPLIT-HLS-RENDITION-CONTRACT.md` §3).
+///
+/// The owner calls it to admit the split, and the ingress calls it to predict
+/// the split for placement, so the two can never disagree about the rule.
+/// S3 widens it here and only here. A request that also resolved an encoded
+/// recipe is never split, which only the owner can know.
+pub(crate) fn split_copy_eligible(
+    req: &SessionRequest,
+    file: &plurx_core::domain::MediaFile,
+) -> bool {
+    req.split_audio
+        // The split master describes an AVC copy; HEVC and Dolby Vision
+        // copies keep the muxed presentation they already qualify.
+        && matches!(
+            req.kind,
+            SessionKind::Copy {
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+                ..
+            }
+        )
+        && matches!(file.video_codec.as_deref(), Some("h264" | "avc" | "avc1"))
+        && req.continuous_media.is_none()
+        && req.subtitle_burn.is_none()
+        && req.presentation == Presentation::Vod
+        // The family reserves every encoded role atomically; its group
+        // admission holds at most three. Larger sets stay muxed for now.
+        && (2..=3).contains(&file.audio_streams.len())
 }
 
 #[cfg(test)]

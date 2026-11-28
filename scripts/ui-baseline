@@ -305,6 +305,9 @@ FOCUS_JS = """
   if (!label) label = (el.innerText || el.textContent || "");
   if (!label && el.placeholder) label = el.placeholder;
   label = label.replace(/\\s+/g, " ").trim().slice(0, 400);
+  // The quality suffix reports live decoder state. Keep the control's name
+  // and order in the structural baseline across both sides of first frame.
+  if (el.id === "pbquality" && /^Playback quality: (Auto|Original|Manual) · /.test(label)) label = "Playback quality";
   return tag + id + cls + (label ? ' "' + label + '"' : "");
 }
 """

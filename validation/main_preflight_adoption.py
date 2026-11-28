@@ -24,6 +24,7 @@ import unittest
 import zipfile
 from typing import Mapping
 
+from validation import mirror_guard
 from validation.python_unit_receipts import (API, IntegrityError, ReceiptError, SourceApplicability,
     artifact_json, atomic_json, bounded_json, discover, positive, require, test_source_path)
 
@@ -349,7 +350,7 @@ def authenticate_journal(api, scope, artifact, env, candidates, skipped_history)
     # Before any git read: the PR #997 force push left a journal whose commit
     # was gone, and reading its workflow crashed prepare outright.
     require(commit_available(commit), f"commit {commit} is not available in this checkout")
-    producer_commands = run_commands(git("show", commit + ":.github/workflows/main-fast-lane.yml"))
+    producer_commands = run_commands(mirror_guard.strip(git("show", commit + ":.github/workflows/main-fast-lane.yml")))
     require(adapter_workflow(producer_commands)
             and journal["producer_blob"] == git("rev-parse", commit + ":validation/main_preflight_adoption.py")
             and journal["manifest_blob"] == git("rev-parse", commit + ":" + str(MANIFEST)),

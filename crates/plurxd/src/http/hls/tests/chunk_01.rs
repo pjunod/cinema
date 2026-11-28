@@ -1778,6 +1778,8 @@
         let master = axum::body::to_bytes(master.into_body(), 16_384).await.expect("split master body");
         let master = std::str::from_utf8(&master).expect("split master UTF-8");
         assert!(master.contains("CODECS=\"hev1."));
+        assert!(master.contains("VIDEO-RANGE=PQ,AUDIO=\"audio\""), "{master}");
+        assert!(master.contains("CHANNELS=\"2\""), "{master}");
 
         for (role, id, init, bytes, renewal, fetched) in [
             ("audio", &ids.audio, &b"audio init"[..], &b"audio segment"[..], "audio-media-segment", None),

@@ -982,6 +982,9 @@ pub(crate) struct VerifiedContinuousFamily {
     pub family: plurx_core::transcode::VodPresentationFamily,
     pub video_budgets: Vec<plurx_core::transcode::VodRenditionBandwidth>,
     pub audio_budget: Option<plurx_core::transcode::VodRenditionBandwidth>,
+    /// The source stream behind the shared soundtrack, for its NAME,
+    /// LANGUAGE and stable rendition id.
+    pub audio_source: Option<plurx_core::transcode::split_master::SplitAudioSource>,
     pub candidates: HashMap<String, plurx_core::playback::candidate::CandidateId>,
 }
 
@@ -1455,6 +1458,9 @@ struct Shared {
     pool: WaitPool,
     /// Node-wide un-admitted materialized bytes — `prodsched`'s working set.
     working_set: AtomicU64,
+    /// One foreground pressure sweep at a time; ordinary production never waits for it.
+    working_set_reclaim: Arc<Mutex<()>>,
+    working_set_requests: StdMutex<HashMap<String, u64>>,
     /// Private media, never ordinary playback pressure, until physical cleanup.
     preparation_media: AtomicU64,
     preparation_storage: preparation_storage::StorageRegistry,

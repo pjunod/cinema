@@ -71,7 +71,7 @@ impl Runtime {
                     && v.revision().source_mtime == file.mtime
             })
             .cloned()?;
-        if !candidate.unchanged() {
+        if !candidate.unchanged().await {
             return None;
         }
         let current = tokio::time::timeout(
@@ -84,9 +84,8 @@ impl Runtime {
         .await
         .ok()?
         .ok()?;
-        (plurx_core::fs_secure::std_file_identity(&current.handle).ok()
-            == Some(candidate.identity()))
-        .then_some(candidate)
+        (plurx_core::media_io::identity(&current.handle).await.ok() == Some(candidate.identity()))
+            .then_some(candidate)
     }
 }
 struct WorkerBoot<'a> {

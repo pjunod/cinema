@@ -20,7 +20,7 @@ use plurx_core::store::subtitle_translation::{
 use plurx_core::{
     domain::MediaFile,
     error::StoreError,
-    fs_secure::{std_file_identity, FileIdentity},
+    fs_secure::{local_file_identity, FileIdentity},
     store::subtitle_translation::{RangeRecipe, SegmentDraft, SourceRevision},
 };
 use sha2::{Digest, Sha256};
@@ -476,9 +476,14 @@ impl VerifiedSource {
         self.fence.object_version()
     }
 
-    pub(crate) fn unchanged(&self) -> bool {
-        self.fence.unchanged_in_place()
-            && std_file_identity(&self.fence.handle).ok() == Some(self.identity)
+    /// Whether the held source is still the verified object. Both reads are
+    /// `fstat`s of a media descriptor, so they wait on the media bound.
+    pub(crate) async fn unchanged(&self) -> bool {
+        self.fence.unchanged().await
+            && plurx_core::media_io::identity(&self.fence.handle)
+                .await
+                .ok()
+                == Some(self.identity)
     }
 
     async fn recheck(
@@ -488,7 +493,7 @@ impl VerifiedSource {
         cancel: &CancellationToken,
     ) -> Result<(), StoreError> {
         interrupted(cancel)?;
-        if !self.unchanged() {
+        if !self.unchanged().await {
             return Err(failure("source_changed"));
         }
         check_revision(state, file, &self.revision, cancel).await?;
@@ -500,7 +505,7 @@ impl VerifiedSource {
                     .map_err(|_| failure("worker_source_unavailable"))?
             }
         };
-        if std_file_identity(&current.handle).ok() != Some(self.identity) {
+        if plurx_core::media_io::identity(&current.handle).await.ok() != Some(self.identity) {
             return Err(failure("source_changed"));
         }
         interrupted(cancel)
@@ -547,7 +552,7 @@ pub(crate) struct SourceHash {
 }
 impl SourceHash {
     pub(crate) fn new(mut held: std::fs::File, expected: FileIdentity) -> Result<Self, StoreError> {
-        if std_file_identity(&held).ok() != Some(expected) {
+        if plurx_core::media_io::identity_in_place(&held).ok() != Some(expected) {
             return Err(failure("source_changed"));
         }
         held.seek(SeekFrom::Start(0))
@@ -597,7 +602,7 @@ impl SourceHash {
         // file cursor and byte count must advance together exactly once.
         if length == 0 {
             if self.bytes != self.expected.size
-                || std_file_identity(&self.held).ok() != Some(self.expected)
+                || plurx_core::media_io::identity_in_place(&self.held).ok() != Some(self.expected)
             {
                 return Err(failure("source_changed"));
             }
@@ -664,8 +669,9 @@ pub(crate) async fn verify_source(
                     .map_err(|_| failure("worker_source_unavailable"))?
             }
         };
-        let identity =
-            std_file_identity(&source.handle).map_err(|_| failure("worker_source_unavailable"))?;
+        let identity = plurx_core::media_io::identity(&source.handle)
+            .await
+            .map_err(|_| failure("worker_source_unavailable"))?;
         if u64::try_from(expected.source_size).ok() != Some(identity.size) {
             return Err(failure("source_changed"));
         }
@@ -1149,7 +1155,7 @@ async fn decode_window(
         .map_err(|_| failure("decode_failed"))?
         .into_std()
         .await;
-    let pcm_identity = std_file_identity(&pcm).map_err(|_| failure("decode_failed"))?;
+    let pcm_identity = local_file_identity(&pcm).map_err(|_| failure("decode_failed"))?;
     let mut held = pcm.try_clone().map_err(|_| failure("decode_failed"))?;
     let scan_cancel = cancel.clone();
     let scan_clock = ClockObservation {
@@ -1310,7 +1316,7 @@ pub(crate) async fn detect_spoken_language(
         let output = child_output(&mut command, Duration::from_secs(45), 64 * 1024, true).await?;
         check_vad(vad.as_ref())?;
         if !invocation.unchanged()
-            || std_file_identity(&decoded.file).ok() != Some(decoded.identity)
+            || local_file_identity(&decoded.file).ok() != Some(decoded.identity)
         {
             return Err(failure("artifact_changed"));
         }
@@ -1374,7 +1380,7 @@ fn vad_reports_no_speech(log: &[u8]) -> bool {
 
 #[cfg(unix)]
 fn check_vad(vad: Option<&ManagedModel>) -> Result<(), StoreError> {
-    if vad.is_some_and(|vad| std_file_identity(&vad.handle).ok() != Some(vad.identity)) {
+    if vad.is_some_and(|vad| local_file_identity(&vad.handle).ok() != Some(vad.identity)) {
         return Err(failure("artifact_changed"));
     }
     Ok(())
@@ -1462,7 +1468,7 @@ async fn infer_window(
         )?;
     }
     crate::subtitle_transcription::managed_artifacts_unchanged(engine, model)?;
-    if std_file_identity(&decoded.file).ok() != Some(decoded.identity) {
+    if local_file_identity(&decoded.file).ok() != Some(decoded.identity) {
         return Err(failure("output_invalid"));
     }
     interrupted(cancel)?;
@@ -1585,7 +1591,7 @@ pub(crate) async fn translate_range(
         .await?;
         phase(fence, SubtitlePhase::Validating, &cancel).await?;
         crate::subtitle_transcription::managed_artifacts_unchanged(engine, model)?;
-        if std_file_identity(&decoded.file).ok() != Some(decoded.identity) {
+        if local_file_identity(&decoded.file).ok() != Some(decoded.identity) {
             return Err(failure("output_invalid"));
         }
         source.recheck(state, file, &cancel).await?;
@@ -1728,7 +1734,8 @@ pub(crate) async fn self_test_translation(
         })
         .await
         .map_err(|_| failure("output_invalid"))??;
-        let source_identity = std_file_identity(&source).map_err(|_| failure("output_invalid"))?;
+        let source_identity =
+            local_file_identity(&source).map_err(|_| failure("output_invalid"))?;
         phase(fence, SubtitlePhase::Decoding, &cancel).await?;
         let duration_ms = selected::SELF_TEST_SAMPLES / 16;
         let window = Window {
@@ -1782,7 +1789,7 @@ pub(crate) async fn self_test_translation(
         )
         .await?;
         phase(fence, SubtitlePhase::Validating, &cancel).await?;
-        if std_file_identity(&source).ok() != Some(source_identity) {
+        if local_file_identity(&source).ok() != Some(source_identity) {
             return Err(failure("source_changed"));
         }
         crate::subtitle_transcription::managed_artifacts_unchanged(engine, model)?;
@@ -2078,7 +2085,7 @@ mod tests {
     fn source_hash_checks_initial_cancellation_and_held_identity_before_qualification() {
         let mut source = tempfile::tempfile().expect("test setup");
         source.write_all(b"exact source bytes").expect("test setup");
-        let identity = std_file_identity(&source).expect("test setup");
+        let identity = local_file_identity(&source).expect("test setup");
         let cancel = CancellationToken::new();
         cancel.cancel();
         assert!(hash_source(source.try_clone().expect("test setup"), identity, &cancel).is_err());
@@ -2102,7 +2109,7 @@ mod tests {
         source
             .write_all(&vec![1_u8; 128 * 1024 + 1])
             .expect("bytes");
-        let identity = std_file_identity(&source).expect("identity");
+        let identity = local_file_identity(&source).expect("identity");
         let mut hash = SourceHash::new(source.try_clone().expect("held"), identity).expect("hash");
         let cancel = CancellationToken::new();
         assert!(hash.step(&cancel).expect("prefix").is_none());
@@ -2120,7 +2127,7 @@ mod tests {
             source
                 .write_all(&[2])
                 .expect("replace byte without changing length");
-            if std_file_identity(&source).expect("changed identity") != identity {
+            if local_file_identity(&source).expect("changed identity") != identity {
                 break;
             }
             assert!(

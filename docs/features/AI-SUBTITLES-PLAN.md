@@ -246,14 +246,14 @@ through the requested lane and `scripts/land`.
 
 | # | Task | Area | State |
 |---|---|---|---|
-| T1 | This plan and the corrected queue finding | docs | in review |
-| T2 | `subtitles.ai.v1` with its migration; admission reads it; `who` replaces `is_admin`; per-user bounds | store admission SQL, settings | pending |
-| T3 | One verification record per model for every purpose; self-install and repair on enable (`boot_id` kept, see §3.2) | `subtitle_models`, `subtitle_translation`, `subtitle_text_translation`, store | pending |
-| T4 | One pipeline: finish demand, completion publishes a stored track (cap-safe), remove whole-file and Advanced generation | `subtitle_translation`, `subtitle_transcription.rs`, store | pending |
-| T5 | `/ai-subtitles` API, automatic route and spoken-language detection | server | pending |
-| T6 | VAD, thread budget, measured Fast/Balanced/Best tiers, text-model comparison | engine options, runtime | pending |
-| T6b | Vulkan engine variant for the iGPUs (optional for landing; nothing in §5 depends on it) | engine build | pending |
-| T7 | Settings → Subtitles, player entry and item control on web, Apple and Android; remove the old UI and routes | clients | pending |
+| T1 | This plan and the corrected queue finding | docs | implemented (#1995) |
+| T2 | `subtitles.ai.v1` with its migration; admission reads it; `who` replaces `is_admin`; per-user bounds | store admission SQL, settings | implemented (#1999) |
+| T3 | One verification record per model for every purpose; self-install and repair on enable (`boot_id` kept, see §3.2) | `subtitle_models`, `subtitle_translation`, `subtitle_text_translation`, store | implemented (#2001) |
+| T4 | One pipeline: finish demand, completion publishes a stored track (cap-safe), remove whole-file and Advanced generation | `subtitle_translation`, `subtitle_transcription.rs`, store | implemented (#2003) |
+| T5 | `/ai-subtitles` API, automatic route and spoken-language detection | server | implemented (#2006) |
+| T6 | VAD, thread budget, measured Fast/Balanced/Best tiers, text-model comparison | engine options, runtime | implemented (#2008) |
+| T6b | Vulkan engine variant for the iGPUs (optional for landing; nothing in §5 depends on it) | engine build | deferred |
+| T7 | Settings → Subtitles, player entry and item control on web, Apple and Android; remove the old UI and routes | clients | implemented (#2009) |
 | T8 | Confirm the surround `source_clock_unsupported` repair on the deployed build with a real 5.1 film | fleet | after deploy |
 | T9 | End-to-end acceptance of all three routes on the fleet | fleet | after deploy |
 

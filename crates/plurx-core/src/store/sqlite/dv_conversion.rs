@@ -1786,6 +1786,14 @@ mod tests {
             // v6 view and marker and the original analysis view, first.
             "INSERT INTO subtitle_managed_schema VALUES(1,7)",
             "CREATE TABLE IF NOT EXISTS analysis_source_scope_schema",
+            // v139: the shared title rewind restores the exact v2 trigger
+            // definitions and marker before removing the authority columns.
+            "INSERT INTO dv_title_jobs_schema VALUES(1,3)",
+            // v140/v141 are reversed before the shared title rewind.
+            "DROP VIEW dispatch_turn_translation_viewer",
+            "DROP TRIGGER subtitle_translation_capture_continuity",
+            // v142 restores the predecessor mutation trigger and drops only empty tables.
+            "CREATE TABLE subtitle_translation_finish_demands(",
         ];
 
         assert!(

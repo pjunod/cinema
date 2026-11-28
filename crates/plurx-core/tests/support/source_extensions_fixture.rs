@@ -119,10 +119,10 @@ pub(crate) fn validated_source_tail_drops(
                 .execute_batch(include_str!("../../src/store/background_job_turns_v2.sql"))
                 .expect("published v136 dispatch migration");
         }
-        if schema_version >= 139 {
+        if schema_version >= 140 {
             expected
                 .execute_batch(include_str!("../../src/store/background_job_turns_v3.sql"))
-                .expect("published v139 dispatch authority");
+                .expect("published v140 dispatch authority");
         }
     }
     assert_eq!(
@@ -904,11 +904,46 @@ pub(crate) fn rewind_empty_source_extensions_to_v121(connection: &rusqlite::Conn
 
 const ANALYSIS_SCOPE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('analysis_required_resources','analysis_source_scope_schema') AND sql IS NOT NULL ORDER BY name";
 
-/// Rewind v138 (analysis reads only its file's root) and v137 (managed v7:
-/// a per-file job reads only its file's root) to v136. Each requires its exact
-/// published shape and marker, then restores the original analysis view and
-/// the managed v6 view with marker 6. Only views and markers change, so no
-/// queued work or reservation is discarded.
+/// Restore the historical title extension without dropping revisions or
+/// changing SQLite's AUTOINCREMENT sequence.
+fn rewind_title_v3_to_v138(conn: &rusqlite::Connection) {
+    use title_extension_fixture::{assert_title_fixture_generation, title_fixture_shape};
+    let version = conn
+        .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+        .expect("title generation ordinal");
+    if version != 139 {
+        return;
+    }
+    assert_title_fixture_generation(conn, 3);
+    let source = title_fixture_shape(2);
+    let mut plan = vec![
+        "DROP TRIGGER dv_title_jobs_bind_authority;".to_owned(),
+        "DROP TRIGGER dv_title_jobs_scanner_authority;".to_owned(),
+        "DROP TRIGGER dv_title_jobs_bind;".to_owned(),
+        "DROP TRIGGER dv_title_jobs_publish;".to_owned(),
+        "ALTER TABLE dv_title_jobs_demand DROP COLUMN aggregate_revision;".to_owned(),
+        "ALTER TABLE dv_title_jobs_demand DROP COLUMN scanner_generation;".to_owned(),
+        "DROP TABLE dv_title_jobs_schema;".to_owned(),
+    ];
+    for name in [
+        "dv_title_jobs_bind",
+        "dv_title_jobs_publish",
+        "dv_title_jobs_schema",
+    ] {
+        let (_, sql) = source
+            .iter()
+            .find(|(object, _)| object == name)
+            .expect("v2 witness");
+        plan.push(format!("{};", sql.trim_end_matches(';')));
+    }
+    plan.push("INSERT INTO dv_title_jobs_schema VALUES(1,2); PRAGMA user_version=138;".into());
+    within_fixture_savepoint(conn, || {
+        conn.execute_batch(&plan.join("\n"))
+            .expect("restore v2 title extension");
+        assert_title_fixture_generation(conn, 2);
+    });
+}
+
 /// The published v112 object witness shared by SQLite and replicated fixtures.
 #[allow(dead_code)]
 pub(crate) const TRANSLATION_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'subtitle_translation_*' OR tbl_name GLOB 'subtitle_translation_*') AND sql IS NOT NULL ORDER BY name";
@@ -965,13 +1000,13 @@ fn translation_shape(connection: &rusqlite::Connection) -> Vec<(String, String)>
         .expect("complete translation shape")
 }
 
-/// Restore the published predecessor trigger only when the exact v141
+/// Restore the published predecessor trigger only when the exact v142
 /// finish extension has no demands, stored tracks, or schedule exclusions.
-fn rewind_empty_translation_finish_to_v140(conn: &rusqlite::Connection) {
+fn rewind_empty_translation_finish_to_v141(conn: &rusqlite::Connection) {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .expect("AI finish ordinal");
-    if version != 141 {
+    if version != 142 {
         return;
     }
     assert_eq!(
@@ -1000,23 +1035,23 @@ fn rewind_empty_translation_finish_to_v140(conn: &rusqlite::Connection) {
          DROP TABLE subtitle_translation_stored_tracks;
          DROP TABLE subtitle_translation_schedule_exclusions;
          {former_trigger};
-         PRAGMA user_version=140;
+         PRAGMA user_version=141;
          RELEASE rewind_ai_finish;"
     ))
     .expect("published AI finish rewind");
 }
 
-/// Restore the published v138 continuity trigger and dispatch view.
-fn rewind_ai_authority_to_v138(conn: &rusqlite::Connection) {
-    rewind_empty_translation_finish_to_v140(conn);
+/// Restore the continuity trigger and dispatch view from before AI authority.
+fn rewind_ai_authority_to_v139(conn: &rusqlite::Connection) {
+    rewind_empty_translation_finish_to_v141(conn);
     let version = conn
         .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
         .expect("AI authority ordinal");
-    if version <= 138 {
+    if version <= 139 {
         return;
     }
     assert!(
-        version <= 140,
+        version <= 141,
         "only the published AI authority tail can rewind"
     );
     let chunk = |source: &str, needle: &str| {
@@ -1028,7 +1063,7 @@ fn rewind_ai_authority_to_v138(conn: &rusqlite::Connection) {
             .to_owned()
     };
     let mut plan = vec!["SAVEPOINT rewind_ai_authority;".to_owned()];
-    if version == 140 {
+    if version == 141 {
         plan.push("DROP TRIGGER subtitle_translation_capture_continuity;".to_owned());
         plan.push(chunk(
             include_str!("../../src/store/subtitle_translation_continuity.sql"),
@@ -1040,13 +1075,16 @@ fn rewind_ai_authority_to_v138(conn: &rusqlite::Connection) {
         include_str!("../../src/store/background_job_turns.sql"),
         "CREATE VIEW dispatch_turn_translation_viewer",
     ));
-    plan.push("PRAGMA user_version=138; RELEASE rewind_ai_authority;".to_owned());
+    plan.push("PRAGMA user_version=139; RELEASE rewind_ai_authority;".to_owned());
     conn.execute_batch(&plan.join("\n"))
         .expect("published AI authority rewind");
 }
 
+/// Restore the published v136 views and managed marker without discarding
+/// queued work or reservations.
 fn rewind_file_root_scope_to_v136(conn: &rusqlite::Connection) {
-    rewind_ai_authority_to_v138(conn);
+    rewind_ai_authority_to_v139(conn);
+    rewind_title_v3_to_v138(conn);
     let ordinal = |conn: &rusqlite::Connection| {
         conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .expect("file-root scope ordinal")

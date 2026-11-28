@@ -502,6 +502,16 @@ impl TranscodeManager {
         };
         *stage = "growing.preparation_authority";
         let authority = owner.gate.current_preparation(&owner.assignment).await?;
+        // The copy's argv keeps or deletes the in-band parameter sets from
+        // this probe's census; a Source-first play measures it here, under
+        // this owner, without moving the witnessed revision.
+        *stage = "growing.census";
+        Box::pin(crate::hevc_census::ensure_source_census(
+            self.store.as_ref(),
+            prepared.file(),
+        ))
+        .await
+        .map_err(|_| SourceWorkerError::Unresolved)?;
         *stage = "growing.probe_evidence";
         let probe = self
             .store

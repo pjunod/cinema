@@ -290,8 +290,8 @@ impl LocalSourceSnapshot {
 
     #[cfg(windows)]
     pub(super) fn from_file(file: &std::fs::File) -> std::io::Result<Self> {
-        let metadata = file.metadata()?;
-        let identity = plurx_core::fs_secure::std_file_identity(file)?;
+        let metadata = plurx_core::media_io::fstat(file)?;
+        let identity = plurx_core::media_io::identity_in_place(file)?;
         let modified = metadata
             .modified()?
             .duration_since(std::time::UNIX_EPOCH)

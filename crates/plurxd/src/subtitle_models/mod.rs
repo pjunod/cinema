@@ -1850,7 +1850,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_install_cache_cannot_requalify_after_restart_or_replacement() {
-        use plurx_core::fs_secure::std_file_identity;
+        use plurx_core::fs_secure::local_file_identity;
         let root = crate::test_tempdir().expect("private root");
         let database = root.path().join("eligibility.sqlite");
         let spec = &catalog().models[0];
@@ -1871,7 +1871,7 @@ mod tests {
             .expect("model permissions");
         drop(cache);
         let held = std::fs::File::open(&cached_path).expect("held original cache");
-        let original = std_file_identity(&held).expect("identity");
+        let original = local_file_identity(&held).expect("identity");
         let initial = persistent_state(root.path(), &database);
         model_receipt_fixture(&initial, original, ModelAction::Install, true).await;
         assert!(initial
@@ -2001,7 +2001,7 @@ mod tests {
             .expect("replacement permissions");
         drop(replacement_file);
         std::fs::rename(&replacement, &cached_path).expect("replace path");
-        let replaced = std_file_identity(&std::fs::File::open(&cached_path).expect("new cache"))
+        let replaced = local_file_identity(&std::fs::File::open(&cached_path).expect("new cache"))
             .expect("new identity");
         assert_ne!(original, replaced);
         model_receipt_fixture(&next_boot, replaced, ModelAction::Install, true).await;
