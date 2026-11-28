@@ -584,7 +584,10 @@ fn rolling_split_layout_is_bound_to_the_issued_master_and_durable_takeover() {
     response.vod = false;
     response.control_lease_timeout_ms = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS;
     response.rolling_hls_layout = Some(layout.clone());
-    assert!(!response.is_valid(), "split cannot advertise the scalar root");
+    assert!(
+        !response.is_valid(),
+        "split cannot advertise the scalar root"
+    );
     response.playlist_url = format!("/api/v1/hls/{}/master.m3u8", response.session_id);
     assert!(response.is_valid());
     response.vod = true;
@@ -593,7 +596,10 @@ fn rolling_split_layout_is_bound_to_the_issued_master_and_durable_takeover() {
     let mut durable = valid_start_request();
     assert!(durable.is_valid());
     durable.request.rolling_hls_layout = Some(layout.clone());
-    assert!(!durable.is_valid(), "only the owner can issue a rolling layout");
+    assert!(
+        !durable.is_valid(),
+        "only the owner can issue a rolling layout"
+    );
     assert!(takeover_recipe_is_valid(&durable));
     let encoded = serde_json::to_vec(&durable).expect("rolling recipe serializes");
     let recovered: RemoteStartRequest = serde_json::from_slice(&encoded).expect("rolling recipe");
