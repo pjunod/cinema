@@ -31,6 +31,7 @@ jobs:
             target/linux-player-deb/plurx-player_*
             target/linux-player-deb/SHA256SUMS
           if-no-files-found: error
+          overwrite: true
 
   release:
     needs: package
