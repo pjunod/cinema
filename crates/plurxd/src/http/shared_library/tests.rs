@@ -3440,6 +3440,7 @@ async fn sharing_source_preparation_uses_complete_live_file_and_real_principal_e
     let incarnation = uuid::Uuid::new_v4().to_string();
     let info = crate::transcode::StartInfo {
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         processed_dv_profile: None,
         processed_fel: None,
         degraded_processing: None,

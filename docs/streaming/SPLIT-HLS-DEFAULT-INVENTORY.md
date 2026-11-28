@@ -1,7 +1,7 @@
 # Split HLS as the default — inventory, client matrix and baseline method
 
 **Status:** open — S1 of P62 (metrics, first copy-HLS baseline) merged; S2
-([contract](SPLIT-HLS-RENDITION-CONTRACT.md)) built; S3 merged; S4 in verification; S5–S8 pending ·
+([contract](SPLIT-HLS-RENDITION-CONTRACT.md)) built; S3 merged; S4 and S5 in verification; S6–S8 pending ·
 **Owner:** Claude Opus 5.5 · **Effort:** `E-5F2C2E9EA4` ·
 **Written:** 2026-11-26 against `main` @ `8724851ba`
 
@@ -93,9 +93,9 @@ play a split presentation.
 |---|---|---|
 | VOD copy | Verified split indexed fMP4, with muxed fallback | S3 |
 | VOD transcode, processed DV windows | Verified split encoded fMP4, with muxed fallback | S4 |
-| Rolling copy | `copyseg` fMP4, or legacy ffmpeg HLS on takeover | S5 |
-| Rolling transcode | ffmpeg HLS MPEG-TS | S5 (fMP4 where split) |
-| Rolling recovery, reopen, takeover | Splits disabled | S5 |
+| Rolling copy | `copyseg` fMP4 or FFmpeg HLS. Eligible split uses the same source windows for video and audio | S5 |
+| Rolling transcode | FFmpeg HLS with paired fMP4 renditions when proved. Muxed remains available on refusal | S5 |
+| Rolling recovery, reopen, takeover | Sealed layout and child IDs survive routed takeover. A new sequence epoch distinguishes regenerated objects | S5 |
 | Live TV | ffmpeg HLS, TS or fMP4 | S6 |
 | DVR | VOD of the recording | With S3/S4 |
 | Shared playback | Relayed Source sessions, closed grammar | S6 |

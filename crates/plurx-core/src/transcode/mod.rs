@@ -1704,6 +1704,29 @@ pub fn hls_args(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec
 /// Explicit name retained so core unit tests can exercise the plan builder
 /// while their baseline-only helper keeps freezing the pre-M2 token vectors.
 pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec<String> {
+    rolling_args_for_plan(plan, execution, RollingMuxer::Hls)
+}
+
+/// Preserve the admitted movie graph and keyframe cadence while sending whole
+/// fMP4 fragments to the rolling writer, which owns HLS publication.
+pub fn rolling_fmp4_pipe_args(
+    plan: &ResolvedTranscode,
+    execution: &TranscodeExecution,
+) -> Vec<String> {
+    rolling_args_for_plan(plan, execution, RollingMuxer::FragmentedMp4)
+}
+
+#[derive(Clone, Copy)]
+enum RollingMuxer {
+    Hls,
+    FragmentedMp4,
+}
+
+fn rolling_args_for_plan(
+    plan: &ResolvedTranscode,
+    execution: &TranscodeExecution,
+    muxer: RollingMuxer,
+) -> Vec<String> {
     let media = plan.options();
     let options = TranscodeOptions {
         output_codec: media.output_codec,
@@ -1737,6 +1760,7 @@ pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecutio
         None,
         Some(plan),
         execution.diagnostics,
+        muxer,
     )
 }
 
@@ -1759,6 +1783,7 @@ fn hls_args_with_compatibility(
         Some(force_software_decode),
         None,
         DiagnosticLogging::Legacy,
+        RollingMuxer::Hls,
     )
 }
 
@@ -1773,6 +1798,7 @@ fn hls_args_inner(
     legacy_force_software_decode: Option<bool>,
     plan: Option<&ResolvedTranscode>,
     diagnostics: DiagnosticLogging,
+    muxer: RollingMuxer,
 ) -> Vec<String> {
     let source_path = source_path.to_owned();
     let mut args: Vec<String> = vec![
@@ -2177,6 +2203,24 @@ fn hls_args_inner(
             args.push("-ar".into());
             args.push(crate::playback::audio::AUDIO_SAMPLE_RATE.to_string());
         }
+    }
+
+    if matches!(muxer, RollingMuxer::FragmentedMp4) {
+        // A rolling child begins at the held seek's decode origin. Each
+        // projected track inherits that clock, with no per-track edit list.
+        args.extend(
+            [
+                "-use_editlist",
+                "0",
+                "-movflags",
+                "+empty_moov+delay_moov+default_base_moof+frag_keyframe+write_colr",
+                "-f",
+                "mp4",
+                "pipe:1",
+            ]
+            .map(str::to_owned),
+        );
+        return args;
     }
 
     // Start the MPEG-TS timeline at zero.

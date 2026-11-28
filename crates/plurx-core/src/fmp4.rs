@@ -6987,6 +6987,14 @@ impl Segmenter {
         Ok(segmenter)
     }
 
+    /// Start a generation with its own decode origin and a reserved global
+    /// sequence range. The media sequence does not change timestamp units.
+    pub fn starting_at(init: Init, policy: CutPolicy, first_index: u64) -> Self {
+        let mut segmenter = Self::new(init, policy);
+        segmenter.next_index = first_index;
+        segmenter
+    }
+
     /// A segmenter for a generation that starts partway into the film.
     ///
     /// `start_index` is the plan index of the first segment this generation
@@ -7019,8 +7027,7 @@ impl Segmenter {
                     .into(),
             ));
         }
-        let mut segmenter = Segmenter::new(init, policy);
-        segmenter.next_index = start_index;
+        let mut segmenter = Segmenter::starting_at(init, policy, start_index);
         segmenter.media_time = Some(MediaTime {
             start_ticks,
             delta: None,

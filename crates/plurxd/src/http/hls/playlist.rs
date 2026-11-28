@@ -115,19 +115,12 @@ pub(super) async fn playlist_local_before(
         )
         .await;
     }
-    let (context, file, owner) = session_file(state, session, playlist_deadline).await?;
-    let context =
-        exact_hls_context_before(state, session, context, &owner, playlist_deadline).await?;
-    let deadline = response_publication_deadline_before(request_deadline);
-    let response = playlist_response(master_playlist(&file, query.subtitle, &context).into_bytes());
-    complete_buffered_response_before(
+    master_playlist_response_local_before(
         state,
         session,
-        &owner,
-        crate::transcode::MediaResponsePublication::generation_metadata("master-playlist"),
-        true,
-        response,
-        deadline,
+        query,
+        playlist_deadline,
+        request_deadline,
     )
     .await
 }
@@ -227,10 +220,7 @@ pub(super) async fn master_playlist_response_local_before(
         .await;
     }
     let (context, file, owner) = session_file(state, session, playlist_deadline).await?;
-    let context =
-        exact_hls_context_before(state, session, context, &owner, playlist_deadline).await?;
-    let deadline = response_publication_deadline_before(request_deadline);
-    let native_split = if query.diagnostic.is_none() {
+    let native_split = if query.diagnostic.is_none() || !owner.allows_rolling_scalar() {
         state
             .transcode
             .native_split_master(session, playlist_deadline)
@@ -238,36 +228,38 @@ pub(super) async fn master_playlist_response_local_before(
     } else {
         None
     };
-    // The muxed copy keeps being written beside the split, so a split master
-    // the writer refuses (a fact it cannot prove) falls back to the muxed
-    // master rather than failing every later fetch of this session.
-    let native_split = native_split.and_then(|(ids, audio_index)| {
+    if native_split.is_none() && !owner.allows_rolling_scalar() {
+        return Err(response_publication_timeout());
+    }
+    let context =
+        exact_hls_context_before(state, session, context, &owner, playlist_deadline).await?;
+    let deadline = response_publication_deadline_before(request_deadline);
+    if let Some((ids, audio_index)) = native_split {
         let presentation = native_split_presentation(&file, &context, &ids, audio_index);
-        split_master_with_subtitles(presentation, &file, query.subtitle)
-            .inspect_err(|error| {
-                tracing::warn!(
-                    target: "plurxd::http::hls",
-                    session = %crate::transcode::session_log_id(session),
-                    %error,
-                    "native split master refused; serving the muxed master"
-                );
-            })
-            .ok()
-    });
-    if let Some(bytes) = native_split {
-        return complete_buffered_response_before(
-            state,
-            session,
-            &owner,
-            crate::transcode::MediaResponsePublication::attempt_media(
-                "master-playlist",
-                Some("master.m3u8"),
+        match split_master_with_subtitles(presentation, &file, query.subtitle) {
+            Ok(bytes) => {
+                return complete_buffered_response_before(
+                    state,
+                    session,
+                    &owner,
+                    crate::transcode::MediaResponsePublication::attempt_media(
+                        "master-playlist",
+                        Some("master.m3u8"),
+                    ),
+                    true,
+                    playlist_response(bytes),
+                    deadline,
+                )
+                .await
+            }
+            Err(error) if !owner.allows_rolling_scalar() => return Err(ApiError::Internal(error)),
+            Err(error) => tracing::warn!(
+                target: "plurxd::http::hls",
+                session = %crate::transcode::session_log_id(session),
+                %error,
+                "native split master refused; serving the muxed master"
             ),
-            true,
-            playlist_response(bytes),
-            deadline,
-        )
-        .await;
+        }
     }
     // Apple's multivariant eligibility check rejects UHD Blu-ray-style HEVC
     // High-tier declarations before VideoToolbox sees bytes it can decode.
@@ -522,6 +514,18 @@ pub(super) async fn video_playlist_local_before(
             Ok((bytes, owner)) => {
                 let response_deadline = *publication_deadline
                     .get_or_insert_with(|| response_publication_deadline_before(request_deadline));
+                if !owner.allows_rolling_scalar() {
+                    authorize_attempt_status(
+                        state,
+                        session,
+                        &owner,
+                        "playlist",
+                        Some(object_name),
+                        response_deadline,
+                    )
+                    .await?;
+                    return Err(ApiError::NotFound("Rolling HLS media playlist"));
+                }
                 let response = playlist_response(bytes);
                 let result = complete_buffered_response_before(
                     state,

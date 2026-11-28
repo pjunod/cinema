@@ -97,6 +97,7 @@ impl TranscodeManager {
             let encoding = facts.encoding.as_ref();
             return Some(StartInfo {
                 vod_copy_layout: recovered.start.vod_copy_layout,
+                rolling_hls_layout: None,
                 processed_dv_profile: encoding
                     .filter(|encoding| encoding.preserves_processed_dv())
                     .map(|_| 8),
@@ -140,14 +141,24 @@ impl TranscodeManager {
             .flatten()
             .and_then(|f| f.duration_ms);
         let encoder = *session.encoder_label.lock().await;
+        let rolling_hls_layout = session
+            .native_split
+            .as_ref()
+            .and_then(|split| split.sealed_layout());
         Some(StartInfo {
             vod_copy_layout: None,
+            rolling_hls_layout: rolling_hls_layout.clone(),
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
             retained_output: None,
             audio_delivery: session.audio_delivery.clone(),
-            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            playlist_url: format!(
+                "/api/v1/hls/{session_id}/{}",
+                rolling_hls_layout
+                    .as_ref()
+                    .map_or("index.m3u8", RollingHlsLayout::playlist_filename),
+            ),
             session_id: session_id.to_owned(),
             duration_ms,
             start_seconds: session.start_seconds,

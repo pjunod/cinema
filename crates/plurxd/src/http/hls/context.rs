@@ -252,7 +252,7 @@ pub(super) async fn exact_hls_context_at(
         None => {
             let opened = match state
                 .transcode
-                .segment_for_publication_before(session, &init_object, deadline)
+                .rolling_init_for_inspection_before(session, &init_object, deadline)
                 .await
             {
                 Ok(crate::transcode::SegmentPublication::Ready(opened)) => *opened,

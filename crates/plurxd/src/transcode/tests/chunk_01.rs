@@ -2254,6 +2254,7 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
     let req = SessionRequest {
         split_audio: false,
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2328,6 +2329,7 @@ fn snapshot_probe_request() -> SessionRequest {
     SessionRequest {
         split_audio: false,
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -4106,6 +4108,7 @@ fn the_grade_is_part_of_a_request_identity() {
     let request = SessionRequest {
         split_audio: false,
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
