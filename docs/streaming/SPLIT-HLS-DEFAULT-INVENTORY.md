@@ -42,7 +42,16 @@ records four passing Chrome attachments on the default worker stack. The
 first attachment used one encoder generation in each layout. The retained
 attachment used no new encoder generation. Split requested 31 HLS objects
 per attachment and muxed requested 15, with about 12.46 MB delivered in
-either layout. Capacity remains open.
+either layout.
+
+In the [retained soundtrack comparison](../performance/evidence/split-hls-retained-soundtrack-20261128.json),
+the second language added 3,792 KiB of sampled allocation with split and
+149,484 KiB with muxed. Both versions played continuously at 1.000×. In the
+[four-viewer comparison](../performance/evidence/split-hls-concurrent-copy-20261128.json),
+all split viewers passed and one muxed viewer exceeded the hitch limit.
+Split allocated 155,920 KiB versus 300,432 KiB muxed, made about twice
+the requests, and used more sampled CPU. This is one aligned title on one
+isolated host. Representative capacity remains open.
 
 If qualification exposes incorrect A/V alignment, a missing issued child
 object, failure on a previously supported client, or a sustained capacity

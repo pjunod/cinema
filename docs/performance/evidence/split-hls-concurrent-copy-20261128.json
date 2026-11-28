@@ -1,0 +1,152 @@
+{
+  "source_head": "c8a35356513d711dc107e3dd220fa56a46b890dd",
+  "method": "One isolated daemon per layout, four independent Chrome instances with pairs of alternate track choices; 27s of observation per viewer, debug build, no shaping.",
+  "notes": [
+    "A muxed viewer exceeded the two-hitch threshold and all four split viewers passed in this run. No observed stalls. Only one aligned title and one shared host were measured, so this observation does not establish fleet capacity.",
+    "CPU from process-tree samples is a lower bound. Scratch is the sampled high-water increase in daemon data-directory allocation."
+  ],
+  "cases": [
+    {
+      "requested_layout": "muxed",
+      "observed": "muxed",
+      "passed": false,
+      "resources": {
+        "samples": 73,
+        "process_count": 4,
+        "cpu_seconds_sampled_lower_bound": 5.64,
+        "allocated_KiB_peak_delta": 300432
+      },
+      "timestamps": {
+        "start": "2026-11-28T13:55:20.125Z",
+        "end": "2026-11-28T13:55:48.935Z"
+      },
+      "hls_requests": 72,
+      "hls_response_bytes": 375190660,
+      "producer_generations": {
+        "plurx_vod_producer_generations_total{kind=\"copy\"}": 2
+      },
+      "viewers": [
+        {
+          "audio": {
+            "requested": 0,
+            "observed": 0
+          },
+          "status": "passed",
+          "errors": [],
+          "ttff_ms": 600,
+          "clock_rate": 1,
+          "hitches": 0,
+          "stalls": 0
+        },
+        {
+          "audio": {
+            "requested": 1,
+            "observed": 1
+          },
+          "status": "passed",
+          "errors": [],
+          "ttff_ms": 678,
+          "clock_rate": 1,
+          "hitches": 0,
+          "stalls": 0
+        },
+        {
+          "audio": {
+            "requested": 0,
+            "observed": 0
+          },
+          "status": "passed",
+          "errors": [],
+          "ttff_ms": 688,
+          "clock_rate": 0.999,
+          "hitches": 0,
+          "stalls": 0
+        },
+        {
+          "audio": {
+            "requested": 1,
+            "observed": 1
+          },
+          "status": "failed",
+          "errors": [
+            "3 visible frame hitches, want <= 2"
+          ],
+          "ttff_ms": 1730,
+          "clock_rate": 1,
+          "hitches": 3,
+          "stalls": 0
+        }
+      ]
+    },
+    {
+      "requested_layout": "split",
+      "observed": "split",
+      "passed": true,
+      "resources": {
+        "samples": 73,
+        "process_count": 13,
+        "cpu_seconds_sampled_lower_bound": 10.489999999999995,
+        "allocated_KiB_peak_delta": 155920
+      },
+      "timestamps": {
+        "start": "2026-11-28T13:59:57.651Z",
+        "end": "2026-11-28T14:00:26.221Z"
+      },
+      "hls_requests": 148,
+      "hls_response_bytes": 375209344,
+      "producer_generations": {
+        "plurx_vod_producer_generations_total{kind=\"copy\"}": 3
+      },
+      "viewers": [
+        {
+          "audio": {
+            "requested": 0,
+            "observed": 0
+          },
+          "status": "passed",
+          "errors": [],
+          "ttff_ms": 1446,
+          "clock_rate": 1,
+          "hitches": 0,
+          "stalls": 0
+        },
+        {
+          "audio": {
+            "requested": 1,
+            "observed": 1
+          },
+          "status": "passed",
+          "errors": [],
+          "ttff_ms": 1441,
+          "clock_rate": 1,
+          "hitches": 0,
+          "stalls": 0
+        },
+        {
+          "audio": {
+            "requested": 0,
+            "observed": 0
+          },
+          "status": "passed",
+          "errors": [],
+          "ttff_ms": 1441,
+          "clock_rate": 1,
+          "hitches": 0,
+          "stalls": 0
+        },
+        {
+          "audio": {
+            "requested": 1,
+            "observed": 1
+          },
+          "status": "passed",
+          "errors": [],
+          "ttff_ms": 1438,
+          "clock_rate": 1,
+          "hitches": 0,
+          "stalls": 0
+        }
+      ]
+    }
+  ]
+}

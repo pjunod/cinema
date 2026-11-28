@@ -1,0 +1,114 @@
+{
+  "source_head": "c8a35356513d711dc107e3dd220fa56a46b890dd",
+  "fixture": "aligned dual-language AAC using the original AVC picture bytes",
+  "method": "25 s per attached Chrome viewer, first default soundtrack and repeat on confirmed track 1; isolated same node; sampled process CPU lower bound and allocated directory high-water delta.",
+  "results": [
+    {
+      "requested_layout": "muxed",
+      "observed_layout": "muxed",
+      "attachment": "first",
+      "selected_audio": null,
+      "status": "passed",
+      "ttff_ms": 571,
+      "clock_rate": 1,
+      "hitches": 0,
+      "stalls": 0,
+      "hls_requests": 17,
+      "hls_response_bytes": 87589412,
+      "producer_generations": {
+        "plurx_vod_producer_generations_total{kind=\"copy\"}": 1
+      },
+      "segment_answers": {
+        "plurx_vod_segment_answers_total{source=\"stored\"}": 15
+      },
+      "resources": {
+        "sample_count": 14,
+        "observed_processes": 1,
+        "cpu_seconds_sampled_lower_bound": 1.52,
+        "daemon_data_allocated_kib_peak_delta": 149532
+      }
+    },
+    {
+      "requested_layout": "muxed",
+      "observed_layout": "muxed",
+      "attachment": "repeat",
+      "selected_audio": {
+        "requested": 1,
+        "observed": 1
+      },
+      "status": "passed",
+      "ttff_ms": 616,
+      "clock_rate": 1,
+      "hitches": 0,
+      "stalls": 0,
+      "hls_requests": 17,
+      "hls_response_bytes": 87597641,
+      "producer_generations": {
+        "plurx_vod_producer_generations_total{kind=\"copy\"}": 1
+      },
+      "segment_answers": {
+        "plurx_vod_segment_answers_total{source=\"stored\"}": 15
+      },
+      "resources": {
+        "sample_count": 14,
+        "observed_processes": 1,
+        "cpu_seconds_sampled_lower_bound": 1.82,
+        "daemon_data_allocated_kib_peak_delta": 149484
+      }
+    },
+    {
+      "requested_layout": "split",
+      "observed_layout": "split",
+      "attachment": "first",
+      "selected_audio": null,
+      "status": "passed",
+      "ttff_ms": 1216,
+      "clock_rate": 1,
+      "hitches": 0,
+      "stalls": 0,
+      "hls_requests": 35,
+      "hls_response_bytes": 87593526,
+      "producer_generations": {
+        "plurx_vod_producer_generations_total{kind=\"copy\"}": 2
+      },
+      "segment_answers": {
+        "plurx_vod_segment_answers_total{source=\"stored\"}": 30
+      },
+      "resources": {
+        "sample_count": 15,
+        "observed_processes": 1,
+        "cpu_seconds_sampled_lower_bound": 3,
+        "daemon_data_allocated_kib_peak_delta": 149636
+      }
+    },
+    {
+      "requested_layout": "split",
+      "observed_layout": "split",
+      "attachment": "repeat",
+      "selected_audio": {
+        "requested": 1,
+        "observed": 1
+      },
+      "status": "passed",
+      "ttff_ms": 734,
+      "clock_rate": 1,
+      "hitches": 0,
+      "stalls": 0,
+      "hls_requests": 35,
+      "hls_response_bytes": 87601612,
+      "producer_generations": {
+        "plurx_vod_producer_generations_total{kind=\"copy\"}": 1
+      },
+      "segment_answers": {
+        "plurx_vod_segment_answers_total{source=\"stored\"}": 28,
+        "plurx_vod_segment_answers_total{source=\"produced\"}": 2
+      },
+      "resources": {
+        "sample_count": 14,
+        "observed_processes": 1,
+        "cpu_seconds_sampled_lower_bound": 3.85,
+        "daemon_data_allocated_kib_peak_delta": 3792
+      }
+    }
+  ]
+}
