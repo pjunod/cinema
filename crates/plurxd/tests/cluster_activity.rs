@@ -2339,6 +2339,7 @@ async fn an_operator_removes_a_killed_follower_from_three_voters() {
 /// One parsed `create startup read budget finished` line.
 #[derive(Debug)]
 struct CreateBudgetLine {
+    local_catalog_resolver_calls: u64,
     authority_reads: u64,
     local_reads: u64,
     mutations: u64,
@@ -2396,6 +2397,7 @@ fn create_budget_lines(log: &str) -> Vec<CreateBudgetLine> {
                     .unwrap_or_else(|| panic!("`{key}` missing from create budget line: {line}"))
             };
             CreateBudgetLine {
+                local_catalog_resolver_calls: number("local_catalog_resolver_calls"),
                 authority_reads: number("authority_reads"),
                 local_reads: number("local_reads"),
                 mutations: number("mutations"),
@@ -2411,7 +2413,7 @@ fn create_budget_lines(log: &str) -> Vec<CreateBudgetLine> {
 #[test]
 fn create_budget_line_parser_reads_the_corrected_fields() {
     let log = "2026-10-04T00:00:00Z  INFO plurxd::http::hls: create startup read budget \
-               finished \x1b[3mfile_id\x1b[0m=7 catalog_calls=0 authority_reads=21 \
+               finished \x1b[3mfile_id\x1b[0m=7 catalog_calls=1 local_catalog_resolver_calls=2 authority_reads=21 \
                local_reads=2 mutations=6 store_ms=48 elapsed_ms=90 \
                phases=lookup:3ms/1a/0l/0w,tail:0ms/0a/0l/0w \
                methods=get_user=1/0/0,claim_media_session_request=0/0/1,get_file=1/1/0\n\
@@ -2419,6 +2421,7 @@ fn create_budget_line_parser_reads_the_corrected_fields() {
     let lines = create_budget_lines(log);
     assert_eq!(lines.len(), 1);
     let line = &lines[0];
+    assert_eq!(line.local_catalog_resolver_calls, 2);
     assert_eq!(
         (line.authority_reads, line.local_reads, line.mutations),
         (21, 2, 6)
@@ -2864,18 +2867,23 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         with_intent["vod"], true,
         "a caps-v2 Auto create is a VOD session: {with_intent}"
     );
+    assert_eq!(
+        line.local_catalog_resolver_calls, 1,
+        "caps-v2 Auto must resolve the ingress catalog once: {line:?}"
+    );
     measured.push(("caps-v2 Auto, intent", line));
 
     let table = measured
         .iter()
         .map(|(shape, line)| {
             format!(
-                "{shape}: authority={} local={} writes={} handler_ms={} store_ms={} phases={}",
+                "{shape}: authority={} local={} writes={} handler_ms={} store_ms={} local_catalog_resolver_calls={} phases={}",
                 line.authority_reads,
                 line.local_reads,
                 line.mutations,
                 line.elapsed_ms,
                 line.store_ms,
+                line.local_catalog_resolver_calls,
                 line.phases
             )
         })

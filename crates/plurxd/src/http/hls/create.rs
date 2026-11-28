@@ -2480,15 +2480,15 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     }
                 }
                 if incumbent_receipt.is_some() && body.height != Some(1440) {
-                    let measured = link_receipts::measured_outputs(
-                        state,
-                        source,
-                        &catalog_request,
+                    let measured = link_receipts::catalog_measured_outputs(
+                        &state.node_id,
+                        &catalogue_result,
                         &eligible_workers,
-                        snapshot,
                         advisory,
-                    )
-                    .await;
+                    );
+                    if let Some(outputs) = measured.as_deref() {
+                        state.transcode.note_catalog_measurements_used(outputs);
+                    }
                     catalog = link_receipts::positive_catalog(
                         state,
                         network_identity,
@@ -3482,6 +3482,7 @@ async fn create_with_purpose(
     tracing::info!(target: "plurxd::http::hls",
         file_id = id,
         catalog_calls = budget.calls(),
+        local_catalog_resolver_calls = budget.local_resolver_calls(),
         authority_reads = after[1].saturating_sub(before[1]),
         local_reads = after[0].saturating_sub(before[0]),
         mutations = after[2].saturating_sub(before[2]),
@@ -5157,46 +5158,24 @@ async fn create_with_purpose_attempt(
         };
     remote_request.retained_output = info.retained_output.clone();
     recipe_json = serde_json::to_string(&remote_request)?;
-    let measured_candidate_outputs = if let (true, Some(source), Some(caps), Some(catalog)) = (
+    let measured_candidate_outputs = if let (true, Some(_), Some(catalog)) = (
         quality_negotiated,
-        source.as_ref(),
         candidate_decoder_caps.as_ref(),
         quality_catalog.as_ref(),
     ) {
-        let catalog_request = crate::media_pool::QualityCatalogRequest {
-            audio_claim: request.audio_claim.clone(),
-            audio_delivery: info.audio_delivery.clone(),
-            copy_contract: request.kind.copy_contract(),
-            file_id: source.id,
-            source_size: source.size,
-            source_mtime: source.mtime,
-            caps: caps.device_caps(),
-            audio_index: request.audio_index,
-            audio_offset_ms: request.audio_offset_ms,
-            subtitle_burn: request.subtitle_burn,
-            presentation: request.presentation,
-        };
-        // Project from the same bound catalogue, not another authority enumeration.
-        let accepted: Vec<_> = catalog
-            .candidates
-            .iter()
-            .filter(|entry| {
-                entry.dispatch_supported && (!entry.partial || entry.node_id == state.node_id)
-            })
-            .cloned()
-            .collect();
-        link_receipts::measured_outputs(
-            &state,
-            source,
-            &catalog_request,
-            &accepted,
-            planning_snapshot,
+        link_receipts::create_response_measured_outputs(
+            &state.node_id,
+            catalog,
+            &request,
+            info.audio_delivery.as_ref(),
             link_receipts::advisory_deadline(),
         )
-        .await
     } else {
         None
     };
+    if let Some(outputs) = measured_candidate_outputs.as_deref() {
+        state.transcode.note_catalog_measurements_used(outputs);
+    }
     let effective_processing =
         super::control::current_dv_report(&state, &info.session_id, &incarnation_id).await;
     let title_scan = session_title_scan(&state, source.as_ref()).await;

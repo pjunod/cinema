@@ -1364,8 +1364,86 @@ pub(crate) async fn measured_outputs(
     })
     .await
     .ok()?;
-    let outputs: Vec<_> = projected
-        .measured_candidate_outputs
+    project_measured_outputs(
+        &state.node_id,
+        projected.measured_candidate_outputs,
+        accepted,
+        None,
+    )
+}
+
+pub(super) fn catalog_measured_outputs(
+    node_id: &str,
+    catalog: &crate::media_pool::QualityCatalogResult,
+    accepted: &[crate::media_pool::WorkerQualityCandidate],
+    deadline: tokio::time::Instant,
+) -> Option<Vec<crate::vodserve::retained::MeasuredCandidateOutput>> {
+    if tokio::time::Instant::now() >= deadline {
+        return None;
+    }
+    let measurements = catalog.local_measurements.as_ref()?;
+    project_measured_outputs(
+        node_id,
+        measurements.outputs.iter().cloned(),
+        accepted,
+        Some(&measurements.binding),
+    )
+}
+
+pub(super) fn create_response_measured_outputs(
+    node_id: &str,
+    catalog: &crate::media_pool::QualityCatalogResult,
+    request: &crate::transcode::SessionRequest,
+    delivered_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
+    deadline: tokio::time::Instant,
+) -> Option<Vec<crate::vodserve::retained::MeasuredCandidateOutput>> {
+    let measurements = catalog.local_measurements.as_ref()?;
+    let receipts = measurements.create_receipts.as_ref()?;
+    if tokio::time::Instant::now() >= deadline
+        || request.presentation != crate::transcode::Presentation::Vod
+        || request.audio_index != receipts.audio_index
+        || request.audio_offset_ms != receipts.audio_offset_ms
+        || request.subtitle_burn != receipts.subtitle_burn
+        || delivered_audio.is_some_and(|audio| !audio.valid_snapshot())
+    {
+        return None;
+    }
+    let actual_audio = delivered_audio.map(|audio| audio.byte_identity());
+    let copy_matches = request
+        .kind
+        .copy_contract()
+        .map_or(receipts.copy_matches_default, |contract| {
+            receipts.copy_contract == Some(contract)
+        });
+    let measured = receipts
+        .outputs
+        .iter()
+        .filter(|row| {
+            (row.output.route != CandidateRoute::Remux || copy_matches)
+                && actual_audio
+                    .as_ref()
+                    .map_or(row.canonical_audio, |identity| {
+                        identity == &row.audio_identity
+                    })
+        })
+        .take(64)
+        .map(|row| row.output.clone());
+    let accepted: Vec<_> = catalog
+        .candidates
+        .iter()
+        .filter(|entry| entry.dispatch_supported && (!entry.partial || entry.node_id == node_id))
+        .cloned()
+        .collect();
+    project_measured_outputs(node_id, measured, &accepted, Some(&measurements.binding))
+}
+
+fn project_measured_outputs(
+    node_id: &str,
+    measured: impl IntoIterator<Item = crate::vodserve::retained::MeasuredCandidateOutput>,
+    accepted: &[crate::media_pool::WorkerQualityCandidate],
+    binding: Option<&crate::media_pool::PlanningBinding>,
+) -> Option<Vec<crate::vodserve::retained::MeasuredCandidateOutput>> {
+    let outputs: Vec<_> = measured
         .into_iter()
         .filter(|output| {
             output.average_bps > 0
@@ -1378,7 +1456,10 @@ pub(crate) async fn measured_outputs(
                             && entry.candidate.recipe_digest == output.recipe_digest
                             && entry.candidate.route == output.route
                     })
-                    .is_some_and(|entry| entry.node_id == state.node_id)
+                    .is_some_and(|entry| {
+                        entry.node_id == node_id
+                            && binding.is_none_or(|binding| entry.binding.as_ref() == Some(binding))
+                    })
         })
         .take(64)
         .collect();
@@ -1511,6 +1592,186 @@ fn measured_margin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn measured_outputs_project_only_the_accepted_bound_local_recipe() {
+        use crate::media_pool::{PlanningBinding, WorkerQualityCandidate};
+        use crate::vodserve::retained::MeasuredCandidateOutput;
+        use plurx_core::playback::candidate::CandidateId;
+
+        let recipe_digest = [7; 32];
+        let candidate_id = CandidateId::for_recipe_digest(recipe_digest);
+        let candidate =
+            crate::transcode::continuous_test_candidate_context(candidate_id, recipe_digest, 720)
+                .selected_candidate;
+        let binding = PlanningBinding {
+            generation: 2,
+            source_digest: "a".repeat(64),
+        };
+        let local = WorkerQualityCandidate {
+            node_id: "local".into(),
+            binding: Some(binding.clone()),
+            partial: false,
+            dispatch_supported: true,
+            candidate,
+        };
+        let proof = MeasuredCandidateOutput {
+            candidate_id,
+            recipe_digest,
+            route: local.candidate.route,
+            artifact_id: "retained-artifact".into(),
+            output_identity: "measured-output".into(),
+            qualification: "complete_full_mux_rfc8216_v1",
+            average_bps: 1000,
+            peak_bps: 1800,
+        };
+        let previous =
+            project_measured_outputs("local", [proof.clone()], std::slice::from_ref(&local), None);
+        let carried = project_measured_outputs(
+            "local",
+            [proof.clone()],
+            std::slice::from_ref(&local),
+            Some(&binding),
+        );
+        assert!(carried.is_some());
+        assert_eq!(
+            serde_json::to_value(previous).expect("legacy projection"),
+            serde_json::to_value(carried).expect("bound projection")
+        );
+
+        let mut peer = local.clone();
+        peer.node_id = "peer".into();
+        assert!(
+            project_measured_outputs(
+                "local",
+                [proof.clone()],
+                &[peer, local.clone()],
+                Some(&binding)
+            )
+            .is_none(),
+            "a lower-ranked local match cannot supply a peer's measurement"
+        );
+        let mut stale = local;
+        stale.binding.as_mut().expect("binding").generation -= 1;
+        assert!(project_measured_outputs("local", [proof], &[stale], Some(&binding)).is_none());
+    }
+
+    #[test]
+    fn create_receipts_match_the_delivered_audio_and_copy_contract() {
+        use crate::media_pool::{
+            CreateReceiptMeasurements, LocalCatalogMeasurements, PlanningBinding,
+            QualityCatalogResult, WorkerQualityCandidate,
+        };
+        use crate::vodserve::retained::{CatalogMeasuredOutput, MeasuredCandidateOutput};
+        use plurx_core::playback::{
+            audio::{AudioAction, AudioDelivery},
+            candidate::CandidateId,
+        };
+
+        let recipe_digest = [4; 32];
+        let candidate_id = CandidateId::for_recipe_digest(recipe_digest);
+        let mut candidate =
+            crate::transcode::continuous_test_candidate_context(candidate_id, recipe_digest, 720)
+                .selected_candidate;
+        candidate.route = CandidateRoute::Remux;
+        let binding = PlanningBinding {
+            generation: 3,
+            source_digest: "b".repeat(64),
+        };
+        let mut request = serde_json::from_value::<super::super::create::CreateSession>(
+            serde_json::json!({"playback_id": "receipt", "copy": true}),
+        )
+        .expect("create request")
+        .into_request(1, 720);
+        let audio = |codec: &str| AudioDelivery {
+            action: AudioAction::Copy {
+                codec: codec.into(),
+                channels: 2,
+            },
+            downmix: None,
+            reason: "fixture".into(),
+        };
+        let output = |codec: &str, canonical_audio| CatalogMeasuredOutput {
+            audio_identity: audio(codec).byte_identity(),
+            canonical_audio,
+            output: MeasuredCandidateOutput {
+                candidate_id,
+                recipe_digest,
+                route: CandidateRoute::Remux,
+                artifact_id: codec.into(),
+                output_identity: codec.into(),
+                qualification: "complete_full_mux_rfc8216_v1",
+                average_bps: 1000,
+                peak_bps: 1800,
+            },
+        };
+        let mut catalog = QualityCatalogResult {
+            candidates: vec![WorkerQualityCandidate {
+                candidate,
+                node_id: "local".into(),
+                binding: Some(binding.clone()),
+                partial: false,
+                dispatch_supported: true,
+            }],
+            authority_refused: false,
+            complete: true,
+            causes: Vec::new(),
+            local_measurements: Some(LocalCatalogMeasurements {
+                binding,
+                outputs: vec![output("aac", true).output],
+                create_receipts: Some(CreateReceiptMeasurements {
+                    audio_index: None,
+                    audio_offset_ms: 0,
+                    subtitle_burn: None,
+                    copy_contract: Some((false, false, false)),
+                    copy_matches_default: false,
+                    outputs: vec![output("aac", true), output("ac3", false)],
+                }),
+            }),
+        };
+        let project = |catalog: &QualityCatalogResult,
+                       request: &crate::transcode::SessionRequest,
+                       delivery| {
+            create_response_measured_outputs(
+                "local",
+                catalog,
+                request,
+                delivery,
+                advisory_deadline(),
+            )
+        };
+        let delivered = audio("ac3");
+        let expected = output("ac3", false).output;
+        let legacy = project_measured_outputs("local", [expected], &catalog.candidates, None)
+            .expect("legacy response output");
+        let actual = project(&catalog, &request, Some(&delivered)).expect("delivered AC-3 receipt");
+        assert_eq!(
+            serde_json::to_value(actual).expect("encoded receipt response"),
+            serde_json::to_value(legacy).expect("encoded legacy response")
+        );
+        assert_eq!(
+            project(&catalog, &request, None).expect("canonical audio receipt")[0].artifact_id,
+            "aac"
+        );
+        let late_delivery = audio("eac3");
+        assert!(project(&catalog, &request, Some(&late_delivery)).is_none());
+        catalog
+            .local_measurements
+            .as_mut()
+            .expect("local measurements")
+            .create_receipts
+            .as_mut()
+            .expect("response measurements")
+            .outputs
+            .push(output("eac3", false));
+        assert_eq!(
+            project(&catalog, &request, Some(&late_delivery)).expect("new discovery receipt")[0]
+                .artifact_id,
+            "eac3"
+        );
+        request.kind = crate::transcode::SessionKind::Transcode { height: 720 };
+        assert!(project(&catalog, &request, Some(&delivered)).is_none());
+    }
 
     #[tokio::test]
     async fn a05_client_log_ack_header_is_exact_negative_only_and_never_batch_authority() {
