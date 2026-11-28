@@ -1099,31 +1099,6 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                     continue;
                 }
             }
-            if let Some(encoding) = rendition
-                .recipe
-                .encoding
-                .as_ref()
-                .filter(|encoding| encoding.is_source_copy())
-            {
-                drop(manifest);
-                if matches!(step, Step::Restart { .. }) {
-                    rendition.gen_epoch.fetch_add(1, Relaxed);
-                    clear_marker_prewarm_dispatch(rendition);
-                    if perform_driver_step(shared, rendition, step).await.is_err() {
-                        return;
-                    }
-                }
-                let result = crate::vodencode::EncodePermit::try_source_copy(
-                    &encoding.admissions,
-                    shared.store.as_ref(),
-                )
-                .await;
-                if let crate::vodencode::SourceCopyPermitRead::Admitted(permit) = result {
-                    prepared_permit = Some(permit);
-                    continue;
-                }
-                return;
-            }
             if let Some(encoding) = &rendition.recipe.encoding {
                 // The old child may own this pool's only permit. Retire it before
                 // admission, but never hold the manifest over process or Store I/O:

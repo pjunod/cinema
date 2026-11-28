@@ -1284,8 +1284,8 @@ impl Encoding {
             });
             None
         };
-        // A shared-audio producer admits its own bounded AAC estimate, never
-        // the video recipe it was resolved beside.
+        // A soundtrack producer admits its own bounded estimate and waits
+        // with the foreground queue regardless of its copy or AAC mode.
         let claim = (priority != Priority::Background)
             .then(|| {
                 self.handoff_claim
@@ -1336,8 +1336,7 @@ impl Encoding {
         Some(permit)
     }
 
-    /// The video recipe's software-encoder cap does not bound the AAC
-    /// producer: shared audio's fixed estimate is its whole floor.
+    /// A soundtrack's own resource estimate supplies its whole floor.
     fn admission_software_threads(&self) -> Option<u32> {
         self.shared_audio
             .is_none()
