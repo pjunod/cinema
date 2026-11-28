@@ -3662,7 +3662,7 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_full_runtime_job_allowances_preserve_the_existing_suites(self):
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
-        for name, minutes in (("preflight", 30), ("check", 180), ("cluster_store_legacy", 240), ("cluster_wal", 60)):
+        for name, minutes in (("preflight", 30), ("check", 180), ("cluster_store_legacy", 150), ("cluster_wal", 60)):
             with self.subTest(job=name):
                 self.assertRegex(jobs[name], rf"(?m)^    timeout-minutes: {minutes}$")
                 # The serial Store suite is not a compiler lane; the full unit
@@ -3686,6 +3686,46 @@ assert.equal(context.ACT_TIMER, null);
         makefile = read("Makefile")
         self.assertIn("--test store_contract -- --test-threads=1", makefile)
         self.assertIn("--features cluster-read-cost-validation,hiqlite-contract-tests", makefile)
+
+    def test_full_promotion_requires_store_shard_union_and_schema_lineage(self):
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        for name in ("cluster_store_legacy", "cluster_store_shards", "cluster_store_shadow"):
+            self.assertIn("split_promotion_store != 'true'", jobs[name])
+        self.assertIn("shard-timeout-minutes: 175", jobs["cluster_store_promotion_shards"])
+        self.assertIn("CI_REGISTRY_PULL_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}",
+                      jobs["cluster_store_promotion_shards"])
+        lineage = jobs["cluster_store_promotion_lineage"]
+        self.assertIn("split_promotion_store == 'true'", lineage)
+        self.assertIn("PLURX_EXPECT_TEST_NAMES: narrow_schema_lineage_bridge_preserves_and_refuses", lineage)
+        self.assertIn("--test schema_lineage_upgrade -- --test-threads=1", lineage)
+        shard_jobs = workflow_job_blocks(".github/workflows/store-shards.yml")
+        self.assertIn("tested_sha: ${{ steps.validate_store_shards.outputs.tested_sha }}",
+                      shard_jobs["aggregate"])
+
+        verdict = workflow_step_blocks(jobs["cluster_store"])["Select the required Store graph"]
+        command = "\n".join(workflow_step_literal(verdict, "run"))
+        environment = {
+            **os.environ,
+            "SPLIT_PROMOTION_STORE": "true",
+            "GITHUB_SHA": "a" * 40,
+            "PROMOTION_SHARD_RESULT": "success",
+            "PROMOTION_SHARD_SHA": "a" * 40,
+            "PROMOTION_LINEAGE_RESULT": "success",
+        }
+        self.assertEqual(subprocess.run(["bash", "-c", command], env=environment,
+                                        capture_output=True).returncode, 0)
+        for key, invalid in (
+            ("PROMOTION_SHARD_RESULT", "skipped"),
+            ("PROMOTION_SHARD_SHA", ""),
+            ("PROMOTION_SHARD_SHA", "b" * 40),
+            ("PROMOTION_LINEAGE_RESULT", "failure"),
+            ("PROMOTION_LINEAGE_RESULT", "skipped"),
+        ):
+            with self.subTest(key=key, invalid=invalid):
+                self.assertNotEqual(subprocess.run(
+                    ["bash", "-c", command], env={**environment, key: invalid},
+                    capture_output=True,
+                ).returncode, 0)
 
     def test_store_shards_are_dynamic_disjoint_and_roll_out_behind_one_verdict(self):
         workflow = read(".github/workflows/ci.yml")
@@ -4982,7 +5022,7 @@ assert.equal(context.ACT_TIMER, null);
                     expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif (
                     path == ".github/workflows/ci.yml"
-                    and name == "cluster_store_legacy"
+                    and name in {"cluster_store_legacy", "cluster_store_promotion_lineage"}
                 ):
                     expected = ci_store
                 elif (

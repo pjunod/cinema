@@ -113,6 +113,7 @@ jobs:
       docs_only: ${{ steps.scope.outputs.docs_only }}
       qualification: ${{ steps.scope.outputs.qualification }}
       execution_mode: ${{ steps.execution_mode.outputs.mode }}
+      split_promotion_store: ${{ steps.execution_mode.outputs.split_promotion_store }}
       promotion_binding: ${{ steps.promotion.outputs.promotion_binding }}
       promotion_pr: ${{ steps.promotion.outputs.promotion_pr }}
       promotion_base_sha: ${{ steps.promotion.outputs.promotion_base_sha }}
@@ -195,6 +196,8 @@ jobs:
         env:
           REQUESTED_MODE: ${{ vars.CI_EXECUTION_MODE || 'legacy' }}
           RETAIN_STORE_UNITS: ${{ steps.retention.outputs.retain_store_contract_units }}
+          PROMOTION_BINDING: ${{ steps.promotion.outputs.promotion_binding }}
+          PREDECESSOR_RUN: ${{ inputs.predecessor_run }}
         run: |
           set -euo pipefail
           mode="$(scripts/ci-execution-mode resolve "$REQUESTED_MODE")"
@@ -203,6 +206,15 @@ jobs:
             exit 1
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          split=false
+          if [ "$RETAIN_STORE_UNITS" != true ] && [ -z "$PREDECESSOR_RUN" ] &&
+             [ -n "$PROMOTION_BINDING" ]; then
+            binding_schema="$(python3 -c 'import json, os; print(json.loads(os.environ["PROMOTION_BINDING"])["schema"])')"
+            if [ "$binding_schema" = 1 ]; then
+              split=true
+            fi
+          fi
+          echo "split_promotion_store=$split" >> "$GITHUB_OUTPUT"
       - name: Restore persistent runner workspace ownership
         if: always()
         run: |
@@ -702,12 +714,10 @@ jobs:
       github.server_url != 'https://github.com' && (
       needs.scope.outputs.cluster_auth == 'true' &&
       needs.scope.outputs.execution_mode != 'accelerated' &&
+      needs.scope.outputs.split_promotion_store != 'true' &&
       needs.preflight.outputs.store_retained != 'true' )
     runs-on: [ci-nonvoter-store]
-    # Run 9756 passed 470 of 509 serial cases at the 120-minute cutoff.
-    # Run 9881 took 1.59 times as long at matching case milestones. Leave
-    # time for all 511 Store cases, the separate lineage suite and receipts.
-    timeout-minutes: 240
+    timeout-minutes: 150
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -767,16 +777,71 @@ jobs:
         if: always() && steps.store_contracts.outcome != 'success'
         run: exit 1
 
+  # Run 9461 hit this Store carrier's three-hour outer deadline. A native
+  # promotion requires the full Store inventory and the separate lineage test.
+  cluster_store_promotion_shards:
+    name: promotion Store shard graph
+    needs: [scope, preflight]
+    if: >-
+      github.server_url != 'https://github.com' && (
+      needs.scope.outputs.cluster_auth == 'true' &&
+      needs.scope.outputs.split_promotion_store == 'true' &&
+      needs.preflight.outputs.store_retained != 'true' )
+    uses: ./.github/workflows/store-shards.yml
+    with:
+      execution-mode: accelerated
+      shard-timeout-minutes: 175
+    secrets:
+      CI_REGISTRY_PULL_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+
+  cluster_store_promotion_lineage:
+    name: promotion schema-lineage upgrade
+    needs: [scope, preflight]
+    if: >-
+      github.server_url != 'https://github.com' && (
+      needs.scope.outputs.cluster_auth == 'true' &&
+      needs.scope.outputs.split_promotion_store == 'true' &&
+      needs.preflight.outputs.store_retained != 'true' )
+    runs-on: [ci-nonvoter-store]
+    timeout-minutes: 60
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: cluster-store-legacy
+      - name: Exercise the schema-lineage bridge
+        env:
+          RUST_MIN_STACK: "8388608"
+          PLURX_EXPECT_TEST_NAMES: narrow_schema_lineage_bridge_preserves_and_refuses
+        run: >-
+          scripts/require-test-count cargo test --locked -p plurx-core
+          --features cluster-read-cost-validation,hiqlite-contract-tests
+          --test schema_lineage_upgrade -- --test-threads=1
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+
   cluster_store_shards:
     name: required replicated Store shard graph
     needs: [scope, preflight]
     if: >-
       github.server_url != 'https://github.com' && (
       needs.scope.outputs.cluster_auth == 'true' &&
+      needs.scope.outputs.split_promotion_store != 'true' &&
       needs.scope.outputs.execution_mode == 'accelerated' )
     uses: ./.github/workflows/store-shards.yml
     with:
       execution-mode: accelerated
+    secrets:
+      CI_REGISTRY_PULL_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
 
   # Shadow evidence is deliberately absent from every required job's `needs`
   # graph. An offline experimental runner can leave this call queued without
@@ -787,10 +852,13 @@ jobs:
     if: >-
       github.server_url != 'https://github.com' && (
       needs.scope.outputs.cluster_auth == 'true' &&
+      needs.scope.outputs.split_promotion_store != 'true' &&
       needs.scope.outputs.execution_mode == 'shadow' )
     uses: ./.github/workflows/store-shards.yml
     with:
       execution-mode: shadow
+    secrets:
+      CI_REGISTRY_PULL_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
 
   cluster_store:
     name: replicated Store contracts
@@ -799,6 +867,8 @@ jobs:
       - preflight
       - cluster_store_legacy
       - cluster_store_shards
+      - cluster_store_promotion_shards
+      - cluster_store_promotion_lineage
     if: github.server_url != 'https://github.com' && (always() && needs.scope.outputs.cluster_auth == 'true' && needs.preflight.outputs.store_retained != 'true')
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
@@ -817,7 +887,19 @@ jobs:
           EXECUTION_MODE: ${{ needs.scope.outputs.execution_mode }}
           LEGACY_RESULT: ${{ needs.cluster_store_legacy.result }}
           SHARD_RESULT: ${{ needs.cluster_store_shards.result }}
+          SPLIT_PROMOTION_STORE: ${{ needs.scope.outputs.split_promotion_store }}
+          PROMOTION_SHARD_RESULT: ${{ needs.cluster_store_promotion_shards.result }}
+          PROMOTION_SHARD_SHA: ${{ needs.cluster_store_promotion_shards.outputs.tested_sha }}
+          PROMOTION_LINEAGE_RESULT: ${{ needs.cluster_store_promotion_lineage.result }}
         run: |
+          set -euo pipefail
+          if [ "${SPLIT_PROMOTION_STORE:-false}" = true ]; then
+            printf 'Promotion Store verdict: shards=%s lineage=%s\n' "$PROMOTION_SHARD_RESULT" "$PROMOTION_LINEAGE_RESULT"
+            test "$PROMOTION_SHARD_RESULT" = success
+            test "$PROMOTION_SHARD_SHA" = "$GITHUB_SHA"
+            test "$PROMOTION_LINEAGE_RESULT" = success
+            exit 0
+          fi
           printf 'Store verdict: mode=%s legacy=%s shards=%s\n' "$EXECUTION_MODE" "$LEGACY_RESULT" "$SHARD_RESULT"
           case "$EXECUTION_MODE" in
             legacy|shadow)

@@ -12,6 +12,16 @@ on:
         description: Validated rollout mode selected by the caller.
         required: true
         type: string
+      shard-timeout-minutes:
+        type: number
+        default: 40
+    secrets:
+      CI_REGISTRY_PULL_TOKEN:
+        required: true
+    outputs:
+      tested_sha:
+        description: Commit whose complete Store inventory passed the shard union check.
+        value: ${{ jobs.aggregate.outputs.tested_sha }}
   # Proving the sharded path must not cost pull-request traffic. A manual run
   # exercises these exact jobs on the real fleet and defaults to `shadow`, so
   # the rehearsal stays advisory until someone deliberately asks for the
@@ -27,6 +37,9 @@ on:
         options:
           - shadow
           - accelerated
+      shard-timeout-minutes:
+        type: number
+        default: 40
 
 jobs:
   shard:
@@ -39,7 +52,7 @@ jobs:
     # `validation/runner-fleet.toml` now says what the fleet carries and
     # `make operations-check` rejects a label no rostered runner answers to.
     runs-on: [ci-nonvoter-store]
-    timeout-minutes: 40
+    timeout-minutes: ${{ inputs.shard-timeout-minutes }}
     continue-on-error: ${{ inputs.execution-mode == 'shadow' }}
     env:
       # The shard count lives here once and both `validation.store_shard`
@@ -100,8 +113,7 @@ jobs:
       # test of the schema-lineage bridge, is a separate test binary that
       # Dockerfile.store-shard does not export. It runs only in
       # `make cluster-store-check` (the legacy Store lane and the
-      # cluster-store backstop), so in accelerated mode no pull-request lane
-      # runs it.
+      # cluster-store backstop) and the separate promotion lineage job.
       - name: Run the assigned Store tests once
         id: store_shard
         if: steps.build_store_binary.outcome == 'success'
@@ -160,6 +172,8 @@ jobs:
       run:
         shell: bash
     timeout-minutes: 10
+    outputs:
+      tested_sha: ${{ steps.validate_store_shards.outputs.tested_sha }}
     continue-on-error: ${{ inputs.execution-mode == 'shadow' }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -180,12 +194,13 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
           mkdir -p target/validation
           python3 -m validation.store_shard validate \
             --receipts-directory target/validation/store-shards \
             --output target/validation/cluster-store-shard-aggregate.json \
             2>&1 | tee target/validation/cluster-store-shard-aggregate.log
+          echo "tested_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
       - name: Retain the Store shard aggregate
         if: always()
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
