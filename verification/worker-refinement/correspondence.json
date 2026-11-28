@@ -8,7 +8,7 @@
       "id": "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete",
       "file": "crates/plurxd/src/library_work.rs",
       "name": "library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete",
-      "item_sha256": "6c4a52cd92e8bdfe975682424c4c5e98f5635df621ad4e4a6143497dcdae548c"
+      "item_sha256": "7c7caeacab1859ad0e604ee44f9ce81e878bfb5fbad0cc52faca5f9cec84f34f"
     },
     {
       "id": "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop",
