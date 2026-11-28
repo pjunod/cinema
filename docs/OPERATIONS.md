@@ -3374,6 +3374,11 @@ available encoder and egress. Build skew alone permits placement.
 Strict envelope changes require a `PROTOCOL_VERSION` bump and a dated note
 here. Newest first:
 
+- 2026-11-28: protocol 16 — seals the issued rolling HLS layout and its video
+  and audio identities on remote starts and durable takeover. A new sequence
+  epoch distinguishes resumed rolling objects. Upgrade worker and ingress
+  nodes in exact protocol cohorts. Keep protocol 15 capacity until protocol 16
+  capacity can take over qualified sessions.
 - 2026-11-28: protocol 15 — seals the selected encoded VOD layout and
   projected child identities. Keep one eligible owner per active ingress
   cohort until its sessions drain. [Rendition contract](streaming/SPLIT-HLS-RENDITION-CONTRACT.md).
