@@ -17,6 +17,12 @@ plugins {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        // The large, pinned Robolectric test SDK can hit Central's rate limit.
+        maven("https://maven-central.storage-download.googleapis.com/maven2/") {
+            content {
+                includeVersion("org.robolectric", "android-all-instrumented", "15-robolectric-13954326-i7")
+            }
+        }
         google()
         mavenCentral()
     }

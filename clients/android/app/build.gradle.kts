@@ -237,6 +237,27 @@ androidComponents {
     }
 }
 
+// Match the instrumented API 35 SDK used by the FileProvider Robolectric test.
+// Resolve it through Gradle so the normal dependency cache covers JVM startup.
+val robolectricSdk = configurations.create("robolectricSdk") {
+    isCanBeConsumed = false
+    isTransitive = false
+}
+dependencies {
+    add(robolectricSdk.name, "org.robolectric:android-all-instrumented:15-robolectric-13954326-i7@jar")
+}
+val robolectricSdkDirectory = layout.buildDirectory.dir("robolectric/sdks")
+val prepareRobolectricSdk = tasks.register<Sync>("prepareRobolectricSdk") {
+    from(robolectricSdk)
+    into(robolectricSdkDirectory)
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(prepareRobolectricSdk)
+    inputs.dir(robolectricSdkDirectory)
+    systemProperty("robolectric.offline", "true")
+    systemProperty("robolectric.dependency.dir", robolectricSdkDirectory.get().asFile.absolutePath)
+}
+
 dependencies {
     implementation(libs.zxing.core)
     implementation(libs.firebase.messaging)
