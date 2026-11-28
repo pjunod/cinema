@@ -529,6 +529,20 @@ mod tests {
             .vod_window(&next_children.video.bytes, 1)
             .is_err());
         assert!(projection.vod_window(&next.bytes, u32::MAX).is_err());
+
+        let mut ceiling_cut = next;
+        let picture = ceiling_cut
+            .tracks
+            .iter_mut()
+            .find(|track| track.track_id == projection.video_init().tracks[0].id)
+            .expect("picture track");
+        picture.runs[0].samples[0].flags |= 0x0001_0000;
+        let ceiling_cut =
+            super::super::merge_retaining(&[ceiling_cut], &projection.multiplexed, 1, false)
+                .expect("verified ceiling cut");
+        assert!(projection.vod_window(&ceiling_cut.bytes, 1).is_err());
+        assert!(projection.range_window(&ceiling_cut.bytes, 0).is_err());
+        assert!(projection.range_window(&ceiling_cut.bytes, 1).is_ok());
     }
     #[test]
     fn vod_window_projects_a_published_dolby_vision_segment() {

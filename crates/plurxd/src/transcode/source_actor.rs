@@ -1567,13 +1567,19 @@ impl SourceViewerActor {
 
         // Detached observation survives waiter timeout only to settle actual
         // jobs; an expired request cannot extend authority or viewer activity.
-        // A VOD segment past its deadline ends the request, as it always has.
+        // Split readers can retry a projection deadline without ending the
+        // already-issued Source attachment.
         if Instant::now() >= deadline {
-            return Err(if kind.media_object() {
-                LiveRefusal::terminal(SourceWorkerError::Deadline)
-            } else {
-                LiveRefusal::transient(SourceWorkerError::Deadline)
-            });
+            return Err(
+                if matches!(
+                    kind,
+                    SharingHlsResourceKind::Init | SharingHlsResourceKind::MediaSegment
+                ) {
+                    LiveRefusal::terminal(SourceWorkerError::Deadline)
+                } else {
+                    LiveRefusal::transient(SourceWorkerError::Deadline)
+                },
+            );
         }
         // A parked segment can outlive the first observation's five-second
         // window. Re-observe real membership/current binding after the wait.
