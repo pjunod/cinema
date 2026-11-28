@@ -21,11 +21,3 @@ source = "clients/android/app/src/main/java/tv/plurx/app/data/AISubtitleModels.k
 source_anchor = "val target: String,"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/ModelContractTest.kt"
 test_anchor = "fun aiSubtitleStartEncodesTheRequiredEnglishTarget()"
-
-[[fixes]]
-id = "apple.ai-subtitle-offer-guard"
-commits = ["3699a9481aa28b144c94ee08cb447155a912240f"]
-source = "clients/apple/Sources/AISubtitles.swift"
-source_anchor = "var canStart: Bool"
-test = "clients/apple/Tests/ProgressiveCaptionTests.swift"
-test_anchor = "func testAIEntryRequiresAnAvailableRouteAndNoExistingEnglishTrack()"
