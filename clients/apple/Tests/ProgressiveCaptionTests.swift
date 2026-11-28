@@ -30,23 +30,13 @@ private final class CaptionHandoffPlayer: AVPlayer {
 private final class CaptionFixture: @unchecked Sendable {
     let lock = NSLock()
     var requests: [URLRequest] = []
-    var corruptSegment = false
-    var wrongPageRevision = false
-    var stopped = false
-    var stoppedCreateConflict = false
-    var unprepared = false
+    var invalidCue = false
+    var largeCueWindow = false
     var oversizedOptions = false
-    var textEnabled = false
-    var resumed = false
-    var heartbeatIntervalMs = 5000
-    var pollMinMs = 1000
-    var offeredProfiles: [[String: Any]]?
+    var completeOperation = false
+    var offeredRoute = "audio"
+    var terminalState: String?
     var defaultProfileID: String?
-    private var requestedProfile: [String: Any]?
-    private var requestedLanguage = "en"
-    var activeProfile: [String: Any] { requestedProfile ?? profile }
-    var activeProfileID: String { activeProfile["profile_id"] as? String ?? profileID }
-    let textJob = "44444444-4444-4444-8444-444444444444"
     let asset = String(repeating: "a", count: 64)
     let profileID = String(repeating: "b", count: 64)
     let source = String(repeating: "c", count: 64)
@@ -54,121 +44,65 @@ private final class CaptionFixture: @unchecked Sendable {
     let operation = "11111111-1111-4111-8111-111111111111"
     let demand = "22222222-2222-4222-8222-222222222222"
     let lease = "33333333-3333-4333-8333-333333333333"
-    let segmentID = String(repeating: "e", count: 64)
     let cueID = String(repeating: "f", count: 64)
-    var epoch: String { stopped ? "9007199254740994" : resumed ? "9007199254740995" : "9007199254740993" }
-    var viewRevision: String { stopped ? "2" : resumed ? "3" : "1" }
     func data(_ value: Any) -> Data { try! JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) }
     var profile: [String: Any] {
         ["profile_id": profileID, "model_id": "small", "model_sha256": model, "task": "transcribe", "output_language": NSNull(),
          "input_languages": ["en", "de"], "timeline_contract": "source-audio-clock-v1", "window": ["core_ms": 30000],
          "limits": ["segment_bytes": 16384, "segment_cues": 128, "page_bytes": 65536, "page_entries": 64,
                     "coverage_intervals": 64, "concurrent_fetches": 2, "cue_memory_bytes": 524288, "cue_count": 1024,
-                    "cue_window_before_ms": 30000, "cue_window_after_ms": 90000, "poll_min_ms": pollMinMs,
-                    "poll_max_ms": 5000, "retry_max_ms": 30000, "heartbeat_interval_ms": heartbeatIntervalMs]]
+                    "cue_window_before_ms": 30000, "cue_window_after_ms": 90000, "poll_min_ms": 1000,
+                    "poll_max_ms": 5000, "retry_max_ms": 30000, "heartbeat_interval_ms": 5000]]
     }
-    var segment: [String: Any] {
-        ["version": 1, "asset_id": asset, "segment_id": segmentID, "core_index": 2, "start_ms": 60000, "end_ms": 90000,
-         "cues": [["cue_id": cueID, "start_ms": 64000, "end_ms": 67000, "text": "A literal <caption> & source clock"]],
-         "provenance": ["engine_sha256": String(repeating: "1", count: 64), "model_sha256": model,
-                        "operation_epoch": "9007199254740993", "platform": "fixture", "profile_id": activeProfileID,
-                        "source_sha256": source, "worker_fence": "9007199254740995"]]
+    var retainedOptions: [String: Any] {
+        ["version": 1, "file_id": "7", "source_size": "10000", "source_mtime": "200", "duration_ms": 120000,
+         "audio_tracks": [["index": 2, "audio_ordinal": 2, "source_index": 5, "normalized_language": "en"]],
+         "models": [profile], "default_profile_id": defaultProfileID.map { $0 as Any } ?? NSNull(),
+         "capability": ["supported": true], "permissions": ["read": true, "demand": true, "stop": true, "resume": true],
+         "assets": [], "server_now_ms": 100000]
     }
-    var reference: [String: Any] {
-        ["segment_id": segmentID, "digest": CaptionValidation.sha256(data(segment)), "start_ms": 60000, "end_ms": 90000]
+
+    var retainedOperation: [String: Any] {
+        ["version": 1, "operation_id": operation, "operation_epoch": "9007199254740994", "view_revision": "2",
+         "state": "stopped", "retryable": false, "asset_id": NSNull(), "content_revision": NSNull(),
+         "file_id": "7", "source_size": "10000", "source_mtime": "200", "audio_index": 2,
+         "spoken_language": "en", "output_language": "en", "task": "transcribe", "profile_id": profileID,
+         "model_id": "small", "model_sha256": model, "timeline_contract": "source-audio-clock-v1",
+         "failed_ranges": [], "server_now_ms": 100000]
     }
+
     func reply(_ request: URLRequest) -> Data {
         lock.lock(); defer { lock.unlock() }
         requests.append(request)
         let path = request.url!.path
-        let input = request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
-        let textConfig: [String: Any] = ["version": 1, "revision": "1", "enabled": textEnabled, "model_id": "opus-mt-mul-en", "target_language": "en"]
-        let textWorkers: [[String: Any]] = [["node_id": "worker-a", "label": "Fixture worker", "boot_id": operation,
-                                           "model_id": "opus-mt-mul-en", "status": "missing"]]
-        if path.hasSuffix("/subtitle-text-translation/options") {
-            return data(["version": 1, "file_id": "7", "source_size": "10000", "source_mtime": "200", "model_id": "opus-mt-mul-en",
-                         "configuration": textConfig, "workers": textWorkers, "permissions": ["read": true, "create": true],
-                         "subtitles": [["index": 22, "language": "de", "title": "German text", "text_eligible": true],
-                                       ["index": 23, "language": "de", "title": "German bitmap", "text_eligible": false]]])
-        }
-        if path.hasSuffix("/subtitle-text-translation/models") {
-            return data(["version": 1, "workers": textWorkers, "input_languages": ["de", "fr"]])
-        }
-        if path.hasSuffix("/subtitle-text-translation/config") {
-            if request.httpMethod == "PUT", let bytes = request.httpBody,
-               let body = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] { textEnabled = body["enabled"] as? Bool ?? false }
-            return data(["version": 1, "revision": request.httpMethod == "PUT" ? "2" : "1", "enabled": textEnabled,
-                         "model_id": "opus-mt-mul-en", "target_language": "en"])
-        }
-        if path.hasSuffix("/subtitles/22/translation") {
-            return data(["version": 1, "job_id": textJob, "state": "queued"])
-        }
-        if path.hasSuffix("/subtitle-text-translation/jobs/" + textJob) {
-            return data(["version": 1, "job_id": textJob, "state": "succeeded", "phase": "published", "retryable": false,
-                         "progress": ["completed": 3, "total": 3],
-                         "result": ["file_id": "7", "subtitle_index": 100005, "downloaded_subtitle_id": asset, "language": "en"]])
-        }
-        if path.hasSuffix("/options") {
+        let filePath = "/api/v1/files/7/ai-subtitles"
+        let operationPath = "/api/v1/ai-subtitles/operations/" + operation
+        if path == filePath && request.httpMethod == "GET" {
             if oversizedOptions { return Data(repeating: 120, count: 70_000) }
-            return data(["version": 1, "file_id": "7", "source_size": "10000", "source_mtime": "200", "duration_ms": 120000,
-                         "audio_tracks": [["index": 2, "audio_ordinal": 2, "source_index": 5, "normalized_language": "en"]],
-                         "models": offeredProfiles ?? [profile], "default_profile_id": defaultProfileID.map { $0 as Any } ?? NSNull(), "capability": ["supported": true],
-                         "permissions": ["read": true, "demand": true, "stop": true, "resume": true], "assets": [], "server_now_ms": 100000])
+            return data(["allowed": true, "target": "en", "route": offeredRoute, "alternatives": []])
         }
-        if path.hasSuffix("/subtitle-translation") {
-            if request.httpMethod == "POST" {
-                requestedProfile = offeredProfiles?.first { $0["profile_id"] as? String == input["profile_id"] as? String }
-                requestedLanguage = input["spoken_language"] as? String ?? "en"
+        let state = terminalState ?? (completeOperation ? "complete" : "working")
+        let trackID: Any = completeOperation ? asset as Any : NSNull()
+        if path == operationPath + "/cues" {
+            let from = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "from_ms" })?.value.flatMap(Int.init) ?? 0
+            let cues: [[String: Any]] = !completeOperation && state == "working" && from < 67000
+                ? [["start_ms": invalidCue ? -1 : 64000, "end_ms": 67000, "text": "A literal <caption> & source clock"]] : []
+            var window: [String: Any] = ["state": state, "track_id": trackID,
+                "ready_from_ms": completeOperation ? 0 : 60000, "ready_to_ms": completeOperation ? 120000 : 90000,
+                "cues": cues]
+            if largeCueWindow {
+                window["cues"] = (0..<96).map { cueIndex in
+                    ["start_ms": 60_000 + 50 * cueIndex, "end_ms": 60_050 + 50 * cueIndex,
+                     "text": String(repeating: "caption ", count: 90)] as [String: Any]
+                }
             }
-            if stoppedCreateConflict && stopped {
-                return data(["version": 1, "code": "operation_stopped", "message": "Stopped", "operation_id": operation, "server_now_ms": 100000])
-            }
-            return data(["version": 1, "outcome": "accepted", "operation_id": operation, "operation_epoch": epoch,
-                         "view_revision": viewRevision, "asset_id": asset, "demand_id": demand, "demand_generation": "1",
-                         "continuity_id": input["continuity_id"] ?? NSNull(), "state": "partial", "server_now_ms": 100000])
+            return data(window)
         }
-        if path.hasSuffix("/stop") { stopped = true
-            return data(["version": 1, "outcome": "stopped", "operation_id": operation, "operation_epoch": epoch,
-                         "view_revision": "2", "asset_id": asset, "state": "stopped", "server_now_ms": 100000])
-        }
-        if path.hasSuffix("/retry") {
-            stopped = false; resumed = true
-            return data(["version": 1, "outcome": "resumed", "operation_id": operation, "operation_epoch": epoch,
-                         "view_revision": "3", "asset_id": asset, "demand_id": demand, "demand_generation": "1",
-                         "continuity_id": input["continuity_id"] ?? NSNull(), "state": "partial", "server_now_ms": 100000])
-        }
-        if path.contains("/demands/") {
-            return data(["version": 1, "outcome": request.httpMethod == "DELETE" ? "released" : "updated",
-                         "operation_id": operation, "operation_epoch": epoch, "view_revision": viewRevision, "demand_id": demand,
-                         "demand_generation": input["demand_generation"] ?? "2",
-                         "continuity_id": input["continuity_id"] ?? NSNull(), "server_now_ms": 100000])
-        }
-        if path.hasSuffix("/operations/" + operation) {
-            return data(["version": 1, "operation_id": operation, "operation_epoch": epoch, "view_revision": viewRevision,
-                         "state": stopped ? "stopped" : "partial", "retryable": false, "asset_id": unprepared ? NSNull() : asset as Any, "content_revision": unprepared ? NSNull() : source as Any,
-                         "file_id": "7", "source_size": "10000", "source_mtime": "200", "audio_index": 2,
-                         "spoken_language": requestedLanguage, "output_language": activeProfile["task"] as? String == "translate" ? "en" : requestedLanguage,
-                         "task": activeProfile["task"] ?? "transcribe", "profile_id": activeProfileID,
-                         "model_id": activeProfile["model_id"] ?? "small", "model_sha256": activeProfile["model_sha256"] ?? model,
-                         "timeline_contract": activeProfile["timeline_contract"] ?? "source-audio-clock-v1",
-                         "failed_ranges": [], "server_now_ms": 100000])
-        }
-        if path.hasSuffix("/manifest") {
-            return data(["version": 1, "asset_id": asset, "file_id": "7", "content_revision": source, "profile_id": activeProfileID,
-                         "audio_index": 2, "spoken_language": requestedLanguage,
-                         "output_language": activeProfile["task"] as? String == "translate" ? "en" : requestedLanguage, "timeline_contract": "source-audio-clock-v1",
-                         "manifest_revision": "1", "view_revision": viewRevision,
-                         "operation": ["operation_id": operation, "epoch": epoch, "state": stopped ? "stopped" : "partial"],
-                         "snapshot": ["lease_id": lease, "revision": "1", "expires_in_ms": 15000],
-                         "coverage": [["start_ms": 60000, "end_ms": 90000]], "segments": wrongPageRevision ? [] : [reference],
-                         "segment_next_cursor": wrongPageRevision ? "page-two" : NSNull(), "server_now_ms": 100000])
-        }
-        if path.hasSuffix("/segments") {
-            return data(["version": 1, "asset_id": asset, "snapshot_revision": "2", "entries": [reference], "next_cursor": NSNull()])
-        }
-        if path.hasSuffix("/segments/" + segmentID) {
-            if corruptSegment { return data(["untrusted": "different exact bytes"]) }
-            return data(segment)
+        if path == operationPath + "/viewer" && request.httpMethod == "DELETE" { return Data() }
+        if (path == filePath && request.httpMethod == "POST") || (path == operationPath + "/viewer" && request.httpMethod == "PUT") {
+            return data(["id": operation, "route": offeredRoute, "state": state, "progress": completeOperation ? 1 : 0.25,
+                         "track_id": trackID, "track_index": completeOperation ? 100005 as Any : NSNull()])
         }
         return data([:])
     }
@@ -211,7 +145,8 @@ private final class CaptionFixtureProtocol: URLProtocol {
     }
     private func deliver(_ body: Data) {
         guard !cancelled else { return }
-        let status=Self.statusOverrides.first { request.url?.path.hasSuffix($0.key)==true }?.value ?? 200
+        let status=Self.statusOverrides.first { request.url?.path.hasSuffix($0.key)==true }?.value
+            ?? (request.httpMethod == "DELETE" ? 204 : 200)
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
@@ -239,7 +174,6 @@ final class ProgressiveCaptionTests: XCTestCase {
     private var fixture: CaptionFixture!
     private var owner: ProgressiveCaptionSession!
     private var captionOwners:[ProgressiveCaptionSession]=[]
-    private var textOwners:[SubtitleTextTranslation]=[]
     override func setUp() {
         fixture = CaptionFixture(); CaptionFixtureProtocol.fixture = fixture
         CaptionFixtureProtocol.statusOverrides=[:]
@@ -247,17 +181,15 @@ final class ProgressiveCaptionTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [CaptionFixtureProtocol.self]
         transport = URLSession(configuration: config)
         owner = ProgressiveCaptionSession()
-        captionOwners=[owner];textOwners=[]
+        captionOwners=[owner]
         Session.shared.setCredentials(origin: "https://captions.test", token: "caption-fixture")
     }
     override func tearDown() async throws {
         // Fence every owner first, then settle its work before closing the
         // shared injected transport. URLSession task creation is asynchronous.
         for caption in captionOwners { caption.retire() }
-        for text in textOwners { text.retire() }
         for caption in captionOwners { await caption.retireAndDrain() }
-        for text in textOwners { await text.retireAndDrain() }
-        subscriptions=[];captionOwners=[];textOwners=[]
+        subscriptions=[];captionOwners=[]
         transport.invalidateAndCancel()
         CaptionFixtureProtocol.holdRequest=nil;CaptionFixtureProtocol.onHeld=nil;CaptionFixtureProtocol.releaseHeld=nil
         Session.shared.setCredentials(origin:"",token:nil);CaptionFixtureProtocol.fixture=nil
@@ -266,7 +198,7 @@ final class ProgressiveCaptionTests: XCTestCase {
         let loaded = expectation(description: "fresh validated options")
         // Ignore the current owner's replayed value: reconfiguration must wait
         // for the next options response, not return on the previous snapshot.
-        owner.$options.dropFirst().compactMap { $0 }.prefix(1).sink { _ in loaded.fulfill() }.store(in: &subscriptions)
+        owner.$aiOptions.dropFirst().compactMap { $0 }.prefix(1).sink { _ in loaded.fulfill() }.store(in: &subscriptions)
         owner.configure(api: PlurxAPI(origin: "https://captions.test", testTransport: transport), fileId: 7, sourceAudioIndex: 2,
                         now: now, current: { true })
         await fulfillment(of: [loaded], timeout: 2)
@@ -275,7 +207,7 @@ final class ProgressiveCaptionTests: XCTestCase {
         await configure()
         let visible = expectation(description: "validated partial cue")
         owner.$window.compactMap { $0 }.filter { $0.cues.count == 1 }.prefix(1).sink { _ in visible.fulfill() }.store(in: &subscriptions)
-        XCTAssertTrue(owner.request(.transcribe))
+        XCTAssertTrue(owner.requestAI { _, _ in })
         await fulfillment(of: [visible], timeout: 2)
         let window = try XCTUnwrap(owner.window), cue = try XCTUnwrap(window.cues.first)
         XCTAssertEqual(CaptionRenderWindow.itemInterval(cue, baseMs: window.baseMs, offsetMs: 0), 4000..<7000)
@@ -283,8 +215,9 @@ final class ProgressiveCaptionTests: XCTestCase {
         let create = try XCTUnwrap(fixture.captured.first { $0.httpMethod == "POST" })
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(create.httpBody,"CREATE must carry its exact serialized body")) as? [String: Any])
         XCTAssertEqual(body["audio_index"] as? Int, 2)
-        XCTAssertEqual(body["task"] as? String, "transcribe")
-        XCTAssertEqual(body["output_language"] as? String, "en")
+        XCTAssertEqual(body["route"] as? String, "auto")
+        XCTAssertEqual(body["target"] as? String, "en")
+        XCTAssertEqual(create.url?.path, "/api/v1/files/7/ai-subtitles")
         XCTAssertEqual(body["position_ms"] as? Int, 65000)
         owner.subtitleOffsetMs = 250
         XCTAssertEqual(CaptionRenderWindow.itemInterval(cue, baseMs: 60000, offsetMs: owner.window!.offsetMs), 4250..<7250)
@@ -293,97 +226,73 @@ final class ProgressiveCaptionTests: XCTestCase {
     private func body(_ request: URLRequest) throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
     }
-    func testAdvancingPlaybackKeepsContinuityAcrossCoreBoundaryPauseRateAndAttachment() async throws {
-        fixture.heartbeatIntervalMs = 1; fixture.pollMinMs = 250
+    func testAdvancingPlaybackKeepsViewerAcrossCoreBoundaryPauseRateAndAttachment() async throws {
         var position = 65000, base = 60000
         var rate = 1.0, paused = false
         await configure(now: { (position, base, rate, paused) })
-        XCTAssertTrue(owner.request(.transcribe))
-        try await eventually { self.fixture.captured.contains { $0.httpMethod == "PUT" } }
+        XCTAssertTrue(owner.requestAI { _, _ in })
+        try await eventually { self.owner.window?.cues.count == 1 }
         let create = try body(XCTUnwrap(fixture.captured.first { $0.httpMethod == "POST" }))
-        let continuity = try XCTUnwrap(create["continuity_id"] as? String)
-        XCTAssertTrue(CaptionValidation.uuid(continuity))
-        // This is an advancing source clock crossing a core boundary, followed
-        // by a quality attachment with a different item origin, not a seek.
+        let playback = try XCTUnwrap(create["playback_id"] as? String)
+        XCTAssertTrue(CaptionValidation.uuid(playback))
+
         position = 95000; base = 90000; rate = 1.5; paused = true
         owner.mediaChanged()
         try await eventually {
             self.fixture.captured.contains { $0.httpMethod == "PUT" && (try? self.body($0)["position_ms"] as? Int) == 95000 }
         }
-        position = 100000; paused = false; owner.subtitleOffsetMs = 500; owner.mediaChanged()
-        try await eventually {
-            self.fixture.captured.contains { $0.httpMethod == "PUT" && (try? self.body($0)["position_ms"] as? Int) == 100000 }
-        }
         let updates = try fixture.captured.filter { $0.httpMethod == "PUT" }.map(body)
-        XCTAssertTrue(updates.allSatisfy { $0["continuity_id"] as? String == continuity })
-        XCTAssertTrue(updates.allSatisfy { $0["playback_id"] as? String == create["playback_id"] as? String })
-        XCTAssertTrue(updates.contains { $0["paused"] as? Bool == true && $0["playback_rate"] as? Double == 1.5 })
+        XCTAssertTrue(updates.allSatisfy { $0["playback_id"] as? String == playback })
+        XCTAssertTrue(updates.contains { $0["playback_rate"] as? Double == 1.5 })
+        XCTAssertEqual(owner.window?.baseMs, 90000)
         XCTAssertTrue(owner.selected)
     }
-    func testSeekDuringHeldHeartbeatSettlesCASBeforeSendingNewContinuity() async throws {
-        fixture.heartbeatIntervalMs = 30000; fixture.pollMinMs = 250
+
+    func testSeekDuringHeldHeartbeatDiscardsTheOldCueWindow() async throws {
         var position = 65000
         await configure(now: { (position, 60000, 1, false) })
-        let held = expectation(description: "first heartbeat held after server acceptance")
-        CaptionFixtureProtocol.holdRequest = (method: "PUT", path: "/api/v1/subtitle-translation/operations/\(fixture.operation)/demands/\(fixture.demand)")
+        let held = expectation(description: "old viewer update held")
+        CaptionFixtureProtocol.holdRequest = (method: "PUT", path: "/api/v1/ai-subtitles/operations/\(fixture.operation)/viewer")
         CaptionFixtureProtocol.onHeld = { held.fulfill() }
-        XCTAssertTrue(owner.request(.transcribe))
+        XCTAssertTrue(owner.requestAI { _, _ in })
         await fulfillment(of: [held], timeout: 2)
         let first = try body(XCTUnwrap(fixture.captured.first { $0.httpMethod == "PUT" }))
-        XCTAssertEqual(first["demand_generation"] as? String, "2")
-        position = 95000; owner.mediaChanged(seek: true, positionMs: position)
-        // The server accepted generation 2 before this explicit seek. Its
-        // immutable response must settle, then generation 3 revokes that UUID.
-        CaptionFixtureProtocol.holdRequest = nil; CaptionFixtureProtocol.releaseHeld?()
-        try await eventually { self.fixture.captured.filter { $0.httpMethod == "PUT" }.count >= 2 }
+        var showedOldCue = false
+        owner.$window.sink { if $0?.cues.isEmpty == false { showedOldCue = true } }.store(in: &subscriptions)
+        position = 95000
+        owner.mediaChanged(seek: true, positionMs: position)
+        CaptionFixtureProtocol.holdRequest = nil
+        CaptionFixtureProtocol.releaseHeld?()
+        try await eventually {
+            self.fixture.captured.contains { $0.url?.path.hasSuffix("/cues") == true && $0.url?.query?.contains("from_ms=85000") == true }
+        }
         let updates = try fixture.captured.filter { $0.httpMethod == "PUT" }.map(body)
-        XCTAssertEqual(updates[1]["demand_generation"] as? String, "3")
-        XCTAssertNotEqual(updates[1]["continuity_id"] as? String, first["continuity_id"] as? String)
-        XCTAssertEqual(updates[1]["playback_id"] as? String, first["playback_id"] as? String)
-        XCTAssertEqual(updates[1]["position_ms"] as? Int, 95000)
-        XCTAssertTrue(CaptionValidation.uuid(try XCTUnwrap(updates[1]["continuity_id"] as? String)))
+        XCTAssertEqual(updates.last?["playback_id"] as? String, first["playback_id"] as? String)
+        XCTAssertEqual(updates.last?["position_ms"] as? Int, 95000)
+        XCTAssertFalse(showedOldCue)
         XCTAssertTrue(owner.selected)
     }
-    func testStopRetryAndSourceReconfigurationUseFreshTraversal() async throws {
-        await configure(); XCTAssertTrue(owner.request(.transcribe))
-        try await eventually { !self.owner.busy && self.owner.operation != nil }
-        let create = try body(XCTUnwrap(fixture.captured.first { $0.httpMethod == "POST" }))
-        owner.stop(); try await eventually { !self.owner.busy && self.owner.stopped }
-        owner.retry(); try await eventually { !self.owner.busy && !self.owner.stopped }
-        let retry = try body(XCTUnwrap(fixture.captured.first { $0.url?.path.hasSuffix("/retry") == true }))
-        XCTAssertNotEqual(retry["continuity_id"] as? String, create["continuity_id"] as? String)
-        XCTAssertTrue(CaptionValidation.uuid(try XCTUnwrap(retry["continuity_id"] as? String)))
-        await owner.retireAndDrain(); fixture.stopped = false
-        let before = fixture.captured.count
-        await configure(); XCTAssertTrue(owner.request(.transcribe))
-        try await eventually { !self.owner.busy && self.owner.operation != nil }
-        let replacement = try body(XCTUnwrap(fixture.captured.dropFirst(before).first { $0.httpMethod == "POST" }))
-        XCTAssertNotEqual(replacement["continuity_id"] as? String, retry["continuity_id"] as? String)
-        XCTAssertNotEqual(replacement["playback_id"] as? String, create["playback_id"] as? String)
-    }
-    func testStoppedCreateDiscoversUnpreparedOperationAndRequiresExplicitResume() async throws {
+
+    func testRetirementThenRestartCreatesANewViewer() async throws {
         await configure()
-        fixture.stopped = true; fixture.stoppedCreateConflict = true; fixture.unprepared = true
-        CaptionFixtureProtocol.statusOverrides = ["/subtitle-translation": 409]
-        XCTAssertTrue(owner.request(.transcribe))
-        try await eventually { !self.owner.busy && self.owner.operation?.state == "stopped" }
-        XCTAssertTrue(owner.canRetry); XCTAssertNil(owner.assetId)
-        XCTAssertEqual(fixture.captured.filter { $0.httpMethod == "POST" }.count, 1)
-        XCTAssertFalse(fixture.captured.contains { $0.url?.path.contains("/demands/") == true })
-        owner.retry()
-        try await eventually { !self.owner.busy && self.fixture.resumed }
-        let retry = try body(XCTUnwrap(fixture.captured.first { $0.url?.path.hasSuffix("/retry") == true }))
-        XCTAssertEqual(retry["expected_operation_epoch"] as? String, "9007199254740994")
-        XCTAssertEqual(retry["expected_view_revision"] as? String, "2")
-        XCTAssertEqual(retry["expected_state"] as? String, "stopped")
+        XCTAssertTrue(owner.requestAI { _, _ in })
+        try await eventually { self.owner.window?.cues.count == 1 }
+        await owner.retireAndDrain()
+        let create = try body(XCTUnwrap(fixture.captured.first { $0.httpMethod == "POST" }))
+        let release = try XCTUnwrap(fixture.captured.first { $0.httpMethod == "DELETE" })
+        let playback = try XCTUnwrap(create["playback_id"] as? String)
+        XCTAssertEqual(release.url?.query, "playback_id=" + playback)
+        await configure()
+        XCTAssertTrue(owner.requestAI { _, _ in })
+        try await eventually { self.owner.window?.cues.count == 1 }
+        let replacement = try body(XCTUnwrap(fixture.captured.last { $0.httpMethod == "POST" }))
+        XCTAssertNotEqual(replacement["playback_id"] as? String, playback)
     }
 
     func testRecoveredOperationIdentityAndNonretryableCoreStatusStayFenced() throws {
-        fixture.stopped = true; fixture.unprepared = true
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let options = try decoder.decode(CaptionOptions.self, from: fixture.reply(URLRequest(url: URL(string: "https://captions.test/options")!)))
-        let original = fixture.reply(URLRequest(url: URL(string: "https://captions.test/operations/" + fixture.operation)!))
-        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? [String: Any])
+        let options = try decoder.decode(CaptionOptions.self, from: fixture.data(fixture.retainedOptions))
+        var value = fixture.retainedOperation
         let validate: ([String: Any]) throws -> CaptionOperation = { value in
             let row = try decoder.decode(CaptionOperation.self, from: self.fixture.data(value))
             try row.validateRecovery(id: self.fixture.operation, file: 7, options: options, profile: options.models[0], audio: 2, language: "en")
@@ -421,118 +330,62 @@ final class ProgressiveCaptionTests: XCTestCase {
         XCTAssertThrowsError(try receipt.validate(continuity: expected))
         XCTAssertNoThrow(try receipt.validate(continuity: receipt.continuityId))
     }
-    private func installFourProfileFixture(defaultModel: String) -> [String: String] {
-        var identifiers: [String: String] = [:]
-        let rows: [(String, String, String)] = [("base", "translate", "1"), ("base", "transcribe", "2"),
-                                                ("small", "translate", "3"), ("small", "transcribe", "4")]
-        fixture.offeredProfiles = rows.map { model, task, digit in
-            var entry = fixture.profile
-            let id = String(repeating: digit, count: 64)
-            identifiers[model + ":" + task] = id
-            entry["profile_id"] = id; entry["model_id"] = model; entry["task"] = task
-            entry["label"] = model.capitalized; entry["default"] = model == defaultModel
-            entry["output_language"] = task == "translate" ? "en" as Any : NSNull()
-            return entry
+    func testUnifiedRequestUsesExplicitRouteAndLanguageWithServerOwnedModel() async throws {
+        await configure()
+        XCTAssertTrue(owner.requestAI(route: "audio", language: "de") { _, _ in })
+        try await eventually { self.owner.window?.cues.count == 1 }
+        let request = try XCTUnwrap(fixture.captured.first { $0.httpMethod == "POST" })
+        let input = try body(request)
+        XCTAssertEqual(input["route"] as? String, "audio")
+        XCTAssertEqual(input["spoken_language"] as? String, "de")
+        XCTAssertEqual(input["target"] as? String, "en")
+        XCTAssertNil(input["profile_id"])
+        XCTAssertNil(input["model_id"])
+    }
+
+    func testRetainedOptionsRejectUnknownProfileIdentity() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        for invalid in [String(repeating: "9", count: 64), "not-a-profile-digest"] {
+            fixture.defaultProfileID = invalid
+            let options = try decoder.decode(CaptionOptions.self, from: fixture.data(fixture.retainedOptions))
+            XCTAssertThrowsError(try options.validate(file: 7))
         }
-        fixture.defaultProfileID = identifiers[defaultModel + ":translate"]
-        return identifiers
-    }
-    func testSavedSmallDefaultHintPreservesModelAcrossTranscriptionAndTranslation() async throws {
-        let ids = installFourProfileFixture(defaultModel: "small")
-        await configure()
-        XCTAssertEqual(owner.profileId, ids["small:translate"])
-        XCTAssertEqual(owner.profile?.label, "Small")
-        XCTAssertEqual(owner.profile?.default, true, "Optional metadata must decode when supplied")
-        owner.spokenLanguage = "de"
-        XCTAssertTrue(owner.request(.transcribe))
-        try await eventually { !self.owner.busy && self.owner.window != nil }
-        XCTAssertEqual(owner.profileId, ids["small:transcribe"])
-        XCTAssertTrue(owner.request(.translate))
-        try await eventually { !self.owner.busy && self.owner.window != nil }
-        XCTAssertEqual(owner.profileId, ids["small:translate"])
-        let creates = try fixture.captured.filter { $0.httpMethod == "POST" && $0.url?.path == "/api/v1/files/7/subtitle-translation" }.map(body)
-        XCTAssertEqual(creates.compactMap { $0["model_id"] as? String }, ["small", "small"])
-        XCTAssertEqual(creates.compactMap { $0["task"] as? String }, ["transcribe", "translate"])
-        // An explicit owner choice wins over the saved default hint on refresh.
-        owner.deselect(); owner.profileId = try XCTUnwrap(ids["base:translate"])
-        await configure()
-        XCTAssertEqual(owner.profileId, ids["base:translate"])
-    }
-    func testUnsetDefaultHintPrefersBaseAndRejectsUnknownProfileIdentity() async throws {
-        let ids = installFourProfileFixture(defaultModel: "base")
-        // Reorder the catalog to prove the hint, rather than first row, wins.
-        fixture.offeredProfiles = fixture.offeredProfiles?.reversed().map { $0 }
-        await configure()
-        XCTAssertEqual(owner.profileId, ids["base:translate"])
-        owner.spokenLanguage = "de"; XCTAssertTrue(owner.request(.transcribe))
-        try await eventually { !self.owner.busy && self.owner.window != nil }
-        XCTAssertEqual(owner.profileId, ids["base:transcribe"])
-        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
-        var request = URLRequest(url: URL(string: "https://captions.test/api/v1/files/7/subtitle-translation/options")!)
-        request.httpMethod = "GET"
-        fixture.defaultProfileID = String(repeating: "9", count: 64)
-        let unknown = try decoder.decode(CaptionOptions.self, from: fixture.reply(request))
-        XCTAssertThrowsError(try unknown.validate(file: 7))
-        fixture.defaultProfileID = "not-a-profile-digest"
-        let malformed = try decoder.decode(CaptionOptions.self, from: fixture.reply(request))
-        XCTAssertThrowsError(try malformed.validate(file: 7))
-        fixture.defaultProfileID = nil; owner.deselect(); owner.profileId = ""
-        await configure()
-        XCTAssertEqual(owner.profile?.modelId, "base", "Legacy null hints retain the Base fallback")
-        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture.reply(request)) as? [String: Any])
+        fixture.defaultProfileID = nil
+        var legacy = fixture.retainedOptions
         legacy.removeValue(forKey: "default_profile_id")
         let absent = try decoder.decode(CaptionOptions.self, from: fixture.data(legacy))
         XCTAssertNoThrow(try absent.validate(file: 7))
     }
-    func testCorruptImmutableSegmentNeverPublishesText() async {
-        fixture.corruptSegment = true
+
+    func testCueWindowCanExceedTheOptionsByteBudget() async throws {
+        fixture.largeCueWindow = true
         await configure()
-        let rejected = expectation(description: "segment rejected")
-        owner.$status.filter { $0.contains("validation") }.prefix(1).sink { _ in rejected.fulfill() }.store(in: &subscriptions)
-        owner.request(.transcribe)
-        await fulfillment(of: [rejected], timeout: 2)
-        XCTAssertTrue(owner.window?.cues.isEmpty ?? true)
+        XCTAssertTrue(owner.requestAI { _, _ in })
+        try await eventually { self.owner.window?.cues.count == 96 }
     }
-    func testMixedSnapshotPagesNeverPublishText() async {
-        fixture.wrongPageRevision = true
+
+    func testOutOfBoundsCueNeverPublishesText() async throws {
+        fixture.invalidCue = true
         await configure()
-        let rejected = expectation(description: "snapshot rejected")
-        owner.$status.filter { $0.contains("validation") }.prefix(1).sink { _ in rejected.fulfill() }.store(in: &subscriptions)
-        owner.request(.transcribe)
-        await fulfillment(of: [rejected], timeout: 2)
-        XCTAssertTrue(owner.window?.cues.isEmpty ?? true)
+        XCTAssertTrue(owner.requestAI { _, _ in })
+        try await eventually { self.owner.coverageStatus == "Coverage ahead: 25 seconds." }
+        XCTAssertTrue(owner.window?.cues.isEmpty == true)
     }
-    func testDeselectRevokesPresentationAndDemandBeforeSeek() async {
+
+    func testDeselectRevokesPresentationAndViewerBeforeSeek() async throws {
         await configure()
-        let visible = expectation(description: "partial cue")
-        owner.$window.compactMap { $0 }.filter { !$0.cues.isEmpty }.prefix(1).sink { _ in visible.fulfill() }.store(in: &subscriptions)
-        owner.request(.transcribe)
-        await fulfillment(of: [visible], timeout: 2)
-        owner.deselect(); owner.mediaChanged(seek: true)
-        XCTAssertFalse(owner.selected); XCTAssertNil(owner.window)
-    }
-    func testStopRetainsCommittedCuesAndSeekDoesNotRestartWork() async throws {
-        await configure()
-        let visible = expectation(description: "partial cue")
-        owner.$window.compactMap { $0 }.filter { !$0.cues.isEmpty }.prefix(1).sink { _ in visible.fulfill() }.store(in: &subscriptions)
-        owner.request(.transcribe)
-        await fulfillment(of: [visible], timeout: 2)
-        let settled = expectation(description: "stop acknowledged")
-        owner.$operation.compactMap { $0 }.filter { $0.state == "stopped" }.prefix(1).sink { _ in settled.fulfill() }.store(in: &subscriptions)
-        owner.stop()
-        await fulfillment(of: [settled], timeout: 2)
-        let before = fixture.captured.filter { $0.httpMethod == "PUT" }.count
-        let reread = expectation(description: "committed captions reread after stopped seek")
-        owner.$window.dropFirst().compactMap { $0 }.filter { !$0.cues.isEmpty }.prefix(1).sink { _ in reread.fulfill() }.store(in: &subscriptions)
+        XCTAssertTrue(owner.requestAI { _, _ in })
+        try await eventually { self.owner.window?.cues.count == 1 }
+        owner.deselect()
         owner.mediaChanged(seek: true)
-        await fulfillment(of: [reread], timeout: 3)
-        XCTAssertTrue(owner.stopped)
-        XCTAssertEqual(fixture.captured.filter { $0.httpMethod == "PUT" }.count, before)
-        XCTAssertEqual(owner.window?.cues.count, 1)
-        let stop = try XCTUnwrap(fixture.captured.first { $0.url?.path.hasSuffix("/stop") == true })
-        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(stop.httpBody,"Stop must carry its exact serialized body")) as? [String: Any])
-        XCTAssertEqual(body["expected_operation_epoch"] as? String, "9007199254740993")
+        try await eventually { self.fixture.captured.contains { $0.httpMethod == "DELETE" } }
+        let released = try XCTUnwrap(fixture.captured.last { $0.httpMethod == "DELETE" })
+        XCTAssertEqual(released.url?.path, "/api/v1/ai-subtitles/operations/\(fixture.operation)/viewer")
+        XCTAssertFalse(owner.selected)
+        XCTAssertNil(owner.window)
     }
+
     func testSynchronizedTextRebindsToSuccessorOriginAndTeardownRemovesIt() throws {
         let view = PlayerSurfaceView(frame: CGRect(x: 0, y: 0, width: 320, height: 180))
         let first = AVPlayerItem(url: URL(string: "https://captions.test/first.mp4")!)
@@ -556,7 +409,7 @@ final class ProgressiveCaptionTests: XCTestCase {
         let api = PlurxAPI(origin: "https://captions.test", testTransport: transport).captionOwner(generation: authorization)
         Session.shared.setCredentials(origin: "https://captions.test", token: "replacement-principal")
         do {
-            let _: CaptionHTTPReply<CaptionOptions> = try await api.caption("files/7/subtitle-translation/options")
+            let _: CaptionHTTPReply<AISubtitleOptions> = try await api.caption("files/7/ai-subtitles")
             XCTFail("The old caption owner must not send with a replacement principal")
         } catch { XCTAssertTrue(error is CancellationError) }
         XCTAssertTrue(fixture.captured.isEmpty)
@@ -568,41 +421,38 @@ final class ProgressiveCaptionTests: XCTestCase {
         owner.configure(api: PlurxAPI(origin: "https://captions.test", testTransport: transport), fileId: 7, sourceAudioIndex: 2,
                         now: { (65000, 60000, 1, false) }, current: { true })
         await fulfillment(of: [rejected], timeout: 2)
-        XCTAssertNil(owner.options)
+        XCTAssertNil(owner.aiOptions)
     }
-    func testExistingTextTranslationUsesDistinctJobAndDoesNotSelectProgressiveTrack() async throws {
-        let text = SubtitleTextTranslation()
-        textOwners.append(text)
-        defer { text.retire() }
-        let loaded = expectation(description: "text caption options")
-        text.$options.compactMap { $0 }.prefix(1).sink { _ in loaded.fulfill() }.store(in: &subscriptions)
-        text.configure(api: PlurxAPI(origin: "https://captions.test", testTransport: transport), fileId: 7)
-        await fulfillment(of: [loaded], timeout: 2)
+    func testTextRouteHandsOffStableStoredTrack() async throws {
+        fixture.offeredRoute = "text"
+        fixture.completeOperation = true
+        await configure()
         let completed = expectation(description: "durable text translation result")
-        text.$job.compactMap { $0?.result }.prefix(1).sink { _ in completed.fulfill() }.store(in: &subscriptions)
-        text.translate()
+        XCTAssertTrue(owner.requestAI { id, index in
+            XCTAssertEqual(id, self.fixture.asset)
+            XCTAssertNil(index)
+            completed.fulfill()
+        })
         await fulfillment(of: [completed], timeout: 2)
-        XCTAssertEqual(text.job?.result?.subtitleIndex, 100005)
-        XCTAssertFalse(owner.selected, "Text translation cannot select the progressive speech track")
-        let request = try XCTUnwrap(fixture.captured.first { $0.url?.path.hasSuffix("/subtitles/22/translation") == true })
-        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody,"text translation must carry its exact serialized body")) as? [String: Any])
-        XCTAssertEqual(body["source_language"] as? String, "de")
-        XCTAssertEqual(body["target_language"] as? String, "en")
-        XCTAssertEqual(body["model_id"] as? String, "opus-mt-mul-en")
-        XCTAssertNil(body["audio_index"], "Existing-text translation is not an ASR request")
+        XCTAssertEqual(owner.aiRoute, "text")
+        XCTAssertTrue(fixture.captured.contains { $0.url?.path.hasSuffix("/cues") == true })
     }
-    func testBitmapTextTranslationDoesNotInventOCRWork() async {
-        let text = SubtitleTextTranslation()
-        textOwners.append(text)
-        defer { text.retire() }
-        let loaded = expectation(description: "text options")
-        text.$options.compactMap { $0 }.prefix(1).sink { _ in loaded.fulfill() }.store(in: &subscriptions)
-        text.configure(api: PlurxAPI(origin: "https://captions.test", testTransport: transport), fileId: 7)
-        await fulfillment(of: [loaded], timeout: 2)
-        text.sourceIndex = 23; text.sourceLanguage = "de"; text.translate()
-        XCTAssertFalse(fixture.captured.contains { $0.httpMethod == "POST" })
-        XCTAssertTrue(text.status.contains("Bitmap"))
+
+    func testDownloadRouteHandsOffWithoutStartingAViewerLoop() async throws {
+        fixture.offeredRoute = "download"
+        fixture.completeOperation = true
+        await configure()
+        let completed = expectation(description: "existing track selected")
+        XCTAssertTrue(owner.requestAI { id, index in
+            XCTAssertEqual(id, self.fixture.asset)
+            XCTAssertEqual(index, 100005)
+            completed.fulfill()
+        })
+        await fulfillment(of: [completed], timeout: 2)
+        await owner.retireAndDrain()
+        XCTAssertFalse(fixture.captured.contains { $0.url?.path.contains("/operations/") == true })
     }
+
     func testExplicitUseResolvesStableArtifactAfterIndexReuseOrReordering() {
         let wanted = String(repeating: "a", count: 64), other = String(repeating: "b", count: 64)
         let result = TextCaptionResult(fileId: "7", subtitleIndex: 100005, downloadedSubtitleId: wanted, language: "en")
@@ -633,68 +483,35 @@ final class ProgressiveCaptionTests: XCTestCase {
         XCTAssertNil(CaptionRenderWindow.itemInterval(cue, baseMs: 2000, offsetMs: 0))
         XCTAssertEqual(CaptionRenderWindow.itemInterval(cue, baseMs: 2000, offsetMs: 250), 0..<250)
     }
-    private var publishedAsset: CaptionAsset {
-        CaptionAsset(assetId:fixture.asset,profileId:fixture.profileID,operationId:fixture.operation,
-                     audioIndex:2,spokenLanguage:"en",outputLanguage:"en",task:.transcribe)
-    }
-    private func eventually(_ condition: @MainActor () -> Bool) async throws {
-        for _ in 0..<400 { if condition() { return };try await Task.sleep(for:.milliseconds(10)) }
-        XCTFail("caption transition did not settle");throw CaptionProtocolError.expired
-    }
-    func testPublishedReadCancelsMutationWithoutRetainingBusyOrLateStopStatus() async throws {
-        for mutation in ["create","stop","retry"] {
-            owner.retire();fixture.stopped=false
-            await configure();owner.spokenLanguage="en"
-            if mutation != "create" {
-                XCTAssertTrue(owner.request(.transcribe));try await eventually { !self.owner.busy && self.owner.window != nil }
-            }
-            if mutation == "retry" { owner.stop();try await eventually { !self.owner.busy && self.owner.stopped } }
-            let held=expectation(description:"held "+mutation)
-            let path=mutation == "create" ? "/api/v1/files/7/subtitle-translation" : "/api/v1/subtitle-translation/operations/\(fixture.operation)/\(mutation)"
-            CaptionFixtureProtocol.holdRequest=(method:"POST",path:path)
-            CaptionFixtureProtocol.onHeld={ held.fulfill() }
-            switch mutation { case "create":XCTAssertTrue(owner.request(.transcribe));case "stop":owner.stop();default:owner.retry() }
-            await fulfillment(of:[held],timeout:2);XCTAssertTrue(owner.busy)
-            owner.read(publishedAsset)
-            XCTAssertFalse(owner.busy,"the read owns presentation, not the cancelled mutation's busy flag")
-            // The held server mutation changes the fixture before its reply
-            // is released. The replacement may legitimately read that state.
-            let replacementStatus = mutation == "stop"
-                ? "Caption work stopped. Published captions remain available."
-                : "Partial captions available. Playback continues."
-            try await eventually {
-                self.owner.window?.cues.first?.cueId == self.fixture.cueID
-                    && self.owner.status == replacementStatus
-            }
-            var observedStatuses: [String] = []
-            let statusObservation = owner.$status.sink { observedStatuses.append($0) }
-            CaptionFixtureProtocol.holdRequest=nil;CaptionFixtureProtocol.releaseHeld?()
-            for _ in 0..<20 { await Task.yield() }
-            // A refresh can report its operation before the cue read finishes.
-            try await eventually { self.owner.status == replacementStatus }
-            statusObservation.cancel()
-            XCTAssertFalse(owner.busy)
-            XCTAssertTrue(observedStatuses.allSatisfy {
-                $0 == replacementStatus || $0 == "Preparing captions. Playback continues."
-            }, "The replaced mutation published a status after " + mutation + ": " + observedStatuses.joined(separator: " | "))
-            XCTAssertTrue(owner.request(.transcribe),"Generate remains usable after replacing "+mutation)
-            owner.deselect();CaptionFixtureProtocol.onHeld=nil;CaptionFixtureProtocol.releaseHeld=nil
+    private func eventually(file: StaticString = #filePath, line: UInt = #line,
+                            _ condition: @MainActor () -> Bool) async throws {
+        for _ in 0..<400 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
         }
+        XCTFail("Caption transition did not settle", file: file, line: line)
+        throw CaptionProtocolError.expired
     }
-    func testCancelledStopCannotOverwriteReconfiguredCaptionOwner() async throws {
-        await configure();owner.spokenLanguage="en";XCTAssertTrue(owner.request(.transcribe))
-        try await eventually { !self.owner.busy && self.owner.window != nil }
-        let held=expectation(description:"held Stop")
-        CaptionFixtureProtocol.holdRequest=(method:"POST",path:"/api/v1/subtitle-translation/operations/\(fixture.operation)/stop");CaptionFixtureProtocol.onHeld={ held.fulfill() }
-        owner.stop();await fulfillment(of:[held],timeout:2)
-        owner.retire();await configure()
-        let status=owner.status
-        CaptionFixtureProtocol.holdRequest=nil;CaptionFixtureProtocol.releaseHeld?()
-        for _ in 0..<20 { await Task.yield() }
-        XCTAssertFalse(owner.busy);XCTAssertFalse(owner.selected);XCTAssertEqual(owner.status,status)
+    func testLateStartReceiptReleasesSupersededViewerWithoutPresentingCues() async throws {
+        await configure()
+        let held = expectation(description: "start receipt held")
+        CaptionFixtureProtocol.holdRequest = (method: "POST", path: "/api/v1/files/7/ai-subtitles")
+        CaptionFixtureProtocol.onHeld = { held.fulfill() }
+        XCTAssertTrue(owner.requestAI { _, _ in XCTFail("Superseded work cannot select a track") })
+        await fulfillment(of: [held], timeout: 2)
+        let create = try body(XCTUnwrap(fixture.captured.first { $0.httpMethod == "POST" }))
+        owner.deselect()
+        CaptionFixtureProtocol.holdRequest = nil
+        CaptionFixtureProtocol.releaseHeld?()
+        try await eventually { self.fixture.captured.contains { $0.httpMethod == "DELETE" } }
+        let release = try XCTUnwrap(fixture.captured.first { $0.httpMethod == "DELETE" })
+        XCTAssertEqual(release.url?.query, "playback_id=" + (try XCTUnwrap(create["playback_id"] as? String)))
+        XCTAssertFalse(fixture.captured.contains { $0.url?.path.hasSuffix("/cues") == true })
+        XCTAssertFalse(owner.selected)
+        XCTAssertNil(owner.window)
     }
 
-    private func burnHandoff(_ outcome: String, generate: Bool) async throws {
+    private func burnHandoff(_ outcome: String) async throws {
         let decision=try JSONDecoder().decode(Decision.self,from:Data("""
         {"fileId":7,"method":"transcode","playUrl":"/not-fetched","source":{"height":1080,"durationMs":120000},
          "audio":[{"index":2,"codec":"aac","default":true}],
@@ -726,7 +543,7 @@ final class ProgressiveCaptionTests: XCTestCase {
                 }
                 return try session("subtitle-off-queued")
             },requestHlsStatus:{_,id in PlaybackSessionStatus(id:id)})
-        captionOwners.append(controller.progressiveCaptions);textOwners.append(controller.subtitleTextTranslation)
+        captionOwners.append(controller.progressiveCaptions)
         defer { release?.resume(throwing:CancellationError());controller.stop() }
         let playbackTransport=try XCTUnwrap(transport)
         let model=AppModel(startServices:false,makeAPI:{ _ in PlurxAPI(origin:"https://captions.test",testTransport:playbackTransport) })
@@ -737,49 +554,47 @@ final class ProgressiveCaptionTests: XCTestCase {
         let captions=controller.progressiveCaptions
         captions.retire()
         let loaded=expectation(description:"caption options")
-        captions.$options.compactMap{$0}.prefix(1).sink{_ in loaded.fulfill()}.store(in:&subscriptions)
+        captions.$aiOptions.compactMap{$0}.prefix(1).sink{_ in loaded.fulfill()}.store(in:&subscriptions)
         captions.configure(api:PlurxAPI(origin:"https://captions.test",testTransport:transport),fileId:7,sourceAudioIndex:2,
                            now:{(65000,0,1,false)},current:{true})
-        await fulfillment(of:[loaded],timeout:2);captions.spokenLanguage="en"
-        let before=fixture.captured.filter{$0.httpMethod=="POST" && $0.url?.path.hasSuffix("/subtitle-translation")==true}.count
+        await fulfillment(of:[loaded],timeout:2)
+        let before=fixture.captured.filter{$0.httpMethod=="POST" && $0.url?.path.hasSuffix("/ai-subtitles")==true}.count
         holdNextChange=true
         if queued { controller.selectQuality(720);await fulfillment(of:[entered],timeout:2) }
-        if generate { controller.selectProgressiveCaptions(.transcribe) } else { controller.selectProgressiveAsset(publishedAsset) }
+        controller.selectAISubtitles()
         if !queued { await fulfillment(of:[entered],timeout:2) }
         XCTAssertFalse(captions.selected);XCTAssertTrue(controller.player.currentItem===incumbent)
-        XCTAssertEqual(fixture.captured.filter{$0.httpMethod=="POST" && $0.url?.path.hasSuffix("/subtitle-translation")==true}.count,before)
+        XCTAssertEqual(fixture.captured.filter{$0.httpMethod=="POST" && $0.url?.path.hasSuffix("/ai-subtitles")==true}.count,before)
         if outcome=="newer-off" { controller.selectSubtitle(nil) }
         if queued { try await eventually { !controller.progressiveCaptionOutputSelected } }
         let continuation=try XCTUnwrap(release);release=nil
         if outcome=="failure" || outcome=="queued-failure" { continuation.resume(throwing:URLError(.cannotConnectToHost)) }
         else { continuation.resume(returning:try session("subtitle-off")) }
         if outcome=="success" {
-            try await eventually { captions.selected }
+            try await eventually { captions.selected && self.fixture.captured.filter { $0.httpMethod == "POST" && $0.url?.path.hasSuffix("/ai-subtitles") == true }.count == before + 1 }
             XCTAssertFalse(controller.player.currentItem===incumbent)
-            XCTAssertEqual(fixture.captured.filter{$0.httpMethod=="POST" && $0.url?.path.hasSuffix("/subtitle-translation")==true}.count,before+(generate ? 1:0))
+            XCTAssertEqual(fixture.captured.filter{$0.httpMethod=="POST" && $0.url?.path.hasSuffix("/ai-subtitles")==true}.count,before+1)
         } else {
             try await eventually { !controller.isChangingStream && !controller.progressiveCaptionOutputSelected }
             XCTAssertFalse(captions.selected)
-            XCTAssertEqual(fixture.captured.filter{$0.httpMethod=="POST" && $0.url?.path.hasSuffix("/subtitle-translation")==true}.count,before)
+            XCTAssertEqual(fixture.captured.filter{$0.httpMethod=="POST" && $0.url?.path.hasSuffix("/ai-subtitles")==true}.count,before)
             if outcome=="failure" || outcome=="queued-failure" { XCTAssertTrue(controller.player.currentItem===incumbent) }
             if outcome=="queued" { XCTAssertGreaterThanOrEqual(calls,3,"the existing reopen owner still drains the queued removal") }
         }
     }
-    func testBurnRemovalFailureNeverStartsSpeechOrPublishedCaptions() async throws {
-        for generate in [true,false] { try await burnHandoff("failure",generate:generate) }
+    func testBurnRemovalFailureNeverStartsAISubtitles() async throws {
+        try await burnHandoff("failure")
     }
-    func testBurnRemovalMustAttachBeforeSpeechOrPublishedCaptionsStart() async throws {
-        for generate in [true,false] { try await burnHandoff("success",generate:generate) }
+    func testBurnRemovalMustAttachBeforeAISubtitlesStart() async throws {
+        try await burnHandoff("success")
     }
     func testQueuedRemovalAndNewerOffCannotAdoptOldCaptionIntent() async throws {
-        for outcome in ["queued","queued-failure","newer-off"] { for generate in [true,false] { try await burnHandoff(outcome,generate:generate) } }
+        for outcome in ["queued","queued-failure","newer-off"] { try await burnHandoff(outcome) }
     }
 
     private func switchFromGeneratedCaptions(
         to index: Int, externalPlayback: Bool = false, refusedWith notice: String? = nil
     ) async throws {
-        fixture.heartbeatIntervalMs = 1
-        fixture.pollMinMs = 250
         let decoder = JSONDecoder()
         let decision = try decoder.decode(Decision.self, from: Data("""
         {"fileId":7,"method":"remux","playUrl":"/not-fetched","deliveredDynamicRange":"hdr10",
@@ -812,7 +627,6 @@ final class ProgressiveCaptionTests: XCTestCase {
         )
         let captions = controller.progressiveCaptions
         captionOwners.append(captions)
-        textOwners.append(controller.subtitleTextTranslation)
         defer {
             // Fixture time only drives the caption window. A zero position
             // keeps stop's detached progress report off the test transport.
@@ -827,11 +641,10 @@ final class ProgressiveCaptionTests: XCTestCase {
             model: model, itemId: 7, fileId: 7, startMs: 0, durationMs: 120000, title: "HDR fixture",
             selection: PrePlaySelection(audioIndex: 2, subtitleIndex: PrePlaySelection.subtitleOff)
         )
-        try await eventually { player.currentItem != nil && !controller.isChangingStream && captions.options != nil }
+        try await eventually { player.currentItem != nil && !controller.isChangingStream && captions.aiOptions != nil }
         let incumbent = try XCTUnwrap(player.currentItem as? CaptionHandoffItem)
         incumbent.time = CMTime(seconds: 65, preferredTimescale: 1000)
-        captions.spokenLanguage = "en"
-        controller.selectProgressiveCaptions(.transcribe)
+        controller.selectAISubtitles()
         try await eventually { captions.window?.cues.count == 1 }
         let window = try XCTUnwrap(captions.window)
         let cue = try XCTUnwrap(window.cues.first)
@@ -842,10 +655,10 @@ final class ProgressiveCaptionTests: XCTestCase {
         XCTAssertEqual(controller.deliveredRange, "hdr10")
 
         func demandRequests(_ method: String) -> [URLRequest] {
-            fixture.captured.filter { $0.httpMethod == method && $0.url?.path.hasSuffix("/demands/" + fixture.demand) == true }
+            fixture.captured.filter { $0.httpMethod == method && $0.url?.path.hasSuffix("/operations/" + fixture.operation + "/viewer") == true }
         }
         let selectionCount = nativeSelections.count
-        let heartbeatCount = demandRequests("PUT").count
+        let cueReadCount = fixture.captured.filter { $0.url?.path.hasSuffix("/cues") == true }.count
         player.simulatedExternalPlayback = externalPlayback
         controller.selectSubtitle(index)
         if let notice {
@@ -858,7 +671,7 @@ final class ProgressiveCaptionTests: XCTestCase {
             XCTAssertTrue(player.currentItem === incumbent)
             XCTAssertEqual(controller.deliveredRange, "hdr10")
             XCTAssertEqual(nativeSelections.count, selectionCount)
-            try await eventually { demandRequests("PUT").count > heartbeatCount }
+            try await eventually { self.fixture.captured.filter { $0.url?.path.hasSuffix("/cues") == true }.count > cueReadCount }
             XCTAssertTrue(demandRequests("DELETE").isEmpty)
             controller.selectSubtitle(nil)
         }
@@ -873,6 +686,7 @@ final class ProgressiveCaptionTests: XCTestCase {
         XCTAssertTrue(player.currentItem === incumbent)
         XCTAssertEqual(controller.deliveredRange, "hdr10")
         XCTAssertEqual(sessionStarts, 1)
+        XCTAssertFalse(fixture.captured.contains { $0.url?.path.contains("/subtitle-text-translation") == true })
         await captions.retireAndDrain()
         XCTAssertEqual(demandRequests("DELETE").count, 1)
     }
@@ -891,14 +705,22 @@ final class ProgressiveCaptionTests: XCTestCase {
         try await switchFromGeneratedCaptions(to: 2)
     }
 
-    func testStopAccessRetirementKeepsAuthenticationStatus() async throws {
-        await configure();owner.spokenLanguage="en";XCTAssertTrue(owner.request(.transcribe))
-        try await eventually { !self.owner.busy && self.owner.window != nil }
-        CaptionFixtureProtocol.statusOverrides=["/stop":403]
-        owner.stop();try await eventually { self.owner.options == nil }
-        XCTAssertFalse(owner.busy);XCTAssertFalse(owner.selected)
-        XCTAssertTrue(owner.status.contains("Caption access ended"))
-        XCTAssertFalse(owner.status.contains("Retry Stop"))
+    func testViewerAccessLossClearsPresentation() async throws {
+        await configure()
+        XCTAssertTrue(owner.requestAI { _, _ in XCTFail("An unauthorized viewer cannot select a track") })
+        try await eventually { self.owner.window?.cues.count == 1 }
+        CaptionFixtureProtocol.statusOverrides = ["/cues": 403]
+        try await eventually { !self.owner.selected }
+        XCTAssertNil(owner.window)
+    }
+
+    func testStoppedOperationEndsPresentationAndReleasesViewer() async throws {
+        fixture.terminalState = "stopped"
+        await configure()
+        XCTAssertTrue(owner.requestAI { _, _ in XCTFail("A stopped operation cannot select a track") })
+        try await eventually { !self.owner.selected && self.fixture.captured.contains { $0.httpMethod == "DELETE" } }
+        XCTAssertNil(owner.window)
+        XCTAssertEqual(owner.status, "AI subtitles stopped.")
     }
 
     func testNetworkDrainWaitsForCancelledWorkAndCapturedCleanup() async throws {

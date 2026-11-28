@@ -98,9 +98,11 @@ final class ReadAfterHTTP: @unchecked Sendable {
         return result
     }
 
-    /// Stream caption pages and immutable segments under their byte ceiling.
+    static let maximumCaptionWindowBytes = 256 * 1024
+
+    /// Stream caption responses under the ceiling chosen for the endpoint.
     func boundedData(for original: URLRequest, using session: URLSession, maximumBytes: Int) async throws -> (Data, URLResponse) {
-        guard (1...65_536).contains(maximumBytes) else { throw CaptionProtocolError.budget }
+        guard (1...Self.maximumCaptionWindowBytes).contains(maximumBytes) else { throw CaptionProtocolError.budget }
         let exchange = prepare(for: original)
         let redirect = ReadAfterRedirect(refuse: true)
         do {

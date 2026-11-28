@@ -4706,7 +4706,6 @@ final class PlayerController: ObservableObject {
         retireProgressiveCaptionSelection()
         guard started, let model, fileId > 0 else { return }
         let lifecycle = lifecycleGeneration
-        subtitleTextTranslation.configure(api: model.requireAPI(), fileId: fileId)
         progressiveCaptions.configure(api: model.requireAPI(), fileId: fileId, sourceAudioIndex: selectedAudio,
             now: { [weak self] in
                 guard let self else { return (0, 0, 1, true) }

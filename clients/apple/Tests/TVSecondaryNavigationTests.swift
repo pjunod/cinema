@@ -61,9 +61,9 @@ final class TVSecondaryNavigationTests: XCTestCase {
     }
     func testTVHelpHasBoundedCategoryPathIndependentOfSettingsContent() {
         XCTAssertEqual(TVSettingsCategory.allCases,
-                       [.playback, .appearance, .liveTv, .sharing, .remotes, .account, .help, .about])
+                       [.playback, .subtitles, .appearance, .liveTv, .sharing, .remotes, .account, .help, .about])
         XCTAssertEqual(TVSettingsCategory.allCases.map(\.title),
-                       ["Playback", "Appearance", "Live TV & recordings", "Shared libraries", "Remotes & devices",
+                       ["Playback", "Subtitles", "Appearance", "Live TV & recordings", "Shared libraries", "Remotes & devices",
                         "Account", "Help", "About"])
         // Identifiers keep their original names whatever the title says.
         XCTAssertEqual(TVSettingsCategory.liveTv.id, "Live TV")

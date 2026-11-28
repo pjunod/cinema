@@ -211,7 +211,7 @@ final class ProgressiveCaptionSession: ObservableObject {
                 let reply: CaptionHTTPReply<AISubtitleWindow> = try await api.caption(path + "/cues", query: [
                     URLQueryItem(name: "from_ms", value: String(max(0, position - 10_000))),
                     URLQueryItem(name: "to_ms", value: String(min(14_400_000, position + 35_000)))
-                ], maximumBytes: 262_144)
+                ], maximumBytes: ReadAfterHTTP.maximumCaptionWindowBytes)
                 guard current(captured), aiPlaybackId == playback else { return }
                 if traversal == windowGeneration {
                     let result = reply.value

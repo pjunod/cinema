@@ -1013,6 +1013,13 @@ async fn leased_segments_and_pages_are_bound_to_account_asset_revision_and_actua
     );
     let decoded: Value = serde_json::from_slice(&bytes).expect("segment JSON");
     assert_eq!(decoded["cues"][0]["text"], "Raw <b> text & punctuation");
+    let (cues, coverage_range) =
+        ai_cue_window(&f.state, f.viewer.id, &recipe.asset_id, 30_000, 0, 30_000)
+            .await
+            .expect("unified cue window");
+    assert_eq!(coverage_range, Some((0, 30_000)));
+    assert_eq!(cues.len(), 1);
+    assert_eq!(cues[0].text, "Raw <b> text & punctuation");
     let coverage_cursor = page_cursor("coverage", f.viewer.id, &recipe.asset_id, snapshot);
     let covered = body(
         coverage(
@@ -1121,6 +1128,10 @@ async fn leased_segments_and_pages_are_bound_to_account_asset_revision_and_actua
             [&segment_id],
         )
         .expect("corrupted stored bytes");
+    assert!(matches!(
+        ai_cue_window(&f.state, f.viewer.id, &recipe.asset_id, 30_000, 0, 30_000).await,
+        Err(ApiError::Internal(_))
+    ));
     refused(
         segment(
             AuthUser(f.viewer.clone()),
