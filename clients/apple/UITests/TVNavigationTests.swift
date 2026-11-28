@@ -108,14 +108,14 @@ final class TVNavigationTests: TVNavigationTestCase {
     }
 
     private func wholeRowJourney(posterSize: String) throws {
+        executionTimeAllowance = 240
         let server = try TVNavigationServer(itemCount: 416)
         let origin = try server.start()
         defer { server.stop() }
         let app = openLibrary(origin: origin, presentation: "rows", posterSize: posterSize)
         defer { app.terminate() }
-        let jump = app.buttons["library:jump"]
-        reachForSetup(jump, in: app, limit: 8)
-        assertFocus(jump, in: app, context: "Whole row jump opener")
+        moveFromViewToJump()
+        assertFocus(app.buttons["library:jump"], in: app, context: "Whole row jump opener")
         remote.press(.select)
         assertFocus(app.buttons["choice:A"], in: app, context: "Whole row initial group")
         for _ in 0..<12 { remote.press(.down) }
@@ -152,6 +152,13 @@ final class TVNavigationTests: TVNavigationTestCase {
                        file: file, line: line)
     }
 
+    private func moveFromViewToJump() {
+        // openLibrary and Library Back leave focus on View. The four real
+        // Right presses reach Jump without re-querying the whole focus tree
+        // at each intermediate toolbar position during setup.
+        for _ in 0..<4 { remote.press(.right) }
+    }
+
     private func toolsJourney(itemCount: Int, presentation: String) throws {
         // Four real remote traversals and toolbar round trips can reach the
         // default three-minute allowance on a loaded simulator.
@@ -167,14 +174,11 @@ final class TVNavigationTests: TVNavigationTestCase {
             XCTAssertFalse(app.buttons["View all A items"].exists, "A row of 20 or fewer titles has no All tile")
         }
         var previousGroup = (letter: "A", index: 0)
-        for (letter, groupIndex) in [("A", 0), ("M", 12), ("Z", 25), ("M", 12)] {
-            let jump = app.buttons["library:jump"]
-            // From content, one Back reaches the toolbar.
-            if app.buttons.matching(NSPredicate(format: "hasFocus == true AND identifier BEGINSWITH %@", "item:")).firstMatch.exists {
-                remote.press(.menu)
-            }
-            reachForSetup(jump, in: app, limit: 8)
-            assertFocus(jump, in: app, context: "Jump opener")
+        for (visit, (letter, groupIndex)) in [("A", 0), ("M", 12), ("Z", 25), ("M", 12)].enumerated() {
+            // Each completed visit verified that the bookmark owns native focus.
+            if visit > 0 { remote.press(.menu) }
+            moveFromViewToJump()
+            assertFocus(app.buttons["library:jump"], in: app, context: "Jump opener")
             remote.press(.select)
             let entry = app.buttons["choice:" + previousGroup.letter]
             XCTAssertTrue(entry.waitForExistence(timeout: 30), app.debugDescription)
