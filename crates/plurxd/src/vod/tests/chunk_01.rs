@@ -489,6 +489,7 @@ pub(super) fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
 fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
     SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -496,6 +497,7 @@ fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -797,6 +799,7 @@ async fn insert_control_session(
         session_id.to_owned(),
         Session {
             requested_audio_index: None,
+            vod_copy_layout: None,
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -931,6 +934,7 @@ async fn insert_terminal_session(
         session_id.to_owned(),
         Session {
             requested_audio_index: None,
+            vod_copy_layout: None,
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,

@@ -1012,6 +1012,36 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(fixture.page.items?.first?.rollup?.leaves, 20)
         XCTAssertEqual(fixture.decision.delivery?.mode, "remux")
         XCTAssertEqual(fixture.decision.deliveredDynamicRange, "dolby_vision")
+
+        // A version's Dolby Vision line and how it plays, as the version
+        // picker and the Media section show them.
+        let file = try XCTUnwrap(fixture.itemDetail.files?.first)
+        XCTAssertEqual(file.dvFacts, "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base")
+        XCTAssertEqual(
+            DetailView.episodeMediaInfoRows(file).first { $0.label == "Dolby Vision" }?.value,
+            "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base"
+        )
+        let device = try XCTUnwrap(file.playsOn?.first)
+        XCTAssertEqual(device.deviceName, "Living room")
+        XCTAssertEqual(device.label, "EL dropped · plays as 8.1")
+        XCTAssertTrue(device.isCaution)
+        XCTAssertFalse(PlaysOn(id: "full", label: "Full FEL", elDropped: false, fullQuality: true).isCaution)
+        XCTAssertNil(DetailView.episodeMediaInfoRows(MediaFile(id: 1)).first { $0.label == "Dolby Vision" })
+    }
+
+    func testIOSVersionRowsShowEachVersionsDolbyVisionLine() {
+        // An iOS menu shows only a row's first line, so the versions are rows
+        // on the page and each carries the server's Dolby Vision line.
+        let rows = VersionChoiceList.rows([
+            MediaFile(id: 1, filename: "Film.2160p.REMUX.DV.mkv", dvFacts: "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base"),
+            MediaFile(id: 2, filename: "Film.1080p.mkv"),
+            MediaFile(id: 3),
+        ], selectedID: 2)
+        XCTAssertEqual(rows, [
+            .init(id: 1, title: "Film.2160p.REMUX.DV.mkv", detail: "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base", selected: false),
+            .init(id: 2, title: "Film.1080p.mkv", detail: nil, selected: true),
+            .init(id: 3, title: "Version 3", detail: nil, selected: false),
+        ])
     }
 
     func testReadingStateDecodesItsRevisionAndRendererNeutralLocator() throws {

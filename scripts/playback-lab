@@ -380,7 +380,7 @@ Usage:
                              [--case TEXT] [--exclude-case TEXT] [--observe SECONDS]
                              [--network-profile NAME] [--json PATH] [--junit PATH]
                              [--preparation-measurement] [--frame-diagnostics] [--d3-acquisition]
-                             [--fixtures DIR] [--server PATH]
+                             [--server-metrics] [--fixtures DIR] [--server PATH]
                              [--chrome PATH] [--edge PATH]
                              [--firefox PATH] [--geckodriver PATH]
                              [--headed] [--keep-runtime]
@@ -4352,6 +4352,55 @@ function normalizeTrace(report) {
   };
 }
 
+// The server series a split-versus-muxed baseline compares
+// (docs/streaming/SPLIT-HLS-DEFAULT-INVENTORY.md §5). Read before and after a
+// case with --server-metrics; the case result keeps only the series that moved.
+const SERVER_METRIC_FAMILIES = [
+  "plurx_hls_requests_total",
+  "plurx_hls_response_bytes_total",
+  "plurx_vod_segment_answers_total",
+  "plurx_vod_producer_generations_total",
+  "plurx_create_seconds_count",
+  "plurx_create_seconds_sum",
+];
+
+function parseServerMetrics(text, families = SERVER_METRIC_FAMILIES) {
+  const series = new Map();
+  for (const line of String(text || "").split("\n")) {
+    if (!line || line.startsWith("#")) continue;
+    const space = line.lastIndexOf(" ");
+    if (space <= 0) continue;
+    const key = line.slice(0, space);
+    const name = key.split("{", 1)[0];
+    if (!families.includes(name)) continue;
+    const value = Number(line.slice(space + 1));
+    if (Number.isFinite(value)) series.set(key, value);
+  }
+  return series;
+}
+
+// A counter that went backwards means the server restarted during the case;
+// the delta is then not a measurement of the case and says so.
+function serverMetricDelta(before, after) {
+  const delta = {};
+  let reset = false;
+  for (const [key, value] of after) {
+    const moved = value - (before.get(key) || 0);
+    if (moved < 0) reset = true;
+    if (moved !== 0) delta[key] = Math.round(moved * 1e6) / 1e6;
+  }
+  return reset ? { ...delta, reset: true } : delta;
+}
+
+async function readServerMetrics(server) {
+  const response = await fetch(`${server.baseUrl}/metrics`, {
+    headers: server.token ? { authorization: `Bearer ${server.token}` } : {},
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error(`/metrics answered ${response.status}`);
+  return parseServerMetrics(await response.text());
+}
+
 async function runOneCase(driver, server, manifest, fixture, testCase, browserInfo, observeOverride, shaper, frameDiagnostics = false, d3Acquisition = false) {
   if (!d3Acquisition) return runOneCaseBody(driver, server, manifest, fixture, testCase, browserInfo, observeOverride, shaper, frameDiagnostics, false);
   const anchors = [];
@@ -4868,6 +4917,9 @@ async function runSuite(manifest, options, dependencies = {}) {
       const fixture = plan.fixtures.get(testCase.fixture);
       process.stdout.write(`CASE    ${String(index + 1).padStart(2)}/${plan.cases.length} ${testCase.name}\n`);
       const caseLogStart = Date.now();
+      const metricsBefore = enabledOption(options.server_metrics)
+        ? await readServerMetrics(server).catch((error) => error)
+        : null;
       let result;
       try {
         result = await (dependencies.runOneCase || runOneCase)(
@@ -4885,6 +4937,15 @@ async function runSuite(manifest, options, dependencies = {}) {
         // Read once after the verdict has been computed, never at the sampling
         // cadence. Truncation and observer overhead are explicit diagnostics;
         // these records do not participate in any score or threshold.
+        if (metricsBefore && result) {
+          // Diagnostic only: never scored, and a failed read is recorded
+          // rather than failing the case.
+          result.server_metrics = metricsBefore instanceof Error
+            ? { read_error: metricsBefore.message }
+            : await readServerMetrics(server)
+              .then((after) => ({ delta: serverMetricDelta(metricsBefore, after) }))
+              .catch((error) => ({ read_error: error.message }));
+        }
         if(enabledOption(options.frame_diagnostics)&&result){
           try{
             result.frame_diagnostics=await driver.eval(`(()=>{
@@ -6017,6 +6078,8 @@ module.exports = {
   writePreparationReport,
   writeFatalRunReport,
   writeDeviceProxyControlFile,
+  parseServerMetrics,
+  serverMetricDelta,
 };
 
 if (require.main === module) {

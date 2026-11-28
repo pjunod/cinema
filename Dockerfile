@@ -4,11 +4,30 @@ ARG PLURX_MEDIA_RUNTIME_REPOSITORY=ghcr.io/pjunod/cinema-media-runtime
 
 # Pinned by digest: `1-bookworm` floats, and what floats with it is this
 # image's Debian system libraries and its own rustup. The compiler is not
-# pinned here -- `COPY . .` below puts rust-toolchain.toml in the build
-# context and rustup honours it -- so this digest is the system-library
+# pinned here -- the toolchain layer below installs what rust-toolchain.toml
+# names -- so this digest is the system-library
 # pin, nothing more. `scripts/image-base-drift` prints this digest beside
 # the current upstream one; the weekly Rust dependency audit runs it.
 FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
+WORKDIR /src
+# The pinned compiler is fetched here, in a layer keyed only on
+# rust-toolchain.toml, and never by the compile below. The base image's own
+# toolchain is whatever `1-bookworm` shipped; without this layer the first
+# `cargo` in the compile RUN saw rust-toolchain.toml name 1.97.1 plus
+# rustfmt/clippy, and rustup downloaded them from static.rust-lang.org inside
+# every build whose source changed (CI run 9051 failed on one network blip
+# there). BuildKit reuses this layer from the runner's persistent builder
+# (.github/actions/buildx-cache) until the toolchain file or the base digest
+# changes, so a source change no longer touches static.rust-lang.org at all.
+# It comes before every ARG and ENV below: those carry the commit (its SHA,
+# ref and time), and an instruction after a changed one misses the cache.
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install --profile minimal \
+    && rustc --version | grep -F "rustc $(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml) "
+# From here a missing toolchain or component is a build error, not a silent
+# download (rustup 1.28+). `COPY . .` re-copies the identical file, so the
+# toolchain installed above is the one every later cargo resolves.
+ENV RUSTUP_AUTO_INSTALL=0
 # `.git` is not in the build context (see .dockerignore), so the build script
 # can't derive the commit itself — CI passes it in, e.g.
 #   docker build --build-arg PLURX_BUILD_REF="$(git describe --tags --always --dirty)"
@@ -31,7 +50,6 @@ ARG TARGETARCH
 # passes `--build-arg CARGO_BUILD_JOBS=N` (ARG values reach RUN as environment).
 # CI does not build this stage; its compiles are bounded in the workflows.
 ARG CARGO_BUILD_JOBS
-WORKDIR /src
 COPY . .
 # The target dirs below are cache mounts that outlive any one checkout, and
 # cargo decides a path crate is fresh from file mtimes, not contents. A node
@@ -64,7 +82,7 @@ RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/
 # (its base, Debian snapshot and package list included) that this image was
 # published from. A contract fails when that recipe changes without a pin.
 # dv-dependency-recipe-sha256: a96a1717d7c66025e783e12e1e8c384d954d77a3fe4bdbb6352f93d8ff04bb4c
-FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:9130f0ce818833dea3361c93b50eaa4d25ceef3f0275593a2ab57877a389a050 AS dv-processing-dependencies
+FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:dfeb835a147680db0fb90826f99cb4f0a41467c8c42ce1718786686a10bbe066 AS dv-processing-dependencies
 
 # These stages sit before runtime-assets so release packaging keeps them
 # (validation/release_dockerfile.py); they see no daemon source.
@@ -95,6 +113,12 @@ RUN placebo_pc=$(dirname "$(find /opt/dv-dependencies/placebo/lib -name libplace
         $(PKG_CONFIG_PATH="$placebo_pc" pkg-config --cflags --libs libplacebo) -lm \
         -o /build-inputs/test_dm_active_area \
     && LD_LIBRARY_PATH=/opt/dv-bundle/lib /build-inputs/test_dm_active_area
+# The title scanner's untagged-Matroska completeness controls run the scanner
+# just built over byte-edited copies of a committed fixture. Demux only, so
+# CPU only: a failing case fails the image.
+RUN LD_LIBRARY_PATH=/opt/dv-bundle/lib python3 \
+        /build-inputs/dv_processing/controls/test_scan_segment_endpoint.py \
+        --scanner /opt/dv-bundle/bin/scan_title
 # The base reconstruction control drives the production base renderer, which
 # needs a Vulkan device. This stage has the compiler and headers but no
 # Vulkan driver, so it only compiles the control, with the helper's own
@@ -112,7 +136,7 @@ RUN placebo_pc=$(dirname "$(find /opt/dv-dependencies/placebo/lib -name libplace
 # A base published before 2026-11-12 still carries a DV helper bundle of its
 # own. The runtime stage below discards it and installs the one built from
 # this context, so this pin never needs to follow tools/dv_processing.
-FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67 AS runtime-assets
+FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:4ec79d58de22ebb0cb09889de57f245cdd56a884ebec3a5327a90662ce12e6c9 AS runtime-assets
 
 # M5's CI image uses the shipped runtime's media assets, not a second ffmpeg
 # install on a persistent runner. These two tool images are pinned by index
@@ -218,7 +242,7 @@ RUN rm -rf /usr/lib/plurx/dv-processing \
 # runtime assertions could report a result.
 FROM runtime-assets AS runtime
 ARG PLURX_BUILD_SHA=""
-ARG PLURX_MEDIA_RUNTIME_DIGEST="sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67"
+ARG PLURX_MEDIA_RUNTIME_DIGEST="sha256:4ec79d58de22ebb0cb09889de57f245cdd56a884ebec3a5327a90662ce12e6c9"
 ENV PLURX_MEDIA_RUNTIME_DIGEST=${PLURX_MEDIA_RUNTIME_DIGEST}
 # The fleet rollout inspects this label on the pulled image ID before it trusts
 # checkout-owned deployment policy. Redeclare the build arg in this final stage:

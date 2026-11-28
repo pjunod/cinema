@@ -87,7 +87,7 @@ impl SourceGrowingBacking {
     pub(crate) fn is_live(&self) -> bool {
         self.production.is_live()
             && self.owners.contains_live_assignment(&self.assignment)
-            && self.source.unchanged()
+            && self.source.unchanged_in_place()
     }
     /// Viewer activity: the first publication, an authenticated resource
     /// fetch, or a control exchange the fence accepted. A refused exchange is
@@ -245,14 +245,15 @@ impl SourceViewerActor {
                                 .round()
                                 .clamp(0.0, u32::MAX as f64) as u32
                         });
+                        // The published segment is immutable. Open it with the
+                        // range released: the renewal tick and the read bank
+                        // need this lock, and an open on a slow or hung share
+                        // must not hold them.
+                        let payload = files.payload.clone();
+                        let path = files.payload_path.join(name);
+                        drop(files);
                         let mut ready = custody
-                            .open_ready_child(
-                                &files.payload,
-                                &files.payload_path.join(name),
-                                name,
-                                &etag,
-                                &backing.delivery,
-                            )
+                            .open_ready_child(&payload, &path, name, &etag, &backing.delivery)
                             .await
                             .map_err(|_| pending)?;
                         ready.observed_media_duration_ms = duration;
@@ -273,11 +274,7 @@ impl SourceViewerActor {
                         if end == crate::copyrange::DeadlineEnd::Slow
                             && backing.production.is_holding()
                         {
-                            if let Err(error) = backing.production.reanchor_at_head().await {
-                                // The renewal tick's own read-bank refresh
-                                // ends a copy whose observer fails.
-                                tracing::warn!(target: "plurxd::transcode", incarnation = %self.0.assignment.binding().incarnation_id(), stage = "growing.reanchor", %error, "Source growing copy could not re-anchor its read bank");
-                            }
+                            backing.production.reanchor_at_head();
                         }
                         return Err(
                             self.deadline_refusal(end == crate::copyrange::DeadlineEnd::Stalled)
@@ -437,10 +434,7 @@ impl SourceViewerActor {
         let route = self.0.gate.renew_with(&self.0.assignment, &proof).await?;
         if route.session_id != backing.session_id
             || route.publication_ready_at_ms != 0
-            || guard
-                .source
-                .as_ref()
-                .is_none_or(|source| !source.unchanged())
+            || guard.source.as_ref().missing_or_changed().await
         {
             return Err(ended);
         }
@@ -482,20 +476,6 @@ impl SourceViewerActor {
     }
 }
 
-/// A selected-caption window's own answer: still preparing (`Deadline`) or
-/// over its concurrent-work bound (`Capacity`) passes; anything else is this
-/// track's final answer for this request.
-pub(super) fn subtitle_refusal(error: SourceWorkerError) -> super::LiveRefusal {
-    if matches!(
-        error,
-        SourceWorkerError::Deadline | SourceWorkerError::Capacity
-    ) {
-        super::LiveRefusal::transient(error)
-    } else {
-        super::LiveRefusal::terminal(error)
-    }
-}
-
 impl TranscodeManager {
     async fn prepare_source_growing(
         &self,
@@ -522,6 +502,16 @@ impl TranscodeManager {
         };
         *stage = "growing.preparation_authority";
         let authority = owner.gate.current_preparation(&owner.assignment).await?;
+        // The copy's argv keeps or deletes the in-band parameter sets from
+        // this probe's census; a Source-first play measures it here, under
+        // this owner, without moving the witnessed revision.
+        *stage = "growing.census";
+        Box::pin(crate::hevc_census::ensure_source_census(
+            self.store.as_ref(),
+            prepared.file(),
+        ))
+        .await
+        .map_err(|_| SourceWorkerError::Unresolved)?;
         *stage = "growing.probe_evidence";
         let probe = self
             .store
@@ -547,6 +537,41 @@ impl TranscodeManager {
             probe.as_deref(),
             preserve_dolby_vision,
             convert_dolby_vision,
+        );
+        // The copy's memory is admitted first, before it takes a copy slot or
+        // reads its head: a start waiting for memory holds nothing another
+        // copy needs and discards no work. A node whose copies hold their
+        // budget answers busy, which the receiver retries.
+        // The one recipe of this range. An Analysis gap fill of the same
+        // source repeats it, so its rows are comparable with these.
+        let recipe = crate::copy_analysis::CopyRecipe {
+            video,
+            audio_index: prepared.request().audio_index,
+            transcode_audio: aac,
+            audio_delivery: prepared.request().audio_delivery.clone(),
+        };
+        *stage = "growing.copy_memory";
+        let charge = crate::copyrange::admission_charge(
+            prepared.file().size,
+            prepared.file().duration_ms,
+            recipe.tracks(prepared.file()).audio_bits_per_second,
+        );
+        let memory = std::sync::Arc::new(
+            self.admissions
+                .copy_memory()
+                .acquire(
+                    charge,
+                    crate::admission::CopyPriority::Live,
+                    tokio::time::Instant::from_std(deadline),
+                )
+                .await
+                .map_err(|refusal| match refusal {
+                    crate::admission::CopyMemoryRefusal::Busy => SourceWorkerError::Capacity,
+                    // More than this node can hold even alone.
+                    crate::admission::CopyMemoryRefusal::OverCeiling => {
+                        SourceWorkerError::CopyInputLimit
+                    }
+                })?,
         );
         *stage = "growing.copy_admission";
         let permit = self.admit_source_copy(deadline).await?;
@@ -586,13 +611,20 @@ impl TranscodeManager {
             )
             .ok_or(SourceWorkerError::Unavailable)?;
         *stage = "growing.head_dispatch";
-        let dispatch = owners
-            .begin_generation()
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+        // The stage alone cannot tell a dispatch capacity refusal from an
+        // authority that could not be proven current; each names its reason.
+        let at = *stage;
+        let dispatch = owners.begin_generation().map_err(|reason| {
+            tracing::warn!(target: "plurxd::transcode", stage = at, reason, "Source producer dispatch refused");
+            SourceWorkerError::Unavailable
+        })?;
         let permission = dispatch
             .authorize_preparing_before_spawn()
             .await
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+            .map_err(|reason| {
+                tracing::warn!(target: "plurxd::transcode", stage = at, reason = %reason, "Source producer authority refused");
+                SourceWorkerError::Unavailable
+            })?;
         *stage = "growing.head_input";
         let input = crate::source_input::SourceInput::open_foreground_held(
             request.clone(),
@@ -698,14 +730,6 @@ impl TranscodeManager {
         )
         .await
         .map_err(|_| SourceWorkerError::Unavailable)?;
-        // The one recipe of this range. An Analysis gap fill of the same
-        // source repeats it, so its rows are comparable with these.
-        let recipe = crate::copy_analysis::CopyRecipe {
-            video,
-            audio_index: prepared.request().audio_index,
-            transcode_audio: aac,
-            audio_delivery: prepared.request().audio_delivery.clone(),
-        };
         *stage = "growing.copy_mux";
         let mux = ObservedCopyMux::new(
             Arc::clone(&contract),
@@ -714,6 +738,7 @@ impl TranscodeManager {
             recipe.tracks(&file),
             video.retains_hevc_parameter_sets(),
             file.video_codec.as_deref() == Some("hevc"),
+            memory,
         )
         .map_err(|_| SourceWorkerError::Unsupported)?;
         *stage = "growing.copy_args";
@@ -721,13 +746,20 @@ impl TranscodeManager {
             .args(&file, prepared.request().start_seconds)
             .map_err(|_| SourceWorkerError::Unsupported)?;
         *stage = "growing.primary_dispatch";
-        let dispatch = owners
-            .begin_generation()
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+        // The stage alone cannot tell a dispatch capacity refusal from an
+        // authority that could not be proven current; each names its reason.
+        let at = *stage;
+        let dispatch = owners.begin_generation().map_err(|reason| {
+            tracing::warn!(target: "plurxd::transcode", stage = at, reason, "Source producer dispatch refused");
+            SourceWorkerError::Unavailable
+        })?;
         let permission = dispatch
             .authorize_preparing_before_spawn()
             .await
-            .map_err(|_| SourceWorkerError::Unavailable)?;
+            .map_err(|reason| {
+                tracing::warn!(target: "plurxd::transcode", stage = at, reason = %reason, "Source producer authority refused");
+                SourceWorkerError::Unavailable
+            })?;
         // The census Input and every reader are joined. Reopen independently
         // against the exact object before the primary operation gets a URL.
         *stage = "growing.primary_input";
@@ -914,10 +946,10 @@ impl TranscodeManager {
                 })?;
             startup_stage = "growing.source_height";
             let facts = StartInfo {
+                vod_copy_layout: None,
                 processed_dv_profile: None,
                 processed_fel: None,
                 degraded_processing: None,
-                processing_note: None,
                 retained_output: None,
                 audio_delivery: prepared.request().audio_delivery.clone(),
                 session_id: session_id.clone(),
@@ -1120,7 +1152,10 @@ impl TranscodeManager {
                 tokio::select! {
                     ()=state.shutdown.cancelled()=>break,
                     ()=retirement=>{},
-                    ()=physical=>{},
+                    // A viewer waited at a held head: apply its re-anchor now.
+                    ()=physical=>{
+                        if backing.production.reanchor_pending() && backing.production.refresh_read_bank().await.is_err() {break;}
+                    },
                     _=renewal.tick()=>{
                         #[cfg(test)]
                         owner.gate.ticked();

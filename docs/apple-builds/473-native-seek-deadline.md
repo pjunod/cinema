@@ -2,7 +2,6 @@
 
 **Status:** built
 
-Build: 192
 Issue: #473
 
 A native seek now has an eight-second completion deadline. If AVPlayer never

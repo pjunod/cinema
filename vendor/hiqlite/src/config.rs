@@ -44,6 +44,15 @@ impl Default for RateLimitConfig {
 /// network, you might want to tune the `RaftConfig`. However, you should never adjust the
 /// `max_in_snapshot_log_to_keep`, because this will play a crucial role if you need to restore
 /// from a backup in case of disaster recovery.
+/// Listeners bound by the caller before `start_node`. Each must already be
+/// bound to the address `start_node` would bind: `listen_addr_raft` or
+/// `listen_addr_api` with this node's port from `nodes`.
+#[derive(Debug)]
+pub struct NodeListeners {
+    pub raft: std::net::TcpListener,
+    pub api: std::net::TcpListener,
+}
+
 #[derive(Debug)]
 pub struct NodeConfig {
     /// The `node_id` matches the `Node::id` of "this node"
@@ -54,6 +63,11 @@ pub struct NodeConfig {
     pub listen_addr_api: Cow<'static, str>,
     /// Listen address for the Raft Server
     pub listen_addr_raft: Cow<'static, str>,
+    /// Raft and API listeners the caller already owns for this node's listen
+    /// addresses. When set, startup serves on exactly these sockets instead of
+    /// binding the addresses again, so the caller's bind is the one that serves
+    /// and no other socket can take either port in between.
+    pub listeners: Option<NodeListeners>,
     /// The directory where the replication log, database and snapshots should be stored.
     /// It must exist and be writable, unless you build with the `in-memory-snapshots`
     /// feature and run a pure cache-only node (no SQLite) with `cache_storage_disk = false`:
@@ -179,6 +193,7 @@ impl Default for NodeConfig {
             nodes: vec![],
             listen_addr_api: "0.0.0.0".into(),
             listen_addr_raft: "0.0.0.0".into(),
+            listeners: None,
             data_dir: "data".into(),
             filename_db: "hiqlite.db".into(),
             log_statements: false,
@@ -342,6 +357,7 @@ impl NodeConfig {
             nodes: Node::parse_from_env("HQL_NODES"),
             listen_addr_api,
             listen_addr_raft,
+            listeners: None,
             data_dir: env::var("HQL_DATA_DIR")
                 .unwrap_or_else(|_| "data".to_string())
                 .into(),

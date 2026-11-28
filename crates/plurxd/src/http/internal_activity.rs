@@ -192,6 +192,12 @@ pub struct ActivityWorkers {
     pub hardware_limit: usize,
     pub software_used: usize,
     pub software_limit: usize,
+    /// Bytes this node's verified copies hold; absent on peers predating it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_memory_used: Option<u64>,
+    /// This node's copy memory budget; absent on peers predating it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_memory_limit: Option<u64>,
     pub children: Vec<String>,
     pub child_count: usize,
 }
@@ -261,6 +267,8 @@ async fn local_workers_with_details(state: &AppState, detailed: bool) -> Activit
         hardware_limit: runtime.hardware_slots_max,
         software_used: runtime.software_threads_used,
         software_limit: runtime.software_threads_max,
+        copy_memory_used: Some(runtime.copy_memory_used),
+        copy_memory_limit: Some(runtime.copy_memory_max),
         child_count: children.len(),
         children: if detailed {
             children
@@ -563,6 +571,9 @@ impl PeerActivityClient {
             Err(PeerTransportError::Unreachable) => PeerActivityOutcome::Unreachable,
             Err(PeerTransportError::LocalUnavailable) => PeerActivityOutcome::LocalUnavailable,
             Err(PeerTransportError::AuthenticationRefused(_)) => PeerActivityOutcome::Refused,
+            Err(PeerTransportError::UnauthenticatedStatus(status)) => {
+                unauthenticated_status_outcome(status)
+            }
         }
     }
 
@@ -710,6 +721,19 @@ async fn read_snapshot_response(
         Err(PeerTransportError::Unreachable) => PeerActivityOutcome::Unreachable,
         Err(PeerTransportError::LocalUnavailable) => PeerActivityOutcome::LocalUnavailable,
         Err(PeerTransportError::AuthenticationRefused(_)) => PeerActivityOutcome::Refused,
+        Err(PeerTransportError::UnauthenticatedStatus(status)) => {
+            unauthenticated_status_outcome(status)
+        }
+    }
+}
+
+/// An unsigned error status is an HTTP error on the path to the peer: never a
+/// snapshot, and never the peer's own authentication refusal (an unsigned 403
+/// may come from any hop).
+fn unauthenticated_status_outcome(status: u16) -> PeerActivityOutcome {
+    match StatusCode::from_u16(status) {
+        Ok(status) if !status.is_success() => PeerActivityOutcome::HttpError,
+        _ => PeerActivityOutcome::InvalidResponse,
     }
 }
 
@@ -1927,6 +1951,8 @@ mod tests {
                 hardware_limit: 1,
                 software_used: 0,
                 software_limit: 1,
+                copy_memory_used: None,
+                copy_memory_limit: None,
                 children: vec!["\0".repeat(256); 32],
                 child_count: 32,
             },
@@ -2160,6 +2186,29 @@ mod tests {
         );
         assert_eq!(
             classify_snapshot_response(StatusCode::OK, b"not JSON", "node-b"),
+            PeerActivityOutcome::InvalidResponse
+        );
+    }
+
+    #[test]
+    fn unsigned_error_status_reports_the_answer_not_an_invalid_response() {
+        // A response-bound Activity read whose 503 came from a layer in front
+        // of the signing handler is a busy peer, not a protocol violation.
+        assert_eq!(
+            unauthenticated_status_outcome(503),
+            PeerActivityOutcome::HttpError
+        );
+        assert_eq!(
+            unauthenticated_status_outcome(403),
+            PeerActivityOutcome::HttpError
+        );
+        // An unsigned success never stands for a snapshot.
+        assert_eq!(
+            unauthenticated_status_outcome(200),
+            PeerActivityOutcome::InvalidResponse
+        );
+        assert_eq!(
+            unauthenticated_status_outcome(1_000),
             PeerActivityOutcome::InvalidResponse
         );
     }

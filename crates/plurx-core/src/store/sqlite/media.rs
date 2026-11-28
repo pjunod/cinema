@@ -2102,6 +2102,52 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn merge_file_probe_dv_levels(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        record: &crate::scan::dv_levels::DvLevelsRecord,
+    ) -> Result<bool, StoreError> {
+        let record = serde_json::to_string(record)
+            .map_err(|error| StoreError::Task(format!("encode DV levels record: {error}")))?;
+        self.with_conn(move |conn| {
+            // The same in-SQL graft as the content encoding above, fenced to
+            // the measured revision.
+            Ok(conn.execute(
+                "UPDATE files
+                    SET probe_json = json_set(probe_json, '$.plurx_dv_levels_v1', json(?1))
+                  WHERE id = ?2 AND size = ?3 AND mtime = ?4 AND probe_json IS NOT NULL",
+                params![record, file_id, size, mtime],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn files_missing_dv_levels(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MediaFile>, StoreError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {FILE_COLS} FROM files
+                  WHERE video_codec = 'hevc' AND dv_profile IN (5,7,8)
+                    AND dv_rpu_present = 1
+                    AND probe_json IS NOT NULL
+                    AND json_type(probe_json, '$.plurx_dv_levels_v1') IS NULL
+                    AND id > ?1
+                  ORDER BY id
+                  LIMIT ?2"
+            ))?;
+            let files = stmt
+                .query_map(params![after_id, limit.max(0)], file_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(files)
+        })
+        .await
+    }
+
     async fn files_missing_dolby_vision(
         &self,
         after_id: i64,

@@ -1,0 +1,69 @@
+name: fold fragment folders
+
+# Pages that every pull request used to edit at one insertion point are now
+# folded from per-pull-request fragment folders (`scripts/fold --list`).
+# A pull request edits only its own fragment; this rewrites the pages, checks
+# the result with `scripts/fold`'s `verify` (only folded pages change, no
+# client-fix row is lost or altered, a second fold changes nothing), and lands
+# it as a `chore(fold):` pull request merged at the head it verified. The fold
+# only moves what is already on `main`, so that check is the only one it waits
+# for; it does not take the requested lane (AGENTS.md, "Landing on main"). A
+# conflict with a later landing fails the run, and the next fold starts again
+# from the new `main` and replaces the `fold/main` branch.
+#
+# It runs on a schedule, not on every push: nearly every landing touches
+# status.d/, and a fold per landing would mean a fold pull request per merge.
+# The page lags its folder by at most six hours.
+#
+# It pushes, opens and merges with FOLD_BOT_TOKEN, the token of the
+# plurx-fold-bot account (a write collaborator on this repository only). The
+# job's own token cannot open a pull request here. The fold waits for no check
+# but its own; its landing is a normal push, so landing-check judges it. A
+# manual run with `all` folds every fragment folder completely, as a release
+# cut does.
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      all:
+        description: Fold every fragment folder completely, as a release cut does
+        type: boolean
+        default: false
+
+concurrency:
+  group: fold-fragment-folders
+  cancel-in-progress: true
+
+jobs:
+  fold:
+    if: github.server_url != 'https://github.com'
+    name: fold and publish
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 10
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out main
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Fold, verify and land
+        env:
+          # Scoped to this one step; scripts/fold passes it to git through
+          # the environment and to the API in a header, never in arguments.
+          FOLD_BOT_TOKEN: ${{ secrets.FOLD_BOT_TOKEN }}
+          FOLD_ALL: ${{ (inputs.all == true || inputs.all == 'true') && '--all' || '' }}
+        run: python3 scripts/fold --publish $FOLD_ALL
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"

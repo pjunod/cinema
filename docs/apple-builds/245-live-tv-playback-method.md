@@ -1,6 +1,5 @@
 # Show what Live TV copies and transcodes
 
-Build: 136
 Issue: #245
 
 Live TV shows the server-selected playback method in the Apple TV preview,

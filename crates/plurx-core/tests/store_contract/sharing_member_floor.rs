@@ -812,10 +812,11 @@ async fn actual_fourth_learner_raw_admission_and_promotion_freeze_capability_rac
         "CREATE TABLE item_identity_watermark(malformed TEXT)",
     )
     .await;
-    let ports = contract_free_ports(2);
+    // The fourth node's sockets stay bound here until its child inherits them.
+    let learner_sockets = ContractNodeSockets::bind_loopback();
     let mut request = sharing_join_request('e', 4);
-    request.api_address = format!("127.0.0.1:{}", ports[0]);
-    request.raft_address = format!("127.0.0.1:{}", ports[1]);
+    request.api_address = learner_sockets.api_address();
+    request.raft_address = learner_sockets.raft_address();
     assert!(
         !raw_sharing_membership(&client, "add_learner", &request)
             .await
@@ -883,17 +884,20 @@ async fn actual_fourth_learner_raw_admission_and_promotion_freeze_capability_rac
         api: request.api_address.clone(),
         raft: request.raft_address.clone(),
     });
+    let mut command = Command::new(std::env::current_exe().expect("fixture executable"));
+    command
+        .arg("hiqlite_contract_node_process")
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("--nocapture");
     let launch = ContractNodeLaunch {
         node_id: 4,
         learner_only: true,
         root: cluster._root.path().to_path_buf(),
         nodes: specs,
+        sockets: learner_sockets.inherit(&mut command),
     };
-    let mut child = Command::new(std::env::current_exe().expect("fixture executable"))
-        .arg("hiqlite_contract_node_process")
-        .arg("--ignored")
-        .arg("--exact")
-        .arg("--nocapture")
+    let mut child = command
         .env(
             "PLURX_CONTRACT_NODE_LAUNCH",
             serde_json::to_string(&launch).expect("node launch"),
@@ -903,6 +907,9 @@ async fn actual_fourth_learner_raw_admission_and_promotion_freeze_capability_rac
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn real fourth learner");
+    // The child holds its own descriptors; the parent's copies go, so the
+    // ports close when the learner stops and peers are refused, as before.
+    drop(learner_sockets);
     let input = child.stdin.take().expect("learner stdin");
     let output = child.stdout.take().expect("learner stdout");
     let reader = tokio::task::spawn_blocking(move || {
@@ -1143,9 +1150,7 @@ async fn stale_registered_learner_does_not_refuse_the_serving_read_floor() {
     .expect("serving floor observer");
 
     // A genuine fourth Raft member, admitted as a learner and then stopped.
-    let ports = contract_free_ports(2);
-    let learner_api = format!("127.0.0.1:{}", ports[0]);
-    let learner_raft = format!("127.0.0.1:{}", ports[1]);
+    let learner_sockets = ContractNodeSockets::bind_loopback();
     let metrics = client.metrics_db().await.expect("bootstrap membership");
     let mut specs = metrics
         .membership_config
@@ -1156,22 +1161,21 @@ async fn stale_registered_learner_does_not_refuse_the_serving_read_floor() {
             raft: node.addr_raft.clone(),
         })
         .collect::<Vec<_>>();
-    specs.push(ContractNodeSpec {
-        id: 4,
-        api: learner_api,
-        raft: learner_raft,
-    });
+    specs.push(learner_sockets.spec(4));
+    let mut command = Command::new(std::env::current_exe().expect("fixture executable"));
+    command
+        .arg("hiqlite_contract_node_process")
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("--nocapture");
     let launch = ContractNodeLaunch {
         node_id: 4,
         learner_only: true,
         root: cluster._root.path().to_path_buf(),
         nodes: specs,
+        sockets: learner_sockets.inherit(&mut command),
     };
-    let mut child = Command::new(std::env::current_exe().expect("fixture executable"))
-        .arg("hiqlite_contract_node_process")
-        .arg("--ignored")
-        .arg("--exact")
-        .arg("--nocapture")
+    let mut child = command
         .env(
             "PLURX_CONTRACT_NODE_LAUNCH",
             serde_json::to_string(&launch).expect("node launch"),
@@ -1181,6 +1185,9 @@ async fn stale_registered_learner_does_not_refuse_the_serving_read_floor() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn real fourth learner");
+    // The child holds its own descriptors; the parent's copies go, so the
+    // ports close when the learner stops and peers are refused, as before.
+    drop(learner_sockets);
     let input = child.stdin.take().expect("learner stdin");
     let output = child.stdout.take().expect("learner stdout");
     let reader = tokio::task::spawn_blocking(move || {

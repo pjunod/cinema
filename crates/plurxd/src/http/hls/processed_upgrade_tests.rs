@@ -6,10 +6,12 @@ use super::*;
 pub(in crate::http) fn ordinary_request(playback_id: &str) -> crate::transcode::SessionRequest {
     crate::transcode::SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         retain_output: None,
         dv_refit_digest: None,
         vod_only: false,
@@ -359,12 +361,18 @@ fn an_unproven_pre_trial_admission_never_skips_the_check_after_the_trial() {
 #[test]
 fn an_unreadable_recovery_memory_lets_the_trial_run_but_never_grants_after_it() {
     use super::{recovery_admission, Admission, AdmissionStage};
-    use crate::http::hls::candidate_recovery::ProcessedRecoveryEvidence as Evidence;
-    assert_eq!(
-        recovery_admission(Evidence::Unavailable, AdmissionStage::BeforeTrial),
-        Ok(Admission::Unproven)
-    );
-    assert!(recovery_admission(Evidence::Unavailable, AdmissionStage::AfterTrial).is_err());
+    use crate::http::hls::candidate_recovery::{
+        ProcessedRecoveryEvidence as Evidence, RecoveryUnavailable,
+    };
+    for reason in RecoveryUnavailable::ALL {
+        assert_eq!(
+            recovery_admission(Evidence::Unavailable(reason), AdmissionStage::BeforeTrial),
+            Ok(Admission::Unproven)
+        );
+        assert!(
+            recovery_admission(Evidence::Unavailable(reason), AdmissionStage::AfterTrial).is_err()
+        );
+    }
     assert!(recovery_admission(Evidence::Rejected, AdmissionStage::BeforeTrial).is_err());
     assert!(recovery_admission(Evidence::Rejected, AdmissionStage::AfterTrial).is_err());
     assert_eq!(
@@ -426,4 +434,116 @@ fn an_upgrade_displaced_by_another_preparation_waits_for_the_free_slot() {
     run.wait_again(intent);
     drop(run);
     assert!(!is_waiting(&session) && !is_running(&session));
+}
+
+#[test]
+fn an_unreadable_recovery_memory_names_the_read_that_missed() {
+    use super::{recovery_admission, AdmissionStage};
+    use crate::http::hls::candidate_recovery::{
+        ProcessedRecoveryEvidence as Evidence, RecoveryUnavailable,
+    };
+    // A deadline names the read it cut, and keeps the deadline wording.
+    let Err(deadline) = recovery_admission(
+        Evidence::Unavailable(RecoveryUnavailable::DeadlineSourceIdentity),
+        AdmissionStage::AfterTrial,
+    ) else {
+        panic!("a deadline read refuses after the trial");
+    };
+    assert!(deadline.contains("before its deadline"), "{deadline}");
+    assert!(
+        deadline.ends_with("(deadline_source_identity)"),
+        "{deadline}"
+    );
+    // An answered miss is not called a deadline.
+    let Err(answered) = recovery_admission(
+        Evidence::Unavailable(RecoveryUnavailable::RouteLeaseExpired),
+        AdmissionStage::AfterTrial,
+    ) else {
+        panic!("an answered miss refuses after the trial");
+    };
+    assert!(!answered.contains("deadline"), "{answered}");
+    assert!(answered.ends_with("(route_lease_expired)"), "{answered}");
+    // Every reason has its own label, and only the four deadline reads are
+    // deadlines.
+    let labels: std::collections::BTreeSet<_> = RecoveryUnavailable::ALL
+        .iter()
+        .map(|reason| reason.label())
+        .collect();
+    assert_eq!(labels.len(), RecoveryUnavailable::ALL.len());
+    assert_eq!(
+        RecoveryUnavailable::ALL
+            .iter()
+            .filter(|reason| reason.is_deadline())
+            .count(),
+        4
+    );
+    for reason in RecoveryUnavailable::ALL {
+        assert_eq!(
+            reason.is_deadline(),
+            reason.label().starts_with("deadline_")
+        );
+    }
+}
+
+#[test]
+fn each_unavailable_recovery_reason_is_counted_by_stage_and_exported() {
+    use super::{recovery_admission, AdmissionStage};
+    use crate::http::hls::candidate_recovery::{
+        ProcessedRecoveryEvidence as Evidence, RecoveryUnavailable,
+    };
+    use crate::playback_control::processed_recovery_unavailable_count as count;
+    // Every reason has the slot its exhaustive index names.
+    for (index, reason) in RecoveryUnavailable::ALL.iter().enumerate() {
+        assert_eq!(reason.index(), index, "{}", reason.label());
+    }
+    // The admission records the reason under its own stage; only the
+    // after-trial read is a refusal. Counters are process-global, so other
+    // tests may add to them concurrently: only a lower bound is exact.
+    let reason = RecoveryUnavailable::RouteRereadMissing;
+    let (before, after) = (count(reason, false), count(reason, true));
+    let _ = recovery_admission(Evidence::Unavailable(reason), AdmissionStage::BeforeTrial);
+    assert!(count(reason, false) > before);
+    let _ = recovery_admission(Evidence::Unavailable(reason), AdmissionStage::AfterTrial);
+    assert!(count(reason, true) > after);
+    let metrics = crate::playback_control::prometheus();
+    for stage in ["before_trial", "after_trial"] {
+        for reason in RecoveryUnavailable::ALL {
+            let series = format!(
+                "plurx_playback_preparation_processed_recovery_unavailable_total{{stage=\"{stage}\",reason=\"{}\"}}",
+                reason.label()
+            );
+            assert!(metrics.contains(&series), "missing {series}");
+        }
+    }
+}
+
+#[test]
+fn a_recovery_deadline_names_the_read_it_was_waiting_on() {
+    use crate::http::hls::candidate_recovery::{RecoveryReadStage, RecoveryUnavailable};
+    let stage = RecoveryReadStage::default();
+    // Nothing entered yet is the first read: the route.
+    assert_eq!(stage.deadline(), RecoveryUnavailable::DeadlineRouteRead);
+    for (entered, named) in [
+        (
+            RecoveryReadStage::SOURCE,
+            RecoveryUnavailable::DeadlineSourceIdentity,
+        ),
+        (
+            RecoveryReadStage::REREAD,
+            RecoveryUnavailable::DeadlineRouteReread,
+        ),
+        (
+            RecoveryReadStage::MEMORY,
+            RecoveryUnavailable::DeadlineMemoryRead,
+        ),
+        // The second bind enters the route read again, so a memory stage
+        // left from the first bind never labels it.
+        (
+            RecoveryReadStage::ROUTE,
+            RecoveryUnavailable::DeadlineRouteRead,
+        ),
+    ] {
+        stage.enter(entered);
+        assert_eq!(stage.deadline(), named);
+    }
 }

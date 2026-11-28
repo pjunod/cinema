@@ -316,6 +316,7 @@ pub(super) fn valid_start_request() -> RemoteStartRequest {
         library_channel: None,
         request: SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -323,6 +324,7 @@ pub(super) fn valid_start_request() -> RemoteStartRequest {
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -548,6 +550,7 @@ fn remote_prepare_names_only_an_exact_reserved_identity() {
 fn valid_start_response() -> RemoteStartResponse {
     let session_id = "00000000-0000-4000-8000-0000000000b1".to_owned();
     RemoteStartResponse {
+        vod_copy_layout: None,
         processed_fel: None,
         processed_dv_profile: None,
         retained_output: None,
@@ -1635,6 +1638,7 @@ fn a_route_the_takeover_path_can_never_accept_is_unrecoverable() {
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -1793,6 +1797,7 @@ fn the_takeover_recipe_validator_refuses_vod() {
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -2873,6 +2878,97 @@ fn service_vod_only_policy_survives_worker_and_durable_recipe_without_native_ide
         !takeover_recipe_is_valid(&recovered),
         "takeover cannot turn VOD-only into rolling"
     );
+}
+
+#[test]
+fn split_vod_worker_seals_the_owner_layout_and_legacy_recipes_keep_their_shape() {
+    use crate::transcode::{VodCopyLayout, VodSoundtrackIdentity, VodSplitVideoIdentity};
+
+    let mut request = valid_start_request();
+    request.request.kind = SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: false,
+        convert_dolby_vision: false,
+        dual_layer_as_copied: false,
+    };
+    request.request.split_audio = true;
+    let legacy_protocol = 13;
+    request.protocol_version = legacy_protocol;
+    let legacy = serde_json::to_value(&request).expect("legacy envelope");
+    assert!(legacy["request"].get("vod_copy_layout").is_none());
+    let legacy: RemoteStartRequest = serde_json::from_value(legacy).expect("legacy durable recipe");
+    assert!(legacy.request.split_audio);
+    assert_eq!(legacy.request.vod_copy_layout, None);
+    assert!(!legacy.is_valid(), "legacy worker is a different cohort");
+
+    request.protocol_version = crate::media_pool::PROTOCOL_VERSION;
+    request.request.prepare_vod_copy_layout();
+    assert_eq!(
+        request.request.vod_copy_layout,
+        Some(VodCopyLayout::PendingV1)
+    );
+    assert!(request.is_valid());
+    let mut fallback = request.request.clone();
+    assert!(fallback.seal_vod_copy_layout(Some(VodCopyLayout::Muxed), true));
+    assert!(!fallback.split_audio);
+    assert!(fallback.vod_copy_layout_valid());
+
+    let copied = VodCopyLayout::SplitV1 {
+        video: VodSplitVideoIdentity {
+            rendition_id: "a".repeat(64),
+            index_key: Some(format!("copy-index-v3:{}", "b".repeat(64))),
+        },
+        soundtracks: (0..4)
+            .map(|source_index| VodSoundtrackIdentity {
+                source_index,
+                rendition_id: format!("{source_index:064x}"),
+                init_id: "c".repeat(64),
+                source_copy: source_index != 0,
+            })
+            .collect(),
+    };
+    let mut response = valid_start_response();
+    response.kind = request.request.kind;
+    response.vod_copy_layout = Some(copied.clone());
+    assert!(
+        !response.is_valid(),
+        "a split receipt requires a master URL"
+    );
+    response.playlist_url = format!("/api/v1/hls/{}/master.m3u8", response.session_id);
+    assert!(response.is_valid());
+    assert!(request
+        .request
+        .seal_vod_copy_layout(response.vod_copy_layout.clone(), true));
+    assert!(request.request.split_audio);
+    let recovered: RemoteStartRequest =
+        serde_json::from_value(serde_json::to_value(&request).expect("sealed recipe JSON"))
+            .expect("sealed recipe reopens");
+    assert_eq!(recovered.request.vod_copy_layout, Some(copied));
+    assert!(!request
+        .request
+        .seal_vod_copy_layout(Some(VodCopyLayout::Muxed), true));
+    if let Some(VodCopyLayout::SplitV1 { video, .. }) = &mut response.vod_copy_layout {
+        video.index_key = None;
+    }
+    assert!(
+        response.is_valid(),
+        "local indexes have no shared cache key"
+    );
+    if let Some(VodCopyLayout::SplitV1 { video, .. }) = &mut response.vod_copy_layout {
+        video.index_key = Some("b".repeat(64));
+    }
+    assert!(response.is_valid(), "v2 uses the bare shared cache key");
+    if let Some(VodCopyLayout::SplitV1 { video, .. }) = &mut response.vod_copy_layout {
+        video.index_key = Some("copy-index-v3:../untrusted".to_owned());
+    }
+    assert!(!response.is_valid(), "malformed shared index key");
+    if let Some(VodCopyLayout::SplitV1 { video, .. }) = &mut response.vod_copy_layout {
+        video.index_key = None;
+    }
+    if let Some(VodCopyLayout::SplitV1 { soundtracks, .. }) = &mut response.vod_copy_layout {
+        soundtracks.push(soundtracks[0].clone());
+    }
+    assert!(!response.is_valid(), "duplicate tracks cannot be sealed");
 }
 
 #[test]
@@ -4683,4 +4779,72 @@ fn owner_base_answers_as_the_media_peers_lookup_did() {
         was(Some(Err(())), "up"),
         Err(PeerTransportError::Unreachable)
     );
+}
+
+/// P49 AC-5: cross-node failover of a split copy. A VOD route is reopened,
+/// never taken over; the recipe a worker holds still asks for the split, and
+/// a worker's start answer for it enters through the family master only for
+/// a VOD copy.
+#[test]
+fn a_split_copy_route_is_reopened_not_taken_over_and_its_wire_keeps_the_split() {
+    let base = eligible_route("session-split");
+    let eligible = eligible_recipe(&base);
+    let split = RemoteStartRequest {
+        request: SessionRequest {
+            dv_processing_destination: None,
+            retain_output: None,
+            dv_refit_digest: None,
+            continuous_media: None,
+            quality_catalog: None,
+            candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
+            presentation: crate::transcode::Presentation::Vod,
+            split_audio: true,
+            vod_copy_layout: None,
+            ..eligible.request.clone()
+        },
+        ..eligible.clone()
+    };
+    let mut route = base.clone();
+    route.recipe_json = serde_json::to_string(&split).expect("serialize split recipe");
+    assert!(
+        matches!(
+            classify_owner_loss(&route, EXPIRED_NOW_MS),
+            OwnerLoss::Unrecoverable(_)
+        ),
+        "a lost split owner answers media_owner_lost with its film position"
+    );
+    let held: RemoteStartRequest =
+        serde_json::from_str(&route.recipe_json).expect("the held recipe parses");
+    assert!(
+        held.request.split_audio,
+        "the reopen on another node asks for the split again"
+    );
+    assert!(worker_session_request_is_valid(&held.request));
+
+    let mut answer = valid_start_response();
+    answer.kind = SessionKind::Copy {
+        convert_dolby_vision: false,
+        dual_layer_as_copied: false,
+        aac: false,
+        preserve_dolby_vision: false,
+    };
+    answer.target_height = 0;
+    answer.playlist_url = format!("/api/v1/hls/{}/master.m3u8", answer.session_id);
+    assert!(
+        answer.is_valid(),
+        "a worker's split copy starts at its family master"
+    );
+    let mut transcode = answer.clone();
+    transcode.kind = SessionKind::Transcode { height: 720 };
+    transcode.target_height = 720;
+    assert!(!transcode.is_valid(), "only a copy has a family master");
+    let mut recovery = answer.clone();
+    recovery.vod = false;
+    assert!(!recovery.is_valid(), "only a VOD copy has a family master");
+    let mut foreign = answer;
+    foreign.playlist_url = "/api/v1/hls/somebody-else/master.m3u8".to_owned();
+    assert!(!foreign.is_valid());
 }

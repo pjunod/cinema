@@ -167,9 +167,7 @@ impl TranscodeManager {
         held_video_bps: Option<u64>,
     ) -> Result<transcode::EnhancementRateEnvelope, String> {
         let ask = request
-            .candidate_context
-            .as_deref()
-            .map(ProcessedUpgradeAsk::from_candidate)
+            .processed_upgrade_ask()
             .ok_or("processed rate requires its current candidate context")?;
         Self::processed_enhancement_envelope_with_ask(
             snapshot,
@@ -401,9 +399,7 @@ impl TranscodeManager {
         height: i64,
     ) -> Result<(SessionRequest, crate::media_pool::QualityCatalogRequest), String> {
         let ask = request
-            .candidate_context
-            .as_deref()
-            .map(ProcessedUpgradeAsk::from_candidate)
+            .processed_upgrade_ask()
             .ok_or("processed trial context missing")?;
         Self::processed_qualification_input_with_ask(snapshot, request, height, &ask)
     }
@@ -842,6 +838,14 @@ impl TranscodeManager {
         held_source: Option<&crate::fragment_index_cluster::SourceFence>,
     ) -> Option<crate::vodserve::retained::MeasuredCandidateCostProof> {
         let mut resolved = request.clone();
+        // A proof needs the actual audio delivery. Without a resolved one it
+        // is derived from the client's audio claim, and with neither no proof
+        // can exist, so answer before reading the source row: a caps-v2
+        // client that sends no audio sinks would otherwise pay one Authority
+        // `get_file` per catalog rung for an answer that is always `None`.
+        if resolved.audio_delivery.is_none() && request.audio_claim.is_none() {
+            return None;
+        }
         let file = if held_source.is_none() || resolved.audio_delivery.is_none() {
             Some(self.store.get_file(request.file_id).await.ok()??)
         } else {
@@ -1487,6 +1491,7 @@ impl TranscodeManager {
             };
             let request = SessionRequest {
                 split_audio: false,
+                vod_copy_layout: None,
                 source_telemetry: None,
                 dv_processing_destination: None,
                 retain_output: None,
@@ -1498,6 +1503,7 @@ impl TranscodeManager {
                 // This request probes a row while its catalog is still being
                 // built; it is not the dispatch request retaining that catalog.
                 quality_catalog: None,
+                accepted_processed_ask: None,
                 candidate_context: Some(Box::new(Self::candidate_context(candidate))),
                 file_id: file.id,
                 playback_id: String::new(),
@@ -1681,7 +1687,7 @@ impl TranscodeManager {
             )
             .await
             .ok()?;
-        if !source.unchanged() {
+        if !source.unchanged().await {
             return None;
         }
         // Persist the verdict for this source revision, so the next plan reads
@@ -1724,7 +1730,7 @@ impl TranscodeManager {
         Self::quality_facts_from_probe(&snapshot.file, &probe)
     }
 
-    pub(super) fn quality_facts_from_probe(
+    pub(crate) fn quality_facts_from_probe(
         file: &plurx_core::domain::MediaFile,
         probe: &serde_json::Value,
     ) -> Option<DecodeFacts> {
@@ -2150,6 +2156,7 @@ impl TranscodeManager {
             catalog_query: None,
             display_target: None,
             display_target_note: None,
+            dv_row_facts: None,
             ordinary_request: None,
             retained_output: None,
             canonical_caps: None,
@@ -5027,6 +5034,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
         }
         let request = SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -5037,6 +5045,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             finite_bitrate_limit_bps: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             file_id: id,
             playback_id: "reorder".into(),
             request_id: Some("00000000-0000-4000-8000-0000000000f3".into()),
@@ -5986,12 +5995,14 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
         let mut request = SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
+            accepted_processed_ask: None,
             candidate_context: Some(Box::new(context)),
             vod_only: false,
             passive_vod: false,

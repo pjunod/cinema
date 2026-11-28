@@ -138,12 +138,43 @@ impl TitleTask {
             pipeline
         };
         let scanner = tools.title_scanner_digest();
+        let generation = crate::dv_tools::TITLE_SCANNER_GENERATION;
         #[cfg(target_os = "linux")]
         let fel = fel_backend(state, &tools).await;
         #[cfg(not(target_os = "linux"))]
         let fel: Option<String> = None;
         #[cfg(target_os = "linux")]
         state.transcode.observe_native_fel_backend(fel.clone());
+        // Before a maintenance or prewarm pass binds a title to this scanner,
+        // keep the aggregates it would only reproduce. (A playback pass binds
+        // nothing new: it skips titles bound to another scanner.) A read
+        // decides first, so a pass with nothing to carry writes nothing; if
+        // the carry cannot be decided, bind nothing this pass rather than
+        // rotate.
+        if !playback_only {
+            match state
+                .store
+                .carry_forward_dv_title_verdicts(
+                    &scanner,
+                    generation,
+                    &crate::dv_tools::TITLE_SCANNER_PREDECESSORS
+                        .iter()
+                        .map(|digest| (*digest).to_owned())
+                        .collect::<Vec<_>>(),
+                )
+                .await
+            {
+                Ok(0) => {}
+                Ok(carried) => tracing::info!(
+                    carried,
+                    "kept title aggregates this scanner reproduces from its predecessor"
+                ),
+                Err(error) => {
+                    tracing::warn!(%error, "carrying title aggregates forward");
+                    return Ok(None);
+                }
+            }
+        }
         let (demands, mut after): (Vec<TitleDemand>, Option<&mut i64>) = match dispatch {
             #[cfg(target_os = "linux")]
             TitleDispatch::Playback => (live_demands.unwrap_or_default(), Some(live_after)),
@@ -163,7 +194,7 @@ impl TitleTask {
                 // A targeted lookup moves neither discovery position.
                 let demands = state
                     .store
-                    .dv_title_demand_for_file(&scanner, file_id, now_ms())
+                    .dv_title_demand_for_file(&scanner, generation, file_id, now_ms())
                     .await?
                     .into_iter()
                     .collect();
@@ -171,7 +202,7 @@ impl TitleTask {
             }
             TitleDispatch::Maintenance => {
                 let (demands, after) = maintenance
-                    .next_page(state.store.as_ref(), &scanner, now_ms())
+                    .next_page(state.store.as_ref(), &scanner, generation, now_ms())
                     .await?;
                 (demands, Some(after))
             }
@@ -184,8 +215,14 @@ impl TitleTask {
             if let Some(after) = after.as_deref_mut() {
                 *after = demand.probe_revision;
             }
+            let scanner_matches = demand.scanner_digest.as_deref() == Some(scanner.as_str());
+            if demand.scanner_generation > generation
+                || (demand.scanner_generation == generation && !scanner_matches)
+            {
+                continue;
+            }
             if playback_only {
-                if demand.scanner_digest.as_deref() != Some(scanner.as_str()) {
+                if !scanner_matches {
                     continue;
                 }
             } else {
@@ -286,14 +323,29 @@ impl TitleTask {
                     continue;
                 }
             }
-            let Some(revision) = state
-                .store
-                .bind_dv_title_demand(demand.probe_revision, &scanner)
-                .await?
-            else {
-                continue;
+            // Existing current work already has its claimable binding. New
+            // work needs the binding first so enqueue can validate its revision.
+            let revision = if scanner_matches && demand.scanner_generation == generation {
+                demand.probe_revision
+            } else {
+                let Some(revision) = state
+                    .store
+                    .bind_dv_title_demand(demand.probe_revision, &scanner, generation, now_ms())
+                    .await?
+                else {
+                    continue;
+                };
+                revision
             };
             let reused = reusable_aggregate(&demand, revision);
+            let existing_job = if scanner_matches && revision == demand.probe_revision {
+                demand
+                    .active_job_id
+                    .as_ref()
+                    .or(demand.queued_job_id.as_ref())
+            } else {
+                None
+            };
             demand.probe_revision = revision;
             use sha2::{Digest, Sha256};
             let mut fel_requests: Vec<_> =
@@ -317,12 +369,8 @@ impl TitleTask {
                 .expect("title request identity"),
             ));
             let now = now_ms();
-            let id = if let Some(id) = demand
-                .active_job_id
-                .clone()
-                .or_else(|| demand.queued_job_id.clone())
-            {
-                id
+            let id = if let Some(id) = existing_job {
+                id.clone()
             } else {
                 let outcome = state
                     .store
@@ -506,7 +554,7 @@ impl TitleTask {
         }
         probe_preempts(
             state,
-            &self.job_id,
+            Some(&self.job_id),
             &self.probe_pipeline,
             &mut self.probe_after,
         )
@@ -523,9 +571,12 @@ impl TitleTask {
 /// `job_id` (a title scan or an F+ fit). Scheduler checks only locally
 /// readable, compatible, live ordinary work; durable SQL excludes stale
 /// coordinators and other resource blockers.
+/// Whether a locally runnable ordinary probe should take the lane. `job_id`
+/// is the running title or F+ job, whose priority the store compares; work
+/// without a job row (the DV levels pass) yields to any runnable probe.
 pub(super) async fn probe_preempts(
     state: &AppState,
-    job_id: &str,
+    job_id: Option<&str>,
     probe_pipeline: &str,
     probe_after: &mut Option<CandidateCursor>,
 ) -> Result<bool, StoreError> {
@@ -575,6 +626,9 @@ pub(super) async fn probe_preempts(
         {
             continue;
         }
+        let Some(job_id) = job_id else {
+            return Ok(true);
+        };
         if state
             .store
             .probe_can_preempt_title(&job.id, job_id, &state.node_id, now)
@@ -692,7 +746,7 @@ async fn requalify_stale_fel_titles(state: &AppState, tools: &ToolSet, scanner: 
             for file_id in titles {
                 state
                     .transcode
-                    .request_fel_qualification(file_id, scanner, &identity)
+                    .request_fel_qualification(file_id, scanner)
                     .await;
             }
         }
@@ -700,17 +754,12 @@ async fn requalify_stale_fel_titles(state: &AppState, tools: &ToolSet, scanner: 
     }
 }
 
-/// The aggregate this title's job may settle with instead of reading the
-/// file: one stored under the generation the worker's bind left unchanged.
-/// Only a publisher bound to that generation's scanner stores one (an index
-/// pass's ride-along, or an earlier job), and a bind to another scanner
-/// rotates the generation and drops it in the same transaction — so a
-/// generation that moved, or a document read before it moved, reuses nothing.
+/// A job may reuse only an aggregate for the revision it will claim.
 pub(super) fn reusable_aggregate(
     demand: &TitleDemand,
     bound_revision: i64,
 ) -> Option<plurx_core::scan::dv_title::DvTitleStats> {
-    if bound_revision != demand.probe_revision {
+    if bound_revision != demand.probe_revision || !demand.aggregate_current {
         return None;
     }
     plurx_core::scan::dv_title::DvTitleStats::from_probe_json(&demand.probe_json)
@@ -1049,9 +1098,13 @@ enum TitleAcquisition {
 /// permanently fail a readable title. A storage read failure is charged like
 /// any other transient read failure (the probe and subtitle paths do the
 /// same), so a bad sector stays bounded by the attempt limit, but under its own
-/// code. A scanner refusal of readable input stays `title_scan_failed`. Every
-/// case keeps the retry backoff, so a whole-title read never restarts in a
-/// tight loop.
+/// code. A content refusal of cleanly read, unchanged input is a verdict on
+/// those bytes under this scanner: rereading them reaches the same refusal, so
+/// the job fails once as `title_scan_refused`, which settles the title's
+/// demand for that probe revision and scanner digest. A changed file (a new
+/// probe revision) or a new scanner re-opens it. Any other scanner failure
+/// stays a charged `title_scan_failed`. Every retry keeps the backoff, so a
+/// whole-title read never restarts in a tight loop.
 fn scan_failure_settlement(
     error: &TitleScanError,
     job_id: &str,
@@ -1075,6 +1128,12 @@ fn scan_failure_settlement(
             JobSettlement::Retry {
                 error_code: "title_source_read_failed".into(),
                 not_before_ms,
+            }
+        }
+        TitleScanError::Refused(_) => {
+            tracing::warn!(%error, job = job_id, "complete-title scan refused the title");
+            JobSettlement::Fail {
+                error_code: "title_scan_refused".into(),
             }
         }
         TitleScanError::Failed(_) => {

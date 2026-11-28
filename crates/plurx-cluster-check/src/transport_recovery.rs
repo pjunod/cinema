@@ -101,16 +101,61 @@ const OWNED_ASYNC_TASK_ENVELOPE_ALLOWANCE: u64 = 0;
 /// same coin flip the per-cycle ceiling lost.
 const RESOURCE_ENVELOPE_WINDOW_SAMPLES: usize = 10;
 /// The closing ceiling is the fourth-highest sample of the closing window,
-/// not its highest. The floor is a resting state and one sample of it is
-/// evidence; the ceiling is whatever was still in flight when the sampler
-/// looked, and the measurement shows it is not one value (node 1's owned
-/// tasks sat at 35 on one high-side cycle and 34 on the next). A count that
-/// three samples reached and seven did not is a spike — a replacement
+/// not its highest. The ceiling is whatever was still in flight when the
+/// sampler looked, and the measurement shows it is not one value (node 1's
+/// owned tasks sat at 35 on one high-side cycle and 34 on the next). A count
+/// that three samples reached and seven did not is a spike — a replacement
 /// connection during one recovery, a slower drain on one cycle, a blocking
-/// thread that had not idled out — and a leak is not a spike: one that
-/// starts at cycle 13 puts eight samples above the opening ceiling, and one
-/// connection leaked at cycle 15 puts six.
+/// thread that had not idled out. The floor is an extreme too, and one
+/// opening sample sets it; that is why a rise of either edge is a leak only
+/// with the significance [`RESOURCE_LEAK_SIGNIFICANCE_DENOMINATOR`] asks for.
 const RESOURCE_CEILING_SUSTAINED_SAMPLES: usize = 4;
+/// An envelope that rose past its allowance is a leak only when the same
+/// node's series of that resource is also, in cycle order, significantly
+/// unlike a series with nothing changing in it: the family of the two exact
+/// tests below rejects "the cycles are exchangeable" at a significance below
+/// one in this many, each test spending half.
+///
+/// The envelope edges are extremes — a single sample sets the opening floor —
+/// and on the series CI now samples they are not the two-state drain §2.3 of
+/// `docs/cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md` measured.
+/// Each hiqlite websocket transport is one socket and three owned tasks, and
+/// the number open at the sample moves by several connections: run 9084's
+/// voter campaign sampled node 1 between 23 and 44 sockets and node 4 (a
+/// fresh process every cycle) between 12 and 16, with no trend on any node
+/// (every upward-trend p above 0.38). Its only failure was node 4's one
+/// opening sample of 12 against a closing floor of 13. Shuffling that run's
+/// own cycles — the same values with any change removed by construction —
+/// fails the envelope alone in 78% of orderings, and no order statistic for
+/// the floor brings that near zero (the fourth-lowest still fails 9%).
+///
+/// Both tests take their null from the recorded values themselves — every
+/// ordering of them equally likely — so their false-positive rate is the
+/// bound whatever the runner's noise looks like; on the shuffled 9084 series
+/// the verdict fails about one role campaign in five thousand. The envelope
+/// stays the effect size, and the allowances keep their meaning. The two
+/// tests cover the two shapes a leak takes:
+///
+/// - growth: [`upward_trend_is_significant`], a rank trend. It catches a
+///   per-cycle leak from any onset up to cycle 13 on the alternating drain, a
+///   socket every k-th recovery for k up to six, and, on 9084's own noise, a
+///   per-cycle leak on any node (node 1, the leader with the widest noise, in
+///   about seven campaigns in ten).
+/// - a step: [`step_separation_is_significant`], every sample from some cycle
+///   on above every earlier one. Ranks ignore size, so a large one-time leak
+///   on a noisy node is the trend test's blind spot; the separation test
+///   catches a +50 step at any cycle from 7 to 15 on every node of 9084, and a
+///   one-socket step held over the same cycles on a quiet node.
+///
+/// What neither catches is a step smaller than the noise — one connection
+/// leaked once on a drain that already moves by one, or a slow leak on the
+/// leader — or a step with fewer than six cycles on either side of it: one
+/// that starts in cycles 2–6 (indistinguishable from warmup settling) or in
+/// the last five. That is the reach of twenty samples of this measurement at
+/// this bound; a looser bound would widen it a cycle at a time and spend
+/// false positives to do so. Option C (§5), sampling once the transports are
+/// released, is what moves it without that trade.
+const RESOURCE_LEAK_SIGNIFICANCE_DENOMINATOR: u128 = 10_000;
 const RECOVERY_WRITE_SQL: &str =
     "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3)";
 
@@ -2131,23 +2176,34 @@ async fn exercise_role_campaign(
         role.label(),
         describe_resource_envelopes(&resource_envelopes)
     );
-    let rose = resource_envelopes_over_allowance(
+    let verdict = resource_envelope_verdict(
         &resource_envelopes,
+        &cycles,
         ResourceEnvelopeAllowances {
             threads: THREAD_ENVELOPE_ALLOWANCE,
             sockets: SOCKET_ENVELOPE_ALLOWANCE,
             owned_async_tasks: OWNED_ASYNC_TASK_ENVELOPE_ALLOWANCE,
         },
     );
-    if !rose.is_empty() {
+    if !verdict.leaks.is_empty() || !verdict.rises_within_noise.is_empty() {
         for line in describe_resource_series(&cycles) {
             println!("cluster-check: {} {line}", role.label());
         }
+    }
+    if !verdict.rises_within_noise.is_empty() {
+        println!(
+            "cluster-check: {} campaign resource envelope rose on a series with no \
+             significant trend or step, not a leak: {}",
+            role.label(),
+            verdict.rises_within_noise.join("; ")
+        );
+    }
+    if !verdict.leaks.is_empty() {
         if envelope_is_asserted(&resource_envelopes) {
             bail!(
                 "{} campaign leaked resources: {}",
                 role.label(),
-                rose.join("; ")
+                verdict.leaks.join("; ")
             );
         }
         println!(
@@ -2155,7 +2211,7 @@ async fn exercise_role_campaign(
              window of {} samples (the campaign asserts at {RESOURCE_ENVELOPE_WINDOW_SAMPLES}): {}",
             role.label(),
             resource_envelopes.closing_window_samples,
-            rose.join("; ")
+            verdict.leaks.join("; ")
         );
     }
 
@@ -2593,7 +2649,7 @@ async fn wait_for_applied_index(
 /// later, so a sample lands on one side or the other of that drain, and
 /// holding the horizon open for the low side turned every high-side cycle
 /// into a sixty-second expiry. The leak question is asked once per campaign,
-/// by [`resource_envelopes_over_allowance`], where a drain cannot be mistaken
+/// by [`resource_envelope_verdict`], where a drain cannot be mistaken
 /// for growth.
 async fn wait_for_stable_idle_resources(
     cluster: &mut ClusterProcesses,
@@ -2853,6 +2909,152 @@ impl ResourceBand {
     }
 }
 
+/// Whether `series`, in cycle order, rises across the campaign at a
+/// significance below half of `1 / RESOURCE_LEAK_SIGNIFICANCE_DENOMINATOR`.
+///
+/// The statistic is the inversion count — pairs of cycles where the earlier
+/// sample is strictly above the later one — and a rising series has few. The
+/// null hypothesis is that the cycles are exchangeable: no trend, so every
+/// distinct ordering of the recorded multiset of values is equally likely,
+/// whatever the values are. The number of orderings with exactly `k`
+/// inversions is the `q^k` coefficient of the q-multinomial coefficient of
+/// the value multiplicities (MacMahon), which is a product of Gaussian
+/// binomials. The p-value is the share of orderings with at most the observed
+/// inversions, computed exactly in integers: ties are part of the count,
+/// not approximated, and a constant series has p = 1. Campaigns are at most
+/// [`TRANSPORT_RECOVERY_CYCLES_PER_ROLE`] cycles, so the ordering count is at
+/// most 20! and the scaled comparison stays far inside `u128`.
+fn upward_trend_is_significant(series: &[u64]) -> bool {
+    let observed = series
+        .iter()
+        .enumerate()
+        .map(|(position, earlier)| {
+            series[position + 1..]
+                .iter()
+                .filter(|later| earlier > *later)
+                .count()
+        })
+        .sum::<usize>();
+    let distribution = inversion_distribution(series);
+    let orderings = distribution.iter().sum::<u128>();
+    let at_most_observed = distribution.iter().take(observed + 1).sum::<u128>();
+    at_most_observed * 2 * RESOURCE_LEAK_SIGNIFICANCE_DENOMINATOR < orderings
+}
+
+/// Whether `series`, in cycle order, steps up: from some cycle on, every
+/// sample sits above every earlier one by a margin that is improbable for an
+/// exchangeable series, at a significance below half of
+/// `1 / RESOURCE_LEAK_SIGNIFICANCE_DENOMINATOR`.
+///
+/// The statistic is the widest separation `g` = max over split points `s` of
+/// (lowest of the samples from `s` on) − (highest before `s`). A separation
+/// of `g > 0` at `s` means the last `n - s` positions hold exactly the
+/// `n - s` largest values, and that they sit `g` above the rest, so the gap
+/// between the `s`-th and `(s+1)`-th smallest recorded values is at least
+/// `g`. Under exchangeability the largest `n - s` values land in the last
+/// `n - s` positions with probability `1 / C(n, s)`, so the p-value is at
+/// most the sum of `1 / C(n, s)` over the split points whose sorted gap is at
+/// least `g` (a union bound: exact for one such gap, conservative for more).
+/// The sum is compared in integers over `lcm(1..=n+1) / (n+1)`, which every
+/// `C(n, s)` divides.
+fn step_separation_is_significant(series: &[u64]) -> bool {
+    let n = series.len();
+    let Some(separation) = (1..n)
+        .map(|split| {
+            let after = series[split..].iter().min().copied().unwrap_or(0);
+            let before = series[..split].iter().max().copied().unwrap_or(0);
+            i128::from(after) - i128::from(before)
+        })
+        .max()
+    else {
+        return false;
+    };
+    if separation <= 0 {
+        return false;
+    }
+    let mut sorted = series.to_vec();
+    sorted.sort_unstable();
+    let common = binomial_row_common_multiple(n);
+    let bound = (1..n)
+        .filter(|split| i128::from(sorted[*split]) - i128::from(sorted[split - 1]) >= separation)
+        .map(|split| common / binomial(n, split))
+        .sum::<u128>();
+    bound * 2 * RESOURCE_LEAK_SIGNIFICANCE_DENOMINATOR < common
+}
+
+fn binomial(n: usize, k: usize) -> u128 {
+    (0..k).fold(1_u128, |product, i| {
+        product * (n - i) as u128 / (i as u128 + 1)
+    })
+}
+
+/// A common multiple of every `C(n, k)`: `lcm(1..=n+1) / (n+1)`.
+fn binomial_row_common_multiple(n: usize) -> u128 {
+    fn gcd(a: u128, b: u128) -> u128 {
+        if b == 0 {
+            a
+        } else {
+            gcd(b, a % b)
+        }
+    }
+    let lcm = (1..=n as u128 + 1).fold(1_u128, |lcm, value| lcm / gcd(lcm, value) * value);
+    lcm / (n as u128 + 1)
+}
+
+/// How many distinct orderings of `values` have each inversion count: the
+/// coefficients of the q-multinomial coefficient of the value multiplicities.
+fn inversion_distribution(values: &[u64]) -> Vec<u128> {
+    let mut multiplicities = BTreeMap::<u64, usize>::new();
+    for value in values {
+        *multiplicities.entry(*value).or_default() += 1;
+    }
+    let mut distribution = vec![1_u128];
+    let mut placed = 0_usize;
+    for count in multiplicities.into_values() {
+        placed += count;
+        distribution = multiply_polynomials(&distribution, &gaussian_binomial(placed, count));
+    }
+    distribution
+}
+
+/// The Gaussian binomial `[n choose k]_q` as coefficients, by the recurrence
+/// `[m, j] = [m-1, j-1] + q^j [m-1, j]`.
+fn gaussian_binomial(n: usize, k: usize) -> Vec<u128> {
+    // row[j] is [m choose j]_q for the current m, for j in 0..=min(m, k).
+    let mut row: Vec<Vec<u128>> = vec![vec![1]];
+    for m in 1..=n {
+        let mut next = Vec::with_capacity(m.min(k) + 1);
+        for j in 0..=m.min(k) {
+            if j == 0 || j == m {
+                next.push(vec![1]);
+                continue;
+            }
+            let left = &row[j - 1];
+            let right = &row[j];
+            let mut sum = vec![0_u128; left.len().max(right.len() + j)];
+            for (power, coefficient) in left.iter().enumerate() {
+                sum[power] += coefficient;
+            }
+            for (power, coefficient) in right.iter().enumerate() {
+                sum[power + j] += coefficient;
+            }
+            next.push(sum);
+        }
+        row = next;
+    }
+    row.swap_remove(k)
+}
+
+fn multiply_polynomials(left: &[u128], right: &[u128]) -> Vec<u128> {
+    let mut product = vec![0_u128; left.len() + right.len() - 1];
+    for (i, a) in left.iter().enumerate() {
+        for (j, b) in right.iter().enumerate() {
+            product[i + j] += a * b;
+        }
+    }
+    product
+}
+
 /// Where the opening window ends for a series of `samples` observations.
 ///
 /// The series is the warmup baseline followed by every recorded cycle, so the
@@ -2978,58 +3180,99 @@ fn resource_envelopes(cycles: &[RecoveryCycleEvidence]) -> Result<RecoveryResour
     })
 }
 
+/// Reads one resource out of a sample.
+type ResourcePick = fn(&ProcessResourceCount) -> u64;
+
+/// The campaign's leak verdict: what rose, and which of those rises are
+/// leaks.
+#[derive(Debug, Default, Eq, PartialEq)]
+struct ResourceEnvelopeVerdict {
+    /// Envelope rises past the allowance whose series also rises across the
+    /// campaign or steps up. Any entry fails an asserted campaign.
+    leaks: Vec<String>,
+    /// Envelope rises past the allowance on a series with no significant
+    /// trend or step: an extreme sample against the rest, which is the
+    /// sampling noise of the transports in flight. Printed, never failed.
+    rises_within_noise: Vec<String>,
+}
+
 /// Every node and resource whose closing band sits above its opening band by
-/// more than the allowance, at either edge, named one at a time.
+/// more than the allowance, at either edge, named one at a time — and, for
+/// each, whether that node's series of the resource also rises across the
+/// campaign or steps up ([`RESOURCE_LEAK_SIGNIFICANCE_DENOMINATOR`]). A leak
+/// needs both: the envelope says by how much, the order of the cycles says it
+/// is growth or a step rather than one sample at an extreme.
 ///
 /// The single source of truth for the campaign's leak question: the run-time
 /// check and the offline validator both ask it here, so the verdict and the
 /// message it produces can never disagree about what counts as a leak.
-fn resource_envelopes_over_allowance(
+/// `envelopes` must be [`resource_envelopes`] of `cycles`, whose node order it
+/// shares.
+fn resource_envelope_verdict(
     envelopes: &RecoveryResourceEnvelopes,
+    cycles: &[RecoveryCycleEvidence],
     allowances: ResourceEnvelopeAllowances,
-) -> Vec<String> {
-    let mut over = Vec::new();
-    for node in &envelopes.nodes {
-        for (resource, opening, closing, allowance) in [
-            (
-                "threads",
-                (node.opening.floor.threads, node.opening.ceiling.threads),
-                (node.closing.floor.threads, node.closing.ceiling.threads),
-                allowances.threads,
-            ),
-            (
-                "sockets",
-                (node.opening.floor.sockets, node.opening.ceiling.sockets),
-                (node.closing.floor.sockets, node.closing.ceiling.sockets),
-                allowances.sockets,
-            ),
+) -> ResourceEnvelopeVerdict {
+    let mut ordered = cycles.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|cycle| cycle.cycle);
+    let mut verdict = ResourceEnvelopeVerdict::default();
+    for (position, node) in envelopes.nodes.iter().enumerate() {
+        let resources: [(&str, ResourcePick, u64); 3] = [
+            ("threads", |count| count.threads, allowances.threads),
+            ("sockets", |count| count.sockets, allowances.sockets),
             (
                 "owned async tasks",
-                (
-                    node.opening.floor.owned_async_tasks,
-                    node.opening.ceiling.owned_async_tasks,
-                ),
-                (
-                    node.closing.floor.owned_async_tasks,
-                    node.closing.ceiling.owned_async_tasks,
-                ),
+                |count| count.owned_async_tasks,
                 allowances.owned_async_tasks,
             ),
-        ] {
-            for (edge, before, after) in [
-                ("floor", opening.0, closing.0),
-                ("ceiling", opening.1, closing.1),
-            ] {
-                if after > before.saturating_add(allowance) {
-                    over.push(format!(
-                        "node {} {resource} {edge} rose {before} -> {after} (allowance {allowance})",
-                        node.node_id
-                    ));
-                }
+        ];
+        for (resource, pick, allowance) in resources {
+            let rises = [
+                (
+                    "floor",
+                    pick(&node.opening.floor),
+                    pick(&node.closing.floor),
+                ),
+                (
+                    "ceiling",
+                    pick(&node.opening.ceiling),
+                    pick(&node.closing.ceiling),
+                ),
+            ]
+            .into_iter()
+            .filter(|(_, before, after)| *after > before.saturating_add(allowance))
+            .map(|(edge, before, after)| {
+                format!(
+                    "node {} {resource} {edge} rose {before} -> {after} (allowance {allowance})",
+                    node.node_id
+                )
+            })
+            .collect::<Vec<_>>();
+            if rises.is_empty() {
+                continue;
+            }
+            let series = ordered
+                .iter()
+                .filter_map(|cycle| cycle.node_resources.get(position))
+                .map(|record| pick(&record.post_quiescence))
+                .collect::<Vec<_>>();
+            let shape = if upward_trend_is_significant(&series) {
+                Some("rose across the campaign")
+            } else if step_separation_is_significant(&series) {
+                Some("stepped above every earlier cycle")
+            } else {
+                None
+            };
+            if let Some(shape) = shape {
+                verdict.leaks.extend(rises.into_iter().map(|rise| {
+                    format!("{rise} and {shape} (p < 1/{RESOURCE_LEAK_SIGNIFICANCE_DENOMINATOR})")
+                }));
+            } else {
+                verdict.rises_within_noise.extend(rises);
             }
         }
     }
-    over
+    verdict
 }
 
 fn describe_band(band: &ResourceBand) -> String {
@@ -4352,12 +4595,13 @@ fn validate_campaign_resource_envelopes(
         );
     }
     if context.resource_envelope_asserted {
-        let rose = resource_envelopes_over_allowance(&recomputed, context.allowances);
-        if !rose.is_empty() {
+        let leaks =
+            resource_envelope_verdict(&recomputed, &campaign.cycles, context.allowances).leaks;
+        if !leaks.is_empty() {
             bail!(
                 "{} recovery campaign leaked resources: {}",
                 role.label(),
-                rose.join("; ")
+                leaks.join("; ")
             );
         }
     }

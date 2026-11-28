@@ -1,6 +1,5 @@
 # Restore converted Dolby Vision and Live TV starts on Apple TV
 
-Build: 127
 Issue: #215
 
 A Profile 7 title that reaches growing copy HLS now keeps its Profile 8.1

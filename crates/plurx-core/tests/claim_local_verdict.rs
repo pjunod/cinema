@@ -93,10 +93,14 @@ impl Pair {
         job.id
     }
 
-    async fn hold_source(&self, slot: i64, job: &str) {
+    async fn hold_source(&self, job: &str) {
         self.raw(&format!(
-            "INSERT INTO background_job_reservations(resource_key,slot,job_id,fence,expires_at_ms)
-             VALUES('source_io',{slot},'{job}',1,{})",
+            "INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,
+               started_at_ms,renewed_at_ms,expires_at_ms)
+             VALUES('job:{job}:1','job','{job}',1,'node-a','{{\"kind\":\"job\",\"job_kind\":\"fragment_index_build\"}}',
+               '[\"source_io\"]','active',{},{},{})",
+            NOW - 1_000,
+            NOW - 1_000,
             NOW + 60_000
         ))
         .await;
@@ -104,9 +108,9 @@ impl Pair {
 
     async fn foreground_owner(&self, lease_expires_at_ms: i64) {
         self.raw(&format!(
-            "INSERT INTO foreground_source_owners(owner_id,identity_json,resource_keys_json,fence,phase,
-               projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms)
-             VALUES('viewer','{{}}','[\"source_io\"]',1,'startup','{{}}',{},{},{lease_expires_at_ms})",
+            "INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,
+               projection_json,started_at_ms,renewed_at_ms,expires_at_ms)
+             VALUES('playback:viewer:1','playback','viewer',1,'node-a','{{}}','[\"source_io\"]','startup','{{}}',{},{},{lease_expires_at_ms})",
             NOW - 1_000,
             NOW - 1_000
         ))
@@ -140,14 +144,14 @@ impl Pair {
 /// An embedded single voter and a SQLite store, side by side.
 async fn pair(root: &Path) -> Pair {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let listeners: Vec<_> = (0..2)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("owned port"))
-        .collect();
-    let addresses: Vec<_> = listeners
-        .iter()
-        .map(|listener| listener.local_addr().expect("listener address"))
-        .collect();
-    drop(listeners);
+    // The voter serves on these sockets rather than binding the ports again,
+    // so no other socket can take either port between choosing and serving it.
+    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("owned port");
+    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("owned port");
+    let addresses = [
+        raft.local_addr().expect("listener address"),
+        api.local_addr().expect("listener address"),
+    ];
     let raft = Box::pin(hiqlite::start_node(NodeConfig {
         node_id: 1,
         nodes: vec![Node {
@@ -157,6 +161,7 @@ async fn pair(root: &Path) -> Pair {
         }],
         listen_addr_api: Cow::Borrowed("127.0.0.1"),
         listen_addr_raft: Cow::Borrowed("127.0.0.1"),
+        listeners: Some(hiqlite::NodeListeners { raft, api }),
         data_dir: Cow::Owned(root.join("node").to_string_lossy().into_owned()),
         filename_db: Cow::Borrowed("claim-verdict.db"),
         secret_api: "owned-claim-verdict-api".into(),
@@ -177,12 +182,18 @@ async fn pair(root: &Path) -> Pair {
     let path = root.join("standalone.db");
     let sqlite = SqliteStore::open(&path).expect("SQLite store");
     let db = rusqlite::Connection::open(&path).expect("SQLite raw connection");
-    Pair {
+    let pair = Pair {
         sqlite,
         db,
         raft,
         replica,
-    }
+    };
+    // Preserve the v1 two-slot cap: one maintenance reader plus the live-demand slot.
+    pair.raw(
+        "INSERT OR REPLACE INTO settings(key,value,updated_at) VALUES('jobs.source_readers_per_root','1',1)",
+    )
+    .await;
+    pair
 }
 
 async fn shutdown(pair: Pair) {
@@ -221,44 +232,44 @@ async fn scenario(root: &Path) {
     pair.foreground_owner(NOW + 60_000).await;
     pair.assert_blocked(&claim(&job, 0, fragment), ClaimBlock::ForegroundWindow)
         .await;
-    pair.raw("DELETE FROM foreground_source_owners").await;
+    pair.raw("DELETE FROM source_leases WHERE owner_kind='playback'")
+        .await;
 
-    // Expired custody: the owner's lease lapsed while it still holds the source.
+    // Expired custody remains charged through the lease grace period.
     pair.foreground_owner(NOW - 1).await;
     pair.assert_blocked(&claim(&job, 0, fragment), ClaimBlock::ForegroundWindow)
         .await;
-    pair.raw("DELETE FROM foreground_source_owners").await;
+    pair.raw("DELETE FROM source_leases WHERE owner_kind='playback'")
+        .await;
 
-    // Two holders.
-    pair.hold_source(0, &holders[0]).await;
-    pair.hold_source(1, &holders[1]).await;
+    // Two holders fill the legacy two-slot cap (configured as 1 + live demand).
+    pair.hold_source(&holders[0]).await;
+    pair.hold_source(&holders[1]).await;
     pair.assert_blocked(&claim(&job, 0, fragment), ClaimBlock::SourceHolders)
         .await;
 
     // One held maintenance reader: the second reader is reserved for live demand.
-    pair.raw("DELETE FROM background_job_reservations WHERE slot=1")
-        .await;
+    pair.raw(&format!(
+        "DELETE FROM source_leases WHERE owner_kind='job' AND work_id='{}'",
+        holders[1]
+    ))
+    .await;
     pair.assert_blocked(&claim(&job, 0, fragment), ClaimBlock::MaintenanceReader)
         .await;
 
-    // A worker can disappear with the physical reader still charged. Admission
-    // must reserve the viewer slot even after its reservation row is pruned.
-    pair.raw("UPDATE background_job_reservations SET expires_at_ms=0")
-        .await;
+    // A worker can disappear with the physical reader still charged. Its
+    // lapsed lease keeps the viewer slot reserved through the grace period.
     pair.raw(&format!(
-        "INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,owner_kind,
-           work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms)
-         VALUES('lapsed','lost-reader','{{}}','[\"source_io\"]','job','{}',1,'active',0,0,0)",
+        "UPDATE source_leases SET expires_at_ms={} WHERE owner_kind='job' AND work_id='{}'",
+        NOW - 1,
         holders[0]
-    )).await;
-    pair.assert_blocked(&claim(&job, 0, fragment), ClaimBlock::MaintenanceReader)
-        .await;
-    pair.raw("DELETE FROM background_job_reservations").await;
+    ))
+    .await;
     pair.assert_blocked(&claim(&job, 0, fragment), ClaimBlock::MaintenanceReader)
         .await;
 
     // Admissible: both propose, and both win.
-    pair.raw("DELETE FROM background_source_custody WHERE custody_id='lapsed'")
+    pair.raw("DELETE FROM source_leases WHERE owner_kind='job'")
         .await;
     let request = claim(&job, 0, fragment);
     for (backend, store) in [
@@ -378,7 +389,7 @@ async fn blocked_queue(root: &Path) {
         }
     }
     pair.raw(&format!(
-        "DELETE FROM background_job_reservations WHERE job_id='{holder}'"
+        "DELETE FROM source_leases WHERE owner_kind='job' AND work_id='{holder}'"
     ))
     .await;
     for (backend, store) in [
@@ -529,7 +540,7 @@ async fn scan_turn(root: &Path) {
         .expect("SQLite ready rows");
     assert!(sqlite_ready > 0, "sqlite: the scan holds a ready turn");
     pair.raw(&format!(
-        "DELETE FROM background_job_reservations WHERE job_id='{holder}'"
+        "DELETE FROM source_leases WHERE owner_kind='job' AND work_id='{holder}'"
     ))
     .await;
     for ((backend, scan), store) in scans.iter().zip([

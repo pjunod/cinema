@@ -143,6 +143,20 @@ pub struct BlockedGetMetrics {
     refused: [AtomicU64; 2],
     producer_generations: [AtomicU64; 2],
     producer_terminations: [AtomicU64; 4],
+    /// Segment GETs answered, by whether the bytes were already stored when
+    /// the GET arrived or had to be produced while it waited. `serving` is
+    /// only the number in flight; this is the running reuse ratio a split
+    /// presentation's shared renditions are measured by.
+    segment_answers: [AtomicU64; 2],
+}
+
+/// Closed segment-answer labels, in exposition order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VodSegmentAnswer {
+    /// The bytes were materialized before the GET looked.
+    Stored,
+    /// The GET waited for a producer to publish them.
+    Produced,
 }
 
 /// Closed producer-generation labels, in exposition order.
@@ -209,7 +223,26 @@ impl BlockedGetMetrics {
                 self.producer_terminations[index].load(Relaxed)
             );
         }
+        out.push_str(
+            "# HELP plurx_vod_segment_answers_total VOD segment GETs answered, by whether the bytes were already stored or were produced while the GET waited.\n\
+             # TYPE plurx_vod_segment_answers_total counter\n",
+        );
+        for (index, source) in ["stored", "produced"].iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "plurx_vod_segment_answers_total{{source=\"{source}\"}} {}",
+                self.segment_answers[index].load(Relaxed)
+            );
+        }
         out
+    }
+
+    pub(crate) fn count_segment_answer(&self, answer: VodSegmentAnswer) {
+        let index = match answer {
+            VodSegmentAnswer::Stored => 0,
+            VodSegmentAnswer::Produced => 1,
+        };
+        self.segment_answers[index].fetch_add(1, Relaxed);
     }
 
     pub(crate) fn count_producer_generation(&self, kind: VodProducerKind) {
@@ -1584,7 +1617,12 @@ mod tests {
         metrics.count_producer_generation(VodProducerKind::Copy);
         metrics.count_producer_generation(VodProducerKind::Encoded);
         metrics.count_producer_termination(VodProducerTermination::YieldToWaiter);
+        metrics.count_segment_answer(VodSegmentAnswer::Stored);
+        metrics.count_segment_answer(VodSegmentAnswer::Stored);
+        metrics.count_segment_answer(VodSegmentAnswer::Produced);
         let text = metrics.prometheus();
+        assert!(text.contains("plurx_vod_segment_answers_total{source=\"stored\"} 2"));
+        assert!(text.contains("plurx_vod_segment_answers_total{source=\"produced\"} 1"));
         assert!(text.contains("plurx_vod_producer_generations_total{kind=\"copy\"} 1"));
         assert!(text.contains("plurx_vod_producer_generations_total{kind=\"encoded\"} 1"));
         assert!(text.contains("plurx_vod_producer_terminations_total{why=\"yield_to_waiter\"} 1"));

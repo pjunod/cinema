@@ -32,7 +32,18 @@ pub(super) fn verify_catalog(
     conn: &rusqlite::Connection,
     live_titles: bool,
 ) -> Result<(), StoreError> {
-    if catalog(conn)? != expected_catalog(live_titles)? {
+    let installed = catalog(conn)?;
+    let expected = expected_catalog(live_titles)?;
+    // The v136 predecessor check runs before the source-lease expand and
+    // stays exact. After it, the expand replaces four dispatch objects with
+    // their root-keyed forms; accept exactly those, as the replicated
+    // installer does, and nothing else.
+    let accepted = if live_titles {
+        super::source_leases::accepts_extension_shape(&installed, &expected)
+    } else {
+        installed == expected
+    };
+    if !accepted {
         return Err(StoreError::Migration(
             "incompatible dispatch turn schema".into(),
         ));
@@ -119,6 +130,9 @@ mod tests {
     fn finite_playback_qualification_precedes_an_admissible_library_turn() {
         let db = rusqlite::Connection::open_in_memory().expect("fixture");
         SqliteStore::apply_migrations_for_test(&db, 135).expect("deployed schema");
+        // This binary's claim statement reads source leases; give the deployed
+        // schema the same lease objects as every other v1-era claim fixture.
+        crate::store::source_leases::install_for_fixture(&db);
         db.execute_batch(r#"
             INSERT INTO libraries(id,name,kind,paths) VALUES(1,'Movies','movies','["/media"]');
             INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','Movie','Movie');
@@ -144,8 +158,19 @@ mod tests {
             .query_row("SELECT winner FROM dispatch_turn_attempt", [], |r| r.get(0))
             .expect("contended turn");
         assert_eq!(winner, "manual");
-        SqliteStore::apply_next_migration_for_test(&db).expect("upgrade with pending work");
-        verify_catalog(&db, true).expect("exact upgraded catalog");
+        // The v136 step's exact-predecessor check runs before the lease expand
+        // in every real upgrade; this fixture already carries leases, so apply
+        // the published v136 statements and check the upgraded catalogue.
+        db.execute_batch(LIVE_TITLE_MIGRATION)
+            .expect("upgrade with pending work");
+        // The hand-made lease fixture keeps v124's library-resources view, so
+        // compare exactly the two objects the v136 step publishes.
+        let published = expected_catalog(true).expect("published v136 catalog");
+        let installed = catalog(&db).expect("upgraded catalog");
+        for name in ["dispatch_turn_job", "dispatch_turn_protected_jobs"] {
+            let row = |rows: &[(String, String)]| rows.iter().find(|(n, _)| n == name).cloned();
+            assert_eq!(row(&installed), row(&published), "exact upgraded {name}");
+        }
         db.execute(
             "UPDATE background_job_waiters SET deadline_ms=1000 WHERE request_id='viewer'",
             [],

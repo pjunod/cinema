@@ -7,7 +7,7 @@
 use crate::subtitle_models::artifacts::ManagedModel;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
-use plurx_core::fs_secure::std_file_identity;
+use plurx_core::fs_secure::local_file_identity;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -166,7 +166,7 @@ fn validate_ranges(layout: &Layout) -> Result<(), String> {
 fn held(model: &ManagedModel, sha256: &str, bytes: u64) -> Result<(), String> {
     if model.sha256 != sha256
         || model.identity.size != bytes
-        || std_file_identity(&model.handle).ok() != Some(model.identity)
+        || local_file_identity(&model.handle).ok() != Some(model.identity)
     {
         return Err(invalid());
     }
@@ -398,7 +398,7 @@ mod tests {
             "text_inference_timeout"
         );
         let model = ManagedModel {
-            identity: std_file_identity(&file).expect("identity"),
+            identity: local_file_identity(&file).expect("identity"),
             handle: file.try_clone().expect("held"),
             path: Default::default(),
             sha256: "synthetic".into(),

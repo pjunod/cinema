@@ -1,6 +1,5 @@
 # Keep the screensaver off while video plays
 
-Build: 212
 Issue: #818
 
 The screensaver no longer comes on over Live TV on Apple TV, in fullscreen or

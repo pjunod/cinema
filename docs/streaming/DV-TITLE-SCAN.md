@@ -5,8 +5,32 @@ Affected qualification, the required lane, merge and operator deployment remain 
 
 Companion to [the display-targeted DV build ledger](DISPLAY-TARGETED-DV-BUILD.md)
 (target selection and rendering) — this is how the title scanner reads and
-stores the facts that select a target. Paul deploys plurxd, which rebuilds the
-DV bundle; avoid mixed-version nodes during rollout.
+stores the facts that select a target.
+
+## Roll out scanner changes in order
+
+The replicated store records a scanner generation alongside each bound
+digest. A lower generation cannot replace it. If two workers report
+different digests at the same generation, the store keeps the existing
+binding. Compatible complete aggregates can advance with the binding.
+Other published aggregates stay available for the same source until a
+new scan replaces them. Jobs can reuse an aggregate only for the revision
+that produced it or carried it forward.
+
+Deploy the store guard with the existing scanner first. Verify that every
+eligible title worker runs the guard before deploying a scanner change.
+Advance `TITLE_SCANNER_GENERATION` when changing scanner releases and verify
+that the eligible workers for that release report the same title scanner
+digest. Existing jobs can drain against their exact bound revisions.
+Workers from before the guard skip fresh reads with a retained aggregate
+because their reuse logic cannot distinguish it from a current result.
+
+Take a verified store backup before applying the migration. SQLite version
+139 and the replicated title extension version 3 require a guard-capable
+binary to start. Running older workers can drain during the rollout. Restart
+a node with a guard-capable binary once the new schema commits. An older
+binary requires restoring a pre-migration store through the recovery
+procedure.
 
 ## The scanner follows the renderer’s picture rules
 
@@ -65,9 +89,17 @@ published. How the attempt settles depends on the failure. A read the source
 service withdrew (an exhausted pause, a revoked or unavailable budget) yields
 uncharged as `title_source_interrupted`, like a preemption. A storage failure (an
 I/O error or a short read) is charged as `title_source_read_failed`, so a bad
-sector ends at the attempt limit. A scanner that refuses readable input is
-charged as `title_scan_failed`, with its exit status and redacted stderr in
-the reason.
+sector ends at the attempt limit. A scanner that refuses the content of
+cleanly read input, naming one of the checks in `CONTENT_REFUSALS`
+(`source_probe/dv_title.rs`), has reached a verdict on those bytes. The same
+file and scanner refuse the same way on every read. The job therefore fails
+once as `title_scan_refused` while the source and the scanner are unchanged.
+That settles the demand for the probe revision and scanner digest, and a
+changed file or a new scanner re-opens it. Examples are an untagged Matroska
+track with no independent endpoint or a timeline gap. Any
+other scanner failure is charged as `title_scan_failed`: an environment
+refusal, an unknown reason, a signal or a deadline. Both carry the exit
+status and redacted stderr in the reason.
 
 ## Playback qualification precedes maintenance scanning
 

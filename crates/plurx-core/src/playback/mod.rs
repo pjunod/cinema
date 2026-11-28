@@ -18,14 +18,16 @@ pub mod candidate;
 pub mod caps;
 pub mod continuous_quality;
 pub mod desired;
+pub mod dv_provenance;
 pub mod enhancement;
 pub mod geometry;
+pub mod hdr_devices;
 pub mod intent;
 use crate::transcode::OutputGrade;
 pub use audio::{resolve_audio, AudioAction, AudioDelivery, AudioRoute, AudioSink, DownmixMatrix};
 pub use caps::{
     DeviceCaps, LearnedLimit, LegacyCaps, Transfer, VideoCaps, DECODER_COMPACTION_CONTRACT,
-    MAX_CLIENT_DECODER_ENTRIES,
+    HLS_SPLIT_AV_TRANSPORT, MAX_CLIENT_DECODER_ENTRIES,
 };
 pub use desired::{
     DesiredCodec, DesiredDynamicRange, DesiredQuality, DesiredSelection, DesiredSubtitles,

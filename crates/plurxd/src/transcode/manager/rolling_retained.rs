@@ -205,10 +205,10 @@ impl TranscodeManager {
             return None;
         }
         Some(StartInfo {
+            vod_copy_layout: None,
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
-            processing_note: None,
             retained_output: None,
             audio_delivery: audio,
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),

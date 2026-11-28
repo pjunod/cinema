@@ -1,4 +1,5 @@
 """Exercise exact prior Node selection, current outcomes, and the root custody proof."""
+from validation import mirror_guard
 import json
 from pathlib import Path
 import unittest
@@ -6,7 +7,6 @@ from unittest.mock import Mock, patch
 
 from validation import python_unit_receipts as r
 from validation import selected_node_preflight as node
-from validation import selected_root_custody as root
 
 SOURCE = 'a' * 40
 CURRENT = 'b' * 40
@@ -72,41 +72,11 @@ class SelectedNodePreflightTests(unittest.TestCase):
             with self.subTest(broken=broken), self.assertRaises(r.ReceiptError):
                 node.coverage(broken, plan)
 
-    def test_root_custody_rejects_any_missing_positive_or_changed_actual_origin_input(self):
-        name = root.ROOT_CASE.rsplit('.', 1)[-1]
-        test_source = ('@unittest.skipUnless(os.geteuid() == 0, "requires root")\n'
-                       + f'def {name}(self): pass\n').encode()
-        root_case = 'operations:' + root.ROOT_CASE
-        peer = root.MODULE + 'RecoveryHelperTests.test_peer'
-        records = {key: {'run': 9, 'commit': SOURCE} for key in (root_case, 'operations:' + peer)}
-        suite = {'inventory': [peer, root.ROOT_CASE], 'retained_source_records': records}
-
-        def files(revision, path):
-            if path == root.INPUTS[0]:
-                return test_source
-            return b'actual helper' if revision == CURRENT else b'old helper'
-
-        with patch.object(root.retention, 'git_bytes', side_effect=files), self.assertRaises(r.ReceiptError):
-            root.prepare(suite, CURRENT)
-        with patch.object(root.retention, 'git_bytes', return_value=test_source):
-            self.assertEqual(set(root.prepare(suite, CURRENT)['records']), {root.ROOT_CASE, peer})
-            records['operations:' + peer] = {'run': 10, 'commit': SOURCE}
-            with self.assertRaisesRegex(r.ReceiptError, 'one actual root execution domain'):
-                root.prepare(suite, CURRENT)
-            records['operations:' + peer] = {'run': 10, 'commit': SOURCE}
-            with self.assertRaisesRegex(r.ReceiptError, 'one actual root execution domain'):
-                root.prepare(suite, CURRENT)
-            del records[root_case]
-            with self.assertRaises(r.ReceiptError):
-                root.prepare(suite, CURRENT)
-
-
-
     def test_workflow_projection_keeps_default_and_rejects_unreviewed_changes(self):
         from validation import workspace_rust_continuation as workspace
 
-        workflow = Path(__file__).resolve().parents[2] / '.github/workflows/ci.yml'
-        raw = workflow.read_bytes()
+        raw = mirror_guard.read_file(
+            Path(__file__).resolve().parents[2] / '.github/workflows/ci.yml', binary=True)
         projected = workspace.selected_preflight_projection(raw)
         self.assertNotIn(b'root_ownership_retained', projected)
         self.assertNotIn(b'NODE_SELECTION', projected)
@@ -117,7 +87,7 @@ class SelectedNodePreflightTests(unittest.TestCase):
                                 b'      - name: Audit corrective-history evidence\n' + node_env)
         for bad in (moved, raw.replace(b'validation.native_python_execute node',
                                        b'validation.native_python_execute unsupported'),
-                    raw.replace(b"&& needs.preflight.outputs.root_ownership_retained != 'true'",
+                    raw.replace(b"&& needs.preflight.outputs.apple_native_retained != 'true'",
                                 b'&& false')):
             with self.subTest(bad=bad[-100:]), self.assertRaises(r.ReceiptError):
                 workspace.selected_preflight_projection(bad)

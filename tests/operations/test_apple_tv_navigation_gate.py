@@ -1,4 +1,5 @@
 """A TV focus regression must fail promotion and preserve its native evidence."""
+from validation import mirror_guard
 from pathlib import Path
 import re
 import tomllib
@@ -66,6 +67,30 @@ class AppleTVNavigationGateTests(unittest.TestCase):
                 self.assertIn("if: always()", step)
                 self.assertIn("if-no-files-found: error", step)
                 self.assertIn("path: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}", step)
+
+    def test_tv_navigation_evidence_keeps_the_server_retention(self):
+        """About 300 MB a run: held 90 days it reached 29 GB on the forge's
+        disk on 2026-11-25 and was still growing."""
+        for path, apple in (
+            (".github/workflows/main-fast-lane.yml", "apple_compile"),
+            (".github/workflows/ci.yml", "apple"),
+        ):
+            with self.subTest(path=path):
+                step = job(path, apple).split("- name: Preserve TV navigation evidence including failures", 1)[1].split("- name:", 1)[0]
+                self.assertRegex(step, r"retention-days:\s*14\b")
+
+    def test_tv_evidence_from_before_the_retention_cut_stays_adoptable(self):
+        """Native receipts accept an earlier producer only by digest; the 90-day
+        block differs from today's in retention alone, so it must be accepted."""
+        import hashlib
+        from validation import native_receipts
+
+        block = native_receipts.native_block(mirror_guard.read_file(ROOT / ".github/workflows/main-fast-lane.yml"))
+        start = block.index("          # About 300 MB per run.")
+        comment = block[start:block.index("          retention-days: 14\n", start)]
+        before = block.replace(comment + "          retention-days: 14\n", "          retention-days: 90\n")
+        self.assertNotEqual(before, block)
+        self.assertEqual(hashlib.sha256(before.encode()).hexdigest(), native_receipts.RETENTION90_JOB_SHA256)
 
     def test_apple_jobs_keep_derived_data_local_and_preserve_build_contracts(self):
         for path, apple, command, budget, serialized in (

@@ -220,55 +220,62 @@ pub struct AacSampleEntryFacts {
     pub samples_per_frame: u16,
 }
 
-pub fn aac_lc_sample_entry_facts(init: &Init) -> Result<AacSampleEntryFacts, Fmp4Error> {
-    if init.tracks.len() != 1
-        || init.tracks[0].kind != TrackKind::Audio
-        || init.tracks[0].timescale != 48_000
-    {
-        return malformed("shared AAC requires one 48 kHz audio track");
+/// The single audio sample entry and its version-zero configuration boxes.
+fn audio_sample_entry(init: &Init) -> Result<([u8; 4], u32, Range<usize>), Fmp4Error> {
+    let [track] = init.tracks.as_slice() else {
+        return malformed("audio init requires exactly one track");
+    };
+    if track.kind != TrackKind::Audio {
+        return malformed("audio init requires an audio track");
     }
     let bytes = &init.bytes;
-    let only_child = |range, kind| -> Result<Range<usize>, Fmp4Error> {
-        let boxes = find_children(bytes, range, kind)?;
-        let [(at, header)] = boxes.as_slice() else {
-            return malformed("shared AAC has a missing or ambiguous configuration box");
-        };
-        Ok(at.start + header.header_len..at.start + header.size)
-    };
-    let moov = only_child(0..bytes.len(), b"moov")?;
-    let selected = find_children(bytes, moov, b"trak")?
-        .into_iter()
-        .map(|(at, header)| at.start + header.header_len..at.start + header.size)
-        .filter_map(|range| match track_id_in_trak(bytes, range.clone()) {
-            Ok(Some(id)) if id == init.tracks[0].id => Some(Ok(range)),
-            Ok(_) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let [trak] = selected.as_slice() else {
-        return malformed("shared AAC track id is missing or duplicated");
-    };
-    let mdia = only_child(trak.clone(), b"mdia")?;
-    let minf = only_child(mdia, b"minf")?;
-    let stbl = only_child(minf, b"stbl")?;
-    let stsd = only_child(stbl, b"stsd")?;
+    let moov = only_audio_box(bytes, 0..bytes.len(), b"moov")?;
+    let trak = only_audio_box(bytes, moov, b"trak")?;
+    if track_id_in_trak(bytes, trak.clone())? != Some(track.id) {
+        return malformed("audio init track id does not match its sample entry");
+    }
+    let mdia = only_audio_box(bytes, trak, b"mdia")?;
+    let minf = only_audio_box(bytes, mdia, b"minf")?;
+    let stbl = only_audio_box(bytes, minf, b"stbl")?;
+    let stsd = only_audio_box(bytes, stbl, b"stsd")?;
     if stsd.len() < 8 || be_u32(bytes, stsd.start + 4) != 1 {
-        return malformed("shared AAC requires one sample description");
+        return malformed("audio init requires one sample description");
     }
-    let entries = &bytes[stsd.start + 8..stsd.end];
-    let descriptions = children(entries)?;
-    let [(header, start, end)] = descriptions.as_slice() else {
-        return malformed("shared AAC has ambiguous sample descriptions");
+    let start = stsd.start + 8;
+    let descriptions = children(&bytes[start..stsd.end])?;
+    let [(header, body_start, body_end)] = descriptions.as_slice() else {
+        return malformed("audio init has ambiguous sample descriptions");
     };
-    if header.kind() != b"mp4a" || end - start < 28 {
-        return malformed("shared AAC has no complete mp4a entry");
+    let body = &bytes[start + body_start..start + body_end];
+    if body.len() < 28 || body[8..10] != [0, 0] {
+        return malformed("audio init requires a complete version-zero sample entry");
     }
-    let body = &entries[*start..*end];
-    if body[8..10] != [0, 0] || be_u32(body, 24) != 48_000 << 16 {
-        return malformed("shared AAC requires a version-zero 48 kHz sample entry");
+    Ok((
+        *header.kind(),
+        be_u32(body, 24),
+        start + body_start + 28..start + body_end,
+    ))
+}
+
+fn only_audio_box(
+    bytes: &[u8],
+    range: Range<usize>,
+    kind: &[u8; 4],
+) -> Result<Range<usize>, Fmp4Error> {
+    let boxes = find_children(bytes, range, kind)?;
+    let [(at, header)] = boxes.as_slice() else {
+        return malformed("audio init has a missing or ambiguous configuration box");
+    };
+    Ok(at.start + header.header_len..at.start + header.size)
+}
+
+pub fn aac_lc_sample_entry_facts(init: &Init) -> Result<AacSampleEntryFacts, Fmp4Error> {
+    let (kind, sample_rate, config) = audio_sample_entry(init)?;
+    if kind != *b"mp4a" || sample_rate != 48_000 << 16 || init.tracks[0].timescale != 48_000 {
+        return malformed("shared AAC requires a 48 kHz mp4a track");
     }
-    let body_start = stsd.start + 8 + start;
-    let esds = only_child(body_start + 28..body_start + body.len(), b"esds")?;
+    let bytes = &init.bytes;
+    let esds = only_audio_box(bytes, config, b"esds")?;
     let record = &bytes[esds];
     if record.len() < 4 || record[..4] != [0, 0, 0, 0] {
         return malformed("shared AAC has an unsupported esds version");
@@ -293,6 +300,100 @@ pub fn aac_lc_sample_entry_facts(init: &Init) -> Result<AacSampleEntryFacts, Fmp
         return malformed("shared AAC has ambiguous AudioSpecificConfig");
     }
     parse_shared_aac_config(asc)
+}
+
+/// Codec and channel count proved by a Dolby audio-only init. The channel
+/// count comes from the decoder configuration, since AudioSampleEntry's
+/// ChannelCount field has no meaning for AC-3 and E-AC-3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DolbyAudioSampleEntryFacts {
+    pub codec: &'static str,
+    pub channels: u16,
+    pub joc: bool,
+}
+
+pub fn dolby_audio_sample_entry_facts(
+    init: &Init,
+) -> Result<DolbyAudioSampleEntryFacts, Fmp4Error> {
+    let (kind, _, config) = audio_sample_entry(init)?;
+    let bytes = &init.bytes;
+    match &kind {
+        b"ac-3" => {
+            let dac3 = only_audio_box(bytes, config, b"dac3")?;
+            let [rate_and_id, mode, rate_and_reserved] = bytes[dac3] else {
+                return malformed("invalid dac3 length");
+            };
+            if rate_and_id >> 6 == 3
+                || (rate_and_id >> 1) & 31 > 10
+                || ((mode & 3) << 3 | rate_and_reserved >> 5) > 18
+                || rate_and_reserved & 31 != 0
+            {
+                return malformed("invalid dac3 configuration");
+            }
+            Ok(DolbyAudioSampleEntryFacts {
+                codec: "ac-3",
+                channels: dolby_base_channels(mode >> 2),
+                joc: false,
+            })
+        }
+        b"ec-3" => {
+            let dec3 = only_audio_box(bytes, config, b"dec3")?;
+            ec3_config_facts(&bytes[dec3])
+        }
+        _ => malformed("audio init has no Dolby sample entry"),
+    }
+}
+
+// ETSI TS 102 366 Table 4.5. The low bit here is lfeon, immediately
+// following acmod in both configuration records.
+fn dolby_base_channels(mode_and_lfe: u8) -> u16 {
+    let mode = usize::from((mode_and_lfe >> 1) & 7);
+    [2, 1, 2, 3, 3, 4, 4, 5][mode] + u16::from(mode_and_lfe & 1)
+}
+
+fn ec3_config_facts(config: &[u8]) -> Result<DolbyAudioSampleEntryFacts, Fmp4Error> {
+    // An independent substream can carry a different audio service. Until the
+    // rendition can name one explicitly, require a single service.
+    let [_, data_rate_and_substreams, service, mode, dependents, rest @ ..] = config else {
+        return malformed("truncated dec3 configuration");
+    };
+    if data_rate_and_substreams & 7 != 0
+        || (service >> 1) & 31 > 16
+        || service & 1 != 0
+        || mode & 0x80 != 0
+        || dependents & 0xe0 != 0
+    {
+        return malformed("unsupported dec3 service configuration");
+    }
+    let mut channels = dolby_base_channels(*mode);
+    let extension = if dependents & 0x1e != 0 {
+        let [locations, extension @ ..] = rest else {
+            return malformed("truncated dec3 dependent channel locations");
+        };
+        let locations = (u16::from(dependents & 1) << 8) | u16::from(*locations);
+        // ETSI TS 102 366 Table F.6.1 in bit order, least significant first.
+        for (bit, count) in [2, 2, 1, 1, 2, 2, 2, 1, 1].into_iter().enumerate() {
+            if locations & (1 << bit) != 0 {
+                channels += count;
+            }
+        }
+        extension
+    } else {
+        if dependents & 1 != 0 {
+            return malformed("invalid dec3 reserved bit");
+        }
+        rest
+    };
+    let joc = match extension {
+        [] | [0] => false,
+        [1, _] => true,
+        _ => return malformed("unsupported dec3 extension"),
+    };
+    Ok(DolbyAudioSampleEntryFacts {
+        codec: "ec-3",
+        channels,
+        joc,
+    })
 }
 
 /// Descriptor lengths are bounded to the MPEG-4 four-byte vocabulary and
@@ -1146,8 +1247,9 @@ impl FragmentReader {
     }
 
     /// Drop what has been consumed. Only ever called right after a unit is
-    /// emitted, so the memmove covers one partial box, never the backlog.
-    fn compact(&mut self) {
+    /// emitted or a whole box is skipped, so the memmove covers one partial
+    /// box, never the backlog.
+    pub(crate) fn compact(&mut self) {
         if self.pos > 0 {
             self.buf.drain(..self.pos);
             self.pos = 0;
@@ -5186,14 +5288,7 @@ fn first_vcl_nal(sample: &[u8], length_size: u8, codec: VideoCodec) -> Option<u8
             nlen = (nlen << 8) | sample[q + i] as usize;
         }
         let head = *sample.get(q + lsz)?;
-        let ty = match codec {
-            VideoCodec::Hevc => (head >> 1) & 0x3f,
-            VideoCodec::H264 => head & 0x1f,
-        };
-        let is_vcl = match codec {
-            VideoCodec::Hevc => ty <= 31,
-            VideoCodec::H264 => (1..=5).contains(&ty),
-        };
+        let (ty, is_vcl) = vcl_nal_type(head, codec);
         if is_vcl {
             return Some(ty);
         }
@@ -5203,6 +5298,22 @@ fn first_vcl_nal(sample: &[u8], length_size: u8, codec: VideoCodec) -> Option<u8
         q = q.checked_add(lsz)?.checked_add(nlen)?;
     }
     None
+}
+
+/// A NAL unit's type, from its first byte, and whether it carries slice data.
+/// The one definition the classifier and [`FragmentTrimmer`] share: what the
+/// trimmer drops is exactly what the classifier stops at.
+fn vcl_nal_type(head: u8, codec: VideoCodec) -> (u8, bool) {
+    match codec {
+        VideoCodec::Hevc => {
+            let ty = (head >> 1) & 0x3f;
+            (ty, ty <= 31)
+        }
+        VideoCodec::H264 => {
+            let ty = head & 0x1f;
+            (ty, (1..=5).contains(&ty))
+        }
+    }
 }
 
 /// Does any sample in this fragment present before its first one?
@@ -6308,7 +6419,7 @@ struct Boundaries {
 
 /// Cuts a verified, film-global AAC sample stream on its own immutable plan.
 /// Callers remove encoder priming and restore absolute `tfdt` before pushing.
-/// A video boundary never participates in this soundtrack's publication.
+/// The plan already owns any cuts derived from video boundaries.
 #[derive(Debug)]
 pub struct PlannedAudioSegmenter {
     init: Init,
@@ -6317,6 +6428,7 @@ pub struct PlannedAudioSegmenter {
     next_tick: u64,
     pending: Vec<Fragment>,
     pending_bytes: usize,
+    source_copy: Option<crate::transcode::VodSourceAudio>,
 }
 
 impl PlannedAudioSegmenter {
@@ -6325,9 +6437,22 @@ impl PlannedAudioSegmenter {
         plan: crate::segplan::SegmentPlan,
         start_entry: u32,
     ) -> Result<Self, Fmp4Error> {
+        Self::with_source_copy(init, plan, start_entry, None)
+    }
+
+    pub fn with_source_copy(
+        init: Init,
+        plan: crate::segplan::SegmentPlan,
+        start_entry: u32,
+        source_copy: Option<crate::transcode::VodSourceAudio>,
+    ) -> Result<Self, Fmp4Error> {
+        let packet_ticks = source_copy.as_ref().map_or(
+            crate::transcode::VOD_AAC_FRAME_SAMPLES,
+            crate::transcode::VodSourceAudio::packet_ticks,
+        );
         let refuse = || {
             Fmp4Error::Unsupported(
-                "shared AAC requires one 48kHz track and a contiguous sample-clock plan".into(),
+                "soundtrack requires one 48 kHz track and a contiguous sample-clock plan".into(),
             )
         };
         if init.tracks.len() != 1
@@ -6346,10 +6471,11 @@ impl PlannedAudioSegmenter {
             if entry.index as usize != index
                 || entry.kind != crate::segplan::PlanEntryKind::AudioTail
                 || entry.start_ticks != next
-                || entry.start_ticks % 1_024 != 0
+                || entry.start_ticks % packet_ticks != 0
                 || entry.duration_ticks == 0
-                || entry.duration_ticks > 480_000
-                || (!final_entry && entry.duration_ticks % 1_024 != 0)
+                || entry.duration_ticks > crate::transcode::VOD_AAC_MAX_SEGMENT_TICKS
+                || ((!final_entry || source_copy.is_some())
+                    && entry.duration_ticks % packet_ticks != 0)
             {
                 return Err(refuse());
             }
@@ -6363,22 +6489,65 @@ impl PlannedAudioSegmenter {
             next_tick,
             pending: Vec::new(),
             pending_bytes: 0,
+            source_copy,
         })
+    }
+
+    /// A coarse container clock may quantize packet times to milliseconds.
+    /// Retain every codec packet byte and recover its exact sample duration
+    /// only inside the tolerance frozen by the held-source census.
+    fn normalize_copy_clock(&self, fragment: &mut Fragment) -> Result<(), Fmp4Error> {
+        let Some(source) = &self.source_copy else {
+            return Ok(());
+        };
+        let [track] = fragment.tracks.as_mut_slice() else {
+            return malformed("copied soundtrack has an unexpected track set");
+        };
+        let mut observed = track.base_decode_time;
+        let mut expected = self.next_tick;
+        let width = source.packet_ticks();
+        let tolerance = source.clock_tolerance();
+        for sample in track.runs.iter_mut().flat_map(|run| &mut run.samples) {
+            let duration = u64::from(sample.duration);
+            if observed.abs_diff(expected) > tolerance || duration.abs_diff(width) > tolerance {
+                return malformed("copied soundtrack packet drifted from its source clock");
+            }
+            if !sample.is_sync() {
+                return malformed("copied soundtrack packet lost its sync flag");
+            }
+            let Some(next_observed) = observed.checked_add(duration) else {
+                return malformed("copied soundtrack packet time overflows");
+            };
+            let Some(next_expected) = expected.checked_add(width) else {
+                return malformed("copied soundtrack plan time overflows");
+            };
+            observed = next_observed;
+            expected = next_expected;
+            sample.duration = width as u32;
+            // Ignore muxer-specific defaults after verifying this packet is
+            // a sync sample. Restart and continuous output use the same flags.
+            sample.flags = 0x0200_0000;
+        }
+        track.base_decode_time = self.next_tick;
+        Ok(())
     }
 
     /// Fully validate the incoming sample run before changing publication
     /// state. Gaps and overlaps are refused rather than absorbed into an AAC
     /// sample duration by the general-purpose fragment merger.
-    pub fn push(&mut self, fragment: Fragment) -> Result<Vec<Published>, Fmp4Error> {
+    pub fn push(&mut self, mut fragment: Fragment) -> Result<Vec<Published>, Fmp4Error> {
         let refuse =
-            || Fmp4Error::Malformed("shared AAC sample bounds or clock continuity failed".into());
+            || Fmp4Error::Malformed("soundtrack sample bounds or clock continuity failed".into());
         if fragment.tracks.len() != 1
             || fragment.len() > 4 * 1024 * 1024
             || fragment.tracks[0].track_id != self.init.tracks[0].id
-            || fragment.tracks[0].base_decode_time != self.next_tick
             || fragment.tracks[0].sample_count() == 0
             || fragment.tracks[0].sample_count() > 2_048
         {
+            return Err(refuse());
+        }
+        self.normalize_copy_clock(&mut fragment)?;
+        if fragment.tracks[0].base_decode_time != self.next_tick {
             return Err(refuse());
         }
         let end = self
@@ -6387,6 +6556,10 @@ impl PlannedAudioSegmenter {
             .last()
             .expect("validated plan")
             .end_ticks();
+        let packet_ticks = self.source_copy.as_ref().map_or(
+            crate::transcode::VOD_AAC_FRAME_SAMPLES,
+            crate::transcode::VodSourceAudio::packet_ticks,
+        );
         let track = &fragment.tracks[0];
         let mut tick = self.next_tick;
         let mut planned_entry = self.entry;
@@ -6399,13 +6572,14 @@ impl PlannedAudioSegmenter {
                     .checked_add(sample.size as usize)
                     .ok_or_else(refuse)?;
                 if sample.duration == 0
-                    || sample.duration > 1_024
+                    || u64::from(sample.duration) > packet_ticks
                     || sample.size == 0
                     || sample.cto != 0
                     || offset < fragment.mdat_payload.start
                     || through > fragment.mdat_payload.end
                     || through > fragment.bytes.len()
-                    || (sample.duration != 1_024 && tick + u64::from(sample.duration) != end)
+                    || (u64::from(sample.duration) != packet_ticks
+                        && (self.source_copy.is_some() || tick + u64::from(sample.duration) != end))
                 {
                     return Err(refuse());
                 }
@@ -6430,6 +6604,13 @@ impl PlannedAudioSegmenter {
                 if next == entry.end_ticks() {
                     planned_entry += 1;
                     interval_bytes = 0;
+                }
+                if self.source_copy.as_ref().is_some_and(|source| {
+                    !source.matches_packet(tick, &fragment.bytes[offset..through])
+                }) {
+                    return Err(Fmp4Error::Malformed(
+                        "copied soundtrack packet differs from its frozen source".into(),
+                    ));
                 }
                 payloads.push((tick, *sample, fragment.bytes[offset..through].to_vec()));
                 tick = next;
@@ -7369,6 +7550,10 @@ pub fn playlist_entry(seconds: f64, name: &str) -> String {
     let _ = write!(s, "#EXTINF:{seconds:.6},\n{name}\n");
     s
 }
+
+#[path = "fmp4/trim.rs"]
+mod trim;
+pub use trim::{FragmentTrimmer, TrimmedFragment, VideoOnlyFragment};
 
 /// `seg00000.m4s` — five digits from zero, exactly what `-start_number 0` and
 /// `seg%05d.m4s` gave the muxer this replaces. The daemon's segment index

@@ -2029,6 +2029,12 @@ pub(crate) mod calls {
         LocalUnavailable,
         /// Advisory refusal metadata is never an authenticated response or ack.
         AuthenticationRefused(PeerAuthRefusal),
+        /// A response-bound call was answered with this non-success status and
+        /// no response signature: a layer in front of the signing handler
+        /// (the capacity gate's 503, a body limit) or a hop on the path. Like
+        /// a refusal it authenticates nothing and is never an ack, but the
+        /// peer was reached and answered, which `InvalidResponse` would hide.
+        UnauthenticatedStatus(u16),
         Unreachable,
         TimedOut,
         InvalidResponse,
@@ -2048,6 +2054,9 @@ pub(crate) mod calls {
             match error {
                 PeerTransportError::LocalUnavailable => None,
                 PeerTransportError::AuthenticationRefused(refusal) => Some(Self::Refused(refusal)),
+                // A bound call answered unsigned never reached the signer, so
+                // it must not rank this origin as a healthy answering peer.
+                PeerTransportError::UnauthenticatedStatus(_) => Some(Self::InvalidResponse),
                 PeerTransportError::Unreachable => Some(Self::Unreachable),
                 PeerTransportError::TimedOut => Some(Self::TimedOut),
                 PeerTransportError::InvalidResponse => Some(Self::InvalidResponse),
@@ -2445,7 +2454,19 @@ pub(crate) mod calls {
                         if signature.is_none() {
                             eprintln!("Peer diagnostic stage=missing_response_signature path={path} status={}", response.status);
                         }
-                        let signature = signature.ok_or(PeerTransportError::InvalidResponse)?;
+                        let Some(signature) = signature else {
+                            // An unsigned error status proves nothing about
+                            // the call, so no caller may read its body, but it
+                            // is still the status the peer path answered. An
+                            // unsigned success is a protocol violation.
+                            return Err(if response.status.is_success() {
+                                PeerTransportError::InvalidResponse
+                            } else {
+                                PeerTransportError::UnauthenticatedStatus(
+                                    response.status.as_u16(),
+                                )
+                            });
+                        };
                         let payload = signed_response_payload(response.status.as_u16(), &response.body);
                         let verified = if member_scoped {
                             tokio::time::timeout_at(

@@ -4,7 +4,7 @@ The web player paints resolution, dynamic range (source → delivered), the
 Dolby Vision enhancement pills (FEL / RPU / DYN) and the audio format above
 its picture (crates/plurxd/src/web/detail/dynamic-range.js
 `playerFactBadges`). Cinema draws the same pills inside mpv. The Lua overlay
-observes what mpv decodes and renders; this module hands it the three facts
+observes what mpv decodes and renders; this module hands it the four facts
 only the launcher holds, whitelisted so no URL, path or credential reaches
 mpv's user-data:
 
@@ -17,6 +17,9 @@ mpv's user-data:
   report supersedes the provisional snapshot. ``processed`` names the
   processing ("HDR10-E", "SDR-E", "P81") the report proves, for the range pill.
   Direct play has no session and so no server enhancement;
+* ``provenance``: the server's "Dolby Vision metadata" and "Display target"
+  rows (``dv_metadata`` / ``display_target``), selected and validated as the
+  web's `playerDvRows` does, with the contract's sub-row labels;
 * ``renderer``: which Dolby Vision mapping the private mpv build reported
   for the current file (playback.py `on_log`), which is how the overlay knows
   the RPU and dynamic metadata were applied on this machine.
@@ -24,7 +27,14 @@ mpv's user-data:
 import re
 
 ENHANCEMENTS = ("FEL", "RPU", "DYN")
+# Sub-row labels of the server's two Playback info rows. The packaged player
+# cannot read tests/playback/playback-info-fields.json, so test_badges.py pins
+# these to that contract's `sub_rows`.
+DV_METADATA_LABELS = ("In the file", "Applied by Cinema", "Left for the display")
+DISPLAY_TARGET_LABELS = ("Reported peak", "Mapped for", "Title peak")
 NATIVE_MAPPER = "shared native Dolby renderer"
+# enhancement.rs's MEL row for a processed route, which the report rebuild keeps.
+MEL_TEXT = "MEL: minimal enhancement layer — it adds no picture detail; the Dolby grade is in the RPU"
 _RPU_NAMES = {"PolynomialReshape": "polynomial reshaping", "MmrReshape": "MMR reshaping",
               "RpuColorConversion": "RPU color conversion"}
 _GENERATION = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
@@ -124,9 +134,13 @@ def _processed(enhancement, report):
              else "L1 only; creative trims are not applied")
     fel = report["fel_contributed"]
     sdr = "SDR " if report.get("sdr_processed") is True else ""
+    # A minimal layer (MEL), as the server's title scan classified it, has no
+    # detail to miss; the row is built from that fact, not from the snapshot.
+    mel = enhancement.get("el_kind") == "mel"
     current = [
-        {"badge": "FEL", "active": fel, "text": f"FEL: full enhancement layer reconstructed into the {sdr}picture"
-            if fel else "FEL: no enhancement-layer detail in this window"},
+        {"badge": "FEL", "active": True, "text": f"FEL: full enhancement layer reconstructed into the {sdr}picture"}
+        if fel else {"badge": "FEL", "active": False, "text": MEL_TEXT}
+        if mel else {"badge": "FEL", "active": False, "text": "FEL: no enhancement-layer detail in this window"},
         {"badge": "RPU", "active": bool(rpu), "text": f"RPU: {', '.join(rpu)} applied by the server"
             if rpu else "RPU: no reshaping or colour conversion applied in this window"},
         {"badge": "DYN", "active": target is not None,
@@ -134,7 +148,7 @@ def _processed(enhancement, report):
             if target is not None else "DYN: no per-shot Dolby display mapping applied in this window"},
     ]
     had_fel = any(d["badge"] == "FEL" for d in enhancement["details"])
-    details = [d for d in current if d["badge"] != "FEL" or d["active"] or had_fel]
+    details = [d for d in current if d["badge"] != "FEL" or d["active"] or had_fel or mel]
     details += [d for d in enhancement["details"] if d["badge"] not in ENHANCEMENTS]
     return {"active": [d["badge"] for d in current if d["active"]], "details": details}
 
@@ -154,10 +168,13 @@ def server_enhancement(session):
         details = [dict(d, text=f"{d['badge']}: not used for this play — {reason}")
                    if not d["active"] and d["badge"] in ("FEL", "RPU") and d["text"].startswith(f"{d['badge']}: not used")
                    else d for d in details]
-    enhancement = {"active": [b for b in ENHANCEMENTS if b in raw["active"]], "details": details, "processed": None}
+    # Full or minimal, as the server's complete-title scan classified the layer.
+    el_kind = raw.get("el_kind") if raw.get("el_kind") in ("fel", "mel") else None
+    enhancement = {"active": [b for b in ENHANCEMENTS if b in raw["active"]], "details": details,
+                   "processed": None, "el_kind": el_kind}
     report, kind = current_report(session)
     if kind == "p81":
-        return {"active": ["FEL"], "processed": "P81", "details": [
+        return {"active": ["FEL"], "processed": "P81", "el_kind": el_kind, "details": [
             {"badge": "FEL", "active": True,
              "text": "FEL: full enhancement layer reconstructed into the Dolby Vision Profile 8.1 picture"}]
             + [d for d in details if d["badge"] not in ENHANCEMENTS]}
@@ -165,7 +182,62 @@ def server_enhancement(session):
         return enhancement
     if report is None:
         return None
-    return dict(_processed(enhancement, report), processed="SDR-E" if kind == "sdr" else "HDR10-E")
+    return dict(_processed(enhancement, report), processed="SDR-E" if kind == "sdr" else "HDR10-E",
+                el_kind=el_kind)
+
+
+def _row_text(value):
+    """dynamic-range.js `dvRowText`: a non-blank, bounded, control-free string."""
+    if isinstance(value, str) and value.strip() and len(value) <= 512 \
+            and not re.search(r"[\x00-\x1f\x7f-\x9f]", value):
+        return value
+    return None
+
+
+def _provenance_row(labels, headline, texts):
+    """{"value", "rows"} when every text is valid, else None (the whole row is dropped)."""
+    texts = [_row_text(t) for t in texts]
+    if any(t is None for t in texts) or _row_text(headline) is None:
+        return None
+    return {"value": headline, "rows": [{"label": l, "text": t} for l, t in zip(labels, texts)]}
+
+
+def provenance_facts(session):
+    """The server's Dolby Vision metadata and display target rows, as the web's `playerDvRows` reads them.
+
+    A processed delivery's rows come only from its current, generation-matched
+    report; otherwise the metadata comes from the enhancement and there is no
+    display target. Each row is dropped whole when any of its texts is invalid.
+    """
+    session = session if isinstance(session, dict) else {}
+    enhancement = session.get("enhancement")
+    if not isinstance(enhancement, dict):
+        return {}
+    if enhancement.get("requires_effective_processing") is True:
+        report, _ = current_report(session)
+        metadata = report.get("dv_metadata") if report else None
+        target = report.get("display_target") if report else None
+    else:
+        metadata, target = enhancement.get("dv_metadata"), None
+
+    def part(value, key):
+        value = value.get(key) if isinstance(value, dict) else None
+        return value if isinstance(value, dict) else {}
+
+    facts = {}
+    if isinstance(metadata, dict):
+        applied = part(metadata, "applied").get("text")
+        row = _provenance_row(DV_METADATA_LABELS, applied, [
+            part(metadata, "in_file").get("text"), applied, part(metadata, "left_for_display").get("text")])
+        if row:
+            facts["dv_metadata"] = row
+    if isinstance(target, dict):
+        mapped = target.get("mapped_for_text")
+        row = _provenance_row(DISPLAY_TARGET_LABELS, mapped, [
+            target.get("reported_peak_text"), mapped, target.get("title_peak_text")])
+        if row:
+            facts["display_target"] = row
+    return facts
 
 
 def renderer_facts(mapper, target_nits=None):
@@ -197,4 +269,4 @@ def renderer_facts(mapper, target_nits=None):
 
 def video_facts(decision, session, mapper, target_nits=None):
     return {"source": source_facts(decision), "enhancement": server_enhancement(session),
-            "renderer": renderer_facts(mapper, target_nits)}
+            "renderer": renderer_facts(mapper, target_nits), "provenance": provenance_facts(session)}

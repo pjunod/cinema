@@ -250,6 +250,8 @@ struct RemoteChoice: Identifiable {
     let label: String
     let selected: Bool
     var returnFocus: String? = nil
+    /// A second, quieter line under the label (a version's Dolby Vision facts).
+    var detail: String? = nil
     let choose: () -> Void
 }
 
@@ -370,12 +372,22 @@ struct RemoteChoicePanel: View {
                             .font(.system(size: 24, weight: .bold))
                             .frame(width: 28)
                             .opacity(choice.selected ? 1 : 0)
-                        Text(choice.label).lineLimit(2)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(choice.label).lineLimit(2)
+                            if let detail = choice.detail {
+                                Text(detail).font(.system(size: 22, weight: .medium)).foregroundStyle(Palette.muted).lineLimit(2)
+                            }
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     #else
                     HStack(spacing: 20) {
-                        Text(choice.label).lineLimit(2)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(choice.label).lineLimit(2)
+                            if let detail = choice.detail {
+                                Text(detail).font(.caption).foregroundStyle(Palette.muted).lineLimit(2)
+                            }
+                        }
                         Spacer(minLength: 24)
                         // Selection stays a checkmark, independent of focus.
                         Image(systemName: "checkmark").opacity(choice.selected ? 1 : 0)

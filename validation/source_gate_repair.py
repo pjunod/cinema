@@ -73,7 +73,20 @@ PREDECESSOR = {
 WORKFLOW = 'ci.yml'
 # Re-reviewed for #1811's preflight `runs-on` high-cpu label (67af36308): a
 # scheduling label and comment only; image, options and every step unchanged.
-WORKFLOW_SHA256 = '10172517eadc7413784ab66c95ee20df354d41c6a96d8fd7e7eed4b70a9977d1'
+# Re-reviewed for #1881 (derived build numbers): only the `mobile_version` job
+# changes -- it drops the merge-target fetch and the stored-counter comparison
+# and runs `python3 -m validation.mobile_versions` on the checked-out tree.
+# preflight, check and every other job are byte-identical.
+# Re-reviewed for #1934 (release tags publish from their gate): the `push:
+# tags` trigger and the tag-only `publish` job are removed, the badge drops its
+# `publish` need and result, and header/concurrency comments change.
+# preflight, check and every other job are byte-identical.
+# Re-reviewed for the TV navigation evidence retention: only that upload
+# step's `retention-days` (90 -> 14) and its comment change.
+# Re-reviewed for the bounded legacy Store deadline (120 -> 150 minutes).
+# Resource bounds, retained evidence and test commands are unchanged.
+# The source-lease workflow uses the consolidated reader and rollout checks.
+WORKFLOW_SHA256 = '8b2a7c90598e13d0bf658f40eac2f5bbf19d571b90dff132a37c22c22d597c9d'
 
 
 def prior_run(api, value, binding, repository, *, current_run=None):
@@ -159,7 +172,7 @@ def python_coverage(api, descriptor, old, pull, run, raw, inventories, root):
                                 for key, value in suite['retained_source_records'].items()},
             'paperwork': sorted(rules), 'node': node, 'dependency_runtime': runtime,
             'apple': plan['apple_preflight'], 'ios_reader_build': reader,
-            'root_ownership': plan['root_ownership'], 'formal_retained': plan['formal_preflight']}
+            'formal_retained': plan['formal_preflight']}
 
 
 ANDROID_INPUTS = ('clients/android', 'Makefile')
@@ -657,7 +670,6 @@ def prior_coverage(api, value, binding, pull, root, current_run=None):
     from validation import main_preflight_adoption as main_commands
     from validation import paperwork_continuation as paperwork
     from validation import selected_apple_preflight as apple
-    from validation import selected_root_custody as root_custody
     from validation import source_gate_landing as landing
 
     repo = api.get('')
@@ -728,8 +740,6 @@ def prior_coverage(api, value, binding, pull, root, current_run=None):
     else:
         formal = {**formal_coverage(api, artifacts, preflight, run, prior, current),
                   'worker-refinement': python['formal_retained']}
-    current_root = reviewed_inputs(prior, current, (*root_custody.INPUTS, 'validation/selected_root_custody.py'))
-    root_custody.coverage_shape(python['root_ownership'])
     retained_lanes = {'apple': {'native': python['apple'], 'current_build': reader, 'inputs': native_inputs},
                       'android_device': {**device, 'source_commit': prior, 'inputs': device_inputs}}
     topology = job_for('cluster_topology')
@@ -746,7 +756,6 @@ def prior_coverage(api, value, binding, pull, root, current_run=None):
             'retained_lanes': retained_lanes, 'python': tests, 'python_due': python_due,
             'node': {'coverage': python['node'], 'input_digests': node_inputs, 'manifest': manifest},
             'formal': formal,
-            'root_ownership': {'coverage': python['root_ownership'], 'inputs': current_root},
             'android': android, 'hdr': hdr}, jvm, snapshot
 
 

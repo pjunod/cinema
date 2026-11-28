@@ -1,4 +1,4 @@
-"""Enforce mobile release versions against the selected Git baseline."""
+"""Enforce mobile release versions and the derived build-number wiring."""
 
 from __future__ import annotations
 
@@ -36,19 +36,39 @@ ANDROID_RELEASE_FILES = frozenset(
 )
 
 
+# The fixed development placeholder project.yml carries for
+# CURRENT_PROJECT_VERSION. The shipped number is derived at build time by
+# scripts/build-number and stamped into each app's Info.plist, so the stored
+# value is never bumped; a change to it would reintroduce the per-pull-request
+# counter whose conflicts the derived number removed.
+APPLE_PLACEHOLDER_BUILD = 1
+# build.gradle.kts assigns versionCode from this value, which it computes by
+# running scripts/build-number (or takes from -PplurxVersionCode).
+ANDROID_DERIVED_VERSION_CODE = "plurxVersionCode"
+BUILD_NUMBER_SCRIPT = "scripts/build-number"
+APPLE_STAMP = re.compile(
+    r'^\s*/usr/libexec/PlistBuddy -c "Set :CFBundleVersion \$\{number\}" '
+    r'"\$\{TARGET_BUILD_DIR\}/\$\{INFOPLIST_PATH\}"\s*$',
+    re.MULTILINE,
+)
+
+
 class MobileVersionError(ValueError):
-    """A mobile version declaration or comparison is invalid."""
+    """A mobile version declaration is invalid."""
 
 
 @dataclasses.dataclass(frozen=True)
 class MobileVersions:
     workspace: str
     android_name: str
-    android_build: int
+    android_version_code: str
+    android_runs_build_number: bool
     apple_name: str
     apple_build: int
     apple_marketing_references: int
     apple_build_references: int
+    apple_stamp_phases: int
+    apple_runs_build_number: int
 
 
 def _required_value(contents: str, pattern: str, label: str) -> str:
@@ -85,12 +105,9 @@ def read_versions(read: Callable[[str], str]) -> MobileVersions:
         r'^\s*versionName\s*=\s*"([^"]+)"\s*$',
         "Android versionName",
     )
-    android_build = _positive_integer(
-        _required_value(
-            android,
-            r"^\s*versionCode\s*=\s*(\S+)\s*$",
-            "Android versionCode",
-        ),
+    android_version_code = _required_value(
+        android,
+        r"^\s*versionCode\s*=\s*(\S+)\s*$",
         "Android versionCode",
     )
     apple_name = _required_value(
@@ -110,7 +127,8 @@ def read_versions(read: Callable[[str], str]) -> MobileVersions:
     return MobileVersions(
         workspace=workspace,
         android_name=android_name,
-        android_build=android_build,
+        android_version_code=android_version_code,
+        android_runs_build_number=BUILD_NUMBER_SCRIPT in android,
         apple_name=apple_name,
         apple_build=apple_build,
         apple_marketing_references=len(
@@ -127,39 +145,20 @@ def read_versions(read: Callable[[str], str]) -> MobileVersions:
                 re.MULTILINE,
             )
         ),
+        apple_stamp_phases=len(APPLE_STAMP.findall(apple)),
+        apple_runs_build_number=len(
+            re.findall(r'"\$\{SRCROOT\}/\.\./\.\./scripts/build-number"', apple)
+        ),
     )
 
 
-def _matches_release_path(
-    path: str, prefixes: tuple[str, ...], files: frozenset[str]
-) -> bool:
-    return path in files or path.startswith(prefixes)
+def validate_versions(current: MobileVersions) -> tuple[str, ...]:
+    """The static release-version rules one tree must satisfy.
 
-
-def _merge_target_hint(baseline_label: str | None, baseline_build: int) -> str:
-    """Say which ref the counter has to clear, when that ref is the merge target.
-
-    Without this the failure reads as "bump it once" and stays ambiguous about
-    *which* baseline moved, which is exactly the confusion a base that advanced
-    under an open branch produces.
+    Build numbers are derived at build time (scripts/build-number), so there is
+    no counter to compare against a baseline: what is checked is that both
+    apps still take the derived number and store none of their own.
     """
-    if not baseline_label:
-        return ""
-    return (
-        f". {baseline_label} is the merge target and already carries "
-        f"{baseline_build}, so re-bump above the current base rather than above "
-        "the commit this branch was cut from"
-    )
-
-
-def validate_versions(
-    current: MobileVersions,
-    *,
-    baseline: MobileVersions | None = None,
-    scope_baseline: MobileVersions | None = None,
-    changed_paths: tuple[str, ...] = (),
-    baseline_label: str | None = None,
-) -> tuple[str, ...]:
     errors: list[str] = []
 
     if not SEMANTIC_VERSION.fullmatch(current.workspace):
@@ -177,8 +176,23 @@ def validate_versions(
             "Apple MARKETING_VERSION must match the workspace version "
             f"({current.workspace}); found {current.apple_name}"
         )
-    if current.android_build > 2_100_000_000:
-        errors.append("Android versionCode exceeds Google Play's 2100000000 ceiling")
+    if current.android_version_code != ANDROID_DERIVED_VERSION_CODE:
+        errors.append(
+            f"Android versionCode must be `{ANDROID_DERIVED_VERSION_CODE}`, the value "
+            f"build.gradle.kts derives from {BUILD_NUMBER_SCRIPT}; found "
+            f"{current.android_version_code!r}. Build numbers are never stored in source."
+        )
+    if not current.android_runs_build_number:
+        errors.append(
+            f"clients/android/app/build.gradle.kts must derive versionCode by running "
+            f"{BUILD_NUMBER_SCRIPT}"
+        )
+    if current.apple_build != APPLE_PLACEHOLDER_BUILD:
+        errors.append(
+            f"Apple CURRENT_PROJECT_VERSION is a fixed development placeholder and must "
+            f"stay {APPLE_PLACEHOLDER_BUILD}; found {current.apple_build}. The shipped "
+            f"build number is derived by {BUILD_NUMBER_SCRIPT}; do not bump it."
+        )
     if current.apple_marketing_references != 2:
         errors.append(
             "the iOS and tvOS targets must both stamp MARKETING_VERSION "
@@ -189,40 +203,13 @@ def validate_versions(
             "the iOS and tvOS targets must both stamp CURRENT_PROJECT_VERSION "
             f"(found {current.apple_build_references} references)"
         )
-
-    if baseline is None:
-        return tuple(errors)
-
-    # "Did this branch bump the release?" is a property of the branch, so it is
-    # answered against the branch point even when the counters are answered
-    # against the merge target. Reading it off the target instead conflates "the
-    # branch released" with "the target released", which reds every open branch
-    # the moment a release lands and tells each one to bump counters it never
-    # touched.
-    scope = baseline if scope_baseline is None else scope_baseline
-    workspace_changed = current.workspace != scope.workspace
-    apple_changed = workspace_changed or any(
-        _matches_release_path(path, APPLE_RELEASE_PATHS, APPLE_RELEASE_FILES)
-        for path in changed_paths
-    )
-    android_changed = workspace_changed or any(
-        _matches_release_path(path, ANDROID_RELEASE_PATHS, ANDROID_RELEASE_FILES)
-        for path in changed_paths
-    )
-
-    if apple_changed and current.apple_build <= baseline.apple_build:
+    if current.apple_stamp_phases != 2 or current.apple_runs_build_number != 2:
         errors.append(
-            "Apple release inputs changed, so CURRENT_PROJECT_VERSION must increase "
-            f"above {baseline.apple_build}; found {current.apple_build}"
-            + _merge_target_hint(baseline_label, baseline.apple_build)
+            "the iOS and tvOS targets must each carry one build phase that sets "
+            f"CFBundleVersion from {BUILD_NUMBER_SCRIPT} (found "
+            f"{current.apple_stamp_phases} PlistBuddy stamps and "
+            f"{current.apple_runs_build_number} {BUILD_NUMBER_SCRIPT} runs)"
         )
-    if android_changed and current.android_build <= baseline.android_build:
-        errors.append(
-            "Android release inputs changed, so versionCode must increase "
-            f"above {baseline.android_build}; found {current.android_build}"
-            + _merge_target_hint(baseline_label, baseline.android_build)
-        )
-
     return tuple(errors)
 
 
@@ -251,141 +238,28 @@ def _filesystem_reader(root: Path) -> Callable[[str], str]:
     return lambda path: (root / path).read_text(encoding="utf-8")
 
 
-# Source suffixes whose comments are not compiled into a shipped binary. A
-# change confined to comment lines in one of these alters no bytes the store
-# receives, so it is not a release input — see _touches_shipped_bytes.
-COMMENTABLE_SUFFIXES = (".swift", ".kt", ".kts", ".java", ".m", ".mm", ".h")
+def check_repository(root: Path = REPO_ROOT, *, mode: str = "all") -> tuple[str, ...]:
+    """Validate the tree the validation mode names.
 
-# A comment line, a block-comment delimiter, or a blank line. Deliberately
-# narrow: anything this does not recognise counts as shipped.
-_COMMENT_LINE = re.compile(r"(//|/\*|\*/|\*(?!/)|$)")
-
-
-def _touches_shipped_bytes(root: Path, path: str, *diff_arguments: str) -> bool:
-    """Answer whether this file's change reaches the shipped binary.
-
-    The counter contract is about *shipped* changes: a store build exists to
-    carry different bytes to a device. Correcting a documentation path inside
-    a `///` comment carries none, and demanding a build number for it is worse
-    than pedantic — the number has to be mirrored into the parity document and
-    the status page, which turns a comment fix into a claim that a build
-    nobody produced was released.
-
-    So a file is exempt only when *every* line the diff touched, added and
-    removed alike, is a comment or blank. Every other answer is "shipped",
-    including one this cannot compute: an unreadable diff, an unknown suffix,
-    a rename, a deletion. Failing open here would let a real change ship
-    without a counter, which is the defect the check exists to catch.
+    ``staged`` reads the index, ``changed-from`` the committed HEAD, and every
+    other mode the working tree. No mode compares against a baseline any more:
+    the build numbers a baseline comparison used to police are derived.
     """
-    if not path.endswith(COMMENTABLE_SUFFIXES):
-        return True
-    try:
-        diff = _git(root, "diff", "-U0", *diff_arguments, "--", path)
-    except MobileVersionError:
-        return True
-    touched = False
-    for line in diff.splitlines():
-        if line.startswith(("+++", "---")):
-            continue
-        if not line.startswith(("+", "-")):
-            continue
-        touched = True
-        if not _COMMENT_LINE.match(line[1:].strip()):
-            return True
-    # No touched lines at all means the diff said nothing about this file;
-    # that is not evidence of a comment-only change.
-    return not touched
-
-
-def _changed_paths(root: Path, *diff_arguments: str) -> tuple[str, ...]:
-    output = _git(
-        root,
-        "diff",
-        "--name-only",
-        "-z",
-        "--diff-filter=ACMRD",
-        *diff_arguments,
-    )
-    return tuple(path for path in output.split("\0") if path)
-
-
-def _release_input_paths(root: Path, *diff_arguments: str) -> tuple[str, ...]:
-    """The changed paths that could reach a store build, comments excluded."""
-    return tuple(
-        path
-        for path in _changed_paths(root, *diff_arguments)
-        if _touches_shipped_bytes(root, path, *diff_arguments)
-    )
-
-
-def check_repository(
-    root: Path = REPO_ROOT,
-    *,
-    mode: str = "all",
-    base: str | None = None,
-    merge_target: str | None = None,
-) -> tuple[str, ...]:
-    """Compare the working revision's build counters against a Git baseline.
-
-    ``base`` scopes *which* release inputs the branch touched, and is the branch
-    point. ``merge_target`` supplies the counters to beat, and is the tip of the
-    branch this change will merge into. They are the same commit only while the
-    target has not moved; once it has, only the target tip answers the question
-    the store cares about, which is whether the counter is still an increase if
-    this merged right now.
-
-    Scope is the whole of scope: both the changed paths and the workspace-version
-    comparison are read against ``base``. Only the counters move to
-    ``merge_target``.
-    """
-    if merge_target and mode != "changed-from":
-        raise MobileVersionError(
-            "a merge target is only meaningful for changed-from validation; "
-            f"mode is {mode}"
-        )
-
-    baseline_label: str | None = None
-    scope_baseline: MobileVersions | None = None
     if mode == "staged":
-        changed = _release_input_paths(root, "--cached", "HEAD")
-        current = read_versions(_git_reader(root, ""))
-        baseline = read_versions(_git_reader(root, "HEAD"))
+        read = _git_reader(root, "")
     elif mode == "changed-from":
-        if not base:
-            raise MobileVersionError("changed-from validation requires a Git base")
-        changed = _release_input_paths(root, f"{base}...HEAD")
-        current = read_versions(_git_reader(root, "HEAD"))
-        baseline = scope_baseline = read_versions(_git_reader(root, base))
-        if merge_target:
-            # Scope stays on the branch point read above; only the counters move
-            # to the target. A missing or unreadable merge target fails the check
-            # rather than falling back to the branch point. Failing open here
-            # reproduces the exact defect this baseline exists to catch: a green
-            # result on a tree that cannot ship.
-            baseline = read_versions(_git_reader(root, merge_target))
-            baseline_label = merge_target
+        read = _git_reader(root, "HEAD")
     elif mode in {"all", "paths", "point"}:
-        changed = ()
-        current = read_versions(_filesystem_reader(root))
-        baseline = None
+        read = _filesystem_reader(root)
     else:
         raise MobileVersionError(f"unsupported validation mode: {mode}")
-
-    return validate_versions(
-        current,
-        baseline=baseline,
-        scope_baseline=scope_baseline,
-        changed_paths=changed,
-        baseline_label=baseline_label,
-    )
+    return validate_versions(read_versions(read))
 
 
 def main() -> int:
     mode = os.environ.get("PLURX_VALIDATION_MODE", "all")
-    base = os.environ.get("PLURX_VALIDATION_BASE")
-    merge_target = os.environ.get("PLURX_VALIDATION_MERGE_TARGET") or None
     try:
-        errors = check_repository(mode=mode, base=base, merge_target=merge_target)
+        errors = check_repository(mode=mode)
     except (MobileVersionError, OSError) as exc:
         print(f"mobile version validation failed: {exc}", file=sys.stderr)
         return 1
@@ -396,7 +270,7 @@ def main() -> int:
             print(f"  - {error}", file=sys.stderr)
         return 1
 
-    print("mobile versions and changed-app build counters are valid")
+    print("mobile versions are valid and both build numbers are derived")
     return 0
 
 

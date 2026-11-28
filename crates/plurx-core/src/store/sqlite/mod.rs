@@ -1374,6 +1374,19 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::library_curation_schema::SCHEMA,
     // v136: live title qualification takes precedence over manual library turns.
     super::background_job_turns::LIVE_TITLE_MIGRATION,
+    // v137: a per-file background job reads only the library root holding its file.
+    super::subtitle_managed_schema::FILE_ROOT_MIGRATION,
+    // v138: a per-file analysis request reads only the library root holding its file.
+    super::analysis_source_scope::SCHEMA,
+    // v139: monotonic scanner authority and aggregate provenance.
+    super::dv_title_jobs::MIGRATION_V3,
+    // v140: source leases expand: one lease row per source reader. It
+    // replaces the v137/v138 resource views with root-keyed projections that
+    // keep their per-file root narrowing.
+    super::source_leases::EXPAND,
+    // v141: source leases contract: the v1 source-owner objects go. A
+    // single SQLite process has no older binary to wait for.
+    super::source_leases::CONTRACT,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1383,6 +1396,22 @@ pub(crate) const MIGRATIONS: &[&str] = &[
 /// migration list prevents the import gate from drifting away from `open`.
 pub const SQLITE_SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
+/// The catalogue (`name`, `sql`) of a fresh database migrated through
+/// `version`: the shape oracle for extensions whose objects changed between
+/// versions.
+pub(crate) fn catalogue_through(version: usize) -> Result<Vec<(String, String)>, StoreError> {
+    catalogue(&SqliteStore::open_migrated_through(version)?)
+}
+
+/// Every named object of `conn` that has SQL text, by name.
+pub(crate) fn catalogue(conn: &Connection) -> Result<Vec<(String, String)>, StoreError> {
+    let mut statement =
+        conn.prepare("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
 /// Column list matching [`item_from_row`]. Prefix with a table alias via
 /// [`item_cols`].
 const ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, year, overview, \
@@ -1659,6 +1688,9 @@ impl SqliteStore {
         // `user_version` stays where it is, so an older binary still opens it.
         super::playback_input_keys::install_sqlite(&conn)?;
         super::fragment_publication::install_sqlite(&conn)?;
+        // Each signed-in device's capability record, owned by its token. The
+        // same additive extension shape as the planning keys.
+        super::playback_device_caps::install_sqlite(&conn)?;
         Self::backfill_hdr_format(&conn)?;
         Ok(SqliteStore {
             conn: Arc::new(Mutex::new(conn)),
@@ -1854,6 +1886,12 @@ impl SqliteStore {
             if version == 136 {
                 super::background_job_turns::verify_catalog(&tx, false)?;
             }
+            if version == super::subtitle_managed_schema::FILE_ROOT_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_file_root_predecessor(&tx)?;
+            }
+            if version == 138 {
+                super::analysis_source_scope::verify_predecessor(&tx)?;
+            }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
         }
@@ -1875,6 +1913,18 @@ impl SqliteStore {
         tx.pragma_update(None, "user_version", version)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// A fresh in-memory database migrated through `version`.
+    pub(crate) fn open_migrated_through(version: usize) -> Result<Connection, StoreError> {
+        let conn = Connection::open_in_memory()?;
+        for (index, sql) in MIGRATIONS.iter().enumerate().take(version) {
+            conn.pragma_update(None, "foreign_keys", "OFF")?;
+            let applied = Self::apply_migration_step(&conn, index as i64 + 1, sql, false);
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+            applied?;
+        }
+        Ok(conn)
     }
 
     pub(crate) fn migrate(conn: &Connection) -> Result<(), StoreError> {
@@ -1955,6 +2005,7 @@ impl SqliteStore {
         super::delegation::verify_sqlite(conn)?;
         super::scan_request_v2::verify_sqlite(conn)?;
         super::dv_refit_jobs::verify_sqlite(conn)?;
+        super::analysis_source_scope::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn
@@ -2338,7 +2389,10 @@ impl MetricsStore for SqliteStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)
                             + (SELECT COUNT(*) FROM analysis_source_reservations
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)),
-                        'source_recovery_pending', (SELECT COUNT(DISTINCT held.custody_id) FROM source_io_occupancy held JOIN background_source_current_owners c ON c.custody_id = held.custody_id WHERE held.active_occupancy=1 AND (CASE WHEN c.authority_expires_at_ms>0 THEN c.authority_expires_at_ms WHEN c.phase='cleanup_pending' THEN c.updated_at_ms WHEN c.phase='paused' THEN 0 ELSE NULL END) <= ?2 * 1000 - 180000),
+                        'source_recovery_pending', (SELECT COUNT(*) FROM source_leases WHERE expires_at_ms <= ?2 * 1000 - 180000),
+                        'source_leases', json_object('playback',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'playback'),'job',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'job'),'analysis',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'analysis'),'lease',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'lease'),'offline',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'offline')),
+                        'source_readers_per_root', COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'jobs.source_readers_per_root' AND CAST(value AS INTEGER) BETWEEN 1 AND 16), 2),
+                        'source_lease_schema_version', COALESCE((SELECT version FROM source_lease_schema WHERE singleton = 1), 0),
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))), ")
                     + &request_health
                     + " FROM offline_packages WHERE node_id = ?1"),

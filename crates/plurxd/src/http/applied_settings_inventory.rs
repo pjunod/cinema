@@ -26,6 +26,10 @@ use std::path::{Path, PathBuf};
 const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     // Polled pages and their helpers: the `settings` route group.
     ("http/developer.rs", "readiness", 1, false),
+    // Source readers per node beside the leases Activity lists: display
+    // only; every claim reads the limit inside its own statement.
+    ("http/analysis.rs", "activity_summary", 1, true),
+    ("http/developer.rs", "indexing_while_serving", 1, true),
     ("http/system.rs", "configured_server_name", 1, true),
     ("http/system.rs", "features", 1, false),
     ("http/system.rs", "server_info", 1, false),
@@ -78,6 +82,24 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
 /// The direct callers of each helper above, `(helper file, helper,
 /// caller file, caller)`.
 const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
+    (
+        "http/analysis.rs",
+        "activity_summary",
+        "http/analysis.rs",
+        "summary",
+    ),
+    (
+        "http/analysis.rs",
+        "activity_summary",
+        "http/system.rs",
+        "activity_detail",
+    ),
+    (
+        "http/developer.rs",
+        "indexing_while_serving",
+        "http/developer.rs",
+        "readiness",
+    ),
     (
         "http/chapter_thumbs.rs",
         "enabled",
@@ -804,7 +826,6 @@ const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[
     ("http/hls/create.rs", "create_with_purpose_attempt", "validate_hevc_copy_transport", "start_plan.as_deref()"),
     ("http/hls/create.rs", "preview_for_compatibility", "validate_hevc_copy_transport", "None"),
     ("http/hls/preparation.rs", "plan_preparation_with_candidate", "validate_hevc_copy_transport", "None"),
-    ("http/hls/processed_upgrade_qualification.rs", "resolve_current", "validate_candidate_planning_binding", "None"),
     ("http/internal_media_sessions.rs", "start", "create_cluster_session_for_receiver", "plan.as_ref()"),
     ("http/internal_media_sessions.rs", "start", "remote_placement_ready", "plan.as_ref().ok().and_then(Option::as_ref)"),
     ("http/internal_media_sessions.rs", "start", "restore_candidate_context_with_deadline", "plan.as_ref()"),
@@ -822,7 +843,6 @@ const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[
     ("transcode/manager/create.rs", "create_session_inner", "validate_candidate_planning_binding", "plan"),
     ("transcode/manager/create.rs", "create_session_inner", "vod_settings_planned", "plan"),
     ("transcode/manager/create.rs", "prepare_processed_upgrade_with_source", "prepare_vod_encoding_with_source", "None"),
-    ("transcode/manager/create.rs", "prepare_processed_upgrade_with_source", "validate_candidate_planning_binding", "None"),
     ("transcode/manager/create.rs", "prepare_source_vod_encoding", "prepare_vod_encoding_with_source", "None"),
     ("transcode/manager/create.rs", "prepare_source_vod_encoding", "refuse_unadmittable_encoding", "None"),
     ("transcode/manager/create.rs", "prepare_vod_encoding_noting", "prepare_vod_encoding_with_source", "plan"),
@@ -832,6 +852,7 @@ const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[
     ("transcode/manager/create.rs", "prepare_vod_encoding_with_source_scoped", "resolve_vod_movie_plan_with_fonts", "plan"),
     ("transcode/manager/create.rs", "prepare_vod_encoding_with_source_scoped", "software_budget_planned", "plan"),
     ("transcode/manager/create.rs", "prepare_vod_encoding_with_source_scoped", "vod_preparation_snapshot_planned", "plan"),
+    ("transcode/manager/create.rs", "processed_planning_authority", "validate_candidate_planning_binding", "None"),
     ("transcode/manager/create.rs", "refuse_unadmittable_encoding", "software_budget_planned", "plan"),
     ("transcode/manager/create.rs", "resurrect_vod_from_recipe_before", "restore_candidate_context_with_deadline", "None"),
     ("transcode/manager/create.rs", "start_live_recovery_session", "start_copy_with_audio_offset", "plan"),

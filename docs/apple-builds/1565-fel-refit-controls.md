@@ -1,6 +1,5 @@
 # Explain F+ curve fitting and the served mapping
 
-Build: 303
 Issue: #1565
 
 Developer settings show independent Apple, web, Android and Linux F+ choices,

@@ -98,6 +98,25 @@ pub(crate) fn processed_candidate_kept<'a>(
     })
 }
 
+/// The start response's candidate list: every worker's dispatchable row
+/// (a partial row only from this node), one per candidate ID. Two workers
+/// offering the same recipe share its ID; `unique_public_candidates` keeps
+/// the worker row with the best evidence, the local one when evidence ties.
+pub(super) fn public_quality_candidates(
+    catalog: Option<&crate::media_pool::QualityCatalogResult>,
+    local_node: &str,
+) -> Vec<plurx_core::playback::candidate::QualityCandidate> {
+    plurx_core::playback::candidate::unique_public_candidates(
+        catalog
+            .into_iter()
+            .flat_map(|result| result.candidates.iter())
+            .filter(|entry| {
+                entry.dispatch_supported && (!entry.partial || entry.node_id == local_node)
+            })
+            .map(|entry| entry.candidate.clone()),
+    )
+}
+
 /// Replace one local descriptive row with its admitted executable facts.
 /// A shortened-ID collision is never an implicit recipe substitution.
 pub(super) fn upsert_processed_worker_candidate(
@@ -269,7 +288,11 @@ pub struct CreateSession {
     /// With `copy`: this client selects soundtracks itself (hls.js alternate
     /// audio). The server may answer with one shared video-only rendition and
     /// every soundtrack as an alternate audio rendition; the session response
-    /// says which presentation it chose. Absent keeps the muxed copy.
+    /// says which presentation it chose.
+    ///
+    /// The legacy spelling of the caps token `hls-split-av-v1`. Absent defers
+    /// to the token; `false` is the explicit muxed request (a client retrying
+    /// without alternates), and it wins over the token.
     pub split_audio: Option<bool>,
     /// With `copy`: retain Dolby Vision signaling and dynamic metadata because
     /// the decision established that this client supports the source profile.
@@ -715,8 +738,14 @@ impl CreateSession {
         let transport = self
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
+        let split_requested = self.split_audio.unwrap_or_else(|| {
+            self.caps
+                .as_ref()
+                .is_some_and(plurx_core::playback::DeviceCaps::plays_split_av)
+        });
         crate::transcode::SessionRequest {
-            split_audio: self.copy == Some(true) && self.split_audio == Some(true),
+            split_audio: self.copy == Some(true) && split_requested,
+            vod_copy_layout: None,
             dv_processing_destination: None,
             // The player's per-playback choice; `SessionRequest` never
             // serializes it.
@@ -725,6 +754,7 @@ impl CreateSession {
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -1559,6 +1589,39 @@ pub(super) async fn burn_would_discard_this_session_hdr(
     .await
 }
 
+/// The grade an ordinary start delivers, by the same rule its Start reports
+/// as `delivered_dynamic_range`: HDR10 only when that is what it sends.
+fn ordinary_delivered_grade(
+    source: Option<&MediaFile>,
+    request: &crate::transcode::SessionRequest,
+) -> plurx_core::transcode::OutputGrade {
+    use plurx_core::transcode::OutputGrade;
+    let requested = if request.hdr10 {
+        OutputGrade::Hdr10
+    } else {
+        OutputGrade::Sdr
+    };
+    if session_delivered_dynamic_range(source, &request.kind, requested) == Some("hdr10") {
+        OutputGrade::Hdr10
+    } else {
+        OutputGrade::Sdr
+    }
+}
+
+/// The height of the rendition an ordinary start runs. A copy runs the
+/// source raster, whatever fallback rung planning resolved for it; a
+/// transcode runs its rung.
+fn ordinary_rendition_height(
+    source: Option<&MediaFile>,
+    request: &crate::transcode::SessionRequest,
+) -> Option<u32> {
+    let height = match request.kind {
+        crate::transcode::SessionKind::Copy { .. } => source?.height?,
+        crate::transcode::SessionKind::Transcode { height } => height,
+    };
+    u32::try_from(height).ok().filter(|height| *height > 0)
+}
+
 /// The dynamic range this session puts on the wire, read off the session it
 /// actually built rather than the decision that suggested it — a burn or a
 /// forced rung produces a transcode `/decision` never promised, and the
@@ -1620,6 +1683,7 @@ pub(super) fn session_delivered_processing_shape(
     clippy::too_many_arguments,
     reason = "each is an independent fact of the session being described"
 )]
+#[cfg(test)]
 pub(super) fn session_enhancement(
     source: Option<&MediaFile>,
     kind: &crate::transcode::SessionKind,
@@ -1629,6 +1693,52 @@ pub(super) fn session_enhancement(
     effective: Option<&plurx_core::transcode::dv_processing::DvEffectiveProcessingReport>,
     snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
     decline: Option<&str>,
+) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
+    session_enhancement_with_title(
+        source,
+        kind,
+        grade,
+        processed_dv_profile,
+        processed_fel,
+        effective,
+        snapshot,
+        decline,
+        None,
+    )
+}
+
+/// The title scans' recorded facts — display-metadata levels for the
+/// Playback info `Dolby Vision metadata` row, and whether the enhancement
+/// layer is full or minimal. A read of the stored probe document; `None` for
+/// a non-DV source.
+pub(crate) async fn session_title_scan(
+    state: &AppState,
+    source: Option<&MediaFile>,
+) -> Option<plurx_core::playback::enhancement::TitleScanFacts> {
+    let file = source.filter(|file| file.dolby_vision.profile.is_some())?;
+    let probe = state
+        .store
+        .get_file_probe_json(file.id)
+        .await
+        .ok()
+        .flatten();
+    Some(plurx_core::playback::enhancement::TitleScanFacts::from_probe(probe.as_deref()))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each is an independent fact of the session being described"
+)]
+pub(crate) fn session_enhancement_with_title(
+    source: Option<&MediaFile>,
+    kind: &crate::transcode::SessionKind,
+    grade: plurx_core::transcode::OutputGrade,
+    processed_dv_profile: Option<u8>,
+    processed_fel: Option<bool>,
+    effective: Option<&plurx_core::transcode::dv_processing::DvEffectiveProcessingReport>,
+    snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
+    decline: Option<&str>,
+    title: Option<&plurx_core::playback::enhancement::TitleScanFacts>,
 ) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
     use plurx_core::playback::enhancement::{EnhancementFacts, EnhancementRoute};
     let file = source?;
@@ -1687,10 +1797,12 @@ pub(super) fn session_enhancement(
     plurx_core::playback::enhancement::playback_enhancement(&EnhancementFacts {
         source_profile: profile,
         source_el_present: file.dolby_vision.el_present,
+        el_kind: title.and_then(|title| title.el_kind),
         route,
         hdr_processing_enabled: setting(plurx_core::store::keys::DV_HDR_PROCESSING),
         fel_reencode_enabled: setting(plurx_core::store::keys::DV_FEL_REENCODE),
         decline_reason: decline,
+        levels: title.and_then(|title| title.levels.as_ref()),
     })
 }
 
@@ -2599,6 +2711,20 @@ async fn resolve_plan_for_principal_with_local_evidence(
         .as_ref()
         .map(plurx_core::playback::DeviceProfile::from_caps_v2);
     let candidate_auto_policy = !passive_compatibility && body.candidate_auto_policy();
+    // A start without an Auto candidate (Original, or a manual rung) still
+    // reaches the post-first-frame processed upgrade. Its ask is what it was
+    // accepted with: these capabilities and the catalog query a candidate
+    // would have carried, frozen before the body is consumed.
+    let accepted_processed = if candidate_context.is_none() {
+        source.zip(body.caps.as_ref()).map(|(file, caps)| {
+            (
+                caps.clone(),
+                body.selection_catalog_request(file, caps, original_copy_scope),
+            )
+        })
+    } else {
+        None
+    };
     let mut request = body.into_request(file_id, height);
     request.audio_claim = audio_claim;
     request.candidate_context = candidate_context;
@@ -2638,13 +2764,38 @@ async fn resolve_plan_for_principal_with_local_evidence(
     // answers it. Only after it is taken does the server's reconciliation
     // apply to the request that will actually be built.
     let fingerprint = request.durable_intent_fingerprint(principal);
-    let plan_notes = match review {
+    let mut plan_notes = match review {
         Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
     };
     normalize_catalog_selection(&mut request, height, candidate_copy)?;
     reconcile_request_audio(source, &mut request);
     reconcile_claimless_copy_audio(source, caps_profile.as_ref(), &mut request);
+    // Described after plan review, so the grade and route are the ones this
+    // start will actually run.
+    if accepted_processed.is_some()
+        && request.reopen_reason == Some(crate::transcode::ReopenReason::Stall)
+        && request.automatic
+    {
+        // The manager steps this recovery down a rung after create
+        // (`normalize_claimed_request`), so no ask frozen here can describe
+        // the rendition it will run; an upgrade from it would restore the
+        // rung that stalled. Its processing waits for the next start.
+        plan_notes.push(processing_declined_note(
+            "a stall recovery may step this start down a rung; its processed upgrade waits for the next start",
+        ));
+    } else if let Some((caps, query)) = accepted_processed {
+        request.accepted_processed_ask =
+            ordinary_rendition_height(source, &request).map(|target_height| {
+                Box::new(crate::transcode::ProcessedUpgradeAsk::accepted(
+                    caps,
+                    target_height,
+                    ordinary_delivered_grade(source, &request),
+                    matches!(request.kind, crate::transcode::SessionKind::Copy { .. }),
+                    query,
+                ))
+            });
+    }
     if let Some(file) = source {
         let platform = match request.previous_session_id.as_deref() {
             Some(previous) => state.transcode.refit_platform_for_session(previous).await,
@@ -2658,6 +2809,14 @@ async fn resolve_plan_for_principal_with_local_evidence(
         )
         .await
         .map_err(ApiError::Internal)?;
+    }
+    if !passive_compatibility
+        && matches!(
+            principal,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { .. }
+        )
+    {
+        request.prepare_vod_copy_layout();
     }
     // Observational retained-output override follows the original intent hash
     // and full route/audio reconciliation. Advisory JSON cannot construct it.
@@ -4528,13 +4687,15 @@ async fn create_with_purpose_attempt(
     {
         vec![state.node_id.clone()]
     } else {
+        let offer_source = source.as_ref().ok_or(ApiError::NotFound("file"))?;
         match MediaOfferRequest::new(
-            source.as_ref().ok_or(ApiError::NotFound("file"))?,
+            offer_source,
             height,
             (request.start_seconds * 1_000.0).round().max(0.0) as i64,
             request.audio_index,
             request.subtitle_burn,
             request.hdr10,
+            crate::transcode::split_copy_eligible(&request, offer_source),
         ) {
             Ok(offer_request) => state
                 .media_pool
@@ -4622,8 +4783,7 @@ async fn create_with_purpose_attempt(
                     replacement,
                     created,
                 } = started;
-                let degraded_processing =
-                    (info.degraded_processing.take(), info.processing_note.take());
+                let degraded_processing = info.degraded_processing.take();
                 let session_id = info.session_id.clone();
                 let response = RemoteStartResponse::from(info);
                 let guard = Some(if created {
@@ -4747,7 +4907,7 @@ async fn create_with_purpose_attempt(
                             "media worker {candidate} did not return an activation generation"
                         )));
                     };
-                    Ok((started.info, guard, Some(target_generation), (None, None)))
+                    Ok((started.info, guard, Some(target_generation), None))
                 }
                 // The worker cannot take this start now. Every 503 its start
                 // route answers is one a retry can outlive, so it is the
@@ -4813,13 +4973,7 @@ async fn create_with_purpose_attempt(
         }
     }
     crate::media_pool::mark_create_phase("dispatch");
-    let Some((
-        owner_node_id,
-        info,
-        guard,
-        local_serving_generation,
-        (degraded_processing, processing_note),
-    )) = started
+    let Some((owner_node_id, info, guard, local_serving_generation, degraded_processing)) = started
     else {
         return Err(last_error
             .unwrap_or_else(|| create_owner_transition("no eligible media worker was available")));
@@ -4863,13 +5017,6 @@ async fn create_with_purpose_attempt(
         let mut worker_request = request.clone();
         worker_request.request_id = Some(incarnation_id.clone());
         remote_request.request = worker_request;
-    }
-    if let Some(reason) = processing_note {
-        // This start's own processing was declined inside the worker (its
-        // FEL verdict, a busy reconstruction slot, a refused window): the
-        // enhancement detail names that reason, not a generic fallback.
-        processing_decline.get_or_insert_with(|| reason.clone());
-        plan_notes.push(processing_declined_note(&reason));
     }
     if !ingress_serving_authority.is_current(ingress_serving_generation) {
         return Err(ApiError::ServiceUnavailable(
@@ -4961,6 +5108,15 @@ async fn create_with_purpose_attempt(
         crate::transcode::SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
         crate::transcode::SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
     };
+    if !remote_request.request.seal_vod_copy_layout(
+        info.vod_copy_layout.clone(),
+        info.vod && matches!(info.kind, crate::transcode::SessionKind::Copy { .. }),
+    ) {
+        return Err(ApiError::ServiceUnavailable(
+            "the media worker did not seal the VOD copy layout".to_owned(),
+        ));
+    }
+    request.split_audio = remote_request.request.split_audio;
     let native_split_master = request.transport.as_deref() == Some("native")
         && request
             .candidate_context
@@ -5025,11 +5181,10 @@ async fn create_with_purpose_attempt(
     } else {
         None
     };
-    let effective_processing = state
-        .transcode
-        .dv_effective_report(&info.session_id, &incarnation_id)
-        .await;
-    let enhancement = session_enhancement(
+    let effective_processing =
+        super::control::current_dv_report(&state, &info.session_id, &incarnation_id).await;
+    let title_scan = session_title_scan(&state, source.as_ref()).await;
+    let enhancement = session_enhancement_with_title(
         source.as_ref(),
         &info.kind,
         info.grade,
@@ -5038,6 +5193,7 @@ async fn create_with_purpose_attempt(
         effective_processing.as_ref(),
         planning_snapshot,
         processing_decline.as_deref(),
+        title_scan.as_ref(),
     );
     let response = StartResponse {
         processed_upgrade: None,
@@ -5053,17 +5209,8 @@ async fn create_with_purpose_attempt(
         quality_catalog_status: quality_catalog.as_ref().map(
             |catalog| serde_json::json!({"complete": catalog.complete, "causes": catalog.causes}),
         ),
-        quality_candidates: quality_negotiated.then(|| {
-            quality_catalog
-                .as_ref()
-                .into_iter()
-                .flat_map(|result| result.candidates.iter())
-                .filter(|entry| {
-                    entry.dispatch_supported && (!entry.partial || entry.node_id == state.node_id)
-                })
-                .map(|entry| entry.candidate.clone())
-                .collect()
-        }),
+        quality_candidates: quality_negotiated
+            .then(|| public_quality_candidates(quality_catalog.as_ref(), &state.node_id)),
         session_id: info.session_id.clone(),
         playlist_url,
         duration_ms: info.duration_ms,
@@ -6924,6 +7071,11 @@ impl PreparedSourcePlayback {
             self.resolved.native_subtitle,
             delivered_dynamic_range,
         );
+        let title_scan = if self.relays_enhancement {
+            session_title_scan(state, Some(&self.file)).await
+        } else {
+            None
+        };
         Ok(StartResponse {
             processed_upgrade: self.processed_upgrade_offered.then(|| "offered".to_owned()),
             // The FEL / RPU / DYN rows local playback shows. A receiver that
@@ -6933,7 +7085,7 @@ impl PreparedSourcePlayback {
             enhancement: self
                 .relays_enhancement
                 .then(|| {
-                    session_enhancement(
+                    session_enhancement_with_title(
                         Some(&self.file),
                         &info.kind,
                         info.grade,
@@ -6942,6 +7094,7 @@ impl PreparedSourcePlayback {
                         None,
                         None,
                         None,
+                        title_scan.as_ref(),
                     )
                 })
                 .flatten(),
@@ -6959,17 +7112,7 @@ impl PreparedSourcePlayback {
                 .as_ref()
                 .map(|context| context.candidate_id),
             quality_candidates: quality_negotiated.then(|| {
-                self.resolved
-                    .quality_catalog
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|catalog| catalog.candidates.iter())
-                    .filter(|entry| {
-                        entry.dispatch_supported
-                            && (!entry.partial || entry.node_id == state.node_id)
-                    })
-                    .map(|entry| entry.candidate.clone())
-                    .collect()
+                public_quality_candidates(self.resolved.quality_catalog.as_ref(), &state.node_id)
             }),
             session_id: info.session_id.clone(),
             playlist_url,
@@ -7173,51 +7316,23 @@ pub(crate) async fn prepare_source_playback<
         body,
     )
     .await?;
-    let processed_upgrade_ask = crate::transcode::ProcessedUpgradeAsk {
-        canonical_caps: Some(caps.clone()),
-        target_height: u32::try_from(resolved.height).map_err(|_| refused("processed_height"))?,
-        // The grade of the ordinary output this Source will actually run —
-        // the resolved request's own shape, the same rule its Start reports
-        // as `delivered_dynamic_range` — not the separate planning decision,
-        // which may plan a transcode the resolved copy never performs.
-        grade: if session_delivered_dynamic_range(
-            Some(&file),
-            &resolved.request.kind,
-            if resolved.request.hdr10 {
-                plurx_core::transcode::OutputGrade::Hdr10
-            } else {
-                plurx_core::transcode::OutputGrade::Sdr
-            },
-        ) == Some("hdr10")
-        {
-            plurx_core::transcode::OutputGrade::Hdr10
-        } else {
-            plurx_core::transcode::OutputGrade::Sdr
-        },
-        names_processed: false,
-        route: resolved
-            .request
-            .candidate_context
-            .as_ref()
-            .map(|context| context.selected_candidate.route)
-            .unwrap_or(
-                if matches!(
-                    resolved.request.kind,
-                    crate::transcode::SessionKind::Copy { .. }
-                ) {
-                    plurx_core::playback::candidate::CandidateRoute::Remux
-                } else {
-                    plurx_core::playback::candidate::CandidateRoute::Encode
-                },
-            ),
-        average_bps: None,
-        peak_bps: None,
-        recipe_digest: [0; 32],
-        required_fel_qualification: None,
-        catalog_query: Some(processed_query),
-        display_target: None,
-        display_target_note: None,
-    };
+    // A shared copy has no Auto candidate context, so its ask is the one any
+    // start without a candidate derives — except that a Source's local Auto
+    // candidate, when it has one, still names the route it runs.
+    let mut processed_upgrade_ask = crate::transcode::ProcessedUpgradeAsk::accepted(
+        caps.clone(),
+        ordinary_rendition_height(Some(&file), &resolved.request)
+            .ok_or_else(|| refused("processed_height"))?,
+        ordinary_delivered_grade(Some(&file), &resolved.request),
+        matches!(
+            resolved.request.kind,
+            crate::transcode::SessionKind::Copy { .. }
+        ),
+        processed_query,
+    );
+    if let Some(context) = resolved.request.candidate_context.as_ref() {
+        processed_upgrade_ask.route = context.selected_candidate.route;
+    }
     let destination = if processed_upgrade.is_some() {
         match crate::transcode::TranscodeManager::processed_upgrade_gates_with_ask(
             &resolved.request,
@@ -7265,8 +7380,10 @@ pub(crate) async fn prepare_source_playback<
             "processed upgrades require a processing Source".into(),
         ));
     }
-    // Source preparation must not run the local census, which can change
-    // the revision being authorized and starts children outside its owner.
+    // Source preparation must not run the local census, which starts
+    // children outside any owner. The Source actor measures it under its own
+    // preparation authority (`hevc_census::ensure_source_census`) before it
+    // decides the copy; the census is not part of the file revision.
     let probe_json = snapshot.probe_json.as_deref();
     if probe_json.is_some_and(|probe| probe.len() > 1024 * 1024) {
         return Err(refused("stored_probe_bound"));

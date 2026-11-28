@@ -29,8 +29,8 @@ use super::telemetry::NodeLocalTelemetry;
 use super::{
     bounded_device_label, keys, validate_generated_settings, ApiKeyStore, ArtworkRepairFence,
     CacheAdminMutationClaim, DeleteTokenByPrefixOutcome, MetricsStore, NetworkPriorStore,
-    PlaybackTelemetryStore, PrometheusStoreSnapshot, SettingsStore, TokenAuthentication,
-    TokenSummary, UserStore, MAX_DEVICE_LABEL_BYTES, TOKEN_SUMMARY_MAX,
+    PlaybackDeviceCaps, PlaybackTelemetryStore, PrometheusStoreSnapshot, SettingsStore,
+    TokenAuthentication, TokenSummary, UserStore, MAX_DEVICE_LABEL_BYTES, TOKEN_SUMMARY_MAX,
 };
 use crate::domain::{
     ApiKey, NetworkPrior, NetworkPriorObservation, OfflinePackageStats, PlaybackEvent,
@@ -2407,6 +2407,7 @@ impl HiqliteAuthStore {
         store.install_source_arbitration_schema(None).await?;
         store.install_analysis_coordination_schema(None).await?;
         store.install_playback_input_keys_schema(None).await?;
+        store.install_playback_device_caps_schema(None).await?;
         store.install_subtitle_managed_schema(None).await?;
         store.install_subtitle_translation_schema(None).await?;
         store.install_subtitle_text_translation_schema(None).await?;
@@ -2423,6 +2424,10 @@ impl HiqliteAuthStore {
         store.install_offloaded_schema(None).await?;
         store.install_storage_domain_pending_schema(None).await?;
         store.install_dv_refit_schema(None).await?;
+        store.install_analysis_source_scope_schema(None).await?;
+        // Last: the lease expand replaces the resource views the managed v7
+        // step and the analysis source scope just installed.
+        store.install_source_leases_schema(None, true).await?;
         Ok(store)
     }
 
@@ -2622,6 +2627,7 @@ impl HiqliteAuthStore {
                     self.install_source_arbitration_schema(admission).await?;
                     self.install_analysis_coordination_schema(admission).await?;
                     self.install_playback_input_keys_schema(admission).await?;
+                    self.install_playback_device_caps_schema(admission).await?;
                     self.install_subtitle_managed_schema(admission).await?;
                     self.install_subtitle_translation_schema(admission).await?;
                     self.install_subtitle_text_translation_schema(admission)
@@ -2639,7 +2645,9 @@ impl HiqliteAuthStore {
                     self.install_offloaded_schema(admission).await?;
                     self.install_storage_domain_pending_schema(admission)
                         .await?;
-                    return self.install_dv_refit_schema(admission).await;
+                    self.install_dv_refit_schema(admission).await?;
+                    self.install_analysis_source_scope_schema(admission).await?;
+                    return self.install_source_leases_schema(admission, false).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -4363,7 +4371,7 @@ impl HiqliteAuthStore {
         ))
     }
 
-    async fn source_arbitration_shape(&self) -> Result<Option<bool>, StoreError> {
+    async fn source_arbitration_layout_has_v1_marker(&self) -> Result<Option<bool>, StoreError> {
         let expected = super::background_jobs_resources::source_arbitration_objects()?;
         let names = expected
             .iter()
@@ -4375,20 +4383,53 @@ impl HiqliteAuthStore {
         if installed.is_empty() {
             return Ok(None);
         }
-        if installed.len() != expected.len()
-            || installed
-                .iter()
-                .zip(&expected)
-                .any(|(row, (name, sql))| row.name != *name || row.sql != *sql)
-        {
+        let rows = installed
+            .iter()
+            .map(|row| (row.name.clone(), row.sql.clone()))
+            .collect::<Vec<_>>();
+        if !super::source_leases::accepts_extension_shape(&rows, &expected) {
             return Err(StoreError::Migration(
                 "foreground source arbitration extension has incompatible shape".into(),
             ));
         }
-        // authority: reader admission requires the committed source-arbitration singleton.
-        let marker=self.client().query_consistent_map::<CountRow,_>("source_arbitration_shape", "SELECT count(*) AS count FROM background_source_schema WHERE singleton=1 AND version=1",params!()).await?;
-        Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
+        Ok(Some(
+            rows.iter()
+                .any(|(name, _)| name == "background_source_schema"),
+        ))
     }
+
+    async fn source_arbitration_shape(&self) -> Result<Option<bool>, StoreError> {
+        let Some(has_v1_marker) = self.source_arbitration_layout_has_v1_marker().await? else {
+            return Ok(None);
+        };
+        if !has_v1_marker {
+            return Ok(Some(self.source_leases_schema_version().await? == Some(3)));
+        }
+        let marker = self
+            .client()
+            // authority: reader admission requires the committed source-arbitration singleton.
+            .query_consistent_map::<CountRow, _>(
+                "source_arbitration_shape",
+                "SELECT count(*) AS count FROM background_source_schema WHERE singleton=1 AND version=1",
+                params!(),
+            )
+            .await;
+        match marker {
+            Ok(rows) => Ok(Some(matches!(rows.as_slice(), [row] if row.count == 1))),
+            Err(error) => {
+                // Another startup may have contracted since our catalogue read.
+                // Only the exact contracted layout can settle a vanished v1 marker.
+                if self.source_arbitration_layout_has_v1_marker().await? == Some(false)
+                    && self.source_leases_schema_version().await? == Some(3)
+                {
+                    Ok(Some(true))
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
     async fn install_source_arbitration_schema(
         &self,
         admission: SchemaMigrationAdmission<'_>,
@@ -4455,6 +4496,62 @@ impl HiqliteAuthStore {
         let marker=self.client().query_consistent_map::<CountRow,_>("playback_input_keys_shape", "SELECT count(*) AS count FROM playback_input_keys_schema WHERE singleton=1 AND version>=1",params!()).await?;
         Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
     }
+
+    /// The device-capability extension (Curator ADR 0031 §5): its table,
+    /// index and marker. `None` when none exist, `Some(true)` when all match
+    /// exactly and the marker is committed; a partial shape is refused.
+    async fn playback_device_caps_shape(&self) -> Result<Option<bool>, StoreError> {
+        let expected = super::playback_device_caps::schema_objects()?;
+        let names = super::playback_device_caps::object_name_list();
+        // authority: the device-capability objects must match the committed extension exactly before the shape is trusted.
+        let installed=self.client().query_consistent_map::<RemoteShapeRow,_>("playback_device_caps_shape", format!("SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name IN ({names}) ORDER BY name"),params!()).await?;
+        if installed.is_empty() {
+            return Ok(None);
+        }
+        if installed.len() != expected.len()
+            || installed
+                .iter()
+                .zip(&expected)
+                .any(|(row, (name, sql))| row.name != *name || row.sql != *sql)
+        {
+            return Err(StoreError::Migration(
+                "playback device caps extension has incompatible shape".into(),
+            ));
+        }
+        // authority: the committed marker closes the extension; shape alone is not admission.
+        let marker=self.client().query_consistent_map::<CountRow,_>("playback_device_caps_shape", "SELECT count(*) AS count FROM playback_device_caps_schema WHERE singleton=1 AND version>=1",params!()).await?;
+        Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
+    }
+
+    async fn install_playback_device_caps_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        match self.playback_device_caps_shape().await? {
+            Some(true) => return Ok(()),
+            Some(false) => {
+                return Err(StoreError::Migration(
+                    "playback device caps marker missing".into(),
+                ))
+            }
+            None => {}
+        }
+        let raced=format!("SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ({})) THEN 1 ELSE json('playback device caps extension raced') END",super::playback_device_caps::object_name_list());
+        let mut statements = vec![(raced, params!())];
+        statements.extend(
+            super::playback_device_caps::statements().map(|sql| (sql.to_owned(), params!())),
+        );
+        admit_schema_migration(admission)?;
+        let attempt = self.schema_migration_transaction(statements).await;
+        if self.playback_device_caps_shape().await? == Some(true) {
+            return Ok(());
+        }
+        attempt?;
+        Err(StoreError::Migration(
+            "playback device caps extension did not settle".into(),
+        ))
+    }
+
     async fn install_playback_input_keys_schema(
         &self,
         admission: SchemaMigrationAdmission<'_>,
@@ -4583,7 +4680,7 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let version = self.subtitle_managed_schema_version().await?;
-        if version == Some(6) {
+        if version == Some(7) {
             return Ok(());
         }
         if version.is_none() {
@@ -4650,7 +4747,7 @@ impl HiqliteAuthStore {
             );
             admit_schema_migration(admission)?;
             let result = self.schema_migration_transaction(statements).await;
-            if !matches!(self.subtitle_managed_schema_version().await?, Some(4..=6)) {
+            if !matches!(self.subtitle_managed_schema_version().await?, Some(4..=7)) {
                 result?;
                 return Err(StoreError::Migration(
                     "managed prepared-artifact schema upgrade did not settle".into(),
@@ -4669,7 +4766,7 @@ impl HiqliteAuthStore {
             );
             admit_schema_migration(admission)?;
             let result = self.schema_migration_transaction(statements).await;
-            if !matches!(self.subtitle_managed_schema_version().await?, Some(5 | 6)) {
+            if !matches!(self.subtitle_managed_schema_version().await?, Some(5..=7)) {
                 result?;
                 return Err(StoreError::Migration(
                     "managed targeted-probe schema upgrade did not settle".into(),
@@ -4688,7 +4785,7 @@ impl HiqliteAuthStore {
             );
             admit_schema_migration(admission)?;
             let result = self.schema_migration_transaction(statements).await;
-            if self.subtitle_managed_schema_version().await? != Some(6) {
+            if !matches!(self.subtitle_managed_schema_version().await?, Some(6 | 7)) {
                 result?;
                 return Err(StoreError::Migration(
                     "fragment publisher resource upgrade did not settle".into(),
@@ -4696,6 +4793,25 @@ impl HiqliteAuthStore {
             }
         }
         if self.subtitle_managed_schema_version().await? == Some(6) {
+            let mut statements = vec![(
+                super::subtitle_managed_schema::FILE_ROOT_GUARD.to_owned(),
+                params!(super::subtitle_managed_schema::file_root_predecessor_view()),
+            )];
+            statements.extend(
+                super::subtitle_managed_schema::file_root_statements()
+                    .into_iter()
+                    .map(|sql| (sql, params!())),
+            );
+            admit_schema_migration(admission)?;
+            let result = self.schema_migration_transaction(statements).await;
+            if self.subtitle_managed_schema_version().await? != Some(7) {
+                result?;
+                return Err(StoreError::Migration(
+                    "file-root resource upgrade did not settle".into(),
+                ));
+            }
+        }
+        if self.subtitle_managed_schema_version().await? == Some(7) {
             return Ok(());
         }
         Err(StoreError::Migration(
@@ -4858,7 +4974,7 @@ impl HiqliteAuthStore {
         ))
     }
 
-    async fn dv_title_jobs_schema_version(&self) -> Result<Option<i64>, StoreError> {
+    async fn dv_title_jobs_catalogue_version(&self) -> Result<Option<i64>, StoreError> {
         // authority: committed extension shape and marker fence title-job migration.
         let rows = self
             .client()
@@ -4872,26 +4988,35 @@ impl HiqliteAuthStore {
             .into_iter()
             .map(|r| (r.name, r.sql))
             .collect::<Vec<_>>();
-        let version = super::dv_title_jobs_schema::version(&shape)?;
-        if matches!(version, Some(1 | 2)) {
-            // authority: exact committed extension marker, not a local cache.
-            let rows = self
-                .client()
-                .query_consistent_map::<CountRow, _>(
-                    "dv_title_jobs_schema_version",
-                    if version == Some(1) {
-                        super::dv_title_jobs_schema::MARKER_SQL_V1
-                    } else {
-                        super::dv_title_jobs_schema::MARKER_SQL
-                    },
-                    params!(),
-                )
-                .await?;
-            if !matches!(rows.as_slice(), [row] if row.count == 1) {
-                return Err(StoreError::Migration("title jobs marker missing".into()));
+        super::dv_title_jobs_schema::version(&shape)
+    }
+
+    async fn dv_title_jobs_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let Some(version) = self.dv_title_jobs_catalogue_version().await? else {
+            return Ok(None);
+        };
+        let rows = self
+            .client()
+            // A concurrent migration can commit between the catalogue and marker reads.
+            .query_consistent_map::<CountRow, _>(
+                "dv_title_jobs_schema_version",
+                "SELECT version AS count FROM dv_title_jobs_schema WHERE singleton=1",
+                params!(),
+            )
+            .await?;
+        match rows.as_slice() {
+            [row] if row.count == version => Ok(Some(version)),
+            [row]
+                if version < 3
+                    && row.count == 3
+                    && self.dv_title_jobs_catalogue_version().await? == Some(3) =>
+            {
+                Ok(Some(3))
             }
+            _ => Err(StoreError::Migration(
+                "title jobs marker does not match catalogue".into(),
+            )),
         }
-        Ok(version)
     }
 
     async fn install_dv_title_jobs_schema(
@@ -4900,20 +5025,16 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let version = self.dv_title_jobs_schema_version().await?;
-        if version == Some(2) {
+        if version == Some(3) {
             return Ok(());
         }
-        let statements = (if version == Some(1) {
-            super::dv_title_jobs_schema::migration_statements()
-        } else {
-            super::dv_title_jobs_schema::statements()
-        })
-        .into_iter()
-        .map(|sql| (sql, params!()))
-        .collect::<Vec<_>>();
+        let statements = super::dv_title_jobs_schema::migration_statements(version)
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
         admit_schema_migration(admission)?;
         let result = self.schema_migration_transaction(statements).await;
-        if self.dv_title_jobs_schema_version().await? == Some(2) {
+        if self.dv_title_jobs_schema_version().await? == Some(3) {
             return Ok(());
         }
         result?;
@@ -5154,6 +5275,71 @@ impl HiqliteAuthStore {
         ))
     }
 
+    async fn analysis_source_scope_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed view shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "analysis_source_scope_schema_version",
+                super::analysis_source_scope::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::analysis_source_scope::version(&shape)?;
+        if version == Some(1) {
+            let rows = self
+                .client()
+                // authority: admission must observe the committed marker paired with the shape.
+                .query_consistent_map::<CountRow, _>(
+                    "analysis_source_scope_schema_version",
+                    super::analysis_source_scope::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration(
+                    "analysis source scope schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+
+    /// Analysis reads only the library root that holds its file: the view
+    /// replaced under its own name. Older nodes neither read the marker nor
+    /// verify the view; they read the narrowed rows through the same triggers.
+    async fn install_analysis_source_scope_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.analysis_source_scope_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let mut statements = vec![(
+            super::analysis_source_scope::GUARD.to_owned(),
+            params!(super::analysis_source_scope::predecessor_view()),
+        )];
+        statements.extend(
+            super::analysis_source_scope::statements()
+                .into_iter()
+                .map(|sql| (sql, params!())),
+        );
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.analysis_source_scope_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "analysis source scope schema install did not settle".into(),
+        ))
+    }
+
     async fn custody_retention_schema_version(&self) -> Result<Option<i64>, StoreError> {
         let rows = self
             .client()
@@ -5355,6 +5541,119 @@ impl HiqliteAuthStore {
         Err(StoreError::Migration(
             "storage domain pending schema install did not settle".into(),
         ))
+    }
+
+    async fn source_leases_catalogue_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: the committed lease catalogue decides expand and contract.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "source_leases_schema_version",
+                super::source_leases::shape_sql(),
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        super::source_leases::version(&shape)
+    }
+
+    async fn source_leases_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let Some(version) = self.source_leases_catalogue_version().await? else {
+            return Ok(None);
+        };
+        let rows = self
+            .client()
+            // authority: pair the marker with the observed catalogue or its exact successor.
+            .query_consistent_map::<CountRow, _>(
+                "source_leases_schema_version",
+                "SELECT version AS count FROM source_lease_schema WHERE singleton=1",
+                params!(),
+            )
+            .await?;
+        match rows.as_slice() {
+            [row] if row.count == version => Ok(Some(version)),
+            [row] if version == 2 && row.count == 3 => {
+                if self.source_leases_catalogue_version().await? == Some(3) {
+                    Ok(Some(3))
+                } else {
+                    Err(StoreError::Migration(
+                        "source lease schema marker does not match catalogue".into(),
+                    ))
+                }
+            }
+            _ => Err(StoreError::Migration(
+                "source lease schema marker does not match catalogue".into(),
+            )),
+        }
+    }
+
+    /// Source leases, installed last. The expand runs on the first start of a
+    /// lease-aware binary; v1 objects stay so a node still on the old binary
+    /// keeps serving playback. The contract drops them on the first start
+    /// after every active node has heartbeated the lease capability, normally
+    /// the next deploy; until then it is refused and the expanded store runs.
+    /// A new cluster (`fresh`) contracts at once.
+    async fn install_source_leases_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+        fresh: bool,
+    ) -> Result<(), StoreError> {
+        static WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        admit_schema_migration(admission)?;
+        let mut version = self.source_leases_schema_version().await?;
+        if version.is_none() {
+            let mut statements = vec![("SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name GLOB 'source_lease*') THEN 1 ELSE json('source lease expand raced') END".to_owned(), params!())];
+            statements.extend(
+                super::source_leases::statements(super::source_leases::EXPAND)
+                    .into_iter()
+                    .map(|sql| (sql, params!())),
+            );
+            admit_schema_migration(admission)?;
+            let attempt = self.schema_migration_transaction(statements).await;
+            version = self.source_leases_schema_version().await?;
+            if version.is_none() {
+                attempt?;
+                return Err(StoreError::Migration(
+                    "source lease expand did not settle".into(),
+                ));
+            }
+        }
+        if version == Some(3) {
+            return Ok(());
+        }
+        let ready = if fresh {
+            "1".to_owned()
+        } else {
+            crate::cluster::membership::source_leases_ready_predicate()
+        };
+        let mut statements = vec![(format!("SELECT CASE WHEN {ready} THEN 1 ELSE json('source lease contract waits for every node') END"), params!())];
+        statements.extend(
+            super::source_leases::statements(super::source_leases::CONTRACT)
+                .into_iter()
+                .map(|sql| (sql, params!())),
+        );
+        admit_schema_migration(admission)?;
+        let attempt = self.schema_migration_transaction(statements).await;
+        if self.source_leases_schema_version().await? == Some(3) {
+            tracing::info!("source lease contract applied: v1 source-owner objects dropped");
+            return Ok(());
+        }
+        // The expanded store is complete on its own; the contract retries on
+        // the next start.
+        if !WAITING.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            match attempt {
+                Ok(_) => tracing::info!(
+                    "source lease contract waits for every node to run a lease-aware binary"
+                ),
+                Err(error) => {
+                    tracing::info!(%error, "source lease contract waits for every node to run a lease-aware binary")
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn library_annotations_schema_version(&self) -> Result<Option<i64>, StoreError> {
@@ -7171,7 +7470,10 @@ impl MetricsStore for HiqliteAuthStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000) \
                             + (SELECT COUNT(*) FROM analysis_source_reservations \
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000)), \
-                        'source_recovery_pending', (SELECT COUNT(DISTINCT held.custody_id) FROM source_io_occupancy held JOIN background_source_current_owners c ON c.custody_id = held.custody_id WHERE held.active_occupancy=1 AND (CASE WHEN c.authority_expires_at_ms>0 THEN c.authority_expires_at_ms WHEN c.phase='cleanup_pending' THEN c.updated_at_ms WHEN c.phase='paused' THEN 0 ELSE NULL END) <= $2 * 1000 - 180000), \
+                        'source_recovery_pending', (SELECT COUNT(*) FROM source_leases WHERE expires_at_ms <= $2 * 1000 - 180000), \
+                        'source_leases', json_object('playback',(SELECT COUNT(*) FROM source_leases WHERE node_id = $1 AND owner_kind = 'playback'),'job',(SELECT COUNT(*) FROM source_leases WHERE node_id = $1 AND owner_kind = 'job'),'analysis',(SELECT COUNT(*) FROM source_leases WHERE node_id = $1 AND owner_kind = 'analysis'),'lease',(SELECT COUNT(*) FROM source_leases WHERE node_id = $1 AND owner_kind = 'lease'),'offline',(SELECT COUNT(*) FROM source_leases WHERE node_id = $1 AND owner_kind = 'offline')), \
+                        'source_readers_per_root', COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'jobs.source_readers_per_root' AND CAST(value AS INTEGER) BETWEEN 1 AND 16), 2), \
+                        'source_lease_schema_version', COALESCE((SELECT version FROM source_lease_schema WHERE singleton = 1), 0), \
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json, ")
                     + &request_health
                     + " FROM offline_packages WHERE node_id = $1",
@@ -8027,6 +8329,82 @@ impl UserStore for HiqliteAuthStore {
             .collect())
     }
 
+    async fn put_device_caps(
+        &self,
+        token_hash: &str,
+        caps: &str,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        // This replica's copy decides whether to write at all: an unchanged
+        // document is the common case, and it must not cost a Raft entry.
+        // The upsert's own predicate is what holds across replicas.
+        let current = self
+            .client()
+            .query_map::<DeviceCapsCurrentRow, _>(
+                "put_device_caps",
+                super::playback_device_caps::CURRENT,
+                params!(token_hash),
+            )
+            .await?;
+        if current.first().map(|row| row.caps.as_str()) == Some(caps) {
+            return Ok(false);
+        }
+        Ok(self
+            .execute_idempotent(
+                "put_device_caps",
+                super::playback_device_caps::UPSERT,
+                params!(caps, now, token_hash),
+            )
+            .await?
+            > 0)
+    }
+
+    async fn device_caps_for_user(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<PlaybackDeviceCaps>, StoreError> {
+        let rows = self
+            .client()
+            .query_map::<DeviceCapsListRow, _>(
+                "device_caps_for_user",
+                super::playback_device_caps::list_for_user_sql(),
+                params!(
+                    MAX_DEVICE_LABEL_BYTES as i64,
+                    keys::AUTH_TOKEN_EXPIRY_ENABLED,
+                    keys::AUTH_TOKEN_IDLE_DAYS,
+                    keys::AUTH_TOKEN_EXPIRY_SINCE,
+                    user_id,
+                    TOKEN_SUMMARY_MAX as i64
+                ),
+            )
+            .await?;
+        Ok(super::playback_device_caps::live(
+            rows.into_iter().map(|row| row.0).collect(),
+            self.now()?,
+        ))
+    }
+
+    async fn device_caps_for_all_users(&self) -> Result<Vec<PlaybackDeviceCaps>, StoreError> {
+        let rows = self
+            .client()
+            .query_map::<DeviceCapsListRow, _>(
+                "device_caps_for_all_users",
+                super::playback_device_caps::list_all_sql(),
+                params!(
+                    MAX_DEVICE_LABEL_BYTES as i64,
+                    keys::AUTH_TOKEN_EXPIRY_ENABLED,
+                    keys::AUTH_TOKEN_IDLE_DAYS,
+                    keys::AUTH_TOKEN_EXPIRY_SINCE,
+                    super::playback_device_caps::DEVICE_CAPS_LIST_MAX as i64
+                ),
+            )
+            .await?;
+        Ok(super::playback_device_caps::live(
+            rows.into_iter().map(|row| row.0).collect(),
+            self.now()?,
+        ))
+    }
+
     async fn delete_token_by_prefix_for_user(
         &self,
         user_id: i64,
@@ -8783,6 +9161,39 @@ struct TokenUserRow {
     user: UserRow,
     last_seen_at: i64,
     expiry: Option<crate::auth::TokenIdlePolicy>,
+}
+
+struct DeviceCapsCurrentRow {
+    caps: String,
+}
+
+impl From<&mut Row<'_>> for DeviceCapsCurrentRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            caps: row.get("caps"),
+        }
+    }
+}
+
+struct DeviceCapsListRow(super::playback_device_caps::ListedDeviceCaps);
+
+impl From<&mut Row<'_>> for DeviceCapsListRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(super::playback_device_caps::ListedDeviceCaps {
+            record: PlaybackDeviceCaps {
+                token_prefix: row.get("token_prefix"),
+                device: row.get("device"),
+                user_id: row.get("user_id"),
+                username: row.get("username"),
+                last_seen_at: row.get("last_seen_at"),
+                caps: row.get("caps"),
+                updated_at: row.get("updated_at"),
+            },
+            expiry_enabled: row.get("expiry_enabled"),
+            idle_days: row.get("idle_days"),
+            expiry_since: row.get("expiry_since"),
+        })
+    }
 }
 
 struct TokenSummaryRow {

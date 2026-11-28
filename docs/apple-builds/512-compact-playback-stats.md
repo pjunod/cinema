@@ -1,6 +1,5 @@
 # Compact playback stats across clients
 
-Build: 79
 Issue: #512
 
 Mini, Standard, and Debug playback information is compact across Apple, web,

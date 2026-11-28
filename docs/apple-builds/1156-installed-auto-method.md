@@ -1,6 +1,5 @@
 # Playback info describes the installed Auto rung
 
-Build: 264
 Issue: #1156
 
 After Auto switches an original remux to an encoded rung, Playback info now

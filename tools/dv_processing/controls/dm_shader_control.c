@@ -13,9 +13,10 @@
 //   target NITS FLOOR_NITS PRIM(0 bt2020|1 p3d65|2 bt709) SMAST_NITS
 //
 // usage: dm_shader_control --pq-helper eotf|oetf RGBA_F32_IN W H GPU_OUT [unfused-fma|no-precise]
-// Evaluates one precise CM4 transfer helper of the production final-pass header on every R, G and B
-// of the raster, so run_pq_helper_exact.py can compare each result with the correctly rounded value.
-// The optional mutation rewrites this run's copy of the header (a*b+c for fma, or no `precise`):
+// Evaluates one CM4 transfer helper of the production final-pass header on every R, G and B of the
+// raster, so run_pq_helper_exact.py can compare each result with the header's CPU evaluation.
+// The optional mutation rewrites this run's copy of the header (every fma as pqt_mad, a separately
+// rounded multiply and add, or no `precise`):
 // a device on which a mutated header still passes cannot tell the helpers from broken ones.
 #include <math.h>
 #include <stdbool.h>
@@ -57,7 +58,7 @@ static int pq_helper(int argc, char **argv) {
   char *header; int changed = 1;
   if (argc == 7) { header = malloc(sizeof(dv_dm_glsl_cm4_final)); require(header != NULL, "memory"); strcpy(header, dv_dm_glsl_cm4_final); }
   else if (!strcmp(argv[7], "unfused-fma"))
-    header = replace_all(dv_dm_glsl_cm4_final, "fma(a.hi,b.hi,negative_product)", "a.hi*b.hi+negative_product", &changed);
+    header = replace_all(dv_dm_glsl_cm4_final, "fma(", "pqt_mad(", &changed);
   else if (!strcmp(argv[7], "no-precise")) header = replace_all(dv_dm_glsl_cm4_final, "precise ", "", &changed);
   else { header = NULL; require(false, "mutation is unfused-fma or no-precise"); }
   require(changed > 0, "mutation matched nothing in the header");
@@ -79,21 +80,27 @@ static int pq_helper(int argc, char **argv) {
   pl_dispatch dispatch = pl_dispatch_create(log, gpu);
   require(dispatch != NULL, "dispatch");
   static float u[DV_DM_U][4];   // the header's curve functions name it; the helpers do not read it
-  struct pl_shader_desc d = {.desc = {.name = "master", .type = PL_DESC_SAMPLED_TEX},
-      .binding = {.object = source, .address_mode = PL_TEX_ADDRESS_CLAMP, .sample_mode = PL_TEX_SAMPLE_NEAREST}};
+  pl_tex tables = dv_dm_pq_tex(gpu);
+  require(tables != NULL, "PQ helper tables");
+  struct pl_shader_desc d[2] = {
+      {.desc = {.name = "master", .type = PL_DESC_SAMPLED_TEX},
+       .binding = {.object = source, .address_mode = PL_TEX_ADDRESS_CLAMP, .sample_mode = PL_TEX_SAMPLE_NEAREST}},
+      {.desc = {.name = "pqtab", .type = PL_DESC_SAMPLED_TEX},
+       .binding = {.object = tables, .address_mode = PL_TEX_ADDRESS_CLAMP, .sample_mode = PL_TEX_SAMPLE_NEAREST}}};
   struct pl_var var = pl_var_vec4("u"); var.dim_a = DV_DM_U;
   struct pl_shader_var v = {.var = var, .data = u, .dynamic = true};
   pl_shader sh = pl_dispatch_begin(dispatch);
   require(pl_shader_custom(sh, &(struct pl_custom_shader){
       .description = "dv-dm-pq-helper", .header = header, .body = body,
       .input = PL_SHADER_SIG_NONE, .output = PL_SHADER_SIG_COLOR,
-      .descriptors = &d, .num_descriptors = 1, .variables = &v, .num_variables = 1,
+      .descriptors = d, .num_descriptors = 2, .variables = &v, .num_variables = 1,
       .output_w = w, .output_h = h}) &&
       pl_dispatch_finish(dispatch, pl_dispatch_params(.shader = &sh, .target = out)), "shader");
   require(pl_tex_download(gpu, pl_tex_transfer_params(.tex = out, .ptr = gpu_out)), "download");
   FILE *o = fopen(argv[6], "wb");
   require(o && fwrite(gpu_out, 16, n, o) == n && !fclose(o), "output");
   pl_dispatch_destroy(&dispatch); pl_tex_destroy(gpu, &out); pl_tex_destroy(gpu, &source);
+  pl_tex_destroy(gpu, &dv_dm_gpu.ptex);
   pl_vulkan_destroy(&vk); pl_log_destroy(&log);
   free(pix); free(gpu_out); free(header);
   return 0;

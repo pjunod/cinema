@@ -8,6 +8,7 @@ env:
 
 jobs:
   cluster-store-backstop:
+    if: github.server_url != 'https://github.com'
     name: full unsharded replicated Store contracts
     runs-on: [ci-nonvoter-store]
     timeout-minutes: 40

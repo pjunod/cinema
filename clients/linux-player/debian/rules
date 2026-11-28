@@ -18,12 +18,13 @@ override_dh_auto_build:
 
 override_dh_auto_test:
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
-	# The source package has the launcher but not the server's caps.rs, so
-	# the caps drift check is the one skip allowed here; make
-	# linux-player-check and the package verification run it, and fail on
-	# any skip.
+	# The source package has the launcher but not the server's caps.rs or
+	# the playback-info field contract, so those two drift checks are the
+	# skips allowed here; make linux-player-check and the package
+	# verification run them, and fail on any skip.
 	python3 -B packaging/run-tests tests \
-	  --allow-skip test_caps_and_trust.CapsTests.test_every_field_is_a_caps_rs_field
+	  --allow-skip test_caps_and_trust.CapsTests.test_every_field_is_a_caps_rs_field \
+	  --allow-skip test_badges.Provenance.test_labels_equal_the_contract
 	lua5.2 tests/test_cinema.lua plurx_player/scripts/cinema.lua
 endif
 

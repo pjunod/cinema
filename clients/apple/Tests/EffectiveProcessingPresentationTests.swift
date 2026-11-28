@@ -254,6 +254,127 @@ final class EffectiveProcessingPresentationTests: XCTestCase {
         XCTAssertEqual(ids.firstIndex(of: "enhancement"), ids.firstIndex(of: "dynamic_range").map { $0 + 1 })
     }
 
+    // MARK: Dolby Vision metadata and display target rows
+
+    private func processedReport(withRows rows: String = """
+        ,"dv_metadata":{"in_file":{"levels":[1,2],"cm_version":"v4.0","text":"L1, L2"},
+                        "applied":{"levels":[{"level":1}],"text":"L1"},
+                        "left_for_display":{"levels":[2],"text":"L2"}},
+         "display_target":{"reported_peak_text":"1000 nits (platform)",
+                           "mapped_for_text":"Mapped for 1000 nits","title_peak_text":"4000 nits"}
+        """) throws -> EffectiveProcessingReport {
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(EffectiveProcessingReport.self, from: Data("""
+        {"generation":"\(generation)","hdr10_enhanced":true,"fel_contributed":true,
+         "applied_operations":["RpuColorConversion"]\(rows)}
+        """.utf8))
+    }
+
+    private func enhancementWire(_ extra: String, requires: Bool) throws -> PlaybackEnhancement {
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(PlaybackEnhancement.self, from: Data("""
+        {"active":["RPU"],"details":[]\(requires ? ",\"requires_effective_processing\":true" : "")\(extra)}
+        """.utf8))
+    }
+
+    func testDvRowsLabelsAndSubRowOrderMatchTheContract() throws {
+        let url = try XCTUnwrap(Bundle(for: EffectiveProcessingPresentationTests.self)
+            .url(forResource: "playback-info-fields", withExtension: "json"))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let fields = try XCTUnwrap(root["fields"] as? [[String: Any]])
+        let ids = fields.compactMap { $0["id"] as? String }
+        XCTAssertEqual(applePlaybackInfoFields.map(\.id), ids.filter { id in
+            applePlaybackInfoFields.contains { $0.id == id } })
+        for id in ["dv_metadata", "display_target"] {
+            let contract = try XCTUnwrap(fields.first { $0["id"] as? String == id })
+            let ours = try XCTUnwrap(applePlaybackInfoFields.first { $0.id == id })
+            XCTAssertEqual(ours.label, contract["label"] as? String)
+            XCTAssertEqual(ours.section, contract["section"] as? String)
+            XCTAssertEqual(ours.subRows, contract["sub_rows"] as? [String])
+            XCTAssertEqual(ours.modes.map(\.rawValue).sorted(), (contract["modes"] as? [String])?.sorted())
+            XCTAssertEqual(ours.placement == .notes, contract["placement"] as? String == "notes")
+        }
+        let order = applePlaybackInfoFields.map(\.id)
+        let start = try XCTUnwrap(order.firstIndex(of: "enhancement"))
+        XCTAssertEqual(Array(order[start...(start + 3)]), ["enhancement", "dv_metadata", "display_target", "dv_refit"])
+    }
+
+    func testProcessedDvRowsComeOnlyFromTheCurrentReport() throws {
+        let processed = try enhancementWire("", requires: true)
+        let report = try processedReport()
+        let rows = PlayerView.dvProvenanceRows(processed, effectiveProcessing: report,
+            activeGeneration: generation, delivered: "hdr10")
+        XCTAssertEqual(rows.metadata?.value, "L1")
+        XCTAssertEqual(rows.metadata?.note,
+            "In the file: L1, L2\nApplied by Cinema: L1\nLeft for the display: L2")
+        XCTAssertEqual(rows.target?.value, "Mapped for 1000 nits")
+        XCTAssertEqual(rows.target?.note,
+            "Reported peak: 1000 nits (platform)\nMapped for: Mapped for 1000 nits\nTitle peak: 4000 nits")
+        // No report, a stale generation or the wrong grade: both rows clear.
+        for (shown, active, delivered) in [(nil as EffectiveProcessingReport?, generation, "hdr10"),
+                                           (report, "replacement", "hdr10"), (report, generation, "sdr")] {
+            let cleared = PlayerView.dvProvenanceRows(processed, effectiveProcessing: shown,
+                activeGeneration: active, delivered: delivered)
+            XCTAssertNil(cleared.metadata); XCTAssertNil(cleared.target)
+        }
+        // A processed delivery never borrows the enhancement's own metadata.
+        let borrowing = try enhancementWire(
+            ",\"dv_metadata\":{\"in_file\":{\"text\":\"a\"},\"applied\":{\"text\":\"b\"},\"left_for_display\":{\"text\":\"c\"}}",
+            requires: true)
+        let bare = try processedReport(withRows: "")
+        let none = PlayerView.dvProvenanceRows(borrowing, effectiveProcessing: bare,
+            activeGeneration: generation, delivered: "hdr10")
+        XCTAssertNil(none.metadata); XCTAssertNil(none.target)
+    }
+
+    func testUnprocessedDeliveryTakesMetadataFromTheEnhancementAndHasNoDisplayTarget() throws {
+        let native = try enhancementWire(
+            ",\"dv_metadata\":{\"in_file\":{\"text\":\"Unavailable\"},\"applied\":{\"text\":\"None\"},\"left_for_display\":{\"text\":\"L1, L2\"}}",
+            requires: false)
+        let report = try processedReport()
+        let rows = PlayerView.dvProvenanceRows(native, effectiveProcessing: report,
+            activeGeneration: generation, delivered: "dolby_vision")
+        XCTAssertEqual(rows.metadata?.value, "None")
+        XCTAssertEqual(rows.metadata?.note,
+            "In the file: Unavailable\nApplied by Cinema: None\nLeft for the display: L1, L2")
+        XCTAssertNil(rows.target)
+        XCTAssertNil(PlayerView.dvProvenanceRows(nil, effectiveProcessing: nil,
+            activeGeneration: nil, delivered: nil).metadata)
+        // The enhancement round-trips with its metadata intact.
+        let data = try JSONEncoder().encode(native)
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        XCTAssertEqual(try decoder.decode(PlaybackEnhancement.self, from: data), native)
+    }
+
+    func testOutOfShapeDvTextDropsItsRowAndDecodesLeniently() throws {
+        let long = String(repeating: "x", count: 513)
+        let bad = ["", "   ", "line\nbreak", "tab\there", "del\u{7F}", "c1\u{85}", long]
+        for text in bad {
+            XCTAssertNil(PlayerView.dvRow("dv_metadata", value: "ok", texts: ["a", text, "c"]), text)
+            XCTAssertNil(PlayerView.dvRow("display_target", value: text, texts: ["a", text, "c"]), text)
+        }
+        XCTAssertNil(PlayerView.dvRow("dv_metadata", value: "ok", texts: ["a", nil, "c"]))
+        XCTAssertNotNil(PlayerView.dvRow("dv_metadata", value: "ok", texts: ["a", String(repeating: "x", count: 512), "c"]))
+        // One failing text drops its row; the other row is unaffected.
+        let mixed = try processedReport(withRows: """
+            ,"dv_metadata":{"in_file":{"text":"a"},"applied":{"text":"b"},"left_for_display":{"text":"bad\\nline"}},
+             "display_target":{"reported_peak_text":"p","mapped_for_text":"m","title_peak_text":"t"}
+            """)
+        let rows = PlayerView.dvProvenanceRows(try enhancementWire("", requires: true),
+            effectiveProcessing: mixed, activeGeneration: generation, delivered: "hdr10")
+        XCTAssertNil(rows.metadata)
+        XCTAssertEqual(rows.target?.value, "m")
+        // Unknown or wrongly typed fields decode to nothing instead of refusing.
+        let lenient = try processedReport(withRows: ",\"dv_metadata\":5,\"display_target\":{\"mapped_for_text\":7}")
+        XCTAssertTrue(lenient.matches(generation: generation, delivered: "hdr10"))
+        XCTAssertNil(lenient.displayTarget?.mappedForText)
+        // A wrongly shaped block carries no text, so it shows no row.
+        let wrong = try enhancementWire(",\"dv_metadata\":\"x\"", requires: false)
+        XCTAssertTrue(wrong.dvMetadata?.texts.allSatisfy { $0 == nil } ?? true)
+        XCTAssertNil(PlayerView.dvProvenanceRows(wrong, effectiveProcessing: nil,
+            activeGeneration: nil, delivered: "dolby_vision").metadata)
+    }
+
     @MainActor
     func testControllerHoldsEnhancementAcrossSeekAndClearsItOnStop() async throws {
         let decoder = JSONDecoder()

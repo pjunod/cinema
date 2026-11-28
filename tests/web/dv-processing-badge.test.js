@@ -408,3 +408,53 @@ test('the rolling Dolby Vision report upgrades the current Profile 8.1 row and c
   p.effectiveProcessing=null;
   assert.equal(playerEnhancementRow(p).value,'DYN');
 });
+
+test('a prepared Profile 8.1 successor keeps FEL, RPU and DYN once its report arrives, with no tone mapping',()=>{
+  // Production 2026-11-23: the committed successor showed FEL · RPU · DYN, then its
+  // first report collapsed the pills to FEL and added a false Tone mapping pill.
+  const context=enhancementSetup({active:['FEL','RPU','DYN'],details:[
+    {badge:'FEL',active:true,text:'FEL: full enhancement layer reconstructed into the Profile 8.1 picture'},
+    {badge:'RPU',active:true,text:'RPU: reshaping applied by the server'},
+    {badge:'DYN',active:true,text:'DYN: Dolby Vision dynamic metadata reaches the display'}]});
+  const p=context.PLAYER;
+  Object.assign(p,{deliveredRange:'dolby_vision',deliveredDvProfile:8,effectiveProcessing:null});
+  assert.deepEqual(pills(context),['FEL','RPU','DYN'],'before the first report');
+  p.effectiveProcessing={generation,hdr10_enhanced:false,profile81_reconstructed:true,fel_contributed:true,
+    applied_operations:['RepresentationNormalization','PolynomialReshape','LinearNlqResidual','RpuColorConversion',
+      'TargetMapping','MetadataAdaptation','Bt2020NclConversion','Main10Encoding','P81ContainerSignaling']};
+  assert.deepEqual(pills(context),['FEL','RPU','DYN'],'the report confirms, it does not drop');
+  assert.equal(context.playerToneMapping(p),false,'a Dolby Vision carrier is never display targeted');
+  assert.doesNotMatch(context.playerFactBadges(),/>Tone mapping<\/span>/);
+  assert.equal(context.playerEnhancementRow(p).value,'Profile 8.1 FEL');
+  p.effectiveProcessing.applied_operations=p.effectiveProcessing.applied_operations.filter(op=>op!=='PolynomialReshape');
+  assert.deepEqual(pills(context),['FEL','DYN'],'RPU follows the reshaping the report names');
+});
+
+test('a Profile 7 MEL title keeps the server MEL row when the report proves no full layer',()=>{
+  const melRow={badge:'FEL',active:false,
+    text:'MEL: minimal enhancement layer — it adds no picture detail; the Dolby grade is in the RPU'};
+  const wire={...processedEnhancement,active:['RPU','DYN'],el_kind:'mel',
+    details:[melRow,...processedEnhancement.details.slice(1)]};
+  const context=enhancementSetup(wire);
+  const p=context.PLAYER;
+  assert.equal(p.enhancement.el_kind,'mel');
+  p.effectiveProcessing={...report(),fel_contributed:false,
+    applied_operations:['PolynomialReshape','RpuColorConversion','TargetMapping',{DisplayTargetMapping:{nits:1600}}]};
+  const shown=context.playerEnhancement(p);
+  assert.deepEqual([...shown.active],['RPU','DYN']);
+  assert.equal(shown.details[0].text,melRow.text);
+  assert.doesNotMatch(context.playerFactBadges(),/>FEL</);
+  // A receipt that a full layer was composed still wins.
+  p.effectiveProcessing=report();
+  assert.match(context.playerEnhancement(p).details[0].text,/^FEL: full enhancement layer/);
+  // A prepared successor's neutral snapshot has no rows; the MEL row still
+  // comes from el_kind, never from a stale FEL sentence.
+  p.effectiveProcessing={...report(),fel_contributed:false,
+    applied_operations:['PolynomialReshape','RpuColorConversion','TargetMapping',{DisplayTargetMapping:{nits:1600}}]};
+  for(const details of [[],[{badge:'FEL',active:true,text:'FEL: full enhancement layer reconstructed into the picture'}]]){
+    p.enhancement=context.playbackEnhancementFromWire({...wire,active:[],details});
+    assert.equal(context.playerEnhancement(p).details[0].text,melRow.text);
+  }
+  // An unknown kind is not carried.
+  assert.equal(context.playbackEnhancementFromWire({...wire,el_kind:'xel'}).el_kind,null);
+});

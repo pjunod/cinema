@@ -1,6 +1,5 @@
 # Show which Dolby Vision enhancements are active
 
-Build: 268
 Issue: #968
 
 The player's badge row now carries a compact teal pill for each Dolby Vision

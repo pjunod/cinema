@@ -1,6 +1,5 @@
 # Stop the control reporter crashing the player it reports on
 
-Build: 91
 Issue: #685
 
 The passive control reporter took its snapshot by asking to be on the main

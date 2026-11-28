@@ -132,6 +132,8 @@ mod jellyfin_play;
 mod library_schedule;
 #[path = "store_contract/offload.rs"]
 mod offload;
+#[path = "store_contract/playback_device_caps.rs"]
+mod playback_device_caps;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
@@ -447,6 +449,9 @@ const USER_METHODS: &[&str] = &[
     "authenticate_token",
     "authenticate_token_for",
     "authenticate_token_proof_for",
+    "put_device_caps",
+    "device_caps_for_user",
+    "device_caps_for_all_users",
     "user_for_token",
     "delete_token",
     "delete_token_with_cache_admin_claim",
@@ -599,6 +604,8 @@ const MEDIA_METHODS: &[&str] = &[
     "merge_file_probe_hevc_parameter_sets",
     "merge_file_probe_hevc_scan",
     "merge_file_probe_content_encoding",
+    "merge_file_probe_dv_levels",
+    "files_missing_dv_levels",
     "files_missing_probe",
     "library_file_paths",
     "ensure_library_root_fingerprint",
@@ -743,6 +750,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "dv_title_demands_through",
     "dv_title_demand_for_file",
     "bind_dv_title_demand",
+    "carry_forward_dv_title_verdicts",
     "publish_dv_title_job",
     "publish_dv_title_from_analysis",
     "probe_can_preempt_title",
@@ -879,15 +887,9 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "foreground_source_pressure",
     "list_foreground_source_owners",
     "resolve_foreground_source",
-    "activate_foreground_source_custody",
-    "abort_foreground_source_activation",
-    "mark_foreground_source_settled",
-    "reap_settled_source_custody",
-    "settled_foreground_source_custody",
-    "activate_background_source_custody",
-    "abort_background_source_activation",
-    "mark_background_source_settled",
-    "settled_background_source_custody",
+    "reap_expired_source_leases",
+    // store_contract/background_jobs.rs `expired_lease_sweep_requeues_with_takeover_bookkeeping`.
+    "requeue_expired_running_jobs",
     "resolve_background_source_custody",
     "register_background_source_custody",
     "claim_background_source_service",
@@ -1282,9 +1284,33 @@ where
 #[tokio::test]
 async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
     for_each_backend(|store, backend| async move {
+        store
+            .put_setting(
+                &format!(
+                    "{}shared-nas",
+                    plurx_core::store::keys::JOB_DOMAIN_SOURCE_READERS_PREFIX
+                ),
+                "1",
+            )
+            .await
+            .expect("one maintenance reader for the shared NAS");
         let mut requests = Vec::new();
+        let mut mappings = Vec::new();
         for (index, node) in ["source-a", "source-b", "source-c"].into_iter().enumerate() {
             let (_, file_id) = seed_file(&store, node).await;
+            let file = store.get_file(file_id).await.expect("file").expect("file");
+            let item = store
+                .get_item(file.item_id)
+                .await
+                .expect("item")
+                .expect("item");
+            // One NAS behind all three: its storage domain keeps one
+            // background reader and the live slot across the cluster.
+            mappings.push(StorageDomainMapping {
+                library_id: item.library_id,
+                root_path: format!("/{node}"),
+                domain_id: "shared-nas".to_owned(),
+            });
             let request = NewAnalysisRequest {
                 request_id: format!("viewer-source-{}-{index}", backend),
                 file_id,
@@ -1307,17 +1333,25 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
                 .unwrap_or_else(|error| panic!("{backend}: enqueue {node}: {error}"));
             requests.push(row);
         }
+        assert!(
+            set_storage_domains(store.as_ref(), mappings, 1_002)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: storage domain: {error}")),
+            "{backend}"
+        );
         let first = store
             .claim_analysis_request("source-a", 1_003, 31_003)
             .await
             .unwrap_or_else(|error| panic!("{backend}: first claim: {error}"))
             .expect("one ordinary source reader");
         assert_eq!(first.request_id, requests[0].request_id, "{backend}");
+        let first_holders = store.source_io_holders(1_004).await.expect("first holder");
+        // One reader is charged to both its root and the mapped domain.
         assert_eq!(
-            store
-                .source_io_holders(1_004)
-                .await
-                .expect("first holder")
+            first_holders
+                .iter()
+                .map(|holder| (&holder.kind, &holder.work_id, &holder.lease_id))
+                .collect::<BTreeSet<_>>()
                 .len(),
             1,
             "{backend}: the first claim must reserve its source domain"
@@ -1369,7 +1403,15 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
             .source_io_holders(1_007)
             .await
             .unwrap_or_else(|error| panic!("{backend}: observe source readers: {error}"));
-        assert_eq!(holders.len(), 2, "{backend}: both source slots are visible");
+        assert_eq!(
+            holders
+                .iter()
+                .map(|holder| (&holder.kind, &holder.work_id, &holder.lease_id))
+                .collect::<BTreeSet<_>>()
+                .len(),
+            2,
+            "{backend}: both source slots are visible"
+        );
         assert!(
             holders
                 .iter()
@@ -1422,14 +1464,36 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
             .settle_analysis_requests(31_010)
             .await
             .unwrap_or_else(|error| panic!("{backend}: settle expired owner: {error}"));
+        // The dead owner's lease still charges its 60 s grace.
+        assert!(
+            store
+                .claim_analysis_request("source-c", 31_011, 61_011)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim inside the grace: {error}"))
+                .is_none(),
+            "{backend}: a lease charges until its expiry plus the grace"
+        );
+        assert!(
+            store
+                .renew_analysis_request(
+                    &second.request_id,
+                    "source-b",
+                    second.fence,
+                    61_000,
+                    121_000
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: owner renew: {error}")),
+            "{backend}"
+        );
         let third = store
-            .claim_analysis_request("source-c", 31_011, 61_011)
+            .claim_analysis_request("source-c", 91_011, 121_011)
             .await
             .unwrap_or_else(|error| panic!("{backend}: third claim after owner death: {error}"))
             .expect("a demand reader may use the released slot");
         assert_eq!(third.request_id, requests[2].request_id, "{backend}");
         let holders = store
-            .source_io_holders(31_012)
+            .source_io_holders(91_012)
             .await
             .unwrap_or_else(|error| panic!("{backend}: observe replacement: {error}"));
         assert!(
@@ -1441,8 +1505,9 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
         assert!(
             holders
                 .iter()
-                .all(|holder| holder.work_id != first.request_id),
-            "{backend}: expired reader disappears"
+                .filter(|holder| holder.work_id == first.request_id)
+                .all(|holder| holder.counts_against.as_deref() == Some("none")),
+            "{backend}: the expired reader no longer counts"
         );
     })
     .await;
@@ -1452,8 +1517,22 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
 async fn concurrent_viewers_keep_cancelled_reader_reservation_until_expiry() {
     for_each_backend(|store, backend| async move {
         let mut requests = Vec::new();
+        let mut mappings = Vec::new();
         for (index, node) in ["reader-a", "reader-b", "reader-c"].into_iter().enumerate() {
             let (_, file_id) = seed_file(&store, node).await;
+            let file = store.get_file(file_id).await.expect("file").expect("file");
+            let item = store
+                .get_item(file.item_id)
+                .await
+                .expect("item")
+                .expect("item");
+            // One NAS behind all three: one background reader and the live
+            // slot across the cluster.
+            mappings.push(StorageDomainMapping {
+                library_id: item.library_id,
+                root_path: format!("/{node}"),
+                domain_id: "shared-nas".to_owned(),
+            });
             requests.push(
                 store
                     .enqueue_analysis_request(&NewAnalysisRequest {
@@ -1476,6 +1555,19 @@ async fn concurrent_viewers_keep_cancelled_reader_reservation_until_expiry() {
                     .expect("enqueue"),
             );
         }
+        store
+            .put_setting(
+                &format!(
+                    "{}shared-nas",
+                    plurx_core::store::keys::JOB_DOMAIN_SOURCE_READERS_PREFIX
+                ),
+                "1",
+            )
+            .await
+            .expect("explicit shared NAS reader cap");
+        assert!(set_storage_domains(store.as_ref(), mappings, 1_000)
+            .await
+            .expect("storage domain"));
         let maintenance = store
             .claim_analysis_request("reader-a", 1_001, 31_001)
             .await
@@ -1536,8 +1628,9 @@ async fn concurrent_viewers_keep_cancelled_reader_reservation_until_expiry() {
                 .any(|holder| holder.work_id == occupied.request_id),
             "{backend}: cancelled reader remains charged until its lease expires"
         );
+        // Free once its lease is past expiry plus the 60 s grace.
         let replacement = store
-            .claim_analysis_request(waiting_node, 31_004, 61_004)
+            .claim_analysis_request(waiting_node, 91_004, 121_004)
             .await
             .expect("claim after expiry")
             .expect("replacement reader");
@@ -2786,6 +2879,7 @@ async fn first_preparation_output_seal_is_exact_and_idempotent_on_every_backend(
             now_ms: staged.now_ms + 1,
             already_complete: false,
             retained_output: Some(receipt.clone()),
+            vod_copy_layout: None,
         };
         assert!(
             store
@@ -10023,6 +10117,24 @@ async fn artwork_repair_publication_fails_closed_without_a_job_lease() {
 #[tokio::test]
 async fn distributed_pretranscode_contract_runs_through_dyn_store() {
     for_each_backend(|store, backend| async move {
+        // Each retried attempt's lease still charges its 60 s grace; this contract
+        // is about the attempt budget, not source capacity.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "16")
+            .await
+            .expect("source readers per root");
+        for domain in ["pretranscode-primary", "pretranscode-secondary"] {
+            store
+                .put_setting(
+                    &format!(
+                        "{}{domain}",
+                        plurx_core::store::keys::JOB_DOMAIN_SOURCE_READERS_PREFIX
+                    ),
+                    "1",
+                )
+                .await
+                .expect("one maintenance reader per explicit source domain");
+        }
         let library = store
             .create_library(&NewLibrary {
                 name: "Pretranscode Contract Library".to_owned(),
@@ -10386,14 +10498,18 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: deleted-source completion: {error}")),
             "{backend}: deleted source work became ready"
         );
+        // The predecessor lease (expired at tick 700) still charges its
+        // source domain for the 60 s lease grace, so the takeover and every
+        // later step runs one grace (600 ticks) later.
+        let late_time = |tick: i64| queue_time(tick.saturating_add(600));
 
         let successor = store
             .fixture_claim_pretranscode_job(
                 "node-d",
                 &capable,
                 &[],
-                queue_time(701),
-                queue_time(1_000),
+                late_time(701),
+                late_time(1_000),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: expired takeover: {error}"))
@@ -10426,7 +10542,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     8_192,
                     None,
                     &"a".repeat(64),
-                    queue_time(702),
+                    late_time(702),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: stale completion: {error}")),
@@ -10453,7 +10569,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     8_192,
                     None,
                     &"d".repeat(64),
-                    queue_time(703),
+                    late_time(703),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: successor completion: {error}")),
@@ -10508,15 +10624,15 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 "node-e",
                 &capable,
                 &[],
-                queue_time(705),
-                queue_time(1_005),
+                late_time(705),
+                late_time(1_005),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim re-enqueued job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: re-enqueued job was not claimable"));
         assert_eq!(refused.dedupe_key, retry.dedupe_key, "{backend}");
         assert!(store
-            .fixture_yield_pretranscode_job(&refused, queue_time(706), queue_time(706))
+            .fixture_yield_pretranscode_job(&refused, late_time(706), late_time(706))
             .await
             .unwrap_or_else(|error| panic!("{backend}: unreadable-node yield: {error}")));
         assert!(
@@ -10525,8 +10641,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     "node-e",
                     &capable,
                     std::slice::from_ref(&refused.id),
-                    queue_time(706),
-                    queue_time(1_006),
+                    late_time(706),
+                    late_time(1_006),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: local refusal claim: {error}"))
@@ -10538,8 +10654,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 "node-f",
                 &capable,
                 &[],
-                queue_time(706),
-                queue_time(1_006),
+                late_time(706),
+                late_time(1_006),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: mounted peer claim: {error}"))
@@ -10552,7 +10668,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
 
         let mut failing = reclaimed;
         for attempt in 1..=5 {
-            let failed_at = queue_time(710 + attempt * 2);
+            let failed_at = late_time(710 + attempt * 2);
             assert!(
                 store
                     .fixture_fail_pretranscode_job(
@@ -10633,8 +10749,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 "node-pagination",
                 &capable,
                 &[],
-                queue_time(950),
-                queue_time(1_250),
+                late_time(950),
+                late_time(1_250),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: paged capability claim: {error}"))
@@ -10644,7 +10760,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: claim did not preserve highest-compatible ordering across pages"
         );
         assert!(store
-            .fixture_cancel_pretranscode_job(&paged_claim, "fixture_done", queue_time(951))
+            .fixture_cancel_pretranscode_job(&paged_claim, "fixture_done", late_time(951))
             .await
             .unwrap_or_else(|error| panic!("{backend}: retire pagination claim: {error}")));
 
@@ -10696,8 +10812,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 "node-legacy",
                 &capable,
                 &[],
-                queue_time(1_251),
-                queue_time(1_551),
+                late_time(1_251),
+                late_time(1_551),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim legacy reuse: {error}"))
@@ -10712,7 +10828,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 16_896,
                 Some(16_384),
                 &adopted_digest,
-                queue_time(1_252),
+                late_time(1_252),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: bind legacy manifest: {error}")));
@@ -10748,7 +10864,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         let wrong_digest = "f".repeat(64);
-        let verification_now = queue_time(1_253);
+        let verification_now = late_time(1_253);
         let location = store
             .transcode_verification_candidates("node-legacy", None)
             .await
@@ -10867,8 +10983,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 "node-collision",
                 &capable,
                 &[],
-                queue_time(1_253),
-                queue_time(1_553),
+                late_time(1_253),
+                late_time(1_553),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim collision job: {error}"))
@@ -10884,7 +11000,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     4_096,
                     None,
                     &"9".repeat(64),
-                    queue_time(1_254),
+                    late_time(1_254),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: conflicting completion: {error}")),
@@ -11059,6 +11175,11 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
     backend: &str,
 ) {
     let seed = &stores[0];
+    // Three handles, one node: its one background reader is the contended
+    // resource (readers are counted per node since source-lease step 4).
+    seed.put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
+        .await
+        .expect("one background reader");
     let library = seed
         .create_library(&NewLibrary {
             name: "Separate Queue Claim Library".to_owned(),
@@ -11167,15 +11288,15 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
         let (a, b, c) = tokio::join!(
             claim(
                 Arc::clone(&stores[0]),
-                format!("separate-a-{round}"),
+                format!("separate-{round}"),
                 Arc::clone(&start)
             ),
             claim(
                 Arc::clone(&stores[1]),
-                format!("separate-b-{round}"),
+                format!("separate-{round}"),
                 Arc::clone(&start)
             ),
-            claim(Arc::clone(&stores[2]), format!("separate-c-{round}"), start),
+            claim(Arc::clone(&stores[2]), format!("separate-{round}"), start),
         );
         let claims = [a, b, c]
             .into_iter()
@@ -13085,7 +13206,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
     }
     for scenario in [
         "source-service-epoch",
-        "custody-retention-shape",
+        "source-lease-shape",
         "translation-job",
         "translation-data",
         "translation-shape",
@@ -13107,7 +13228,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
-            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,6)".to_owned()),
+            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,7)".to_owned()),
             "translation-marker" => ("DELETE FROM subtitle_translation_schema".to_owned(), "INSERT INTO subtitle_translation_schema VALUES(1,1)".to_owned()),
             "text-marker" => ("DELETE FROM subtitle_text_translation_schema".to_owned(), "INSERT INTO subtitle_text_translation_schema VALUES(1,1)".to_owned()),
             "caption-marker" => ("DELETE FROM shared_caption_schema".to_owned(), "INSERT INTO shared_caption_schema VALUES(1,1)".to_owned()),
@@ -13115,9 +13236,9 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "unowned-text-index" => ("CREATE INDEX unexpected_text_fixture_index ON subtitle_text_translation_cues(cue_index)".to_owned(), "DROP INDEX unexpected_text_fixture_index".to_owned()),
             "unowned-managed-index" => ("CREATE INDEX unexpected_managed_fixture_index ON subtitle_model_receipts(model_id)".to_owned(), "DROP INDEX unexpected_managed_fixture_index".to_owned()),
             "text-cue" => ("INSERT INTO subtitle_text_translation_cues VALUES('fixture-tail-data',printf('%064d',0),0,printf('%064d',0),0,1,'{}',0)".to_owned(), "DELETE FROM subtitle_text_translation_cues WHERE job_id='fixture-tail-data'".to_owned()),
-            "custody-retention-shape" | "text-shape" | "caption-shape" => {
+            "source-lease-shape" | "text-shape" | "caption-shape" => {
                 let index = match scenario {
-                    "custody-retention-shape" => "background_source_custody_owner_work",
+                    "source-lease-shape" => "source_leases_work",
                     "text-shape" => "subtitle_text_translation_recipe",
                     _ => "shared_caption_read_expiry",
                 };
@@ -13199,6 +13320,23 @@ async fn replicated_dispatch_turn_upgrade_preserves_pending_turns() {
     let catalog =
         "SELECT name,sql FROM sqlite_master WHERE name GLOB 'dispatch_turn_*' ORDER BY name";
     let current = replicated_fixture_shape(&client, catalog).await;
+    // The deployed turn definitions preceded the lease overlays.
+    let lease_rewind = replicated_source_lease_rewind(&client)
+        .await
+        .expect("empty current lease tail");
+    for result in client
+        .txn(
+            lease_rewind
+                .into_iter()
+                .map(|sql| (sql, hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("pre-lease turn fixture")
+    {
+        result.expect("exact pre-lease statement");
+    }
+    let pre_lease = replicated_fixture_shape(&client, catalog).await;
     let original = include_str!("../src/store/background_job_turns.sql");
     let old_objects: Vec<_> = original
         .split("-- next statement")
@@ -13232,9 +13370,9 @@ async fn replicated_dispatch_turn_upgrade_preserves_pending_turns() {
         .collect::<Result<Vec<_>, _>>()
         .expect("complete old catalog and wait");
     let deployed = replicated_fixture_shape(&client, catalog).await;
-    assert_eq!(current.len(), deployed.len());
+    assert_eq!(pre_lease.len(), deployed.len());
     assert_eq!(
-        current
+        pre_lease
             .iter()
             .zip(&deployed)
             .filter(|(a, b)| a != b)
@@ -13254,11 +13392,12 @@ async fn replicated_dispatch_turn_upgrade_preserves_pending_turns() {
 }
 
 /// Review #1405 (4): a replicated cluster at managed v4 (the v125 release)
-/// passes through v5 on bootstrap and reaches the exact current v6 view
-/// and marker, with managed receipts kept. Later bootstrap is a no-op.
+/// passes through v5 on bootstrap and reaches the exact current v7 view
+/// and marker (with the source-lease root overlay), with managed receipts
+/// kept. Later bootstrap is a no-op.
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
+async fn replicated_managed_v4_upgrades_to_v6_and_a_restart_is_a_no_op() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -13280,6 +13419,23 @@ async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
     let custody_shape =
         queue_fixture::source_extensions_fixture::CUSTODY_RETENTION_FIXTURE_SHAPE_SQL;
     let custody_before = replicated_fixture_shape(&client, custody_shape).await;
+    // Restore the pre-lease generation before selecting a historical managed
+    // generation; a contracted lease catalogue requires its live root overlay.
+    let rewind = replicated_source_lease_rewind(&client)
+        .await
+        .expect("empty current lease tail");
+    for result in client
+        .txn(
+            rewind
+                .into_iter()
+                .map(|sql| (sql, hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("pre-lease managed fixture")
+    {
+        result.expect("exact pre-lease statement");
+    }
     // Return exactly the managed view and marker to published v4.
     let statements = include_str!("../src/store/subtitle_managed_resources_v4.sql")
         .split("-- next statement")
@@ -13312,11 +13468,11 @@ async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
                 .await
                 .unwrap_or_else(|error| panic!("{round} bootstrap: {error}")),
         );
-        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 7).await;
         assert_eq!(
             replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
-            queue_fixture::managed_fixture_shape(6),
-            "{round}: exact managed v6 view, marker and guards"
+            current_managed_fixture_shape(),
+            "{round}: exact current managed v7 view, marker and guards"
         );
         assert_eq!(
             replicated_fixture_shape(&client, custody_shape).await,
@@ -13412,7 +13568,7 @@ async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exact
         custody_before
     );
     require_replicated_fixture_marker(&client, "background_custody_retention_schema", 1).await;
-    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 7).await;
     require_replicated_fixture_marker(&client, "subtitle_translation_schema", 1).await;
     for marker in queue_fixture::CURRENT_TAIL_FIXTURE_MARKERS {
         require_replicated_fixture_marker(&client, marker, 1).await;
@@ -13462,6 +13618,10 @@ async fn replicated_fixture_shape(client: &Client, sql: &str) -> Vec<(String, St
         .collect()
 }
 
+/// A current replicated store has the contracted source-lease tail; a
+/// historical fixture needs the published v1 source owners and the v1
+/// claim effects instead. The statements that rewind it, to run first in
+/// the caller's one transaction; `None` for a store without a lease tail.
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn replicated_custody_retention_rewind(client: &Client) -> [String; 6] {
     use queue_fixture::source_extensions_fixture::{
@@ -13473,14 +13633,398 @@ async fn replicated_custody_retention_rewind(client: &Client) -> [String; 6] {
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
-async fn replicated_source_tail_drops(
-    client: &Client,
-    remove: impl Fn(&str) -> bool,
-) -> Vec<String> {
+async fn replicated_source_lease_rewind(client: &Client) -> Option<Vec<String>> {
     use queue_fixture::source_extensions_fixture::{
-        validated_source_tail_drops, SOURCE_TAIL_SHAPE,
+        current_source_lease_rewind_shape, source_lease_rewind_plan, CLAIM_EFFECTS_V1,
+        SOURCE_LEASE_REWIND_SHAPE_SQL, SOURCE_LEASE_UNOWNED_SQL,
     };
-    let custody_rewind = replicated_custody_retention_rewind(client).await;
+    let present: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM sqlite_master WHERE name='source_lease_schema'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("replicated source lease inventory");
+    if present.first().is_none_or(|row| row.value == 0) {
+        return None;
+    }
+    let marker: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT version AS value FROM source_lease_schema",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("source lease generation");
+    assert_eq!(marker.len(), 1);
+    let version = marker[0].value;
+    assert!(matches!(version, 2 | 3), "known lease generation");
+    require_replicated_fixture_marker(client, "source_lease_schema", version).await;
+    let shape = client
+        .query_consistent(SOURCE_LEASE_REWIND_SHAPE_SQL.to_owned(), hiqlite::params!())
+        .await
+        .expect("replicated current lease catalogue")
+        .iter_mut()
+        .map(|row| {
+            (
+                row.get::<String>("type"),
+                row.get::<String>("name"),
+                row.get::<String>("sql"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shape.as_slice(),
+        if version == 2 {
+            expanded_source_lease_witness().lease_shape.as_slice()
+        } else {
+            current_source_lease_rewind_shape()
+        },
+        "exact generation-specific lease catalogue required before replicated rewind"
+    );
+    let unowned: Vec<I64Value> = client
+        .query_consistent_map(SOURCE_LEASE_UNOWNED_SQL, hiqlite::params!())
+        .await
+        .expect("replicated source lease data inventory");
+    assert_eq!(
+        unowned.first().map(|row| row.value),
+        Some(0),
+        "historical fixture must not discard source leases"
+    );
+    if version == 2 {
+        // CONTRACT removes v1 owner tables. Every caller, including standalone
+        // lease rewinds, must validate their exact DDL and empty facts first.
+        let inventory = replicated_source_tail_inventory(client).await;
+        let witness = expanded_source_lease_witness();
+        assert_eq!(
+            inventory.shape, witness.source_shape,
+            "exact expanded source tail"
+        );
+        assert_eq!(
+            inventory.counts, witness.source_counts,
+            "expanded owner facts cannot be discarded by fixture contract"
+        );
+    }
+    let mut plan = if version == 2 {
+        expanded_source_lease_witness().contract.clone()
+    } else {
+        Vec::new()
+    };
+    plan.extend(source_lease_rewind_plan());
+    Some(
+        plan.iter()
+            .flat_map(|text| text.split("-- next statement"))
+            .chain(CLAIM_EFFECTS_V1)
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// Review of source-lease steps 2-4, M1: a replicated store installs its
+/// base job schema only when the cluster is created, so an upgraded cluster
+/// keeps the v1 two-slot claim effects unless the expand replaces them. A
+/// populated v1 store: the first open expands and carries the live holder,
+/// the contract waits for every node's lease capability, a later open
+/// contracts, and repeated opens change nothing. The carried reader and one
+/// new reader then fill the root's two maintenance slots across all nodes.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v1_source_store_expands_carries_holders_and_contracts_when_every_node_is_ready()
+{
+    use plurx_core::store::background_jobs::{
+        ClaimJob, ClaimOutcome, EnqueueJob, JobKind, JobPayload, JobRequest,
+    };
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("source lease upgrade client");
+    let telemetry = cluster._root.path().join("source-lease-upgrade.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current replicated store");
+    current
+        .validation_reset_contract_state()
+        .await
+        .expect("empty owned fixture");
+    let store: Arc<dyn Store> = Arc::new(current);
+    let (_, file_id) = seed_file(&store, "source-lease-upgrade").await;
+    let job = |index: usize| EnqueueJob {
+        id: uuid::Uuid::new_v4().to_string(),
+        payload: JobPayload::FragmentIndexBuild {
+            file_id,
+            source_generation: format!("source:{file_id}"),
+            source_size: 100,
+            source_mtime: 1,
+            source_sha256: "d".repeat(64),
+            cache_key: format!("{index:064}"),
+            pipeline_digest: "a".repeat(64),
+        },
+        dedupe_key: format!("lease-upgrade:{index}"),
+        priority: 1,
+        not_before_ms: 1_000,
+        now_ms: 1_000,
+        request: JobRequest {
+            scope: "user:1".to_owned(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            request_digest: "b".repeat(64),
+            consumer_kind: "analysis".to_owned(),
+            consumer_ref: format!("analysis:{index}"),
+            target_node_id: None,
+            deadline_ms: None,
+            retain_identity: false,
+        },
+    };
+    let claim = |id: &str, node: &str, now_ms: i64| ClaimJob {
+        job_id: id.to_owned(),
+        expected_revision: 0,
+        node_id: node.to_owned(),
+        boot_id: uuid::Uuid::new_v4().to_string(),
+        claim_id: uuid::Uuid::new_v4().to_string(),
+        kind: JobKind::FragmentIndexBuild,
+        payload_version: 1,
+        now_ms,
+        dispatched_at_ms: now_ms,
+    };
+    let enqueue = |index: usize| {
+        let store = Arc::clone(&store);
+        async move {
+            let request = job(index);
+            let id = request.id.clone();
+            store.enqueue_job(request).await.expect("enqueue");
+            id
+        }
+    };
+    let held = enqueue(0).await;
+    assert!(matches!(
+        store
+            .claim_job(claim(&held, "node-a", 1_001))
+            .await
+            .expect("claim the v1 holder"),
+        ClaimOutcome::Claimed { .. }
+    ));
+    // The v1 store: v1 source owners, the two-slot claim effects, and a
+    // live job reader recorded only by its job and its reservation.
+    use queue_fixture::{
+        published_title_v2_restore_plan, title_fixture_shape, TITLE_FIXTURE_SHAPE_SQL,
+    };
+    assert_eq!(
+        extension_shape(&client, TITLE_FIXTURE_SHAPE_SQL).await,
+        title_fixture_shape(3)
+    );
+    require_replicated_fixture_marker(&client, "dv_title_jobs_schema", 3).await;
+    let mut rewind = replicated_source_lease_rewind(&client)
+        .await
+        .expect("current store has a lease tail");
+    rewind.extend(published_title_v2_restore_plan());
+    client
+        .txn(
+            rewind
+                .into_iter()
+                .map(|sql| (sql, hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("v1 source fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("atomic source v1 and title v2 fixture");
+    assert_eq!(
+        extension_shape(&client, TITLE_FIXTURE_SHAPE_SQL).await,
+        title_fixture_shape(2)
+    );
+    require_replicated_fixture_marker(&client, "dv_title_jobs_schema", 2).await;
+    client
+        .txn([
+            ("CREATE TABLE cluster_nodes(node_id TEXT PRIMARY KEY,last_seen_at INTEGER,removed_at INTEGER)", hiqlite::params!()),
+            ("CREATE TABLE cluster_node_join_staging(node_id TEXT PRIMARY KEY)", hiqlite::params!()),
+            ("CREATE TABLE cluster_node_capabilities(node_id TEXT,capability TEXT,last_seen_at INTEGER,PRIMARY KEY(node_id,capability))", hiqlite::params!()),
+            ("INSERT INTO cluster_nodes VALUES('node-a',10,NULL),('node-b',20,NULL),('node-c',30,NULL)", hiqlite::params!()),
+            ("INSERT INTO cluster_node_capabilities VALUES('node-a','source_leases_v2',10),('node-c','source_leases_v2',30)", hiqlite::params!()),
+        ])
+        .await
+        .expect("membership fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("membership fixture applied");
+    async fn text(client: &Client, sql: &str) -> Vec<String> {
+        client
+            .query_consistent(sql.to_owned(), hiqlite::params!())
+            .await
+            .expect("fixture inventory")
+            .iter_mut()
+            .map(|row| row.get::<String>("value"))
+            .collect()
+    }
+    let claim_effects =
+        "SELECT sql AS value FROM sqlite_master WHERE name='background_job_claim_effects'";
+    let lease_version =
+        "SELECT CAST(COALESCE((SELECT version FROM source_lease_schema),0) AS TEXT) AS value";
+    let catalogue = "SELECT type||' '||name||' '||COALESCE(sql,'') AS value FROM sqlite_master ORDER BY type,name";
+    let leases = "SELECT lease_id AS value FROM source_leases ORDER BY lease_id";
+    assert!(
+        text(&client, claim_effects).await[0].contains("SELECT 0 AS slot UNION ALL SELECT 1"),
+        "the fixture has the v1 two-slot claim effects"
+    );
+
+    let other_telemetry = cluster._root.path().join("source-lease-upgrade-peer.db");
+    let (first, second) = tokio::try_join!(
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry),
+        HiqliteAuthStore::open_or_migrate(client.clone(), &other_telemetry),
+    )
+    .expect("concurrent starts settle the title and lease expansions");
+    drop((first, second));
+    assert_eq!(
+        extension_shape(&client, TITLE_FIXTURE_SHAPE_SQL).await,
+        title_fixture_shape(3)
+    );
+    require_replicated_fixture_marker(&client, "dv_title_jobs_schema", 3).await;
+    assert_eq!(text(&client, lease_version).await, ["2"], "expanded");
+    assert!(
+        text(&client, claim_effects).await[0].contains("NOT LIKE 'source_io%'"),
+        "the expand replaced the v1 claim effects"
+    );
+    assert_eq!(
+        text(&client, leases).await,
+        [format!("job:{held}:1")],
+        "the live v1 reader is carried as a lease"
+    );
+    let expanded = text(&client, catalogue).await;
+    drop(
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+            .await
+            .expect("restart while node-b runs the v1 binary"),
+    );
+    assert_eq!(
+        text(&client, catalogue).await,
+        expanded,
+        "the contract waits for node-b; nothing else changes"
+    );
+    client
+        .execute(
+            "INSERT INTO cluster_node_join_staging VALUES('node-b')",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("stage the join before its first capability heartbeat");
+    drop(
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+            .await
+            .expect("restart with a committed member still joining"),
+    );
+    assert_eq!(
+        text(&client, catalogue).await,
+        expanded,
+        "a staged member must finish joining before the contract drops v1 objects"
+    );
+    client
+        .execute(
+            "DELETE FROM cluster_node_join_staging WHERE node_id='node-b'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("finish the join");
+    client
+        .execute(
+            "INSERT INTO cluster_node_capabilities VALUES('node-b','source_leases_v2',20)",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("node-b runs a lease-aware binary");
+    let (first, second) = tokio::try_join!(
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry),
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry),
+    )
+    .expect("concurrent starts settle the same contract");
+    drop((first, second));
+    assert_eq!(text(&client, lease_version).await, ["3"], "contracted");
+    let contracted = text(&client, catalogue).await;
+    assert!(
+        !contracted
+            .iter()
+            .any(|row| row.contains(" foreground_source_owners ")),
+        "the v1 source owners are gone"
+    );
+    let root_view = "background_job_required_resources";
+    let current_root_view = text(
+        &client,
+        "SELECT sql AS value FROM sqlite_master WHERE name='background_job_required_resources'",
+    )
+    .await;
+    let pre_lease_root_view = include_str!("../src/store/subtitle_managed_resources_v7.sql")
+        .split("-- next statement")
+        .find(|sql| sql.contains("CREATE VIEW IF NOT EXISTS background_job_required_resources AS"))
+        .expect("published pre-lease job resource view");
+    for ddl in [pre_lease_root_view, &current_root_view[0]] {
+        client
+            .txn([
+                (format!("DROP VIEW {root_view}"), hiqlite::params!()),
+                (ddl.to_owned(), hiqlite::params!()),
+            ])
+            .await
+            .expect("replace job resource view")
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("both catalogue changes applied");
+        if ddl == pre_lease_root_view {
+            assert!(matches!(
+                HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry).await,
+                Err(StoreError::Migration(reason)) if reason.contains("source lease schema partial or incompatible")
+            ));
+        }
+    }
+    let reopened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("restart a contracted store");
+    assert_eq!(text(&client, catalogue).await, contracted, "a no-op");
+    let reopened: Arc<dyn Store> = Arc::new(reopened);
+    for (index, node, expected) in [(1, "node-b", true), (2, "node-c", false)] {
+        let id = {
+            let request = job(index);
+            let id = request.id.clone();
+            reopened.enqueue_job(request).await.expect("enqueue");
+            id
+        };
+        assert_eq!(
+            matches!(
+                reopened
+                    .claim_job(claim(&id, node, 2_000))
+                    .await
+                    .unwrap_or_else(|error| panic!("{node}: {error}")),
+                ClaimOutcome::Claimed { .. }
+            ),
+            expected,
+            "{node}: the carried reader and new readers share two root maintenance slots"
+        );
+    }
+    assert_eq!(
+        text(
+            &client,
+            "SELECT node_id AS value FROM source_leases ORDER BY node_id"
+        )
+        .await,
+        ["node-a", "node-b"],
+        "the carried v1 reader and one new reader fill the rooted budget across nodes"
+    );
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+struct ReplicatedSourceTailInventory {
+    shape: Vec<(String, String, String)>,
+    counts: Vec<(String, i64)>,
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_source_tail_inventory(client: &Client) -> ReplicatedSourceTailInventory {
+    use queue_fixture::source_extensions_fixture::SOURCE_TAIL_SHAPE;
     let source_shape: Vec<_> = client
         .query_consistent(SOURCE_TAIL_SHAPE.to_owned(), hiqlite::params!())
         .await
@@ -13509,15 +14053,150 @@ async fn replicated_source_tail_drops(
         assert_eq!(rows.len(), 1);
         source_counts.push((name.clone(), rows[0].value));
     }
-    require_replicated_fixture_marker(client, "background_source_schema", 1).await;
-    custody_rewind
+    ReplicatedSourceTailInventory {
+        shape: source_shape,
+        counts: source_counts,
+    }
+}
+
+/// The validated drops of the published source tail. A current store's
+/// contracted lease tail is rewound to it first, in the same statements.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_source_tail_drops(
+    client: &Client,
+    remove: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    use queue_fixture::source_extensions_fixture::{
+        current_source_tail, published_source_tail, validated_source_tail_drops,
+    };
+    let rewind = replicated_source_lease_rewind(client).await;
+    let ReplicatedSourceTailInventory {
+        shape: source_shape,
+        counts: source_counts,
+    } = replicated_source_tail_inventory(client).await;
+    let Some(rewind) = rewind else {
+        let custody_rewind = replicated_custody_retention_rewind(client).await;
+        require_replicated_fixture_marker(client, "background_source_schema", 1).await;
+        return custody_rewind
+            .into_iter()
+            .chain(validated_source_tail_drops(
+                &source_shape,
+                &source_counts,
+                true,
+                true,
+                remove,
+            ))
+            .collect();
+    };
+    // Both known generations are legitimate. Expansion keeps v1 metadata
+    // until every node's binary is ready; never forge capabilities to contract.
+    let marker: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT version AS value FROM source_lease_schema",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("source tail generation");
+    assert_eq!(marker.len(), 1);
+    if marker[0].value == 2 {
+        let witness = expanded_source_lease_witness();
+        assert_eq!(
+            source_shape, witness.source_shape,
+            "exact expanded source tail"
+        );
+        assert_eq!(
+            source_counts, witness.source_counts,
+            "no accepted expanded source facts may be discarded"
+        );
+    } else {
+        assert_eq!(marker[0].value, 3);
+        assert_eq!(
+            source_shape,
+            current_source_tail(),
+            "exact contracted source tail"
+        );
+        assert!(source_counts.iter().all(|(_, count)| *count == 0),
+            "source grants, checkpoints or dispatch demand must not be discarded: {source_counts:?}");
+    }
+    let published = published_source_tail(true, true);
+    let counts = published
+        .iter()
+        .filter(|(kind, _, _)| kind == "table")
+        .map(|(_, name, _)| (name.clone(), i64::from(name == "background_source_schema")))
+        .collect::<Vec<_>>();
+    let remove_holders = remove("background_source_pauses");
+    let mut rewind = rewind;
+    if remove_holders {
+        use queue_fixture::source_extensions_fixture::{
+            published_storage_pending_fixture_shape, STORAGE_PENDING_FIXTURE_SHAPE_SQL,
+            STORAGE_PENDING_REWIND_SQL,
+        };
+        let pending_shape = client
+            .query_consistent(STORAGE_PENDING_FIXTURE_SHAPE_SQL, hiqlite::params!())
+            .await
+            .expect("complete pending-domain fixture inventory")
+            .iter_mut()
+            .map(|row| {
+                (
+                    row.get::<String>("type"),
+                    row.get::<String>("name"),
+                    row.get::<String>("sql"),
+                )
+            })
+            .collect::<Vec<_>>();
+        // The lease preflight already validates these root-overlaid views
+        // against the exact v2/v3 generation. Every other object is frozen v131.
+        let stable = |rows: Vec<(String, String, String)>| {
+            rows.into_iter()
+                .filter(|(_, name, _)| {
+                    !matches!(
+                        name.as_str(),
+                        "background_storage_domain_holders"
+                            | "background_storage_domain_disturbed"
+                            | "background_storage_domain_affected_jobs"
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            stable(pending_shape),
+            stable(published_storage_pending_fixture_shape()),
+            "exact pending-domain owner before full rewind"
+        );
+        require_replicated_fixture_marker(client, "background_storage_domain_pending_schema", 1)
+            .await;
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(
+                "SELECT count(*) AS value FROM background_storage_domain_pending",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("accepted pending-domain configuration");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].value, 0,
+            "desired storage-domain configuration cannot be discarded"
+        );
+        rewind.extend(
+            STORAGE_PENDING_REWIND_SQL
+                .split(';')
+                .map(str::trim)
+                .filter(|sql| !sql.is_empty() && !sql.starts_with("PRAGMA"))
+                .map(str::to_owned),
+        );
+    }
+    if remove("background_source_custody") {
+        // The exact current preflight covers both retention triggers, its
+        // marker DDL and its index. The lease rewind restores their frozen
+        // custody form; full source removal must then restore their predecessor
+        // before dropping the custody table they reference.
+        require_replicated_fixture_marker(client, "background_custody_retention_schema", 1).await;
+        rewind.extend(queue_fixture::source_extensions_fixture::custody_retention_rewind_plan());
+    }
+    rewind
         .into_iter()
         .chain(validated_source_tail_drops(
-            &source_shape,
-            &source_counts,
-            true,
-            true,
-            remove,
+            &published, &counts, true, true, remove,
         ))
         .collect()
 }
@@ -13564,75 +14243,19 @@ async fn replicated_scan_request_drops(client: &Client) -> Vec<String> {
     validated_scan_request_drops(&shape, (marker, marker), rows[0].value)
 }
 
-/// Plan removal of an exact, empty replicated fixture extension before an
-/// older migration reconstructs its dependencies.
 #[cfg(feature = "hiqlite-contract-tests")]
-async fn replicated_empty_extension_rewind(
-    client: &Client,
-    expected: Vec<(String, String, String)>,
-    marker: &str,
-) -> Vec<String> {
-    let names = expected
-        .iter()
-        .map(|(_, name, _)| format!("'{}'", name.replace('\'', "''")))
-        .collect::<Vec<_>>()
-        .join(",");
-    let installed: Vec<_> = client
-        .query_consistent(
-            format!(
-                "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL
-                 AND (name IN ({names}) OR tbl_name IN ({names})) ORDER BY type,name"
-            ),
-            hiqlite::params!(),
-        )
+async fn extension_shape(client: &Client, sql: &str) -> Vec<(String, String)> {
+    client
+        .query_consistent(sql.to_owned(), hiqlite::params!())
         .await
-        .expect("replicated fixture extension inventory")
+        .expect("extension shape inventory")
         .iter_mut()
-        .map(|row| {
-            (
-                row.get::<String>("type"),
-                row.get::<String>("name"),
-                row.get::<String>("sql"),
-            )
-        })
-        .collect();
-    assert_eq!(installed, expected, "exact published fixture extension");
-    require_replicated_fixture_marker(client, marker, 1).await;
-    for (kind, name, _) in &expected {
-        if kind == "table" {
-            let rows: Vec<I64Value> = client
-                .query_consistent_map(
-                    format!(
-                        r#"SELECT count(*) AS value FROM "{}""#,
-                        name.replace('"', "\"\"")
-                    ),
-                    hiqlite::params!(),
-                )
-                .await
-                .expect("complete fixture extension data inventory");
-            assert_eq!(rows.len(), 1);
-            assert_eq!(
-                rows[0].value,
-                i64::from(name == marker),
-                "accepted data in {name} must not be discarded"
-            );
-        }
-    }
-    let mut drops = Vec::new();
-    for kind in ["trigger", "view", "table"] {
-        for (object_kind, name, _) in expected.iter().rev() {
-            if object_kind == kind {
-                drops.push(format!(
-                    r#"DROP {} "{}""#,
-                    kind.to_ascii_uppercase(),
-                    name.replace('"', "\"\"")
-                ));
-            }
-        }
-    }
-    drops
+        .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
+        .collect()
 }
 
+/// Plan removal of an exact, empty replicated fixture extension before an
+/// older migration reconstructs its dependencies.
 /// A historical queue fixture cannot retain half of the independent managed
 /// extension after removing its background objects. Rewind only an empty,
 /// unactivated current extension, then let ordinary open reinstall it.
@@ -13641,32 +14264,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_unactivated_contract_baseline(client).await;
     // These independently recognized current extensions must be validated
     // before the queue teardown. Their drops join the one transaction below.
-    async fn extension_shape(client: &Client, sql: &str) -> Vec<(String, String)> {
-        client
-            .query_consistent(sql.to_owned(), hiqlite::params!())
-            .await
-            .expect("extension shape inventory")
-            .iter_mut()
-            .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
-            .collect()
-    }
-    use queue_fixture::source_extensions_fixture::{
-        coordination_tail_witness, published_v124_reservation_trigger,
-        storage_domain_pending_fixture_shape,
-    };
-    let storage_domain_drops = replicated_empty_extension_rewind(
-        client,
-        storage_domain_pending_fixture_shape(),
-        "background_storage_domain_pending_schema",
-    )
-    .await;
-    let mut coordination_drops = replicated_empty_extension_rewind(
-        client,
-        coordination_tail_witness(),
-        "analysis_coordination_schema",
-    )
-    .await;
-    coordination_drops.push(published_v124_reservation_trigger().to_owned());
+    let coordination_drops = replicated_coordination_drops(client).await;
     let scan_request_drops = replicated_scan_request_drops(client).await;
     let source_drops = replicated_source_tail_drops(client, |_| true).await;
     let handoff_shape = extension_shape(client, queue_fixture::HANDOFF_FIXTURE_SHAPE_SQL).await;
@@ -13720,14 +14318,14 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         &tail_counts,
         &tail_markers,
     );
-    require_replicated_fixture_marker(client, "dv_title_jobs_schema", 2).await;
+    require_replicated_fixture_marker(client, "dv_title_jobs_schema", 3).await;
     require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
-    require_replicated_fixture_marker(client, "subtitle_managed_schema", 6).await;
+    require_replicated_fixture_marker(client, "subtitle_managed_schema", 7).await;
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
-            "SELECT count(*) AS value FROM dv_title_jobs_schema WHERE singleton=1 AND version=2",
+            "SELECT count(*) AS value FROM dv_title_jobs_schema WHERE singleton=1 AND version=3",
             hiqlite::params!(),
         )
         .await
@@ -13739,7 +14337,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_eq!(title_data.len(), 1);
     let title_drops = queue_fixture::validated_empty_title_rewind(
         &title_shape,
-        2,
+        3,
         title_marker[0].value,
         title_data[0].value,
     );
@@ -13760,7 +14358,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     let annotations_drops =
         queue_fixture::validated_empty_annotations_rewind(&annotations_shape, &annotations_counts);
     let rows: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=6) AS value",
+        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=7) AS value",
         hiqlite::params!(),
     ).await.expect("current managed fixture marker");
     assert_eq!(rows.len(), 1);
@@ -13791,8 +14389,16 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         "partial managed fixtures cannot be rewound"
     );
     let managed_shape = extension_shape(client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await;
+    assert_eq!(
+        managed_shape,
+        current_managed_fixture_shape(),
+        "exact live managed shape with source-lease root overlay required before rewind"
+    );
+    // The source-lease rewind is queued first in the same transaction and
+    // restores the frozen v7 view before these validated managed drops run.
+    let frozen_managed_v7 = queue_fixture::managed_fixture_shape(7);
     let managed_drops =
-        queue_fixture::validated_empty_managed_rewind(&managed_shape, 6, managed_data_count);
+        queue_fixture::validated_empty_managed_rewind(&frozen_managed_v7, 7, managed_data_count);
     // The historical queue teardown also removes translation triggers that
     // reference background_jobs. Remove the entire exact empty extension,
     // never leave its marker/tables advertising a partial current shape.
@@ -13832,10 +14438,9 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_eq!(jobs.len(), 1);
     let translation_drops =
         queue_fixture::validated_empty_translation_rewind(&shape, &counts, jobs[0].value);
-    let mut statements: Vec<_> = storage_domain_drops
+    let mut statements: Vec<_> = scan_request_drops
         .into_iter()
         .chain(coordination_drops)
-        .chain(scan_request_drops)
         .chain(source_drops)
         .chain(tail_drops)
         .chain(handoff_drops)
@@ -13858,6 +14463,98 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         .expect("all managed rewind statements");
 }
 
+/// Historical fixtures remove the complete empty v127 adjunct before changing
+/// the analysis table. Validate the replaced reservation trigger with its
+/// coordination owner before removing any of its dependencies.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_coordination_drops(client: &Client) -> Vec<String> {
+    let expected = queue_fixture::source_extensions_fixture::coordination_tail_witness();
+    let actual: Vec<_> = client
+        .query_consistent(
+            "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND \
+         (name GLOB 'analysis_coordination*' OR tbl_name GLOB 'analysis_coordination*' \
+          OR name GLOB 'copy_source_*' OR tbl_name GLOB 'copy_source_*' \
+          OR name GLOB 'copy_index_v3*' OR tbl_name GLOB 'copy_index_v3*' \
+          OR name='copy_index_source_attestations' OR tbl_name='copy_index_source_attestations' \
+          OR name='analysis_source_reserve_on_claim') \
+         ORDER BY type,name",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("current coordination inventory")
+        .iter_mut()
+        .map(|row| {
+            (
+                row.get::<String>("type"),
+                row.get::<String>("name"),
+                row.get::<String>("sql"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "only the exact published coordination adjunct can rewind"
+    );
+    require_replicated_fixture_marker(client, "analysis_coordination_schema", 1).await;
+    for (_, name, _) in expected.iter().filter(|(kind, _, _)| kind == "table") {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(
+                format!(
+                    r#"SELECT count(*) AS value FROM "{}""#,
+                    name.replace('"', r#""""#)
+                ),
+                hiqlite::params!(),
+            )
+            .await
+            .expect("coordination accepted data inventory");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].value,
+            i64::from(name == "analysis_coordination_schema"),
+            "coordination roles, designations and copy index facts cannot be discarded: {name}"
+        );
+    }
+    let mut drops: Vec<_> = expected
+        .iter()
+        .filter(|(kind, _, _)| kind == "trigger")
+        .map(|(_, name, _)| format!(r#"DROP TRIGGER "{}""#, name.replace('"', r#""""#)))
+        .collect();
+    let tables = [
+        "analysis_coordination_source_interests",
+        "copy_source_designation_bindings",
+        "copy_source_owner_designations",
+        "analysis_coordination_roles",
+        "analysis_coordination_schema",
+        "copy_index_v3_heads",
+        "copy_index_v3_locations",
+        "copy_index_v3_quarantines",
+        "copy_index_v3_artifacts",
+        "copy_index_source_attestations",
+    ];
+    let mut actual_tables: Vec<_> = expected
+        .iter()
+        .filter(|(kind, _, _)| kind == "table")
+        .map(|(_, name, _)| name.as_str())
+        .collect();
+    actual_tables.sort();
+    let mut drop_tables = tables.to_vec();
+    drop_tables.sort();
+    assert_eq!(
+        actual_tables, drop_tables,
+        "complete dependency-ordered table inventory"
+    );
+    drops.extend(
+        tables
+            .into_iter()
+            .map(|name| format!(r#"DROP TABLE "{name}""#)),
+    );
+    // The adjunct replaced the v124 claim reservation trigger; restore it.
+    drops.push(
+        queue_fixture::source_extensions_fixture::published_v124_reservation_trigger().to_owned(),
+    );
+    drops
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn drop_post_v39_extension_schema(client: &Client) -> Vec<(String, String)> {
     // Capture the current oracle before removing managed triggers: ordinary
@@ -13871,7 +14568,7 @@ async fn drop_post_v39_extension_schema(client: &Client) -> Vec<(String, String)
         .collect::<Vec<_>>();
     rewind_empty_managed_subtitle_extension(client).await;
     let mut rows = client
-        .query_consistent("SELECT type,name,sql FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name='analysis_required_resources' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
+        .query_consistent("SELECT type,name,sql FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name IN ('analysis_required_resources','analysis_source_scope_schema') OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
         .await.expect("read later background schema inventory");
     let statements = rows
         .iter_mut()
@@ -14364,7 +15061,7 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ._root
         .path()
         .join("fresh-bootstrap-subtitle-source-telemetry.db");
-    let checks: [(&str, i64); 8] = [
+    let checks: [(&str, i64); 9] = [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
             AUTH_SCHEMA_BASELINE_VERSION,
@@ -14401,14 +15098,18 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ),
         (
             "SELECT COUNT(*) AS value FROM subtitle_managed_schema \
-             WHERE singleton = 1 AND version = 6",
+             WHERE singleton = 1 AND version = 7",
             1,
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'view' \
              AND name = 'background_job_required_resources' \
-             AND sql LIKE '%subtitle_model_operation%' AND sql LIKE '%subtitle_model:%' \
-             AND sql LIKE '%library-targeted-v1%'",
+             AND sql LIKE '%subtitle_model_operation%' AND sql LIKE '%subtitle_model:%'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'view' \
+             AND name = 'source_lease_job_scopes' AND sql LIKE '%library-targeted-v1%'",
             1,
         ),
     ];
@@ -14428,11 +15129,11 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
             assert_eq!(rows.len(), 1, "{round}: {sql}");
             assert_eq!(rows[0].value, expected, "{round}: {sql}");
         }
-        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 7).await;
         assert_eq!(
             replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
-            queue_fixture::managed_fixture_shape(6),
-            "{round}: exact current managed v6 view, marker and guards",
+            current_managed_fixture_shape(),
+            "{round}: exact current managed v7 view, marker and guards",
         );
         let views: Vec<SchemaText> = client
             .query_consistent_map(
@@ -14994,6 +15695,62 @@ fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
     );
 }
 
+/// Start the store once more over an empty membership roster (every node
+/// ready), so an expanded source-lease tail contracts; the roster tables
+/// are the cluster layer's and are removed again.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn contract_source_leases_with_an_empty_roster(client: &Client, telemetry: &std::path::Path) {
+    let roster = [
+        "cluster_nodes(node_id TEXT PRIMARY KEY,last_seen_at INTEGER,removed_at INTEGER)",
+        "cluster_node_join_staging(node_id TEXT PRIMARY KEY)",
+        "cluster_node_capabilities(node_id TEXT,capability TEXT,last_seen_at INTEGER)",
+    ];
+    client
+        .txn(
+            roster
+                .iter()
+                .map(|table| (format!("CREATE TABLE {table}"), hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("empty roster")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("empty roster applied");
+    drop(
+        HiqliteAuthStore::open_or_migrate(client.clone(), telemetry)
+            .await
+            .expect("start with every node ready"),
+    );
+    client
+        .txn(
+            roster
+                .iter()
+                .map(|table| {
+                    let name = table.split('(').next().expect("table name");
+                    (format!("DROP TABLE {name}"), hiqlite::params!())
+                })
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("remove roster")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("roster removed");
+    let version: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT version AS value FROM source_lease_schema",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("source lease marker");
+    assert_eq!(
+        version.iter().map(|row| row.value).collect::<Vec<_>>(),
+        [3],
+        "contracted"
+    );
+}
+
 /// Bootstrap installs every schema object directly and stamps
 /// `AUTH_SCHEMA_VERSION`; the daemon's `open_or_migrate` never reruns a step
 /// the stamp says has happened. So bootstrap is a second copy of the
@@ -15088,6 +15845,11 @@ async fn fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree() {
             reached.iter().map(|row| row.value).collect::<Vec<_>>(),
             vec![AUTH_SCHEMA_BASELINE_VERSION]
         );
+        // An upgraded cluster keeps the source-lease expand until every node
+        // runs a lease-aware binary; a fresh one contracts at once. Compare
+        // the chain after its contract: with a roster in which every node is
+        // ready (none listed), the next start contracts.
+        contract_source_leases_with_an_empty_roster(&client, &telemetry).await;
         assert_migrated_fragment_prune_budget(&client).await;
         store_schema_snapshot(&client).await
     };
@@ -15523,6 +16285,19 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
         .iter_mut()
         .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
         .collect::<Vec<_>>();
+    let lease_marker: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT version AS value FROM source_lease_schema",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("restored lease generation");
+    assert_eq!(lease_marker.len(), 1);
+    let expected_background_triggers = match lease_marker[0].value {
+        2 => expanded_background_trigger_oracle(expected_background_triggers),
+        3 => expected_background_triggers,
+        version => panic!("unknown restored lease generation: {version}"),
+    };
     assert_eq!(
         restored_triggers, expected_background_triggers,
         "historical migration must restore every removed background and Jellyfin trigger definition"
@@ -18689,6 +19464,9 @@ struct ContractNodeLaunch {
     learner_only: bool,
     root: PathBuf,
     nodes: Vec<ContractNodeSpec>,
+    /// The descriptors of this node's own Raft and API sockets, bound by the
+    /// parent and inherited across exec.
+    sockets: ContractInheritedSockets,
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -18708,7 +19486,6 @@ struct ContractCluster {
 #[cfg(feature = "hiqlite-contract-tests")]
 #[derive(Debug)]
 enum ContractStartError {
-    PortCollision,
     Failed(String),
 }
 
@@ -18722,75 +19499,64 @@ struct ContractStartupEvent {
 #[cfg(feature = "hiqlite-contract-tests")]
 impl ContractCluster {
     async fn start() -> Self {
-        const ATTEMPTS: usize = 5;
         install_contract_crypto_provider();
-        for attempt in 1..=ATTEMPTS {
-            match Self::try_start().await {
-                Ok(cluster) => return cluster,
-                Err(ContractStartError::PortCollision) if attempt < ATTEMPTS => continue,
-                Err(ContractStartError::PortCollision) => {
-                    panic!("three-voter contract exhausted {ATTEMPTS} port-bind attempts")
-                }
-                Err(ContractStartError::Failed(error)) => {
-                    panic!("three-voter contract startup failed: {error}")
-                }
+        match Self::try_start().await {
+            Ok(cluster) => cluster,
+            Err(ContractStartError::Failed(error)) => {
+                panic!("three-voter contract startup failed: {error}")
             }
         }
-        unreachable!("contract startup loop returns or panics")
     }
 
     async fn try_start() -> Result<Self, ContractStartError> {
         Self::try_start_sized(3, 0)
             .await
-            .map(|(cluster, _)| cluster)
+            .map(|(cluster, _, _)| cluster)
     }
 
-    /// `voters` child voters, and the specs of every node: the voters first,
-    /// then `spares` further nodes whose ports were reserved in the same
-    /// allocation, for a caller that starts them itself (an in-process
-    /// learner with a local client and a mark).
+    /// `voters` child voters, the specs of every node (the voters first, then
+    /// `spares` further nodes), and the sockets of the spare nodes in spec
+    /// order, for a caller that starts them itself (an in-process learner
+    /// with a local client and a mark) on the very sockets whose ports the
+    /// specs name.
     async fn try_start_sized(
         voters: u64,
         spares: u64,
-    ) -> Result<(Self, Vec<ContractNodeSpec>), ContractStartError> {
+    ) -> Result<(Self, Vec<ContractNodeSpec>, Vec<ContractNodeSockets>), ContractStartError> {
         let root = tempfile::tempdir().expect("three-voter contract root");
-        // Select the complete port set while all probe listeners coexist,
-        // so one call cannot contain duplicate port numbers. The listeners
-        // must be released before Hiqlite can bind; try_start reports that
-        // remaining cross-process race and start() reallocates the whole set.
-        let mut ports =
-            contract_free_ports(2 * usize::try_from(voters + spares).expect("node count"))
-                .into_iter();
-        let mut specs = (1..=voters + spares)
-            .map(|id| ContractNodeSpec {
-                id,
-                raft: format!(
-                    "127.0.0.1:{}",
-                    ports.next().expect("reserved contract Raft port")
-                ),
-                api: format!(
-                    "127.0.0.1:{}",
-                    ports.next().expect("reserved contract API port")
-                ),
-            })
+        // Every node's sockets are bound here and stay bound: a voter child
+        // inherits its own pair by descriptor and a spare is handed back to
+        // the caller, so no port is ever released between being chosen and
+        // being served on, and no other socket on the host can take it.
+        let mut sockets = (1..=voters + spares)
+            .map(|_| ContractNodeSockets::bind_loopback())
             .collect::<Vec<_>>();
-        let all_specs = specs.clone();
+        let all_specs = sockets
+            .iter()
+            .zip(1..)
+            .map(|(node, id)| node.spec(id))
+            .collect::<Vec<_>>();
+        let mut specs = all_specs.clone();
         specs.truncate(usize::try_from(voters).expect("voter count"));
         let executable = std::env::current_exe().expect("contract test executable");
         let mut starting = Vec::new();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         for node_id in 1..=voters {
+            let mut command = Command::new(&executable);
+            command
+                .arg("hiqlite_contract_node_process")
+                .arg("--ignored")
+                .arg("--exact")
+                .arg("--nocapture");
             let launch = ContractNodeLaunch {
                 node_id,
                 learner_only: false,
                 root: root.path().to_path_buf(),
                 nodes: specs.clone(),
+                sockets: sockets[usize::try_from(node_id - 1).expect("voter index")]
+                    .inherit(&mut command),
             };
-            let mut child = Command::new(&executable)
-                .arg("hiqlite_contract_node_process")
-                .arg("--ignored")
-                .arg("--exact")
-                .arg("--nocapture")
+            let mut child = command
                 .env(
                     "PLURX_CONTRACT_NODE_LAUNCH",
                     serde_json::to_string(&launch).expect("serialize node launch"),
@@ -18816,9 +19582,6 @@ impl ContractCluster {
                         Ok(_) if line.trim() == format!("PLURX_CONTRACT_NODE_READY {node_id}") => {
                             break Ok(());
                         }
-                        Ok(_) if line.starts_with("PLURX_CONTRACT_NODE_PORT_COLLISION ") => {
-                            break Err(ContractStartError::PortCollision);
-                        }
                         Ok(_) if line.starts_with("PLURX_CONTRACT_NODE_START_FAILED ") => {
                             break Err(ContractStartError::Failed(line.trim().to_owned()));
                         }
@@ -18838,6 +19601,11 @@ impl ContractCluster {
             });
             starting.push((node_id, child, Some(input)));
         }
+        // Every voter child has been spawned and holds its own descriptors,
+        // so the parent's copies of the voters' sockets are no longer needed;
+        // only the spares' sockets outlive the spawn, for the caller.
+        let spare_sockets = sockets.split_off(specs.len());
+        drop(sockets);
 
         let mut outputs = std::collections::BTreeMap::new();
         while outputs.len() < starting.len() {
@@ -18875,6 +19643,7 @@ impl ContractCluster {
                 _nodes: nodes,
             },
             all_specs,
+            spare_sockets,
         ))
     }
 }
@@ -18917,6 +19686,9 @@ async fn hiqlite_contract_node_process() {
     let _ = ServerTlsConfig::server_config_self_signed("127.0.0.1").await;
     let data_dir = launch.root.join(format!("node-{}", launch.node_id));
     std::fs::create_dir_all(&data_dir).expect("contract node data directory");
+    // Serve on the sockets the parent bound and passed down, rather than
+    // binding the ports again, which any other socket could have taken.
+    let (raft, api) = launch.sockets.take();
     let client = match hiqlite::start_node(NodeConfig {
         node_id: launch.node_id,
         learner_only: launch.learner_only,
@@ -18931,6 +19703,7 @@ async fn hiqlite_contract_node_process() {
             .collect(),
         listen_addr_api: Cow::Borrowed("127.0.0.1"),
         listen_addr_raft: Cow::Borrowed("127.0.0.1"),
+        listeners: Some(hiqlite::NodeListeners { raft, api }),
         data_dir: Cow::Owned(data_dir.to_string_lossy().into_owned()),
         filename_db: Cow::Borrowed("contract.db"),
         secret_raft: CONTRACT_RAFT_SECRET.to_owned(),
@@ -18946,21 +19719,11 @@ async fn hiqlite_contract_node_process() {
     {
         Ok(client) => client,
         Err(error) => {
-            let message = error.to_string();
-            let lower = message.to_ascii_lowercase();
-            if lower.contains("address already in use")
-                || lower.contains("addrinuse")
-                || lower.contains("os error 48")
-                || lower.contains("os error 98")
-            {
-                println!("PLURX_CONTRACT_NODE_PORT_COLLISION {}", launch.node_id);
-            } else {
-                println!(
-                    "PLURX_CONTRACT_NODE_START_FAILED {} {}",
-                    launch.node_id,
-                    message.replace(['\r', '\n'], " ")
-                );
-            }
+            println!(
+                "PLURX_CONTRACT_NODE_START_FAILED {} {}",
+                launch.node_id,
+                error.to_string().replace(['\r', '\n'], " ")
+            );
             std::io::stdout().flush().expect("flush contract failure");
             return;
         }
@@ -18986,15 +19749,139 @@ async fn hiqlite_contract_node_process() {
     std::process::exit(0);
 }
 
+/// The Raft and API listeners of one contract node, bound by the process that
+/// will own the node's lifetime.
+///
+/// Reading a port from a bound socket and dropping it before the node binds
+/// the port again lets any other socket on the host take it in between. The
+/// sockets stay bound instead: a child process inherits them by descriptor, an
+/// in-process node serves on duplicates, and the port is never unbound.
 #[cfg(feature = "hiqlite-contract-tests")]
-fn contract_free_ports(count: usize) -> Vec<u16> {
-    let listeners = (0..count)
-        .map(|_| TcpListener::bind("127.0.0.1:0").expect("bind contract port"))
-        .collect::<Vec<_>>();
-    listeners
-        .iter()
-        .map(|listener| listener.local_addr().expect("contract port address").port())
-        .collect()
+struct ContractNodeSockets {
+    raft: TcpListener,
+    api: TcpListener,
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+impl ContractNodeSockets {
+    fn bind_loopback() -> Self {
+        Self {
+            raft: TcpListener::bind("127.0.0.1:0").expect("bind contract Raft socket"),
+            api: TcpListener::bind("127.0.0.1:0").expect("bind contract API socket"),
+        }
+    }
+
+    fn raft_address(&self) -> String {
+        self.raft
+            .local_addr()
+            .expect("contract Raft socket address")
+            .to_string()
+    }
+
+    fn api_address(&self) -> String {
+        self.api
+            .local_addr()
+            .expect("contract API socket address")
+            .to_string()
+    }
+
+    fn spec(&self, id: u64) -> ContractNodeSpec {
+        ContractNodeSpec {
+            id,
+            raft: self.raft_address(),
+            api: self.api_address(),
+        }
+    }
+
+    /// Hand both sockets to the child `command` will spawn, and nobody else.
+    ///
+    /// Rust opens these descriptors close-on-exec and the parent keeps them
+    /// that way, so a child spawned concurrently by another test does not
+    /// inherit them. Only this command's child clears the flag, in its own
+    /// forked process just before exec.
+    fn inherit(&self, command: &mut Command) -> ContractInheritedSockets {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+
+        let raft_fd = self.raft.as_raw_fd();
+        let api_fd = self.api.as_raw_fd();
+        // SAFETY: the closure runs in the forked child before exec and only
+        // calls fcntl, which is async-signal-safe. It clears FD_CLOEXEC in the
+        // child's own descriptor table, which does not touch the parent's
+        // flags. The descriptors must still be open when `command` spawns:
+        // every caller keeps these sockets alive until `spawn` returns, and a
+        // caller that dropped them first would hand the child closed or
+        // reused descriptor numbers.
+        unsafe {
+            command.pre_exec(move || {
+                for fd in [raft_fd, api_fd] {
+                    if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        ContractInheritedSockets { raft_fd, api_fd }
+    }
+
+    /// Duplicates for a node started in this process; the originals stay
+    /// bound for the lifetime of `self`.
+    fn node_listeners(&self) -> hiqlite::NodeListeners {
+        hiqlite::NodeListeners {
+            raft: self.raft.try_clone().expect("clone contract Raft socket"),
+            api: self.api.try_clone().expect("clone contract API socket"),
+        }
+    }
+
+    /// Duplicates for a parent-side [`Config`] that starts the voter in this
+    /// process, so it serves on the same sockets a child served on before.
+    fn cluster_listeners(&self) -> plurx_core::config::ClusterListeners {
+        let listeners = self.node_listeners();
+        plurx_core::config::ClusterListeners::owned(listeners.raft, listeners.api)
+    }
+}
+
+/// Descriptor numbers of the sockets a child inherited from its parent's
+/// [`ContractNodeSockets`], carried in the child's launch description.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct ContractInheritedSockets {
+    raft_fd: i32,
+    api_fd: i32,
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+impl ContractInheritedSockets {
+    /// Placeholder in a launch the spawning code has not yet filled in: only
+    /// `inherit` knows the descriptors, and it runs when the command is built.
+    const UNSET: Self = Self {
+        raft_fd: -1,
+        api_fd: -1,
+    };
+
+    /// Take ownership of the inherited Raft and API listeners.
+    ///
+    /// Call this once per child process, in the child that inherited the
+    /// descriptors: a second call would wrap descriptors that are already
+    /// owned, and a call in any other process names unrelated descriptors.
+    fn take(self) -> (TcpListener, TcpListener) {
+        use std::os::fd::FromRawFd;
+
+        assert!(
+            self.raft_fd >= 0 && self.api_fd >= 0,
+            "launch was not given inherited sockets"
+        );
+        // SAFETY: the parent cleared close-on-exec on exactly these
+        // descriptors for this child, they are listening TCP sockets nothing
+        // else in this process owns, and this is the only call that wraps them.
+        unsafe {
+            (
+                TcpListener::from_raw_fd(self.raft_fd),
+                TcpListener::from_raw_fd(self.api_fd),
+            )
+        }
+    }
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -19649,7 +20536,6 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "background_predictions",
             "background_provider_budgets",
             "background_scan_request_v2",
-            "background_source_custody",
             "background_source_pauses",
             "background_source_service_epochs",
             "background_source_service_grants",
@@ -19675,7 +20561,6 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "dvr_rules",
             "file_grants",
             "files",
-            "foreground_source_owners",
             "items",
             "jellyfin_entity_ids",
             "jellyfin_login_tokens",
@@ -19735,6 +20620,8 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "sharing_rotations",
             "sharing_viewers",
             "sharing_watch",
+            "source_lease_receipt_sources",
+            "source_leases",
             "timeline_annotation_sets",
             "timeline_manual_overrides",
             "tokens",
@@ -20848,24 +21735,22 @@ async fn a_cleartext_trakt_row_is_refused_before_any_row_reaches_raft() {
     );
 }
 
+/// A one-voter configuration whose cluster ports are bound sockets the config
+/// owns, so the voter serves on them and no port is ever released between
+/// being chosen and being served on.
+///
+/// The sockets are on loopback because fresh activation's staging voter is
+/// forced there: a held wildcard socket would refuse its bind.
 #[cfg(feature = "hiqlite-contract-tests")]
 fn one_voter_config(data_dir: &std::path::Path) -> Config {
     let mut config = Config::default();
-    let mut ports = contract_free_ports(2).into_iter();
+    let raft = TcpListener::bind("127.0.0.1:0").expect("bind one-voter Raft socket");
+    let api = TcpListener::bind("127.0.0.1:0").expect("bind one-voter API socket");
     config.storage.data_dir = data_dir.to_owned();
-    config.cluster.raft_bind = format!(
-        "0.0.0.0:{}",
-        ports.next().expect("reserved one-voter Raft port")
-    )
-    .parse()
-    .expect("raft bind");
-    config.cluster.api_bind = format!(
-        "0.0.0.0:{}",
-        ports.next().expect("reserved one-voter API port")
-    )
-    .parse()
-    .expect("api bind");
+    config.cluster.raft_bind = raft.local_addr().expect("one-voter Raft address");
+    config.cluster.api_bind = api.local_addr().expect("one-voter API address");
     config.cluster.advertise_host = "127.0.0.1".to_owned();
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
     config
 }
 
@@ -20877,10 +21762,32 @@ struct ActivationNodeLaunch {
     api_bind: String,
     source_version: i64,
     first_boot: bool,
+    /// Filled in by whatever spawns the child, once it has inherited the
+    /// node's sockets into that command.
+    sockets: ContractInheritedSockets,
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
 impl ActivationNodeLaunch {
+    /// A launch on the addresses `sockets` are bound to.
+    fn new(
+        data_dir: &std::path::Path,
+        sockets: &ContractNodeSockets,
+        source_version: i64,
+        first_boot: bool,
+    ) -> Self {
+        Self {
+            data_dir: data_dir.to_owned(),
+            raft_bind: sockets.raft_address(),
+            api_bind: sockets.api_address(),
+            source_version,
+            first_boot,
+            sockets: ContractInheritedSockets::UNSET,
+        }
+    }
+
+    /// The configuration without listeners: the child gets its sockets from
+    /// the descriptors it inherited.
     fn config(&self) -> Config {
         let mut config = Config::default();
         config.storage.data_dir = self.data_dir.clone();
@@ -20888,6 +21795,23 @@ impl ActivationNodeLaunch {
         config.cluster.api_bind = self.api_bind.parse().expect("api bind");
         config.cluster.advertise_host = "127.0.0.1".to_owned();
         config
+    }
+
+    /// The configuration for the parent process, which reads the node's
+    /// addresses as a client and starts it in-process after a child has
+    /// stopped: it serves on duplicates of the same sockets the children used.
+    fn parent_config(&self, sockets: &ContractNodeSockets) -> Config {
+        let mut config = self.config();
+        config.cluster.listeners = sockets.cluster_listeners();
+        config
+    }
+
+    /// This launch with the descriptors `command` will pass to its child.
+    fn inheriting(&self, sockets: &ContractNodeSockets, command: &mut Command) -> Self {
+        Self {
+            sockets: sockets.inherit(command),
+            ..self.clone()
+        }
     }
 }
 
@@ -20900,16 +21824,19 @@ struct ActivationNodeProcess {
 
 #[cfg(feature = "hiqlite-contract-tests")]
 impl ActivationNodeProcess {
-    fn start(launch: &ActivationNodeLaunch) -> Self {
+    fn start(launch: &ActivationNodeLaunch, sockets: &ContractNodeSockets) -> Self {
         let executable = std::env::current_exe().expect("activation test executable");
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        command
             .arg("hiqlite_activation_node_process")
             .arg("--ignored")
             .arg("--exact")
-            .arg("--nocapture")
+            .arg("--nocapture");
+        let launch = launch.inheriting(sockets, &mut command);
+        let mut child = command
             .env(
                 "PLURX_ACTIVATION_NODE_LAUNCH",
-                serde_json::to_string(launch).expect("serialize activation launch"),
+                serde_json::to_string(&launch).expect("serialize activation launch"),
             )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -20951,16 +21878,23 @@ impl ActivationNodeProcess {
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
-fn run_injected_activation(launch: &ActivationNodeLaunch, failpoint: &str) {
+fn run_injected_activation(
+    launch: &ActivationNodeLaunch,
+    sockets: &ContractNodeSockets,
+    failpoint: &str,
+) {
     let executable = std::env::current_exe().expect("activation test executable");
-    let output = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("hiqlite_activation_node_process")
         .arg("--ignored")
         .arg("--exact")
-        .arg("--nocapture")
+        .arg("--nocapture");
+    let launch = launch.inheriting(sockets, &mut command);
+    let output = command
         .env(
             "PLURX_ACTIVATION_NODE_LAUNCH",
-            serde_json::to_string(launch).expect("serialize activation launch"),
+            serde_json::to_string(&launch).expect("serialize activation launch"),
         )
         .env("PLURX_CLUSTER_ACTIVATION_FAILPOINT", failpoint)
         .output()
@@ -20980,15 +21914,12 @@ async fn assert_one_voter_activation(data_dir: &std::path::Path, source_version:
     // so put this source back in that shape and require the coordinator to run
     // the ordinary one-time sealing upgrade before it publishes the backup.
     make_trakt_fixture_row_cleartext(&data_dir.join("plurx.db"));
-    let config = one_voter_config(data_dir);
-    let launch = ActivationNodeLaunch {
-        data_dir: data_dir.to_owned(),
-        raft_bind: config.cluster.raft_bind.to_string(),
-        api_bind: config.cluster.api_bind.to_string(),
-        source_version,
-        first_boot: true,
-    };
-    let first = ActivationNodeProcess::start(&launch);
+    // One pair of sockets for the whole test: both children serve on it, so
+    // the port stays bound while the first stops and the second starts.
+    let sockets = ContractNodeSockets::bind_loopback();
+    let launch = ActivationNodeLaunch::new(data_dir, &sockets, source_version, true);
+    let config = launch.parent_config(&sockets);
+    let first = ActivationNodeProcess::start(&launch, &sockets);
 
     let active = data_dir.join(HIQLITE_ACTIVE_DIRNAME);
     let marker: ActivationMarker = serde_json::from_slice(
@@ -21038,10 +21969,13 @@ async fn assert_one_voter_activation(data_dir: &std::path::Path, source_version:
     drop(second);
     first.stop();
 
-    let reopened = ActivationNodeProcess::start(&ActivationNodeLaunch {
-        first_boot: false,
-        ..launch
-    });
+    let reopened = ActivationNodeProcess::start(
+        &ActivationNodeLaunch {
+            first_boot: false,
+            ..launch
+        },
+        &sockets,
+    );
     let second = connect_activated_store(&config)
         .await
         .expect("second reader after subsequent run");
@@ -21187,15 +22121,15 @@ async fn killed_activation_boundaries_recover_sqlite_or_completed_target() {
         let fixture = tempfile::tempdir().expect("interrupted activation fixture");
         let source = populated_current_import_fixture(fixture.path());
         make_trakt_fixture_row_cleartext(&source);
-        let config = one_voter_config(fixture.path());
-        let launch = ActivationNodeLaunch {
-            data_dir: fixture.path().to_owned(),
-            raft_bind: config.cluster.raft_bind.to_string(),
-            api_bind: config.cluster.api_bind.to_string(),
-            source_version: plurx_core::store::SQLITE_SCHEMA_VERSION,
-            first_boot: true,
-        };
-        run_injected_activation(&launch, failpoint);
+        let sockets = ContractNodeSockets::bind_loopback();
+        let launch = ActivationNodeLaunch::new(
+            fixture.path(),
+            &sockets,
+            plurx_core::store::SQLITE_SCHEMA_VERSION,
+            true,
+        );
+        let config = launch.parent_config(&sockets);
+        run_injected_activation(&launch, &sockets, failpoint);
 
         let recovered = select_daemon_store(&config)
             .await
@@ -21218,19 +22152,19 @@ async fn killed_activation_boundaries_recover_sqlite_or_completed_target() {
     let fixture = tempfile::tempdir().expect("post-rename activation fixture");
     let source = populated_current_import_fixture(fixture.path());
     make_trakt_fixture_row_cleartext(&source);
-    let config = one_voter_config(fixture.path());
-    let launch = ActivationNodeLaunch {
-        data_dir: fixture.path().to_owned(),
-        raft_bind: config.cluster.raft_bind.to_string(),
-        api_bind: config.cluster.api_bind.to_string(),
-        source_version: plurx_core::store::SQLITE_SCHEMA_VERSION,
-        first_boot: true,
-    };
-    run_injected_activation(&launch, "after-rename");
+    let sockets = ContractNodeSockets::bind_loopback();
+    let launch = ActivationNodeLaunch::new(
+        fixture.path(),
+        &sockets,
+        plurx_core::store::SQLITE_SCHEMA_VERSION,
+        true,
+    );
+    let config = launch.parent_config(&sockets);
+    run_injected_activation(&launch, &sockets, "after-rename");
     assert!(fixture.path().join(HIQLITE_ACTIVE_DIRNAME).is_dir());
     assert!(!fixture.path().join("hiqlite.incoming").exists());
 
-    let resumed = ActivationNodeProcess::start(&launch);
+    let resumed = ActivationNodeProcess::start(&launch, &sockets);
     let second = connect_activated_store(&config)
         .await
         .expect("read completed target after rename crash");
@@ -21346,15 +22280,15 @@ async fn a_lost_replicated_target_refuses_to_reimport_the_retained_source() {
     let fixture = tempfile::tempdir().expect("activated source fixture");
     let source = populated_current_import_fixture(fixture.path());
     make_trakt_fixture_row_cleartext(&source);
-    let config = one_voter_config(fixture.path());
-    let launch = ActivationNodeLaunch {
-        data_dir: fixture.path().to_owned(),
-        raft_bind: config.cluster.raft_bind.to_string(),
-        api_bind: config.cluster.api_bind.to_string(),
-        source_version: plurx_core::store::SQLITE_SCHEMA_VERSION,
-        first_boot: true,
-    };
-    ActivationNodeProcess::start(&launch).stop();
+    let sockets = ContractNodeSockets::bind_loopback();
+    let launch = ActivationNodeLaunch::new(
+        fixture.path(),
+        &sockets,
+        plurx_core::store::SQLITE_SCHEMA_VERSION,
+        true,
+    );
+    let config = launch.parent_config(&sockets);
+    ActivationNodeProcess::start(&launch, &sockets).stop();
 
     let breadcrumb = fixture.path().join(ACTIVATED_SOURCE_FILENAME);
     assert!(
@@ -21397,7 +22331,7 @@ async fn a_lost_replicated_target_refuses_to_reimport_the_retained_source() {
     // directory activates again rather than staying permanently wedged. The
     // failpoint stops that attempt as soon as it proves the guard is passed.
     std::fs::remove_file(&breadcrumb).expect("accept the rollback");
-    run_injected_activation(&launch, "after-quiescence");
+    run_injected_activation(&launch, &sockets, "after-quiescence");
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -21417,7 +22351,12 @@ async fn activation_node_observation_fixture() {
         &std::env::var("PLURX_ACTIVATION_NODE_LAUNCH").expect("activation launch"),
     )
     .expect("decode activation launch");
-    let selected = startup_observer::select_applied_singleton(&launch.config())
+    // The only place the inherited descriptors are taken, so the staging and
+    // active generations of fresh activation share the one pair of sockets.
+    let (raft, api) = launch.sockets.take();
+    let mut config = launch.config();
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
+    let selected = startup_observer::select_applied_singleton(&config)
         .await
         .expect("select one-voter store");
     assert_eq!(selected.backend, SelectedBackend::Replicated);
@@ -21850,7 +22789,31 @@ fn contract_inventory_matches_every_store_method() {
     // `authenticate_token_proof_for` to USER_METHODS. Both are exercised on
     // each backend by token_proofs::token_proof_uses_the_authoritative_audience_and_policy_read_on_each_backend.
     // No existing method, trait or supertrait is removed.
-    assert_eq!(declared.len(), 638, "review the Store method count");
+    // 638 -> 641 for per-device playback capabilities (PR #1907): `UserStore`'s
+    // `put_device_caps`, `device_caps_for_user` and `device_caps_for_all_users`
+    // keep each sign-in's capability document in the additive
+    // `playback_device_caps_r1` extension, removed with its token. Named in
+    // USER_METHODS and exercised on both backends by
+    // playback_device_caps::a_device_capability_record_lives_and_dies_with_its_sign_in.
+    // 641 -> 643: `merge_file_probe_dv_levels` grafts the Dolby Vision levels
+    // record onto the measured probe revision and `files_missing_dv_levels`
+    // pages the DV sources still lacking it. Both are named in `MEDIA_METHODS`
+    // and covered on both backends by
+    // store_contract/dv_title_probe_provenance.rs (dv_levels_*).
+    // No new trait or supertrait of `Store`.
+    // 643 -> 635: source leases remove the eight foreground/background
+    // custody proof methods; lease expiry is the release.
+    // 635 -> 636: `BackgroundJobStore`'s `requeue_expired_running_jobs`
+    // returns expired-lease running jobs to the queue with the takeover's
+    // bookkeeping. Named in BACKGROUND_JOB_METHODS and exercised on both
+    // backends by background_jobs::expired_lease_sweep_requeues_with_takeover_bookkeeping.
+    // No new trait or supertrait of `Store`.
+    // 636 -> 637: `BackgroundJobStore`'s `carry_forward_dv_title_verdicts`
+    // re-points settled title demand from a reviewed predecessor scanner in
+    // place. Named in BACKGROUND_JOB_METHODS and exercised on both backends by
+    // dv_title_jobs::title_verdicts_carry_forward_only_where_the_successor_reproduces_them.
+    // No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 637, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -23531,6 +24494,12 @@ async fn rendition_plan_contract_runs_through_dyn_store() {
 #[tokio::test]
 async fn fragment_index_attempt_history_survives_every_charged_attempt() {
     for_each_backend(|store, backend| async move {
+        // Each retried attempt's lease still charges its 60 s grace; this contract
+        // is about the attempt budget, not source capacity.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "16")
+            .await
+            .expect("source readers per root");
         let (_, file_id) = seed_file(&store, "attempt-history").await;
         let source_sha256 = "a".repeat(64);
         let pipeline_sha256 = "b".repeat(64);
@@ -25330,6 +26299,12 @@ async fn timeline_annotation_contract_runs_through_dyn_store() {
 #[tokio::test]
 async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
     for_each_backend(|store, backend| async move {
+        // One maintenance reader per root beside the live slot: the numbers this
+        // contract was written against.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
+            .await
+            .expect("source readers per root");
         let (_, file_id) = seed_file(&store, "analysis-admin-control").await;
         let request_id = uuid::Uuid::new_v4().to_string();
         store
@@ -25387,22 +26362,24 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
                 .is_none(),
             "{backend}: a cancelled reader still owns its source slot"
         );
+        // Its old lease expired at 20 ms and charges the 60 s grace.
+        let current_reader_deadline = 60_100;
         let current = store
-            .claim_analysis_request("analysis-node", 21, 30)
+            .claim_analysis_request("analysis-node", 60_021, current_reader_deadline)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim analysis request: {error}"))
             .unwrap_or_else(|| panic!("{backend}: replacement analysis claim"));
         assert_eq!(current.request_id, retried.request_id, "backend {backend}");
         assert!(
             !store
-                .complete_analysis_request(&stale, "generation-stale", 22)
+                .complete_analysis_request(&stale, "generation-stale", 60_022)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: replay old publication: {error}")),
             "backend {backend}: a reclaimed request must refuse its old worker"
         );
         assert!(
             store
-                .complete_analysis_request(&current, "generation-current", 22)
+                .complete_analysis_request(&current, "generation-current", 60_022)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: publish current generation: {error}")),
             "backend {backend}"
@@ -25428,6 +26405,14 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             "backend {backend}: cancellation never deletes a published artifact"
         );
 
+        // Keep this subscenario after the preceding reader's expiry/grace.
+        // The three fenced attempts below may retain physical readers during
+        // grace; this subscenario checks retry/publication fences, not capacity.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "3")
+            .await
+            .expect("capacity for three fenced semantic attempts");
+        let semantic_start = current_reader_deadline + 60_001;
         let semantic_request_id = uuid::Uuid::new_v4().to_string();
         let semantic_request = NewAnalysisRequest {
             request_id: semantic_request_id.clone(),
@@ -25444,8 +26429,8 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             // Empty means cluster-owned semantic work. It is intentionally not
             // pinned to whichever ingress accepted the request.
             target_node_id: String::new(),
-            not_before_ms: 20,
-            created_at_ms: 20,
+            not_before_ms: semantic_start,
+            created_at_ms: semantic_start,
         };
         store
             .enqueue_analysis_request(&semantic_request)
@@ -25462,7 +26447,7 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             "backend {backend}: semantic work is cluster-owned once"
         );
         let expired = store
-            .claim_analysis_request("analysis-node-a", 20, 30)
+            .claim_analysis_request("analysis-node-a", semantic_start, semantic_start + 10)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim semantic request: {error}"))
             .unwrap_or_else(|| panic!("{backend}: first semantic claim"));
@@ -25473,7 +26458,7 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
         assert_eq!(attempts[0].phase, "claimed", "backend {backend}");
         assert!(
             store
-                .claim_analysis_request("analysis-node-b", 30, 50)
+                .claim_analysis_request("analysis-node-b", semantic_start + 10, semantic_start + 30)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: reclaim semantic request: {error}"))
                 .is_none(),
@@ -25488,7 +26473,8 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             attempts[0].terminal_code, "lease_expired",
             "backend {backend}"
         );
-        let first_retry_at = 30 + analysis_backoff_ms(&semantic_request_id, 1, 5_000, 300_000);
+        let first_retry_at =
+            semantic_start + 10 + analysis_backoff_ms(&semantic_request_id, 1, 5_000, 300_000);
         assert!(store
             .claim_analysis_request("analysis-node-b", first_retry_at - 1, first_retry_at + 9)
             .await
@@ -26710,13 +27696,7 @@ async fn analysis_phase_retries_after_storage_domain_apply_without_losing_claim(
         }
 
         let blocked = store
-            .begin_analysis_source_phase(
-                claim.clone(),
-                source.clone(),
-                0,
-                uuid::Uuid::new_v4().to_string(),
-                1_005,
-            )
+            .begin_analysis_source_phase(claim.clone(), source.clone(), 0, 1_005)
             .await
             .expect("capacity refusal is retryable");
         assert!(
@@ -26758,13 +27738,7 @@ async fn analysis_phase_retries_after_storage_domain_apply_without_losing_claim(
             );
         }
         let phase = store
-            .begin_analysis_source_phase(
-                claim.clone(),
-                source.clone(),
-                0,
-                uuid::Uuid::new_v4().to_string(),
-                1_007,
-            )
+            .begin_analysis_source_phase(claim.clone(), source.clone(), 0, 1_007)
             .await
             .expect("retry physical phase")
             .expect("retry succeeds");
@@ -28373,6 +29347,12 @@ async fn the_prometheus_snapshot_answers_what_the_queue_verdict_asks() {
 #[tokio::test]
 async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store() {
     for_each_backend(|store, backend| async move {
+        // Each retried attempt's lease still charges its 60 s grace; this contract
+        // is about the attempt budget, not source capacity.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "16")
+            .await
+            .expect("source readers per root");
         let (_, file_id) = seed_file(&store, "analysis-terminal-identity").await;
         let request = NewAnalysisRequest {
             request_id: "terminal-analysis-request".to_owned(),
@@ -28874,6 +29854,12 @@ async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality
 #[tokio::test]
 async fn analysis_admin_retry_resets_attempt_budget_through_dyn_store() {
     for_each_backend(|store, backend| async move {
+        // Each retried attempt's lease still charges its 60 s grace; this contract
+        // is about the attempt budget, not source capacity.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "16")
+            .await
+            .expect("source readers per root");
         let (_, file_id) = seed_file(&store, "analysis-retry-budget").await;
         let request_id = uuid::Uuid::new_v4().to_string();
         store
@@ -35472,6 +36458,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: other.id,
                     spec: &spec,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35491,6 +36478,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &spec,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35517,6 +36505,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &spec,
                     only_items: Some(&only),
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35532,6 +36521,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &spec,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35557,6 +36547,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &only_unwatched,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35578,6 +36569,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &first,
                     only_items: None,
+                    top_level_only: false,
                     day: 0,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35599,6 +36591,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &shuffle,
                     only_items: None,
+                    top_level_only: false,
                     day: 20_400,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35613,6 +36606,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     viewer: owner.id,
                     spec: &shuffle,
                     only_items: None,
+                    top_level_only: false,
                     day: 20_400,
                     presence: plurx_core::domain::ItemPresence::Everything,
                 },
@@ -35789,6 +36783,80 @@ async fn curation_contract_runs_through_dyn_store() {
             before,
             "{backend}: seasons and episodes are not taggable"
         );
+
+        let home = store
+            .create_library(&NewLibrary {
+                name: "Curation Videos".into(),
+                kind: LibraryKind::Home,
+                paths: vec![PathBuf::from("/curation/videos")],
+                anime: false,
+            })
+            .await
+            .expect("video library");
+        let home_item = |kind, parent_id, title: &str| NewItem {
+            library_id: home.id,
+            kind,
+            parent_id,
+            title: title.into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        };
+        let folder = store
+            .insert_item(&home_item(ItemKind::Folder, None, "Trips"))
+            .await
+            .expect("folder");
+        let video = store
+            .insert_item(&home_item(ItemKind::Video, Some(folder), "Beach day"))
+            .await
+            .expect("nested video");
+        store
+            .set_tag_members(
+                household.id,
+                &[video],
+                &[],
+                owner.id,
+                TagSource::Manual,
+                255,
+            )
+            .await
+            .expect("tag nested video");
+        let video_rule = RowSpec {
+            all_of: vec![Term::Tag(household.id)],
+            libraries: vec![home.id],
+            ..Default::default()
+        };
+        let mut query = RuleQuery {
+            viewer: owner.id,
+            spec: &video_rule,
+            only_items: None,
+            top_level_only: false,
+            day: 0,
+            presence: plurx_core::domain::ItemPresence::OnDisk,
+        };
+        let result = store.rule_items(&query, 0, 20).await.expect("Home row");
+        assert_eq!(
+            (result.item_ids, result.total),
+            (vec![video], 1),
+            "{backend}"
+        );
+        query.top_level_only = true;
+        let result = store
+            .rule_items(&query, 0, 20)
+            .await
+            .expect("root library grid");
+        assert_eq!((result.item_ids, result.total), (vec![], 0), "{backend}");
+        store
+            .set_tag_members(
+                household.id,
+                &[],
+                &[video],
+                owner.id,
+                TagSource::Manual,
+                256,
+            )
+            .await
+            .expect("remove nested-video tag before the merge count assertions");
 
         // Ids are never reused: a stored layout or a client holding row:N or
         // tag N must not silently point at something new.
@@ -45509,4 +46577,111 @@ async fn library_path_removal_runs_through_dyn_store() {
         );
     })
     .await;
+}
+
+// Contract-only witnesses of the current source-lease generation. They live
+// here, not in the shared support module, because only this replicated
+// contract suite builds with `hiqlite-contract-tests`.
+#[cfg(feature = "hiqlite-contract-tests")]
+pub(crate) struct ExpandedLeaseWitness {
+    pub lease_shape: Vec<(String, String, String)>,
+    pub source_shape: Vec<(String, String, String)>,
+    pub source_counts: Vec<(String, i64)>,
+    pub contract: Vec<String>,
+    background: Vec<(String, String)>,
+    contracted_background: Vec<(String, String)>,
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+fn background_trigger_rows(conn: &rusqlite::Connection) -> Vec<(String, String)> {
+    conn.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND (name GLOB 'background_*' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0) ORDER BY name")
+        .expect("canonical background trigger inventory")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("canonical background trigger rows")
+        .collect::<Result<_, _>>()
+        .expect("complete canonical background triggers")
+}
+
+/// Use the production migration and generated contract, including macro guards;
+/// a raw SQL include would omit the permanent contracted service guard.
+#[cfg(feature = "hiqlite-contract-tests")]
+pub(crate) fn expanded_source_lease_witness() -> &'static ExpandedLeaseWitness {
+    static EXPECTED: std::sync::OnceLock<ExpandedLeaseWitness> = std::sync::OnceLock::new();
+    EXPECTED.get_or_init(|| {
+        let (conn, contract) = plurx_core::store::validation_expanded_source_lease_fixture()
+            .expect("canonical expanded source leases");
+        let source_shape = queue_fixture::source_extensions_fixture::source_tail_objects(&conn);
+        let source_counts = source_shape
+            .iter()
+            .filter(|(kind, _, _)| kind == "table")
+            .map(|(_, name, _)| {
+                let count = conn
+                    .query_row(
+                        &format!(r#"SELECT count(*) FROM "{}""#, name.replace('"', r#""""#)),
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("expanded source marker/data witness");
+                (name.clone(), count)
+            })
+            .collect();
+        let directory = tempfile::tempdir().expect("contracted background witness");
+        let path = directory.path().join("current.db");
+        drop(plurx_core::store::SqliteStore::open(&path).expect("contracted current witness"));
+        let current = rusqlite::Connection::open(path).expect("contracted catalogue");
+        ExpandedLeaseWitness {
+            lease_shape: queue_fixture::source_extensions_fixture::source_lease_rewind_objects(
+                &conn,
+            ),
+            source_shape,
+            source_counts,
+            contract,
+            background: background_trigger_rows(&conn),
+            contracted_background: background_trigger_rows(&current),
+        }
+    })
+}
+
+/// Preserve every unrelated captured definition; replace only the exact
+/// canonical generation delta, refusing an already-drifted original oracle.
+#[cfg(feature = "hiqlite-contract-tests")]
+pub(crate) fn expanded_background_trigger_oracle(
+    original: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let witness = expanded_source_lease_witness();
+    let before: BTreeMap<_, _> = witness.contracted_background.iter().cloned().collect();
+    let after: BTreeMap<_, _> = witness.background.iter().cloned().collect();
+    let mut result: BTreeMap<_, _> = original.into_iter().collect();
+    let names: BTreeSet<_> = before.keys().chain(after.keys()).cloned().collect();
+    for name in names {
+        if before.get(&name) != after.get(&name) {
+            assert_eq!(
+                result.get(&name),
+                before.get(&name),
+                "original generation drift: {name}"
+            );
+            match after.get(&name) {
+                Some(sql) => {
+                    result.insert(name, sql.clone());
+                }
+                None => {
+                    result.remove(&name);
+                }
+            }
+        }
+    }
+    result.into_iter().collect()
+}
+
+/// Canonical live managed objects after the current SQLite bootstrap, including
+/// the source-lease root overlay on background_job_required_resources. Frozen
+/// published generations continue to use managed_fixture_shape(version).
+#[cfg(feature = "hiqlite-contract-tests")]
+pub(crate) fn current_managed_fixture_shape() -> Vec<(String, String)> {
+    let directory = tempfile::tempdir().expect("current managed fixture witness");
+    let path = directory.path().join("current.db");
+    drop(plurx_core::store::SqliteStore::open(&path).expect("current managed fixture"));
+    let connection = rusqlite::Connection::open(path).expect("current managed catalogue");
+    queue_fixture::source_extensions_fixture::managed_fixture_rows(&connection)
 }

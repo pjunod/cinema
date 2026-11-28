@@ -3,7 +3,6 @@
 **Status:** open — the sole batch review found three issues, now addressed;
 focused regressions and mandatory qualification follow.
 
-Build: 199
 Issue: #465
 
 Apple library demand now uses the actual adaptive column count and an exclusive

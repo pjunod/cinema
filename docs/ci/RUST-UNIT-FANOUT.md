@@ -383,8 +383,10 @@ Dispatched proofs on 2026-11-13 establish the following boundaries:
 These are execution and reuse proofs, not a measured speedup claim. Concurrent
 main changes require fresh keys for affected crates; receipts remain reusable
 only where the recomputed key matches. The final combined PR's lane must pass
-before landing. Runner capacity and real train installation remain separate
-operational acceptance work.
+before landing. Runner capacity remains separate operational acceptance
+work. The merge train is retired; the heavy lane now runs once per head when
+a session asks for it with the `lane` label
+([REQUESTED-LANE.md](REQUESTED-LANE.md)).
 
 ## 9. Other languages — follow-up plan
 

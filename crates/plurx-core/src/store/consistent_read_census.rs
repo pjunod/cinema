@@ -57,20 +57,26 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // Custody retention (main) checks its trigger shape and marker: two more.
     // Offload: committed column shape before its additive schema migration.
     // Storage-domain pending apply checks its trigger shape and marker: two more.
+    // Source leases check their object shape and marker (source_leases_schema_version,
+    // install_source_leases_schema): two more.
     // Scoped application login (delegation) checks its shape and marker: two more.
     // Curation (tags, rows, Home layouts) checks its shape and marker: two more.
     // F+ curve fits check their extension shape and marker: two more.
     // Fragment publication (#1827) checks its trigger shape before startup.
-    ("hiqlite.rs", 81),
+    // Device capabilities (Curator ADR 0031 §5) check their shape and marker: two more.
+    // Analysis source scope checks its view shape and marker: two more.
+    // Source leases check the lease shape and the contract readiness: two more.
+    ("hiqlite.rs", 87),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
     ("hiqlite_annotations.rs", 5),
     // Curation reads are local replica reads: a person's own tags and rows.
     ("hiqlite_curation.rs", 0),
-    // Managed bootstrap validates committed shape and marker. Legacy trigger
-    // installation also checks the committed custody-retention marker.
-    ("hiqlite_background_jobs.rs", 5),
+    // Managed bootstrap validates committed shape and marker. Retention
+    // bootstrap validates the committed custody-retention shape and its
+    // singleton marker before it may keep an existing owner.
+    ("hiqlite_background_jobs.rs", 6),
     ("hiqlite_catalog.rs", 2),
     ("hiqlite_classification.rs", 1),
     ("hiqlite_coordination.rs", 2),
@@ -97,7 +103,10 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_pretranscode.rs", 2),
     ("hiqlite_publication.rs", 7),
     ("hiqlite_reading.rs", 2),
-    ("hiqlite_sessions.rs", 37),
+    // The claim's entry read answers its request row and whether the
+    // playback already exists in one read, so a reopen skips a write and a
+    // re-read; `request_row` keeps its other callers.
+    ("hiqlite_sessions.rs", 38),
     ("hiqlite_sharing.rs", 1),
     ("hiqlite_shared_cache.rs", 4),
     ("hiqlite_timeline_annotations.rs", 2),
@@ -556,6 +565,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     // on a membership change, outside a request's accounting.
     ("analysis_component_schema_is_current", STARTUP),
     ("analysis_coordination_shape", STARTUP),
+    ("analysis_source_scope_schema_version", STARTUP),
     ("bootstrap_with_clock", STARTUP),
     ("bridge_private_lineage_inner", STARTUP),
     ("custody_retention_schema_version", STARTUP),
@@ -574,6 +584,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("migrate_playback_inputs", STARTUP),
     ("migrate_schema", STARTUP),
     ("offloaded_column_present", STARTUP),
+    ("playback_device_caps_shape", STARTUP),
     ("playback_handoffs_schema_version", STARTUP),
     ("playback_input_keys_shape", STARTUP),
     ("pointer_desired_revision_column_present", STARTUP),
@@ -586,6 +597,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("settle_migration_attempt", STARTUP),
     ("shared_caption_schema_version", STARTUP),
     ("source_arbitration_shape", STARTUP),
+    ("source_leases_schema_version", STARTUP),
     ("storage_domain_pending_schema_version", STARTUP),
     ("subtitle_managed_schema_version", STARTUP),
     ("subtitle_text_translation_schema_version", STARTUP),

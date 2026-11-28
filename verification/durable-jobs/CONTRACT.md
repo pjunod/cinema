@@ -14,6 +14,42 @@ source mapping**, not an automatic refinement proof. Item hashes in
 that set complete or that the abstractions are correct.
 
 
+## Expired-lease sweep under source leases — port review on 2026-11-27
+
+PR #1728 replaces physical source custody with expiring source leases. The
+sweep keeps its statement, grace, attempt budget, `lease_expired` fragment and
+voter-gated caller, but drops the previous-reader custody clause:
+`claim_previous_reader` no longer exists (the successor fence does not wait
+on its own lease; see SOURCE-LEASE-AS-BUILT). The sweep needs no source
+clause because it admits nothing: the next claim of the requeued row runs full
+source admission. The requeue does not delete the expired worker's lease
+(`source_lease_job_settled` keeps an expired owner's lease to expiry plus
+grace), so it stays charged to other claims through its grace on each
+claimant's clock; `EXPIRED_LEASE_SWEEP_GRACE_MS >= SOURCE_LEASE_GRACE_MS` is
+asserted but not load-bearing. The `ExpireSweep` model action has no custody
+guard and releases `held` for the job at once, which is laxer than the kept
+lease; the model does not represent the own-job ghost overlap a takeover
+allows during the grace. The model is unchanged; the row for the removed
+macro is dropped and the remaining pins are refreshed.
+
+## Expired-lease sweep — model and source review on 2026-11-26
+
+`requeue_expired_running_jobs` returns an expired running job to `queued`
+with the takeover's revocation and no successor (`ExpireSweep`). The claim's
+attempt budget, `lease_expired` attempt-error and previous-reader custody
+fragments are now macros shared with the sweep; `CLAIM_SQL` expands to the
+same statement text, and the trait, adapter, `claim_state`,
+`claim_source_holders` and `CLAIM_SQL` pins are refreshed with the new
+sweep and fragment rows. Review fixes add the sweep grace, move the caller
+behind the voter gate, and pin `background_job_settlement_effects`,
+`background_fragment_interest_failed`, the grace constant and
+`maintain_background_queue`; the model is unchanged and the smoke profile
+was rerun. Model `a992eb158a07`: all 18 registered
+configurations returned their expected verdicts in one local `full` run
+(clean governed inputs at `9e25e97b9`; baseline 33,608,489 distinct states
+in 477 s, lifecycle 11,754,965 in 139 s). This is development evidence;
+CI and promotion qualification remain separate.
+
 ## HDR integration with item pins — 2026-11-18
 
 Main `1d350d82` introduces item pins and the reviewed claim/predicate
@@ -366,8 +402,8 @@ transitions or an eventual-recovery guarantee.
 
 The mapping refreshes 17 existing rows and adds four explicit dependency pins
 for startup, [custody integration](../../crates/plurxd/src/source_custody.rs),
-[recovery](../../crates/plurxd/src/source_custody/recovery.rs), and the
-[host helper](../../scripts/source-custody-recovery). Those pins expose future
+recovery (`crates/plurxd/src/source_custody/recovery.rs`, removed), and the
+host helper (`scripts/source-custody-recovery`, removed). Those pins expose future
 drift; they do not map physical reboot proof into `DurableJobs`. Same-machine
 boot identity, descendant termination, fsync durability, aborted-activation
 reconciliation, exact-Store isolation and safe legacy challenge preparation
@@ -857,7 +893,7 @@ A newly acquired higher domain fence may temporarily have no matching binding.
 |---|---|---|---|
 | Enqueue / demand | `store/background_jobs.rs::enqueue_job`, `ENQUEUE_SQL`, `background_jobs_retention.sql::background_job_enqueue_command` | Accepted demand creates or joins a queued job; request identity differs from job identity | Library id, kind and payload-v1 validation are fixed valid; waiter priorities and payload data are abstracted |
 | Claim read, then CAS | `background_jobs.rs::claim_job`, `CLAIM_SQL` | First read can return the same live claim; otherwise exact observed revision CAS claims eligible queued/expired work, increments fence/revision, installs attempt and both required reservations atomically | Read and CAS are separate transitions; capability/kind predicates fixed to selected kinds; no Raft implementation |
-| Claim eligibility | `CLAIM_SQL` and resource triggers in `background_jobs_resources.sql` | Valid demand, not-before reached, retry budget, owner not removed, dispatch window, fresh identity, reservation slots available; live reservations of other jobs compete | Finite identities never recycle; counter exhaustion is an exploration boundary, not a production terminal state |
+| Claim eligibility | `CLAIM_SQL` and resource triggers in `background_job_claim_effects.sql` and `background_jobs_resources.sql` | Valid demand, not-before reached, retry budget, owner not removed, dispatch window, fresh identity, reservation slots available; live reservations of other jobs compete | Finite identities never recycle; counter exhaustion is an exploration boundary, not a production terminal state |
 | Replay / resolution | `background_jobs.rs::claim_job` and `resolve_claim` | Same identity returns existing current token only with matching node/boot, running state, live expiry and actual resource coverage or the exact paused source substitute; absent history gives expired/pruned, never a new attempt | Resolve without fence additionally checks dispatch window; per-operation caller `now_ms` is retained |
 | Queue renewal | `RENEW_SQL`, `background_jobs_schema.sql::background_job_renew_command` | Exact predecessor, running state, live lease, no removed owner, covering reservations or exact paused source substitute; increments revision and updates reservation expiry | Cancellation changes revision as well as state; replay is not a new renewal |
 | Cancellation / settlement | `cancel_job`, `SETTLE_SQL`, cancellation/settlement triggers | Queued→cancelled, running→cancelling; exact live settlement clears owner and reservations; yield preserves demand and installs not-before; failure consumes retry budget | S5 checks no revival of cancelling by modeled actions; cancelling is absorbing here, with no modeled completion/settlement from that state. New requests and general cancellation/completion precedence are outside this fragment |
@@ -998,6 +1034,7 @@ in README and the model; finite safety exhaustion is never liveness evidence.
 |---|---|
 | `InitFresh`, `InitRecovery`, `Next`, `ModelView`, `Symm` | Constructed reachable-shape seeds and explicit finite exploration machinery; not production operations |
 | `Cancel`, `Remove`, `LoseResource`, `Takeover`, `Outage`, `Restart` | Queue cancellation; membership removal; reservation loss; environment takeover abstraction of expired `CLAIM_SQL` plus triggers; unreachable authority; crash/reboot transport abstraction |
+| `ExpireSweep` | `background_jobs.rs::requeue_expired_running_jobs` (`EXPIRED_LEASE_ATTEMPTS_SQL`, `EXPIRED_LEASE_REQUEUE_SQL` and the settlement trigger): an expired running row returns to `queued` unowned with fence and revision advanced, its attempts finished and its reservations released; `EXPIRED_LEASE_SWEEP_GRACE_MS` grace, attempt budget, retry window, charged-custody guard and voter-only caller (`maintain_background_queue`) are not modelled; each only narrows the action. The model fires it at any `exp <= sample` and has no clock skew, so it does not show that the grace tolerates a skewed sweeper clock |
 | `PauseSource`, `ResumeSource` | `background_jobs_resources.rs::pause_background` / `resume_background` plus foreground SQL triggers; exact stable owner and one source reservation; physical stop/join and extra admission veto external |
 | `SendRenew`, `ApplyRenew`, `DeliverRenew` | Caller queue heartbeat; atomic `RENEW_SQL`/renew trigger; worker adoption of returned exact token |
 | `DomainChange`, `AcquireDomain` | Exact domain renewal/release and expired-lease acquisition in both coordination backends |
@@ -1034,6 +1071,11 @@ old facade result is not new-boot authority.
 successor attempt. It can invalidate old authority more broadly than the
 source claim path; it is not an exact claim-eligibility implementation or a
 recovery action. The normal dispatch/CAS path retains those predicates.
+
+`ExpireSweep` is the same revocation with no successor: it never installs a
+token, so it can only make old authority inexact earlier than a claim would.
+Its source grace (`EXPIRED_LEASE_SWEEP_GRACE_MS`, 60 s past expiry on the
+sweeper's clock) is a skew margin outside the model, not a modelled guard.
 
 Recovery Init has time0, a running old-boot claim expiring at2 and not-before2
 or3. Fair time reaches the applicable barriers; a delay2 claim may occur at2,
@@ -1150,14 +1192,14 @@ reader witness is armed only after that acknowledgement. Recovery uses the
 same typed settlement and release selectors as normal cleanup. A lost Store
 reply leaves evidence for retry. Physical-stop evidence cannot grant a new
 activation or stand in for a worker join.
-[Activation](../../crates/plurxd/src/source_custody.rs) ·
-[Settlement](../../crates/plurxd/src/source_custody/recovery.rs)
+Activation journal (`activate_background_with_journal`, removed) ·
+Settlement (`crates/plurxd/src/source_custody/recovery.rs`, removed)
 
 The model takes reader termination as a premise. Separate runtime tests cover
 the native same-kernel witness and the Linux host census for one audited
 legacy DV activation. An unknown reader or inconclusive witness keeps custody
-held. [Native witness tests](../../crates/plurxd/src/source_custody/recovery/reader/tests.rs) ·
-[Legacy custody tests](../../crates/plurxd/src/source_custody/recovery/physical_stop/tests.rs)
+held. Native witness tests (`crates/plurxd/src/source_custody/recovery/reader/tests.rs`, removed) ·
+Legacy custody tests (`crates/plurxd/src/source_custody/recovery/physical_stop/tests.rs`, removed)
 
 ## Pipeline-v2 and HDR integration — source correspondence, 2026-11-09
 
@@ -1168,3 +1210,81 @@ bodies retain both parents' source. The Store parent registers both sets of
 conformance tests. Refresh only those whole-file source hashes after checking
 the existing anchors; model/configuration bytes and qualification identities
 are unchanged. This is source correspondence, not model execution evidence.
+
+## Source lease step 2 — proof machinery removed, 2026-11-15
+
+[SOURCE-LEASE-RELEASE-PLAN.md](../../docs/server/SOURCE-LEASE-RELEASE-PLAN.md)
+step 2 deletes the reader-witness, census and physical-stop recovery module,
+the background completion ledger and the host recovery helper. Lease expiry
+is the release: the store sweep deletes an owner whose authority lapsed
+60 s ago. The three recovery dependency pins (exact-Store boot replay, the
+prepared host-reboot challenge and the startup configuration call) are
+removed with their sources; the activation pin and the refreshed rows stay.
+Links above to the removed files are kept as plain text for history. No
+modeled transition changes.
+
+## Source lease steps 3+4 — root capacity clarification, 2026-11-17
+
+[SOURCE-LEASE-AS-BUILT.md](../../docs/server/SOURCE-LEASE-AS-BUILT.md):
+source readers are rows of `source_leases`, counted per configured library
+root inside the claim's own statement. Root defaults are two maintenance
+readers plus one live slot; node occupancy adds no rooted cap, and an
+aggregate storage-domain cap exists only when explicitly configured. Repinned after review of
+each anchored item (rows keep narrow item anchors; the runner also requires
+a digest of each containing source file, so unchanged items in edited files
+were repinned without a model note):
+
+- `proposal §4.1 resource claim effects` is re-anchored to
+  `background_job_claim_effects.sql`, where the trigger now lives (the base
+  job schema and the lease expand both install it). Non-source resources
+  keep their two reservation slots; a source reservation is only the job's
+  bundle record (next free slot). Source capacity, which the model
+  abstracts as the resource cap, is decided by `CLAIM_SQL`'s lease counts
+  in the same statement, so the claim stays all-or-none.
+- The queue protocol trait and shared adapter lose `begin_analysis_source_phase`'s
+  caller custody id and gain the node in the analysis capacity clause; no
+  modeled transition reads either.
+- The M2 conformance test raises the root-default reader setting so earlier
+  scenarios' leases do not refuse later claims; its assertions are unchanged.
+- `recovery dependency outside model: custody activation and cleanup`
+  (`activate_background_with_journal`) is removed: the activation journal
+  is deleted and no dependency remains.
+- Registration checks total capacity and maintenance state in the same atomic
+  Store write. An offline source resumes after lease expiry through the
+  existing grant write; full re-admission adds no RPC. Delayed v1 metadata
+activation cannot recreate or renew an expired offline lease; only an admitted
+service grant renews offline capacity. The rolling legacy
+  projection is temporary and is removed at the contract boundary.
+
+These source details change no modeled transition and establish no liveness
+claim.
+
+
+The November 17 root-policy delta resolves each file to its longest
+component-matching configured root. The resource view supplies the same keys to
+claims, independent registrations, rolling owner bridges and pause readmission.
+Dispatch eligibility is generated from the three claim macros rather than a
+second threshold implementation. These are source correspondence obligations;
+the model's abstract resource key does not prove path resolution, root settings
+validation, or the optional aggregate-domain policy. New root/bridge regressions
+and their mutation evidence must qualify those implementation details.
+
+
+Root-policy review fixes (R1-R3): active lease ownership stays unchanged while
+its effective resource projection resolves the owner's current file/root scope.
+A library-root edit therefore cannot hide an existing reader or playback window.
+Unresolvable retired owners conservatively charge overlapping snapshot scopes
+during their bounded grace; explicit physical-domain associations remain charged
+until the phase closes. The shared writer rechecks old-binary resume proposals
+against current roots and maintenance/live capacity, while exact already-active
+resume acknowledgements remain idempotent. Resource CTEs are explicitly not
+materialized so identity-filtered lookups retain queue-key pushdown. Regression
+and mutation results are recorded separately after review; this paragraph is not
+a pass claim or a new model/liveness proof.
+
+
+The receipt-to-source relation also snapshots the immutable library/path scope.
+It survives physical lease retirement for the rest of the receipt epoch, so a
+root edit cannot erase bytes already allocated before an owner finishes.
+Receipt deletion cascades this metadata; it owns no lease, file or library and
+adds no recovery wait, pin, timer or RPC. Import inventory is 109 tables.

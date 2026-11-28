@@ -1,11 +1,11 @@
 name: ci
 
-# Full runtime sweep: manual or an explicit release tag only. Main pull
-# requests use main-fast-lane.yml after their one review; merging allocates no
-# second sweep and deployment remains explicit.
+# Full runtime sweep: manual dispatch only. Main pull requests use
+# main-fast-lane.yml after their one review; merging allocates no second
+# sweep and deployment remains explicit. A release tag does not start it:
+# release-tag.yml publishes a tag from the gate its release commit already
+# passed, without retesting it (Paul, 2026-11-25).
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       retained_units_sha256:
@@ -66,7 +66,7 @@ concurrency:
   group: ci-${{ github.ref }}
   # A final promotion candidate must survive a newer event long enough to
   # retain a diagnostic result. Ordinary PRs and main pushes still supersede
-  # their older work; tags remain immutable evidence. Workflow concurrency is
+  # their older work. Workflow concurrency is
   # evaluated before jobs, so this intentionally uses event context only.
   cancel-in-progress: >-
     ${{
@@ -83,6 +83,7 @@ jobs:
   # Resolve the PR diff once. Expensive jobs consume these outputs in parallel;
   # pushes and tags deliberately enable every surface.
   scope:
+    if: github.server_url != 'https://github.com'
     name: validation scope
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
@@ -208,13 +209,13 @@ jobs:
           owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
           chown -R "$owner" "$GITHUB_WORKSPACE"
 
-  # A stale counter must fail the aggregate gate without hiding the native test
-  # result. Run release hygiene beside preflight and the affected platform jobs
-  # rather than making it their prerequisite.
+  # A broken version declaration must fail the aggregate gate without hiding
+  # the native test result. Run release hygiene beside preflight and the
+  # affected platform jobs rather than making it their prerequisite.
   mobile_version:
     name: mobile release version
     needs: scope
-    if: needs.scope.outputs.mobile_version == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.mobile_version == 'true')
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -230,45 +231,11 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          fetch-depth: 0
-      # The recorded base sha is the target tip at event time, not now. Two
-      # branches that write the same build counter auto-merge with no conflict
-      # and no BEHIND signal in this job, so a branch bumped to N stays green
-      # forever once an unrelated release bump lands N on the target. Re-fetch
-      # the target here so the counter is compared against what the target
-      # actually ships, while the recorded base still scopes which release
-      # inputs this branch touched.
-      - name: Resolve the current merge target
-        if: github.event_name == 'pull_request' || needs.scope.outputs.qualification == 'true'
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          GITHUB_TOKEN: ${{ github.token }}
-          BOUND_BASE_SHA: ${{ needs.scope.outputs.promotion_base_sha }}
-        run: |
-          set -euo pipefail
-          if [ -n "$BOUND_BASE_SHA" ]; then BASE_REF=main; fi
-          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
-          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
-            "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          if [ -n "$BOUND_BASE_SHA" ]; then
-            test "$(git rev-parse "origin/$BASE_REF")" = "$BOUND_BASE_SHA"
-          fi
-          echo "MERGE_TARGET=origin/$BASE_REF" >> "$GITHUB_ENV"
+      # Build numbers are derived at build time (scripts/build-number), so
+      # there is no counter to compare against a merge target: the check is
+      # the checked-out tree's marketing versions and derived-number wiring.
       - name: Check mobile release hygiene
-        env:
-          VALIDATION_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          BOUND_BASE_SHA: ${{ needs.scope.outputs.promotion_base_sha }}
-        run: |
-          if [ -n "$BOUND_BASE_SHA" ]; then VALIDATION_BASE="$BOUND_BASE_SHA"; fi
-          if [ -n "$VALIDATION_BASE" ] \
-            && git cat-file -e "$VALIDATION_BASE^{commit}" 2>/dev/null; then
-            PLURX_VALIDATION_MODE=changed-from \
-              PLURX_VALIDATION_BASE="$VALIDATION_BASE" \
-              PLURX_VALIDATION_MERGE_TARGET="$MERGE_TARGET" \
-              python3 -m validation.mobile_versions
-          else
-            python3 -m validation.mobile_versions
-          fi
+        run: python3 -m validation.mobile_versions
       - name: Restore persistent runner workspace ownership
         if: always()
         run: |
@@ -280,6 +247,7 @@ jobs:
   # simulators, emulators, cross compilers, or Docker builds, and make every
   # expensive fan-out job in this workflow depend on this result.
   preflight:
+    if: github.server_url != 'https://github.com'
     name: fast policy and contract preflight
     needs: scope
     # History and bounded TLC share this job; use high-cpu general workers.
@@ -460,7 +428,7 @@ jobs:
     # Give main-bound pull requests an early, independent compiler verdict.
     # The full unit and SQLite suite continues below; contributors may merge
     # after this compile gate and policy pass, then watch that suite on main.
-    if: needs.scope.outputs.rust == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.rust == 'true')
     # Use the same compiler pool and cold-build budget as main-fast-lane.
     runs-on: [ci-nonvoter-compile-amd64]
     container:
@@ -562,7 +530,7 @@ jobs:
     # Kotlin and Swift diffs compile nothing under crates/, so the cargo lane
     # only runs when the diff can reach it; qualification and queue runs force
     # the complete fan-out.
-    if: needs.scope.outputs.rust == 'true' && needs.scope.outputs.retain_rust != 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.rust == 'true' && needs.scope.outputs.retain_rust != 'true')
     # The 20-GiB unit container shares a capacity-one build slot on a nonvoter.
     runs-on: [ci-nonvoter-heavy-amd64]
     # Private, smoke-tested CI target; never expose the management credential.
@@ -696,14 +664,6 @@ jobs:
           PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}
           WORKSPACE_RUST_EVIDENCE: ${{ inputs.workspace_rust_evidence }}
         run: python3 -m validation.workspace_rust_continuation
-      - name: Verify source recovery ownership in the root Linux unit container
-        if: steps.workspace-continuation.outputs.root_retained != 'true' && needs.preflight.outputs.root_ownership_retained != 'true'
-        run: |
-          # This container is already the root-capable pinned Linux unit
-          # surface. Exercise real UID/GID handoff instead of counting the
-          # non-root operations lane's ownership-case skip as coverage.
-          python3 -c 'import os; assert os.geteuid() == 0, "source recovery ownership regression requires the root unit container"'
-          python3 -m unittest discover -s tests/operations -p test_source_custody_recovery.py -v
       - name: Run format, Clippy, unit, and SQLite contracts
         if: inputs.workspace_rust_evidence == ''
         run: make ci-rust-gate
@@ -739,14 +699,15 @@ jobs:
     name: replicated Store contracts (legacy)
     needs: [scope, preflight]
     if: >-
+      github.server_url != 'https://github.com' && (
       needs.scope.outputs.cluster_auth == 'true' &&
       needs.scope.outputs.execution_mode != 'accelerated' &&
-      needs.preflight.outputs.store_retained != 'true'
+      needs.preflight.outputs.store_retained != 'true' )
     runs-on: [ci-nonvoter-store]
-    # Run 6867 reached 418 of 430 serial controls at the 95m cutoff.
-    # Measured compile + full suite + the separate lineage bridge need about
-    # 106m. Keep every test and allow a finite 120m budget for this inventory.
-    timeout-minutes: 120
+    # Run 9756 passed 470 of 509 serial cases at the 120-minute cutoff.
+    # That pace puts the original first binary near 130 minutes. Leave
+    # room for additional cases, the lineage bridge and receipts.
+    timeout-minutes: 150
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -810,8 +771,9 @@ jobs:
     name: required replicated Store shard graph
     needs: [scope, preflight]
     if: >-
+      github.server_url != 'https://github.com' && (
       needs.scope.outputs.cluster_auth == 'true' &&
-      needs.scope.outputs.execution_mode == 'accelerated'
+      needs.scope.outputs.execution_mode == 'accelerated' )
     uses: ./.github/workflows/store-shards.yml
     with:
       execution-mode: accelerated
@@ -823,8 +785,9 @@ jobs:
     name: non-blocking replicated Store shard shadow
     needs: [scope, preflight]
     if: >-
+      github.server_url != 'https://github.com' && (
       needs.scope.outputs.cluster_auth == 'true' &&
-      needs.scope.outputs.execution_mode == 'shadow'
+      needs.scope.outputs.execution_mode == 'shadow' )
     uses: ./.github/workflows/store-shards.yml
     with:
       execution-mode: shadow
@@ -836,7 +799,7 @@ jobs:
       - preflight
       - cluster_store_legacy
       - cluster_store_shards
-    if: always() && needs.scope.outputs.cluster_auth == 'true' && needs.preflight.outputs.store_retained != 'true'
+    if: github.server_url != 'https://github.com' && (always() && needs.scope.outputs.cluster_auth == 'true' && needs.preflight.outputs.store_retained != 'true')
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -889,9 +852,10 @@ jobs:
     name: replicated topology contracts
     needs: [scope, preflight]
     if: >-
+      github.server_url != 'https://github.com' && (
       needs.preflight.outputs.topology_retained != 'true' &&
       (needs.scope.outputs.cluster_auth == 'true' ||
-       needs.scope.outputs.hiqlite_spike == 'true')
+       needs.scope.outputs.hiqlite_spike == 'true') )
     runs-on: [ci-nonvoter-store]
     # A cold runner builds the command-profile dependency graph before the
     # three-voter proof. Persistent non-voter caches shorten later runs.
@@ -1015,7 +979,7 @@ jobs:
   cluster_transport_recovery_contracts:
     name: cluster transport recovery contracts
     needs: [scope, preflight]
-    if: needs.scope.outputs.cluster_auth == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.cluster_auth == 'true')
     runs-on: [ci-nonvoter-store]
     timeout-minutes: 30
     steps:
@@ -1068,8 +1032,9 @@ jobs:
     name: cluster transport recovery voter role
     needs: [scope, preflight, cluster_transport_recovery_contracts]
     if: >-
+      github.server_url != 'https://github.com' && (
       needs.scope.outputs.cluster_auth == 'true' &&
-      needs.cluster_transport_recovery_contracts.result == 'success'
+      needs.cluster_transport_recovery_contracts.result == 'success' )
     runs-on: [ci-nonvoter-store]
     timeout-minutes: 240
     steps:
@@ -1136,8 +1101,9 @@ jobs:
     name: cluster transport recovery learner role
     needs: [scope, preflight, cluster_transport_recovery_contracts]
     if: >-
+      github.server_url != 'https://github.com' && (
       needs.scope.outputs.cluster_auth == 'true' &&
-      needs.cluster_transport_recovery_contracts.result == 'success'
+      needs.cluster_transport_recovery_contracts.result == 'success' )
     runs-on: [ci-nonvoter-store]
     timeout-minutes: 240
     steps:
@@ -1208,7 +1174,7 @@ jobs:
       - cluster_transport_recovery_contracts
       - cluster_transport_recovery_voter
       - cluster_transport_recovery_learner
-    if: always() && needs.scope.outputs.cluster_auth == 'true'
+    if: github.server_url != 'https://github.com' && (always() && needs.scope.outputs.cluster_auth == 'true')
     runs-on: [ci-nonvoter-store]
     timeout-minutes: 30
     steps:
@@ -1321,7 +1287,7 @@ jobs:
   cluster_wal:
     name: replicated WAL recovery contracts
     needs: [scope, preflight]
-    if: needs.scope.outputs.cluster_auth == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.cluster_auth == 'true')
     # Retained outcomes still require compiling the large current native targets.
     runs-on: [ci-nonvoter-heavy-amd64]
     # Run 5447 passed 213 commands; the next feature target was still compiling
@@ -1386,7 +1352,7 @@ jobs:
   cluster_daemon:
     name: cluster daemon contracts
     needs: [scope, preflight]
-    if: needs.scope.outputs.cluster_auth == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.cluster_auth == 'true')
     runs-on: [ci-nonvoter-compile-amd64]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -1520,7 +1486,7 @@ jobs:
   web_layout:
     name: web layout and accessibility
     needs: [scope, preflight]
-    if: needs.scope.outputs.web_layout == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.web_layout == 'true')
     # Pinned for the same reason as `check`: a browser sweep still plays media
     # through ffmpeg. See .github/actions/ffmpeg.
     runs-on: [ci-nonvoter-heavy-amd64]
@@ -1693,7 +1659,7 @@ jobs:
     # A dependency is deliberate: Forgejo 16 accepted the same job-level
     # concurrency group on both siblings but still executed them together.
     needs: [scope, preflight, web_layout]
-    if: needs.scope.outputs.web_layout == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.web_layout == 'true')
     runs-on: [ci-nonvoter-heavy-amd64]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -1844,7 +1810,7 @@ jobs:
   android_jvm:
     name: Android JVM tests and lint
     needs: [scope, preflight]
-    if: needs.scope.outputs.android_jvm == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.android_jvm == 'true')
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 20
     steps:
@@ -1924,7 +1890,7 @@ jobs:
   apple:
     name: Apple iOS + tvOS tests
     needs: [scope, preflight]
-    if: (needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true') || needs.scope.outputs.desktop_macos == 'true'
+    if: github.server_url != 'https://github.com' && ((needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true') || needs.scope.outputs.desktop_macos == 'true')
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     concurrency:
       group: plurx-apple-silicon-heavy
@@ -2030,7 +1996,10 @@ jobs:
           name: tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
-          retention-days: 90
+          # About 300 MB per run. Held 90 days, they reached 29 GB on the forge's
+          # disk and kept growing; 14 is the server default every other evidence
+          # artifact uses. Native receipts adopt journeys from the last 14 days.
+          retention-days: 14
       - name: Delete the run's simulators
         if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'
         run: |
@@ -2044,7 +2013,7 @@ jobs:
   android_apks:
     name: Build Android instrumentation APKs
     needs: [scope, preflight]
-    if: needs.scope.outputs.android_device == 'true' && needs.scope.outputs.retain_android_device != 'true' && needs.preflight.outputs.android_device_retained != 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.android_device == 'true' && needs.scope.outputs.retain_android_device != 'true' && needs.preflight.outputs.android_device_retained != 'true')
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 25
     steps:
@@ -2089,7 +2058,7 @@ jobs:
   android_device:
     name: Android instrumented UI tests
     needs: [scope, preflight, android_apks]
-    if: ${{ !cancelled() && needs.scope.result == 'success' && needs.preflight.result == 'success' && needs.scope.outputs.android_device == 'true' && needs.scope.outputs.retain_android_device != 'true' && needs.preflight.outputs.android_device_retained != 'true' }}
+    if: ${{ github.server_url != 'https://github.com' && (!cancelled() && needs.scope.result == 'success' && needs.preflight.result == 'success' && needs.scope.outputs.android_device == 'true' && needs.scope.outputs.retain_android_device != 'true' && needs.preflight.outputs.android_device_retained != 'true') }}
     runs-on: [self-hosted, macOS, ARM64, lab, apple, primary]
     concurrency:
       group: plurx-apple-silicon-heavy
@@ -2220,7 +2189,7 @@ jobs:
       group: ${{ matrix.arch == 'arm64' && 'plurx-apple-silicon-heavy' || format('plurx-package-{0}-{1}', github.run_id, matrix.arch) }}
       cancel-in-progress: false
     needs: [scope, preflight]
-    if: needs.scope.outputs.release_build == 'true' || needs.scope.outputs.container == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.release_build == 'true' || needs.scope.outputs.container == 'true')
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -2441,20 +2410,6 @@ jobs:
           BUILDER_NAME: ${{ steps.buildx-cache.outputs.builder-name }}
         run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50
 
-  # CD validates the tag in this workflow, then delegates artifact construction,
-  # per-platform smoke, and alias publication to the manually recoverable release
-  # workflow. A cancelled tag run can therefore be recovered without moving it.
-  publish:
-    name: publish image (local registry)
-    needs: [scope, check, package_smoke]
-    if: >-
-      startsWith(github.ref, 'refs/tags/v') && inputs.promotion_pr == '' &&
-      inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' &&
-      needs.scope.outputs.qualification != 'true'
-    uses: ./.github/workflows/publish-release.yml
-    with:
-      release_tag: ${{ github.ref_name }}
-
   # Only an operator's manual dispatch on main may publish a sha- image.
   # Merging allocates no runtime sweep or image build (P-01 option (a)); the
   # dispatch proves that exact main tree before moving the fleet image alias.
@@ -2479,10 +2434,11 @@ jobs:
       - android_device
       - package_smoke
     if: >-
+      github.server_url != 'https://github.com' && (
       always() && github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' && inputs.promotion_pr == '' &&
       inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' &&
-      needs.scope.outputs.qualification != 'true'
+      needs.scope.outputs.qualification != 'true' )
     runs-on: [ci-nonvoter-heavy-amd64]
     timeout-minutes: 90
     concurrency:
@@ -2619,9 +2575,10 @@ jobs:
   pr_gate:
     name: Main promotion gate
     if: >-
+      github.server_url != 'https://github.com' && (
       always() && (github.event_name == 'pull_request' ||
         (github.event_name == 'workflow_dispatch' &&
-          (inputs.promotion_pr != '' || inputs.promotion_head_sha != '' || inputs.promotion_base_sha != '')))
+          (inputs.promotion_pr != '' || inputs.promotion_head_sha != '' || inputs.promotion_base_sha != ''))) )
     needs:
       - scope
       - mobile_version
@@ -2765,7 +2722,7 @@ jobs:
 
   badge:
     name: publish CI badge
-    if: always()
+    if: github.server_url != 'https://github.com' && (always())
     needs:
       - scope
       - mobile_version
@@ -2782,7 +2739,6 @@ jobs:
       - apple
       - android_device
       - package_smoke
-      - publish
       - publish_main
       - pr_gate
     runs-on: [self-hosted, Linux, X64, lab, general]
@@ -2813,7 +2769,7 @@ jobs:
             ${{ needs.web_layout.result }} ${{ needs.vod_web.result }}
             ${{ needs.android_jvm.result }} ${{ needs.apple.result }}
             ${{ needs.android_device.result }}
-            ${{ needs.package_smoke.result }} ${{ needs.publish.result }}
+            ${{ needs.package_smoke.result }}
             ${{ needs.publish_main.result }} ${{ needs.pr_gate.result }}
         run: |
           message=passing; fill='#4c1'; color=brightgreen

@@ -158,16 +158,16 @@ storage-pressure-check: ## Root Linux: prove a real ENOSPC cache/scratch device 
 	PLURX_RUN_STORAGE_PRESSURE_TEST=1 $(CARGO) test --locked -p plurxd \
 	  a_full_cache_or_scratch_device_never_relocates_authoritative_bytes -- --nocapture
 
-# The bookkeeping rules CI enforces — index rows, release counters, infra
+# The bookkeeping rules CI enforces — index rows, mobile versions, infra
 # names, Regression-Test lines, route docs — checked in seconds with the fix
 # printed beside each failure. The pre-push hook and the fast lane's first job
 # run the same script. docs/ci/PAPERWORK.md lists every rule.
 .PHONY: paperwork
-paperwork: ## Fast bookkeeping checks (index rows, counters, names, Regression-Test) with fixes
+paperwork: ## Fast bookkeeping checks (index rows, mobile versions, names, Regression-Test) with fixes
 	@python3 scripts/paperwork
 
 .PHONY: paperwork-fix
-paperwork-fix: ## Apply the derivable paperwork fixes (counters, Markdown host names, index rows) to the working tree
+paperwork-fix: ## Apply the derivable paperwork fixes (Markdown host names, index rows) to the working tree
 	@python3 scripts/paperwork-fix
 
 .PHONY: history-check
@@ -266,6 +266,40 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::api::tests::write_ack_log_index_is_sent_only_on_a_negotiated_connection \
 	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::pre_vote_variants_follow_every_deployed_raft_stream_ordinal \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::only_the_exact_header_value_advertises_pre_vote \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::an_older_server_never_receives_a_pre_vote_and_keeps_its_stream \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::an_advertising_server_answers_the_pre_vote_itself \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::both_raft_stream_handlers_advertise_and_answer_pre_vote \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::a_local_only_answer_read_from_a_socket_is_refused \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::an_unreachable_peer_gives_no_pre_vote_answer \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::a_reconnect_renegotiates_pre_vote \
+	  --lib -- --exact
+	PLURX_EXPECT_TEST_COUNT=14 $(CARGO) test --locked --manifest-path vendor/openraft/Cargo.toml \
+	  --features serde engine::tests::pre_vote_test:: --lib
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::frame_io::tests::real_tls_tail_backpressure_completes_for_every_payload_direction \
@@ -1092,11 +1126,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::migration::startup_wait_logging_tests::immediate_watermark_errors_cannot_starve_due_startup_log \
 	  --lib -- --exact
-	@OPENRAFT_MANIFEST="$$( $(CARGO) metadata --locked \
-	  --manifest-path vendor/hiqlite/Cargo.toml --format-version 1 \
-	  | python3 -c 'import json, sys; data = json.load(sys.stdin); print(next(p["manifest_path"] for p in data["packages"] if p["name"] == "openraft" and p["version"] == "0.9.25"))' )"; \
-	  CARGO_TARGET_DIR="$(CURDIR)/target/openraft-regression" $(CARGO) test --locked \
-	  --manifest-path "$$OPENRAFT_MANIFEST" --features generic-snapshot-data \
+	$(CARGO) test --locked --manifest-path vendor/openraft/Cargo.toml --features generic-snapshot-data \
 	  network::snapshot_transport::tests::test_chunked_reset_offset_if_snapshot_id_mismatch \
 	  --lib -- --exact
 	PLURX_EXPECT_TEST_COUNT=17 $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -1207,7 +1237,7 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 .PHONY: cluster-transport-recovery-contracts
 cluster-transport-recovery-contracts: ## Run transport recovery schemas, validators, and focused regressions
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=76 \
+	PLURX_EXPECT_TEST_COUNT=79 \
 	  PLURX_EXPECT_TEST_NAMES='transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly,transport_recovery::tests::two_early_acknowledgements_cannot_hide_a_long_recovery_gap,transport_recovery::tests::writer_must_cover_the_end_of_recovery,transport_recovery::tests::whole_recovery_duration_cannot_exceed_the_absolute_deadline,transport_recovery::tests::worst_transfer_duration_covers_the_complete_source_series,transport_recovery::tests::artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result,transport_recovery::tests::owned_async_task_growth_has_no_resource_slack' \
 	  scripts/require-test-count $(CARGO) test --locked \
 	  -p plurx-cluster-check transport_recovery --lib
@@ -1584,6 +1614,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/cinema-remote-browser-support.test.js
 	@node --test tests/web/cinema-remote-client.test.js
 	@node --test tests/web/offload.test.js
+	@node --test tests/web/dv-version-facts.test.js
 	@node --test tests/web/cinema-remote-controller.test.js
 	@node --test tests/web/cinema-remote-guard.test.js
 	@node --test tests/web/cinema-remote-receiver.test.js
@@ -1630,6 +1661,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/caption-controls.test.js
 	# HDR10-E appears only for an accepted current-generation processing report.
 	@node --test tests/web/dv-processing-badge.test.js
+	@node --test tests/web/dv-provenance-rows.test.js
 	@node --test tests/web/hdr-display-peak.test.js
 	# The HDR display claim follows (dynamic-range: high) after boot (Linux Chrome, monitor moves).
 	@node --test tests/web/hdr-display-change.test.js
@@ -1650,6 +1682,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/error-reporter.test.js
 	@node --test tests/playback/current-main-effort-quality.test.js
 	@node --test tests/playback/frame-diagnostics.test.js
+	@node --test tests/playback/server-metrics.test.js
 	@node tests/playback/network-shaping.test.js
 	@node --test tests/playback/cq-native-shipping-evidence.test.js
 	@node --test tests/playback/preparation-measurement.test.js
@@ -1785,6 +1818,16 @@ docker-startup-budget-check: ## Prove the resolved Compose startup budget before
 # mutation, rather than depending on `docker-startup-budget-check` and letting
 # each recipe derive its own. A preflight that proves one number while
 # `compose up` applies another is not a preflight.
+# Build once per commit, not once per node. `scripts/fleet-image pull` asks
+# the fleet registry (PLURX_REGISTRY in deploy/.env) for this exact clean
+# commit's `build-<sha>-<arch>` image once the hardware overlay is resolved.
+# It prints `use <image id>` when another node already built it (verified, and
+# both services resolve through PLURX_IMAGE), and that ID is proved and started
+# with --no-build instead of compiling. It prints `share <sha>` when this node
+# should build and then `fleet-image push --expect <sha>` the result for the
+# next node. It prints nothing (plain source build, nothing pushed) with no
+# registry configured, a dirty checkout, or an overlay that pins its own image
+# (the Pi runtime). Neither step can fail the deploy.
 .PHONY: docker-up
 docker-up: ## Build + (re)start Compose after its startup budget passes
 	cd deploy && hardware="$$(mktemp "$${TMPDIR:-/tmp}/plurx-hardware.XXXXXX")" \
@@ -1792,8 +1835,16 @@ docker-up: ## Build + (re)start Compose after its startup budget passes
 	  && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
 	  && compose_files="$$(python3 ../scripts/docker-hardware --prepare-pi --output "$$hardware")" \
 	  && export COMPOSE_FILE="$$compose_files" COMPOSE_PATH_SEPARATOR=: \
+	  && shared="$$(python3 ../scripts/fleet-image pull)" \
+	  && case "$$shared" in "use "*) export PLURX_IMAGE="$${shared#use }" ;; esac \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
-	  && PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT="$(PLURX_MEDIA_RUNTIME_REPOSITORY)" PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
+	  && case "$$shared" in \
+	     "use "*) \
+	       PLURX_HEALTH_START_PERIOD="$$period" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --no-build --pull never ;; \
+	     *) \
+	       PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT="$(PLURX_MEDIA_RUNTIME_REPOSITORY)" PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build \
+	         && case "$$shared" in "share "*) python3 ../scripts/fleet-image push --expect "$${shared#share }" ;; esac ;; \
+	     esac
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 
 # Fleet voters consume the already-qualified registry image. Pulling is safe
@@ -1928,10 +1979,6 @@ desktop-macos-test: ## Run native server tray Swift and AppKit unit contracts
 desktop-macos-check: desktop-macos-build desktop-macos-test ## Build the arm64 tray and test it
 
 ## ---- apple clients -----------------------------------------------------
-
-.PHONY: apple-build-bump
-apple-build-bump: ## Claim the next Apple build number across every generated surface
-	@python3 -m validation.apple_build --merge-target "$${PLURX_MERGE_TARGET:-origin/main}"
 
 # iPhone and iPad run the exact same build products, so iOS compiles ONCE with
 # `build-for-testing` and both destinations replay it with
@@ -2081,6 +2128,10 @@ apk: android ## Build the Android debug APK (alias for android)
 # applies the audited lineage and verifies the effective signer at API 28 and
 # 36. Any missing input or mismatch fails before publishing an APK.
 #
+# The image carries no Git and cannot see a worktree's history, so the store
+# build number is derived here on the host (`scripts/build-number --release`)
+# and handed to Gradle as the plurxVersionCode project property.
+#
 # The keystore path is resolved to an absolute one before `docker run -v`
 # sees it. Docker reads a source that is not absolute as a *volume name*: the
 # `plurx-upload.jks` that PUBLISHING.md's `keytool` line leaves in the cwd
@@ -2095,6 +2146,7 @@ android-release: android-image ## Build the lineage-signed Android release APK (
 	keystore="$$(cd "$$(dirname "$${PLURX_ANDROID_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_KEYSTORE}")" && \
 	oldkeystore="$$(cd "$$(dirname "$${PLURX_ANDROID_OLD_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_OLD_KEYSTORE}")" && \
 	lineage="$$(cd "$$(dirname "$${PLURX_ANDROID_LINEAGE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_LINEAGE}")" && \
+	versioncode="$$(scripts/build-number --release)" && \
 	docker run --rm \
 	  --platform $(ANDROID_PLATFORM) \
 	  -u $$(id -u):$$(id -g) -e HOME=/tmp \
@@ -2106,6 +2158,7 @@ android-release: android-image ## Build the lineage-signed Android release APK (
 	  -e PLURX_ANDROID_KEYSTORE=/signing/upload.jks \
 	  -e PLURX_ANDROID_OLD_KEYSTORE=/signing/old.jks \
 	  -e PLURX_ANDROID_LINEAGE=/signing/lineage.bin \
+	  -e ORG_GRADLE_PROJECT_plurxVersionCode="$$versioncode" \
 	  -v "$$keystore":/signing/upload.jks:ro \
 	  -v "$$oldkeystore":/signing/old.jks:ro \
 	  -v "$$lineage":/signing/lineage.bin:ro \

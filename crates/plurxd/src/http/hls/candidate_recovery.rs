@@ -358,10 +358,16 @@ async fn authenticate_cause(
     Ok(Some(cause))
 }
 
-pub(super) struct BoundRecovery {
+pub(super) struct BoundRecovery<C = QualityCandidate> {
     pub(super) scope: CandidateRecoveryScope,
     pub(super) route: MediaSessionRoute,
-    pub(super) candidate: QualityCandidate,
+    pub(super) candidate: C,
+}
+
+#[derive(Clone, Copy)]
+enum IncumbentCandidate {
+    Required,
+    OptionalForProcessedUpgrade,
 }
 
 pub(crate) async fn auto_catalog(
@@ -417,9 +423,210 @@ pub(crate) enum ProcessedRecoveryEvidence {
     /// The recipe is in the incumbent's rejected set, or the incumbent the
     /// upgrade was planned against is no longer the playback's incumbent.
     Rejected,
-    /// The incumbent or its memory could not be read before the deadline.
-    /// Not a verdict about the recipe.
-    Unavailable,
+    /// The incumbent or its memory could not be read. Not a verdict about the
+    /// recipe; the reason names which read missed.
+    Unavailable(RecoveryUnavailable),
+}
+
+/// Which read of an incumbent's recovery memory missed, and how. Each exit of
+/// the bind has its own reason, and a deadline names the read it was waiting
+/// on, so a refused upgrade says what to fix instead of one generic wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveryUnavailable {
+    /// The deadline passed during the playback's route read.
+    DeadlineRouteRead,
+    /// The deadline passed while fencing the source for the link identity.
+    DeadlineSourceIdentity,
+    /// The deadline passed during the route re-read after the source fence.
+    DeadlineRouteReread,
+    /// The deadline passed during the recovery-memory read.
+    DeadlineMemoryRead,
+    /// The viewer's network identity names no local user.
+    NoNetworkUser,
+    /// The store answered the route read with an error.
+    RouteStoreError,
+    /// The playback has no route.
+    NoRoute,
+    /// The route is owned by another node.
+    RouteOwnedElsewhere,
+    /// The route is not active.
+    RouteNotActive,
+    /// The route is still publishing.
+    RoutePublishing,
+    /// The route's owner lease has expired.
+    RouteLeaseExpired,
+    /// The route belongs to another session than the one planned against.
+    RouteOtherSession,
+    /// The route's recipe or response exceeds its bound.
+    RouteOversized,
+    /// The route's recipe does not decode or does not describe this playback.
+    RecipeMismatch,
+    /// The route's response does not decode or does not match its recipe.
+    ResponseMismatch,
+    /// The response lists no single selected candidate within its bound.
+    CandidateMismatch,
+    /// The selected candidate's id is not the one its recipe digest names.
+    CandidateIdentity,
+    /// The network identity carries no credential generation.
+    NoCredentialGeneration,
+    /// The source could not be opened or stat'ed for its fence.
+    SourceFenceOpen,
+    /// The source changed while it was fenced.
+    SourceChanged,
+    /// The store answered the route re-read after the source fence with an
+    /// error.
+    RouteRereadStoreError,
+    /// The playback had no route at the re-read after the source fence.
+    RouteRereadMissing,
+    /// The route re-read after the source fence no longer matches the bound
+    /// route (another incarnation, owner, epoch or recipe, or no longer
+    /// active).
+    RouteMoved,
+    /// The bound scope is not a valid recovery scope.
+    ScopeInvalid,
+    /// The store answered the recovery-memory read with an error.
+    MemoryStoreError,
+}
+
+impl RecoveryUnavailable {
+    pub(crate) const ALL: [Self; 25] = [
+        Self::DeadlineRouteRead,
+        Self::DeadlineSourceIdentity,
+        Self::DeadlineRouteReread,
+        Self::DeadlineMemoryRead,
+        Self::NoNetworkUser,
+        Self::RouteStoreError,
+        Self::NoRoute,
+        Self::RouteOwnedElsewhere,
+        Self::RouteNotActive,
+        Self::RoutePublishing,
+        Self::RouteLeaseExpired,
+        Self::RouteOtherSession,
+        Self::RouteOversized,
+        Self::RecipeMismatch,
+        Self::ResponseMismatch,
+        Self::CandidateMismatch,
+        Self::CandidateIdentity,
+        Self::NoCredentialGeneration,
+        Self::SourceFenceOpen,
+        Self::SourceChanged,
+        Self::RouteRereadStoreError,
+        Self::RouteRereadMissing,
+        Self::RouteMoved,
+        Self::ScopeInvalid,
+        Self::MemoryStoreError,
+    ];
+
+    /// This reason's position in [`Self::ALL`]. Exhaustive, so a new variant
+    /// does not compile until it has a slot (a test pins `ALL[index] == self`).
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::DeadlineRouteRead => 0,
+            Self::DeadlineSourceIdentity => 1,
+            Self::DeadlineRouteReread => 2,
+            Self::DeadlineMemoryRead => 3,
+            Self::NoNetworkUser => 4,
+            Self::RouteStoreError => 5,
+            Self::NoRoute => 6,
+            Self::RouteOwnedElsewhere => 7,
+            Self::RouteNotActive => 8,
+            Self::RoutePublishing => 9,
+            Self::RouteLeaseExpired => 10,
+            Self::RouteOtherSession => 11,
+            Self::RouteOversized => 12,
+            Self::RecipeMismatch => 13,
+            Self::ResponseMismatch => 14,
+            Self::CandidateMismatch => 15,
+            Self::CandidateIdentity => 16,
+            Self::NoCredentialGeneration => 17,
+            Self::SourceFenceOpen => 18,
+            Self::SourceChanged => 19,
+            Self::RouteRereadStoreError => 20,
+            Self::RouteRereadMissing => 21,
+            Self::RouteMoved => 22,
+            Self::ScopeInvalid => 23,
+            Self::MemoryStoreError => 24,
+        }
+    }
+
+    /// The metric label and the reason's name in a refusal.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::DeadlineRouteRead => "deadline_route_read",
+            Self::DeadlineSourceIdentity => "deadline_source_identity",
+            Self::DeadlineRouteReread => "deadline_route_reread",
+            Self::DeadlineMemoryRead => "deadline_memory_read",
+            Self::NoNetworkUser => "no_network_user",
+            Self::RouteStoreError => "route_store_error",
+            Self::NoRoute => "no_route",
+            Self::RouteOwnedElsewhere => "route_owned_elsewhere",
+            Self::RouteNotActive => "route_not_active",
+            Self::RoutePublishing => "route_publishing",
+            Self::RouteLeaseExpired => "route_lease_expired",
+            Self::RouteOtherSession => "route_other_session",
+            Self::RouteOversized => "route_oversized",
+            Self::RecipeMismatch => "recipe_mismatch",
+            Self::ResponseMismatch => "response_mismatch",
+            Self::CandidateMismatch => "candidate_mismatch",
+            Self::CandidateIdentity => "candidate_identity",
+            Self::NoCredentialGeneration => "no_credential_generation",
+            Self::SourceFenceOpen => "source_fence_open",
+            Self::SourceChanged => "source_changed",
+            Self::RouteRereadStoreError => "route_reread_store_error",
+            Self::RouteRereadMissing => "route_reread_missing",
+            Self::RouteMoved => "route_moved",
+            Self::ScopeInvalid => "scope_invalid",
+            Self::MemoryStoreError => "memory_store_error",
+        }
+    }
+
+    /// Whether the read ran out of time rather than answering.
+    pub(crate) const fn is_deadline(self) -> bool {
+        matches!(
+            self,
+            Self::DeadlineRouteRead
+                | Self::DeadlineSourceIdentity
+                | Self::DeadlineRouteReread
+                | Self::DeadlineMemoryRead
+        )
+    }
+}
+
+impl From<super::link_receipts::SourceIdentityMiss> for RecoveryUnavailable {
+    fn from(miss: super::link_receipts::SourceIdentityMiss) -> Self {
+        use super::link_receipts::SourceIdentityMiss as Miss;
+        match miss {
+            Miss::NoUser => Self::NoNetworkUser,
+            Miss::NoCredentialGeneration => Self::NoCredentialGeneration,
+            Miss::FenceOpen => Self::SourceFenceOpen,
+            Miss::Changed => Self::SourceChanged,
+        }
+    }
+}
+
+/// The read a bind is waiting on, so a deadline can say which one it cut.
+/// Atomic because the bind runs inside spawned (`Send`) upgrade tasks.
+#[derive(Default)]
+pub(super) struct RecoveryReadStage(std::sync::atomic::AtomicU8);
+
+impl RecoveryReadStage {
+    pub(super) const ROUTE: u8 = 0;
+    pub(super) const SOURCE: u8 = 1;
+    pub(super) const REREAD: u8 = 2;
+    pub(super) const MEMORY: u8 = 3;
+
+    pub(super) fn enter(&self, stage: u8) {
+        self.0.store(stage, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(super) fn deadline(&self) -> RecoveryUnavailable {
+        match self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            Self::SOURCE => RecoveryUnavailable::DeadlineSourceIdentity,
+            Self::REREAD => RecoveryUnavailable::DeadlineRouteReread,
+            Self::MEMORY => RecoveryUnavailable::DeadlineMemoryRead,
+            _ => RecoveryUnavailable::DeadlineRouteRead,
+        }
+    }
 }
 
 pub(crate) async fn processed_candidate_recovery_evidence(
@@ -437,47 +644,46 @@ pub(crate) async fn processed_candidate_recovery_evidence(
     let Some(network) = network else {
         return ProcessedRecoveryEvidence::Rejected;
     };
-    // Err(()) is an unreadable incumbent or memory; Ok(false) is a verdict.
-    let read = async {
-        let bound = incumbent(
+    let stage = RecoveryReadStage::default();
+    // Original and manual starts can own this recovery lifetime without a
+    // selected catalog row. They still inherit rejected recipes in that scope.
+    let bind = || {
+        bind_incumbent(
             state,
             network,
             file,
             playback,
             Some(&predecessor.session_id),
-            deadline,
+            IncumbentCandidate::OptionalForProcessedUpgrade,
+            &stage,
         )
-        .await
-        .ok_or(())?;
+    };
+    // Err is an unreadable incumbent or memory; Ok(false) is a verdict.
+    let read = async {
+        let bound = bind().await?;
         if bound.route.incarnation_id != predecessor.incarnation_id {
             return Ok(false);
         }
+        stage.enter(RecoveryReadStage::MEMORY);
         let memory = state
             .store
             .candidate_recovery_memory(&bound.scope)
             .await
-            .map_err(|_| ())?;
-        let current = incumbent(
-            state,
-            network,
-            file,
-            playback,
-            Some(&predecessor.session_id),
-            deadline,
-        )
-        .await
-        .ok_or(())?;
-        Ok::<_, ()>(
+            .map_err(|_| RecoveryUnavailable::MemoryStoreError)?;
+        let current = bind().await?;
+        Ok::<_, RecoveryUnavailable>(
             current.scope == bound.scope
-                && current.route.incarnation_id == bound.route.incarnation_id
-                && current.candidate.id == bound.candidate.id
+                && same_incumbent_authority(&bound.route, &current.route)
+                && current.candidate.as_ref().map(|c| c.id)
+                    == bound.candidate.as_ref().map(|c| c.id)
                 && !memory.rejected_recipes.contains(&candidate.recipe_digest),
         )
     };
     match tokio::time::timeout_at(deadline, read).await {
         Ok(Ok(true)) => ProcessedRecoveryEvidence::Admissible,
         Ok(Ok(false)) => ProcessedRecoveryEvidence::Rejected,
-        Ok(Err(())) | Err(_) => ProcessedRecoveryEvidence::Unavailable,
+        Ok(Err(reason)) => ProcessedRecoveryEvidence::Unavailable(reason),
+        Err(_) => ProcessedRecoveryEvidence::Unavailable(stage.deadline()),
     }
 }
 
@@ -566,94 +772,154 @@ pub(super) async fn incumbent(
     previous: Option<&str>,
     deadline: tokio::time::Instant,
 ) -> Option<BoundRecovery> {
-    tokio::time::timeout_at(deadline, async {
-        let user = network.user_id?;
-        let route = state
-            .store
-            .media_session_route_for_playback(
-                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user },
-                playback,
-            )
-            .await
-            .ok()??;
-        if route.owner_node_id != state.node_id
-            || route.state != "active"
-            || route.publication_ready_at_ms != 0
-            || route.lease_expires_at_ms <= super::unix_ms()
-            || previous.is_some_and(|id| id != route.session_id)
-            || route.recipe_json.len() > 64 * 1024
-            || route.response_json.len() > 1024 * 1024
-        {
-            return None;
-        }
-        let recipe: RemoteStartRequest = serde_json::from_str(&route.recipe_json).ok()?;
-        if recipe.principal.local_user_id() != Some(user)
-            || recipe.request.file_id != file.id
-            || recipe.source_size != file.size
-            || recipe.source_mtime != file.mtime
-            || recipe.incarnation_id != route.incarnation_id
-            || recipe.request.playback_id != playback
-        {
-            return None;
-        }
-        let response: StartResponse = serde_json::from_str(&route.response_json).ok()?;
-        let id = response.quality_candidate_id?;
-        if recipe.candidate_id != Some(id) || response.session_id != route.session_id {
-            return None;
-        }
-        let candidates = response.quality_candidates?;
-        if candidates.len() > 64 {
-            return None;
-        }
-        let mut matches = candidates
-            .into_iter()
-            .filter(|candidate| candidate.id == id);
-        let candidate = matches.next()?;
-        if matches.next().is_some() || !candidate.identity_matches() {
-            return None;
-        }
-        let source = super::link_receipts::SourceLinkIdentity::for_request(network, file)
-            .await?
-            .candidate(candidate.recipe_digest, candidate.route);
-        // Source work may await. A retired/replaced incumbent cannot mint memory.
-        let current = state
-            .store
-            .media_session_route_for_playback(
-                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user },
-                playback,
-            )
-            .await
-            .ok()??;
-        if current.incarnation_id != route.incarnation_id
-            || current.session_id != route.session_id
-            || current.owner_node_id != route.owner_node_id
-            || current.owner_epoch != route.owner_epoch
-            || current.recovery_epoch != route.recovery_epoch
-            || current.recipe_json != route.recipe_json
-            || current.state != "active"
-            || current.publication_ready_at_ms != 0
-            || current.lease_expires_at_ms <= super::unix_ms()
-        {
-            return None;
-        }
-        let scope = CandidateRecoveryScope {
-            user_id: user,
-            playback_id: playback.to_owned(),
-            recovery_epoch: route.recovery_epoch.clone(),
-            file_id: file.id,
-            source_size: file.size,
-            source_mtime: file.mtime,
-            source_object_version: source.source_object_version,
-            credential_generation: source.credential_generation,
-            client_class: source.client_class,
-        };
-        scope.valid().then_some(BoundRecovery {
-            scope,
-            route,
-            candidate,
-        })
-    })
+    let stage = RecoveryReadStage::default();
+    let bound = tokio::time::timeout_at(
+        deadline,
+        bind_incumbent(
+            state,
+            network,
+            file,
+            playback,
+            previous,
+            IncumbentCandidate::Required,
+            &stage,
+        ),
+    )
     .await
-    .ok()
-    .flatten()
+    .ok()?
+    .ok()?;
+    Some(BoundRecovery {
+        scope: bound.scope,
+        route: bound.route,
+        candidate: bound.candidate?,
+    })
+}
+
+/// [`incumbent`] without its deadline, naming the exit that did not bind.
+/// `stage` tracks the read in flight for a caller's deadline.
+async fn bind_incumbent(
+    state: &AppState,
+    network: &NetworkIdentity,
+    file: &MediaFile,
+    playback: &str,
+    previous: Option<&str>,
+    candidate_requirement: IncumbentCandidate,
+    stage: &RecoveryReadStage,
+) -> Result<BoundRecovery<Option<QualityCandidate>>, RecoveryUnavailable> {
+    use RecoveryUnavailable as Miss;
+    let user = network.user_id.ok_or(Miss::NoNetworkUser)?;
+    let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user };
+    stage.enter(RecoveryReadStage::ROUTE);
+    let route = state
+        .store
+        .media_session_route_for_playback(&principal, playback)
+        .await
+        .map_err(|_| Miss::RouteStoreError)?
+        .ok_or(Miss::NoRoute)?;
+    if route.owner_node_id != state.node_id {
+        return Err(Miss::RouteOwnedElsewhere);
+    }
+    if route.state != "active" {
+        return Err(Miss::RouteNotActive);
+    }
+    if route.publication_ready_at_ms != 0 {
+        return Err(Miss::RoutePublishing);
+    }
+    if route.lease_expires_at_ms <= super::unix_ms() {
+        return Err(Miss::RouteLeaseExpired);
+    }
+    if previous.is_some_and(|id| id != route.session_id) {
+        return Err(Miss::RouteOtherSession);
+    }
+    if route.recipe_json.len() > 64 * 1024 || route.response_json.len() > 1024 * 1024 {
+        return Err(Miss::RouteOversized);
+    }
+    let recipe: RemoteStartRequest =
+        serde_json::from_str(&route.recipe_json).map_err(|_| Miss::RecipeMismatch)?;
+    if recipe.principal.local_user_id() != Some(user)
+        || recipe.request.file_id != file.id
+        || recipe.source_size != file.size
+        || recipe.source_mtime != file.mtime
+        || recipe.incarnation_id != route.incarnation_id
+        || recipe.request.playback_id != playback
+    {
+        return Err(Miss::RecipeMismatch);
+    }
+    let response: StartResponse =
+        serde_json::from_str(&route.response_json).map_err(|_| Miss::ResponseMismatch)?;
+    let candidate = incumbent_candidate(&route, &recipe, response, candidate_requirement)?;
+    stage.enter(RecoveryReadStage::SOURCE);
+    let source = super::link_receipts::SourceLinkIdentity::for_request_classified(network, file)
+        .await
+        .map_err(Miss::from)?;
+    // Source work may await. A retired/replaced incumbent cannot mint memory.
+    stage.enter(RecoveryReadStage::REREAD);
+    let current = state
+        .store
+        .media_session_route_for_playback(&principal, playback)
+        .await
+        .map_err(|_| Miss::RouteRereadStoreError)?
+        .ok_or(Miss::RouteRereadMissing)?;
+    if !same_incumbent_authority(&route, &current)
+        || current.state != "active"
+        || current.publication_ready_at_ms != 0
+        || current.lease_expires_at_ms <= super::unix_ms()
+    {
+        return Err(Miss::RouteMoved);
+    }
+    let scope = source.recovery_scope(playback, &route.recovery_epoch);
+    if !scope.valid() {
+        return Err(Miss::ScopeInvalid);
+    }
+    Ok(BoundRecovery {
+        scope,
+        route,
+        candidate,
+    })
+}
+
+fn same_incumbent_authority(left: &MediaSessionRoute, right: &MediaSessionRoute) -> bool {
+    left.incarnation_id == right.incarnation_id
+        && left.session_id == right.session_id
+        && left.owner_node_id == right.owner_node_id
+        && left.owner_epoch == right.owner_epoch
+        && left.recovery_epoch == right.recovery_epoch
+        && left.recipe_json == right.recipe_json
+}
+
+fn incumbent_candidate(
+    route: &MediaSessionRoute,
+    recipe: &RemoteStartRequest,
+    response: StartResponse,
+    requirement: IncumbentCandidate,
+) -> Result<Option<QualityCandidate>, RecoveryUnavailable> {
+    use RecoveryUnavailable as Miss;
+    if response.session_id != route.session_id
+        || response.quality_candidate_id != recipe.candidate_id
+    {
+        return Err(Miss::ResponseMismatch);
+    }
+    let Some(id) = response.quality_candidate_id else {
+        return match requirement {
+            IncumbentCandidate::OptionalForProcessedUpgrade
+                if recipe.candidate_catalog.is_none() =>
+            {
+                Ok(None)
+            }
+            _ => Err(Miss::ResponseMismatch),
+        };
+    };
+    let candidates = response
+        .quality_candidates
+        .filter(|candidates| candidates.len() <= 64)
+        .ok_or(Miss::CandidateMismatch)?;
+    // One public row; a response stored before the catalogue repeated no ID
+    // may list worker twins of the same recipe, which address that one row.
+    let candidate = plurx_core::playback::candidate::single_public_row(&candidates, id)
+        .cloned()
+        .ok_or(Miss::CandidateMismatch)?;
+    if !candidate.identity_matches() {
+        return Err(Miss::CandidateIdentity);
+    }
+    Ok(Some(candidate))
 }

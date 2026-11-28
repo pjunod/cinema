@@ -1,6 +1,5 @@
 # Choose the HDR display peak on Apple devices
 
-Build: 313
 Issue: #1891
 
 Settings → Playback has an HDR display peak, with the same values as Android

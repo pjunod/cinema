@@ -286,16 +286,47 @@ pub(crate) async fn acquire_cluster_job_with_policy(
     ttl: Duration,
     heartbeat: Duration,
 ) -> Result<Option<ActiveJobLease>, StoreError> {
+    Ok(
+        match claim_cluster_job(coordinator, authority, resource, ttl, heartbeat).await? {
+            ClusterJobClaim::Acquired(lease) => Some(lease),
+            ClusterJobClaim::NotEligible | ClusterJobClaim::Held { .. } => None,
+        },
+    )
+}
+
+/// Why a cluster-wide singleton job did or did not start here. Callers that
+/// answer a person (an admin button, say) need the reason; a background pass
+/// that simply skips can use [`acquire_cluster_job`].
+pub(crate) enum ClusterJobClaim {
+    Acquired(ActiveJobLease),
+    /// This node may not take cluster-wide leases (it is not a committed
+    /// voter), whether or not any other node is running the job.
+    NotEligible,
+    /// Another node holds the lease now.
+    Held {
+        owner_node_id: String,
+    },
+}
+
+/// [`acquire_cluster_job`], reporting why a lease was not taken.
+pub(crate) async fn claim_cluster_job(
+    coordinator: &StoreCoordinator,
+    authority: &dyn ClusterJobAuthority,
+    resource: String,
+    ttl: Duration,
+    heartbeat: Duration,
+) -> Result<ClusterJobClaim, StoreError> {
     if !authority.may_run_cluster_jobs().await {
         tracing::debug!(
             resource,
             "declining a cluster job: this node is not a committed voter"
         );
-        return Ok(None);
+        return Ok(ClusterJobClaim::NotEligible);
     }
     match coordinator.acquire(&resource, ttl).await? {
         LeaseClaim::Acquired(lease) => {
-            ActiveJobLease::start_with_policy(coordinator.clone(), lease, ttl, heartbeat).map(Some)
+            ActiveJobLease::start_with_policy(coordinator.clone(), lease, ttl, heartbeat)
+                .map(ClusterJobClaim::Acquired)
         }
         LeaseClaim::Held {
             owner_node_id,
@@ -309,7 +340,7 @@ pub(crate) async fn acquire_cluster_job_with_policy(
                 expires_at_unix_ms,
                 "cluster job lease is held; skipping local duplicate"
             );
-            Ok(None)
+            Ok(ClusterJobClaim::Held { owner_node_id })
         }
     }
 }

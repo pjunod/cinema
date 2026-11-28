@@ -64,7 +64,7 @@ impl VodServe {
         source: &crate::fragment_index_cluster::SourceFence,
     ) -> Option<MeasuredCandidateCostProof> {
         let context = request.candidate_context.as_ref()?;
-        if !source.unchanged()
+        if !source.unchanged_in_place()
             || !candidate.identity_matches()
             || !candidate.decoder_compatible
             || candidate.id != context.candidate_id
@@ -273,6 +273,7 @@ pub(crate) async fn test_reorder_candidate_cost_isolation(
     serve.shared.retained_artifacts.collect(temp.path()).await;
     let mut request = SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -282,6 +283,7 @@ pub(crate) async fn test_reorder_candidate_cost_isolation(
         passive_vod: false,
         finite_bitrate_limit_bps: None,
         quality_catalog: None,
+        accepted_processed_ask: None,
         candidate_context: Some(Box::new(context)),
         file_id: file.id,
         playback_id: "reorder-cost".to_owned(),
@@ -530,7 +532,7 @@ impl RetainedVodArtifact {
                 && rendition
                     .source
                     .as_ref()
-                    .is_some_and(|source| source.unchanged())
+                    .is_some_and(|source| source.unchanged_in_place())
                 && init
                     .as_ref()
                     .is_some_and(|init| init.served_init == self.observation.served_init)
@@ -1151,7 +1153,7 @@ impl RetainedArtifactRegistry {
                     && artifact.observation.preimage.playlist.as_slice()
                         == rendition.playlist.as_slice()))
             && rendition.source.as_ref().is_some_and(|source| {
-                source.unchanged() && source.object_version() == artifact.source_version
+                source.unchanged_in_place() && source.object_version() == artifact.source_version
             }))
         .then_some(artifact)
     }
@@ -1358,7 +1360,7 @@ impl RetainedArtifactRegistry {
                         logical_matches = artifact.logical == *incoming_logical,
                         playlist_matches = artifact.observation.preimage.playlist == rendition.playlist,
                         source_present = rendition.source.is_some(),
-                        source_unchanged = rendition.source.as_ref().is_some_and(|s| s.unchanged()),
+                        source_unchanged = rendition.source.as_ref().is_some_and(|source| source.unchanged_in_place()),
                         source_version_matches = rendition.source.as_ref().is_some_and(|s| s.object_version() == artifact.source_version),
                         candidate_fields = %binding,
                         logical_fields = ?logical,
@@ -1384,9 +1386,7 @@ impl RetainedArtifactRegistry {
                     && artifact.validated.load(Acquire)
                     && artifact.logical == *incoming_logical
                     && artifact.observation.preimage.playlist == rendition.playlist
-                    && rendition.source.as_ref().is_some_and(|source| {
-                        source.unchanged() && source.object_version() == artifact.source_version
-                    }))
+                    && rendition.source.as_ref().is_some_and(|source| source.unchanged_in_place() && source.object_version() == artifact.source_version))
                 .then(|| artifact.facts())
             })
         }?;
@@ -1439,10 +1439,12 @@ impl RetainedArtifactRegistry {
             || artifact.logical.is_none()
             || artifact.logical != *incoming_logical
             || artifact.observation.preimage.playlist.as_slice() != rendition.playlist.as_slice()
-            || !rendition
-                .source
-                .as_ref()
-                .is_some_and(|s| s.unchanged() && s.object_version() == artifact.source_version)
+            // The collector and validation locks are held here: check in
+            // place, so they are never held while queued for a media slot.
+            || !rendition.source.as_ref().is_some_and(|source| {
+                source.object_version() == artifact.source_version
+                    && source.unchanged_in_place()
+            })
         {
             return None;
         }
@@ -1472,10 +1474,12 @@ impl RetainedArtifactRegistry {
         )
         .await;
         if !matches!(validated, Ok(Ok(Ok(()))))
-            || !rendition
-                .source
-                .as_ref()
-                .is_some_and(|s| s.unchanged() && s.object_version() == artifact.source_version)
+            // The collector and validation locks are held here: check in
+            // place, so they are never held while queued for a media slot.
+            || !rendition.source.as_ref().is_some_and(|source| {
+                source.object_version() == artifact.source_version
+                    && source.unchanged_in_place()
+            })
         {
             return None;
         }
@@ -1859,7 +1863,7 @@ impl RetainedArtifactRegistry {
                 && rendition
                     .source
                     .as_ref()
-                    .is_some_and(|source| source.unchanged());
+                    .is_some_and(|source| source.unchanged_in_place());
             let init_matches = source_current
                 && init
                     .as_ref()
@@ -2269,6 +2273,7 @@ mod tests {
         }
         let mut request = SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -2278,6 +2283,7 @@ mod tests {
             passive_vod: false,
             finite_bitrate_limit_bps: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             file_id: file.id,
             playback_id: "durable".into(),
             quality_catalog: None,
@@ -2657,6 +2663,7 @@ mod tests {
         };
         let session = Session {
             requested_audio_index: None,
+            vod_copy_layout: None,
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
@@ -3638,6 +3645,7 @@ mod tests {
         };
         let request = SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -3646,6 +3654,7 @@ mod tests {
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
+            accepted_processed_ask: None,
             candidate_context: Some(Box::new(
                 crate::transcode::TranscodeManager::candidate_context(&candidate),
             )),

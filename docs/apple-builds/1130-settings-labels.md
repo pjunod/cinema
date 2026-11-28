@@ -1,6 +1,5 @@
 # Name Apple TV settings beside their selected values
 
-Build: 285
 Issue: #1130
 
 **Status:** built; physical Apple TV acceptance pending.

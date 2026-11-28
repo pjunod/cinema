@@ -561,6 +561,7 @@ async fn head_and_gap_equal_the_whole_title(stop: CancellationToken) -> Result<(
     .expect("head normalization contract")
     .init_contract_sha256()
     .to_owned();
+    let copy_memory = crate::admission::CopyMemoryPool::new(1 << 30);
     let fill = |gap: RangeGap| CopyGapFill {
         file: &file,
         recipe: &recipe,
@@ -572,6 +573,7 @@ async fn head_and_gap_equal_the_whole_title(stop: CancellationToken) -> Result<(
         max_rows: plurx_core::store::MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES / 28,
         runtime_cache: cache.path(),
         stop: &stop,
+        copy_memory: &copy_memory,
     };
 
     let mut open = opener(&bytes, &held);

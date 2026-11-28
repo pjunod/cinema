@@ -4,7 +4,6 @@
 pass on the branch. Physical iOS and Apple TV checks of the new placement are
 pending (2026-09-28).
 
-Build: 200
 Issue: #602
 
 Settings now has a Live TV row on iPhone, iPad and Apple TV that opens the

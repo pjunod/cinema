@@ -1,6 +1,5 @@
 # Restore the iPhone Live TV guide time grid
 
-Build: 273
 Issue: #1273
 
 Guide on iPhone opens the existing multi-channel time grid with station logos,
