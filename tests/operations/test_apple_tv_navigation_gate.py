@@ -1,4 +1,5 @@
 """A TV focus regression must fail promotion and preserve its native evidence."""
+from validation import mirror_guard
 from pathlib import Path
 import re
 import tomllib
@@ -84,7 +85,7 @@ class AppleTVNavigationGateTests(unittest.TestCase):
         import hashlib
         from validation import native_receipts
 
-        block = native_receipts.native_block((ROOT / ".github/workflows/main-fast-lane.yml").read_text())
+        block = native_receipts.native_block(mirror_guard.read_file(ROOT / ".github/workflows/main-fast-lane.yml"))
         start = block.index("          # About 300 MB per run.")
         comment = block[start:block.index("          retention-days: 14\n", start)]
         before = block.replace(comment + "          retention-days: 14\n", "          retention-days: 90\n")

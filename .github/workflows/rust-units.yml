@@ -46,6 +46,7 @@ env:
 
 jobs:
   select:
+    if: github.server_url != 'https://github.com'
     name: "Rust units: select"
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
@@ -96,7 +97,7 @@ jobs:
   rust_units_archive:
     name: "Rust units: build archive"
     needs: select
-    if: needs.select.outputs.build == 'true'
+    if: github.server_url != 'https://github.com' && (needs.select.outputs.build == 'true')
     runs-on: [ci-nonvoter-compile-amd64]
     # The same private CI image as ci.yml's full Rust lane: Rust 1.97.1, the
     # Jellyfin FFmpeg 8 build and the native libraries. Its digest is part of
@@ -228,7 +229,7 @@ jobs:
   shard:
     name: "Rust units shard ${{ matrix.shard }}"
     needs: rust_units_archive
-    if: needs.rust_units_archive.outputs.shards != '[]'
+    if: github.server_url != 'https://github.com' && (needs.rust_units_archive.outputs.shards != '[]')
     # Any idle x64 `general` runner. The container caps each shard at the
     # fleet's general-job budget, so a shard on a production voter host is
     # bounded exactly like every other general job (docs/ci/RUNNER-DISK.md).
@@ -306,7 +307,8 @@ jobs:
     name: "Rust units: verdict"
     needs: [select, rust_units_archive, shard]
     if: >-
-      always() && needs.rust_units_archive.result == 'success' && needs.rust_units_archive.outputs.shards != '[]'
+      github.server_url != 'https://github.com' && (
+      always() && needs.rust_units_archive.result == 'success' && needs.rust_units_archive.outputs.shards != '[]' )
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -452,7 +454,7 @@ jobs:
   rust_units_baseline:
     name: "Rust units: merge-base check of failures"
     needs: verdict
-    if: always() && needs.verdict.outputs.failures == 'true'
+    if: github.server_url != 'https://github.com' && (always() && needs.verdict.outputs.failures == 'true')
     runs-on: [ci-nonvoter-compile-amd64]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -583,7 +585,7 @@ jobs:
   gate:
     name: "Rust unit verdict"
     needs: [select, rust_units_archive, shard, verdict, rust_units_baseline]
-    if: always()
+    if: github.server_url != 'https://github.com' && (always())
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d

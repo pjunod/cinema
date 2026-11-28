@@ -50,9 +50,10 @@ jobs:
     # among the PR's labels (an unrelated label, or `lane` being removed)
     # nothing runs. Every other event runs paperwork as before.
     if: >-
+      github.server_url != 'https://github.com' && (
       (github.event.action != 'labeled' && github.event.action != 'label_updated') ||
       (github.event.pull_request.draft == false &&
-       contains(github.event.pull_request.labels.*.name, 'lane'))
+       contains(github.event.pull_request.labels.*.name, 'lane')) )
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -110,7 +111,8 @@ jobs:
     # run is the requested full lane (`lane_requested`); job conditions below
     # only compare that output.
     if: >-
-      github.event.pull_request.draft == false
+      github.server_url != 'https://github.com' && (
+      github.event.pull_request.draft == false )
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -163,8 +165,9 @@ jobs:
     name: production worker controller proof
     needs: scope
     if: >-
+      github.server_url != 'https://github.com' && (
       github.event.pull_request.draft == false && needs.scope.outputs.lane_requested == 'true' &&
-      needs.scope.outputs.worker_control == 'true'
+      needs.scope.outputs.worker_control == 'true' )
     runs-on: [ci-nonvoter-heavy-amd64]
     # Kani's goto-cc preprocesses its C library with gcc. The pinned CI image
     # carries gcc 12, Python 3.12.15 and rustc 1.97.1, so the proof no longer
@@ -307,7 +310,7 @@ jobs:
   preflight:
     name: fast policy and contract preflight
     needs: scope
-    if: needs.scope.outputs.lane_requested == 'true' && needs.scope.outputs.preflight == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.lane_requested == 'true' && needs.scope.outputs.preflight == 'true')
     # History and bounded TLC share this job; use high-cpu general workers.
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     container:
@@ -476,10 +479,11 @@ jobs:
     # Cheap gate: every ready push. A requested run still waits for its
     # preflight to pass before allocating this job.
     if: >-
+      github.server_url != 'https://github.com' && (
       !cancelled() && needs.scope.result == 'success' &&
       (needs.preflight.result == 'success' ||
        (needs.scope.outputs.lane_requested != 'true' && needs.preflight.result == 'skipped')) &&
-      (needs.scope.outputs.rust == 'true')
+      (needs.scope.outputs.rust == 'true') )
     # The nonvoter compile pool, in the pinned rust-gate image: no per-run apt
     # or toolchain downloads. The container's limits are the job's bound on
     # either carrier; the first step verifies them and CARGO_BUILD_JOBS is
@@ -578,9 +582,10 @@ jobs:
     needs: [scope, preflight]
     # Requested lane only: its preflight ran and passed.
     if: >-
+      github.server_url != 'https://github.com' && (
       !cancelled() && needs.scope.result == 'success' &&
       needs.scope.outputs.lane_requested == 'true' && needs.preflight.result == 'success' &&
-      (needs.scope.outputs.rust_units == 'true')
+      (needs.scope.outputs.rust_units == 'true') )
     uses: ./.github/workflows/rust-units.yml
     with:
       base: ${{ github.event.pull_request.base.sha }}
@@ -592,10 +597,11 @@ jobs:
     # Cheap gate: every ready push. A requested run still waits for its
     # preflight to pass before allocating this job.
     if: >-
+      github.server_url != 'https://github.com' && (
       !cancelled() && needs.scope.result == 'success' &&
       (needs.preflight.result == 'success' ||
        (needs.scope.outputs.lane_requested != 'true' && needs.preflight.result == 'skipped')) &&
-      (needs.scope.outputs.web_layout == 'true')
+      (needs.scope.outputs.web_layout == 'true') )
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -664,9 +670,10 @@ jobs:
     needs: [scope, preflight]
     # Requested lane only: its preflight ran and passed.
     if: >-
+      github.server_url != 'https://github.com' && (
       !cancelled() && needs.scope.result == 'success' &&
       needs.scope.outputs.lane_requested == 'true' && needs.preflight.result == 'success' &&
-      (needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true')
+      (needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true') )
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     # 32 native journeys take 81-163 s each (about 60 min, up to 87) after the compile.
     timeout-minutes: 120
@@ -757,10 +764,11 @@ jobs:
     # Cheap gate: every ready push. A requested run still waits for its
     # preflight to pass before allocating this job.
     if: >-
+      github.server_url != 'https://github.com' && (
       !cancelled() && needs.scope.result == 'success' &&
       (needs.preflight.result == 'success' ||
        (needs.scope.outputs.lane_requested != 'true' && needs.preflight.result == 'skipped')) &&
-      (needs.scope.outputs.android_jvm == 'true')
+      (needs.scope.outputs.android_jvm == 'true') )
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 10
     steps:
@@ -799,9 +807,10 @@ jobs:
     # Only on the requested run: a cheap push run has no gate (scripts/land
     # refuses a skipped one), and a requested run must pass every heavy job.
     if: >-
+      github.server_url != 'https://github.com' && (
       always() &&
       github.event.pull_request.draft == false &&
-      needs.scope.outputs.lane_requested == 'true'
+      needs.scope.outputs.lane_requested == 'true' )
     needs:
       - paperwork
       - scope

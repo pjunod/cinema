@@ -19,7 +19,7 @@ env:
 
 jobs:
   deep-validation:
-    if: ${{ !inputs.fuzz_only }}
+    if: ${{ github.server_url != 'https://github.com' && (!inputs.fuzz_only) }}
     name: playback, recovery, bounds, clients, UI, and packaging
     # SDK builds stay inside hard-bounded VMs on verified non-voter hosts.
     runs-on: [incus, ci-nonvoter-heavy-amd64]
@@ -111,6 +111,7 @@ jobs:
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
   pgs-fuzz:
+    if: github.server_url != 'https://github.com'
     name: bounded PGS parser fuzz campaign
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
@@ -194,6 +195,7 @@ jobs:
   # target that has stopped finding new edges is visible without opening its
   # log; fifteen minutes per target is a budget, not coverage evidence.
   parser-fuzz:
+    if: github.server_url != 'https://github.com'
     name: bounded ${{ matrix.target }} fuzz campaign
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
@@ -269,7 +271,7 @@ jobs:
   # owns (validation/points.toml), so when #386 changes what the probe reports,
   # this lane is where the change meets a real ffmpeg 8 rather than a mock.
   ffmpeg8-pacing:
-    if: ${{ !inputs.fuzz_only }}
+    if: ${{ github.server_url != 'https://github.com' && (!inputs.fuzz_only) }}
     name: pacing capability contract on ffmpeg 8
     # The container tag is the pin here — `ubuntu:26.04` is where ffmpeg 8 comes
     # from, and it moves only when this line does. The final step restores the
@@ -314,7 +316,7 @@ jobs:
           chown -R "$owner" "$GITHUB_WORKSPACE"
 
   mutation:
-    if: ${{ !inputs.fuzz_only }}
+    if: ${{ github.server_url != 'https://github.com' && (!inputs.fuzz_only) }}
     name: report-only weekly mutation spot-check
     # Mutants execute against the same shipping media package as the app.
     runs-on: [incus, ci-nonvoter-heavy-amd64]

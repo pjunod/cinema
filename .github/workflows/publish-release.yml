@@ -24,6 +24,7 @@ env:
 
 jobs:
   resolve:
+    if: github.server_url != 'https://github.com'
     name: resolve immutable release source
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 5
@@ -129,8 +130,9 @@ jobs:
     name: build, package, and smoke (${{ matrix.arch }})
     needs: resolve
     if: >-
+      github.server_url != 'https://github.com' && (
       always() && needs.resolve.result == 'success' &&
-      needs.resolve.outputs.version_exists != 'true'
+      needs.resolve.outputs.version_exists != 'true' )
     # Each leg builds on its own architecture. arm64 runs on the native
     # aarch64 Linux VM on the M4 lab Mac, never under QEMU on an X64 host:
     # emulated C/C++ stages (FFmpeg, the subtitle engine) overran their build
@@ -491,7 +493,7 @@ jobs:
   reuse:
     name: verify existing release (${{ matrix.arch }})
     needs: resolve
-    if: needs.resolve.outputs.version_exists == 'true'
+    if: github.server_url != 'https://github.com' && (needs.resolve.outputs.version_exists == 'true')
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 20
     strategy:
@@ -566,9 +568,10 @@ jobs:
     name: attach verified release aliases
     needs: [resolve, image, reuse]
     if: >-
+      github.server_url != 'https://github.com' && (
       always() && needs.resolve.result == 'success' &&
       ((needs.resolve.outputs.version_exists == 'true' && needs.reuse.result == 'success') ||
-       (needs.resolve.outputs.version_exists != 'true' && needs.image.result == 'success'))
+       (needs.resolve.outputs.version_exists != 'true' && needs.image.result == 'success')) )
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 30
     concurrency:

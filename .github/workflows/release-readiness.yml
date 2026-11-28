@@ -26,6 +26,7 @@ concurrency:
 
 jobs:
   release-check:
+    if: github.server_url != 'https://github.com'
     name: current version is ready to tag
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
@@ -77,7 +78,7 @@ jobs:
     needs: release-check
     # Only a scheduled run tags, only when the release commit's gate evidence
     # was found above, and only a commit that is an untagged, dated release.
-    if: github.event_name == 'schedule' && needs.release-check.result == 'success' && needs.release-check.outputs.pending == 'true'
+    if: github.server_url != 'https://github.com' && (github.event_name == 'schedule' && needs.release-check.result == 'success' && needs.release-check.outputs.pending == 'true')
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d

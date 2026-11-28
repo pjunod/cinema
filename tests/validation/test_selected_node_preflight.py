@@ -1,4 +1,5 @@
 """Exercise exact prior Node selection, current outcomes, and the root custody proof."""
+from validation import mirror_guard
 import json
 from pathlib import Path
 import unittest
@@ -105,8 +106,8 @@ class SelectedNodePreflightTests(unittest.TestCase):
     def test_workflow_projection_keeps_default_and_rejects_unreviewed_changes(self):
         from validation import workspace_rust_continuation as workspace
 
-        workflow = Path(__file__).resolve().parents[2] / '.github/workflows/ci.yml'
-        raw = workflow.read_bytes()
+        raw = mirror_guard.read_file(
+            Path(__file__).resolve().parents[2] / '.github/workflows/ci.yml', binary=True)
         projected = workspace.selected_preflight_projection(raw)
         self.assertNotIn(b'root_ownership_retained', projected)
         self.assertNotIn(b'NODE_SELECTION', projected)
