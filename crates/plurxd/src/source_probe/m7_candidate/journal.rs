@@ -5,7 +5,7 @@
 //! for reuse. Its absence can never grant another slot.
 
 use super::{hash, Hash, MAX_ENCODED_BYTES};
-use plurx_core::fs_secure::{open_directory_nofollow_blocking, std_file_identity};
+use plurx_core::fs_secure::{local_file_identity, open_directory_nofollow_blocking};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     ffi::CString,
@@ -560,13 +560,13 @@ fn read(dir: &File, name: &str, limit: u64) -> Result<Option<Vec<u8>>, Error> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let before = std_file_identity(&file)?;
+    let before = local_file_identity(&file)?;
     if !file.metadata()?.is_file() || !(1..=limit).contains(&before.size) {
         return Err(Error::Binding("bounded regular journal child"));
     }
     let mut bytes = Vec::with_capacity(before.size as usize);
     (&file).take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 != before.size || std_file_identity(&file)? != before {
+    if bytes.len() as u64 != before.size || local_file_identity(&file)? != before {
         return Err(Error::Binding("journal child changed during read"));
     }
     Ok(Some(bytes))

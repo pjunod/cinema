@@ -37,6 +37,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [FEL-REFERENCE-COMPOSITION-PLAN.md](FEL-REFERENCE-COMPOSITION-PLAN.md) | Independent FEL composer reference, measured deviation, matching composition. | open |
 | [FEL-RPU-REFIT-BUILD.md](FEL-RPU-REFIT-BUILD.md) | F+ curves: build plan. | built |
 | [F+ acceptance](FEL-RPU-REFIT-GRADUATION-AND-M7.md) | Physical playback and NP1 trials. | open |
+| [M7 Model B](M7-MODEL-B-GENERAL-COMPOSITION.md) | How FEL composition and calibration are verified. | built |
 | [M7 trial](FEL-RPU-REFIT-M7-2026-11-19.json) | Frozen NP1 rejection against served F+. | done |
 | [M6 Q12 qualification](FEL-RPU-REFIT-M6-Q12-2026-11-16.json) · [Q23 history](FEL-RPU-REFIT-M6-2026-11-16.json) | Native evidence. | done |
 | [PLAYBACK-CACHE-BUDGET.md](PLAYBACK-CACHE-BUDGET.md) | Shared playback cache: reservations, eviction and protected readers. | built |
