@@ -7525,7 +7525,7 @@ async fn run_live_session_inner(
                     None
                 } else {
                     let scan =
-                        inventory_scan.get_or_insert_with(|| spawn_scratch_scan(manager, &session));
+                        inventory_scan.get_or_insert_with(|| spawn_scratch_scan(manager, session));
                     match tokio::time::timeout(SESSION_TICK, &mut *scan).await {
                         Ok(joined) => {
                             inventory_scan = None;

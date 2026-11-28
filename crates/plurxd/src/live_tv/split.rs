@@ -97,7 +97,7 @@ pub(super) struct Window {
     layout: Arc<Layout>,
     segments: Arc<std::collections::BTreeMap<u64, Segment>>,
     retained: Arc<std::collections::BTreeMap<u64, RetainedSegment>>,
-    metadata: Arc<std::collections::BTreeMap<u64, Vec<String>>>,
+    metadata: Arc<SegmentMetadata>,
     discontinuity_sequence: Option<String>,
     sequence: u64,
     target: u64,
@@ -479,10 +479,12 @@ impl Projection {
     }
 }
 
+type SegmentMetadata = std::collections::BTreeMap<u64, Vec<String>>;
+
 fn segment_metadata(
     playlist: &[u8],
     sequences: &[u64],
-) -> Result<(Option<String>, std::collections::BTreeMap<u64, Vec<String>>), String> {
+) -> Result<(Option<String>, SegmentMetadata), String> {
     let playlist = std::str::from_utf8(playlist).map_err(|error| error.to_string())?;
     let mut discontinuity_sequence = None;
     let mut pending = Vec::new();
