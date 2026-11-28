@@ -192,7 +192,7 @@ use context::*;
 
 // split: begin hls-subtitle-names
 #[path = "hls/subtitle_names.rs"]
-mod subtitle_names;
+pub(crate) mod subtitle_names;
 use subtitle_names::*;
 // split: end hls-subtitle-names
 

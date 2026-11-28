@@ -403,6 +403,8 @@ pub struct SubTrackDto {
     pub source: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub downloaded_subtitle_id: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ai: bool,
     /// Position among subtitle streams (`s:{index}`).
     pub index: i64,
     pub codec: String,
@@ -1159,6 +1161,9 @@ fn sub_tracks(file: &MediaFile, overlay_enabled: bool) -> Vec<SubTrackDto> {
         .iter()
         .enumerate()
         .map(|(i, s)| SubTrackDto {
+            ai: file
+                .downloaded_subtitle(i as i64)
+                .is_some_and(|caption| caption.is_ai()),
             source: if file.downloaded_subtitle(i as i64).is_some() {
                 "downloaded"
             } else {
@@ -1170,7 +1175,14 @@ fn sub_tracks(file: &MediaFile, overlay_enabled: bool) -> Vec<SubTrackDto> {
             index: i as i64,
             codec: s.codec.clone(),
             language: s.language.clone(),
-            title: s.title.clone(),
+            title: if file
+                .downloaded_subtitle(i as i64)
+                .is_some_and(|caption| caption.is_ai())
+            {
+                Some(super::hls::subtitle_names::language_name(s.language.as_deref()).to_owned())
+            } else {
+                s.title.clone()
+            },
             default: s.default,
             forced: s.forced,
             text: !is_bitmap_subtitle(&s.codec),
@@ -2506,7 +2518,7 @@ pub(super) async fn decision_for_source_file(
     // Source Start prepares a missing non-Dolby HEVC index under its owned
     // admission. Keep the common capability plan: an absent index does not
     // require video encoding or an HDR10 encoder for HDR10 copy delivery.
-    decision_for_file(
+    let mut result = decision_for_file(
         state,
         file,
         q,
@@ -2515,7 +2527,12 @@ pub(super) async fn decision_for_source_file(
         (None, None),
         PlanningReadPolicy::StoredSourceEvidence,
     )
-    .await
+    .await?;
+    // The Source export envelope is a closed protocol on older peers.
+    for track in &mut result.subtitles {
+        track.ai = false;
+    }
+    Ok(result)
 }
 
 async fn decision_for_file(

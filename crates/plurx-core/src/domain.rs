@@ -670,6 +670,10 @@ pub struct SubtitleTextTranslation {
 }
 
 impl DownloadedSubtitle {
+    pub fn is_ai(&self) -> bool {
+        self.transcription.is_some() || self.text_translation.is_some()
+    }
+
     /// Stable within a source revision; unlike its current display ordinal,
     /// this identity survives other downloaded tracks being added or removed.
     pub fn stable_id(&self) -> String {

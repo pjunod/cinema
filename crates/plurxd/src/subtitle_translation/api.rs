@@ -1399,6 +1399,73 @@ struct Coverage {
     start_ms: i64,
     end_ms: i64,
 }
+
+/// One bounded cue read on the snapshot used by the existing progressive
+/// reader. Empty published cores still advance contiguous coverage.
+pub(crate) async fn ai_cue_window(
+    state: &AppState,
+    user_id: i64,
+    asset_id: &str,
+    core_ms: i64,
+    from: i64,
+    to: i64,
+) -> Result<
+    (
+        Vec<plurx_core::store::subtitle_translation::TranslationCue>,
+        Option<(i64, i64)>,
+    ),
+    ApiError,
+> {
+    let asset = asset_row(state, user_id, asset_id).await?;
+    let end = to.min(asset.duration_ms);
+    if end <= from || !(1_000..=30_000).contains(&core_ms) {
+        return Ok((Vec::new(), None));
+    }
+    let lease = acquire_lease(state, user_id, asset_id).await?;
+    let (coverage, _) = coverage_page(state, user_id, &asset, &lease, -1, from, end).await?;
+    let covering = coverage
+        .iter()
+        .find(|range| range.start_ms <= from && range.end_ms > from)
+        .map(|range| (range.start_ms, range.end_ms));
+    let first = from / core_ms;
+    let last = ((end - 1) / core_ms).min(asset.core_count - 1);
+    let mut cues = Vec::new();
+    let mut after = first - 1;
+    while after < last {
+        let through = (after + 8).min(last);
+        let (segments, _) =
+            segment_page(state, user_id, &asset, &lease, after, through, from, end).await?;
+        for segment in segments {
+            let rows = read_rows(
+                state,
+                user_id,
+                TranslationQuery::Segment {
+                    asset_id: asset_id.to_owned(),
+                    lease_id: lease.id.clone(),
+                    segment_id: segment.segment_id,
+                },
+            )
+            .await?;
+            let row = rows.first().ok_or_else(observation_error)?;
+            let body = field(row, "body")?;
+            if body.len() > 16_384 || hex::encode(Sha256::digest(body.as_bytes())) != segment.digest
+            {
+                return Err(observation_error());
+            }
+            let body: Value = serde_json::from_str(body).map_err(|_| observation_error())?;
+            let mut parsed: Vec<plurx_core::store::subtitle_translation::TranslationCue> =
+                serde_json::from_value(body["cues"].clone()).map_err(|_| observation_error())?;
+            parsed.retain(|cue| cue.start_ms < end && cue.end_ms > from);
+            cues.extend(parsed);
+        }
+        after = through;
+    }
+    if lease.expires <= crate::state::clock_ms() {
+        return Err(expired());
+    }
+    Ok((cues, covering))
+}
+
 #[derive(Debug, Serialize)]
 struct FailedRange {
     core_index: i64,

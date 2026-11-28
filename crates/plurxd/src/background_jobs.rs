@@ -1418,6 +1418,7 @@ impl JobFence {
         source: plurx_core::store::background_jobs::JobPayload,
         source_sha256: String,
         local_identity: String,
+        resolved_language: Option<String>,
     ) -> Result<bool, StoreError> {
         let mut state = self.0.state.lock().await;
         if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
@@ -1432,6 +1433,7 @@ impl JobFence {
                 source,
                 source_sha256,
                 local_identity,
+                resolved_language,
                 now_ms: unix_ms()?,
             };
         let result = match self.0.store.bind_translation_source(request.clone()).await {

@@ -147,7 +147,8 @@ impl TranslationMutation {
                 source.validate()?;
                 profile.validate()?;
                 if !(0..=255).contains(audio_index)
-                    || !super::background_jobs_transcription::whisper_language(spoken_language)
+                    || !(super::background_jobs_transcription::whisper_language(spoken_language)
+                        || (*finish && spoken_language == "auto" && profile.task.is_translation()))
                     || (profile.task.is_translation() && spoken_language == "en")
                     || !(1..=14400000).contains(duration_ms)
                     || target_node_id.is_empty()

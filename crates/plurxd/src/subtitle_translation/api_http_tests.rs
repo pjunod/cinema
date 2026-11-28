@@ -310,6 +310,7 @@ async fn bound(f: &Fixture, language: &str) -> RangeRecipe {
             token: job.token.expect("job token"),
             source,
             source_sha256: f.sha256.clone(),
+            resolved_language: None,
             local_identity: "synthetic-claimed-source-publication".into(),
             now_ms: crate::state::clock_ms()
         })

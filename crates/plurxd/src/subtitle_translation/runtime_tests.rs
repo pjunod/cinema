@@ -345,7 +345,8 @@ async fn range(f: &mut Fixture, source: &VerifiedSource) -> RangeRecipe {
         .bind_translation_source(
             f.prepare_payload.clone(),
             source.sha256().into(),
-            crate::subtitle_models::artifacts::identity_key(source.identity())
+            crate::subtitle_models::artifacts::identity_key(source.identity()),
+            None,
         )
         .await
         .expect("authoritative source publication"));

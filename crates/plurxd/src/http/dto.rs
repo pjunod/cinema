@@ -374,6 +374,16 @@ pub fn in_progress_dto(item: InProgressItem) -> ItemDto {
 }
 
 #[derive(Serialize)]
+pub struct FileSubtitleDto {
+    #[serde(flatten)]
+    pub stream: SubtitleStream,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ai: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track_id: Option<String>,
+}
+
+#[derive(Serialize)]
 pub struct FileDto {
     pub id: i64,
     /// Lossless decimal spelling for route construction in JavaScript. Safe
@@ -439,7 +449,7 @@ pub struct FileDto {
     pub plays_on: Vec<PlaysOnDto>,
     pub bitrate: Option<i64>,
     pub audio_streams: Vec<AudioStream>,
-    pub subtitle_streams: Vec<SubtitleStream>,
+    pub subtitle_streams: Vec<FileSubtitleDto>,
     /// The server's cold-start track outcome for this file. This is computed
     /// from stored stream facts and the same pure policy playback uses; clients
     /// do not need the underlying admin preference values to reproduce it.
@@ -643,6 +653,27 @@ fn defaults_from_selection(
 impl FileDto {
     pub fn from_media_file(f: MediaFile, prefs: &LangPrefs) -> Self {
         let playback_defaults = playback_defaults(&f.audio_streams, &f.subtitle_streams, prefs);
+        let subtitle_streams = f
+            .subtitle_streams
+            .iter()
+            .cloned()
+            .map(|mut stream| {
+                let ai_track = f
+                    .downloaded_subtitle(stream.index)
+                    .filter(|caption| caption.is_ai());
+                if ai_track.is_some() {
+                    stream.title = Some(
+                        super::hls::subtitle_names::language_name(stream.language.as_deref())
+                            .to_owned(),
+                    );
+                }
+                FileSubtitleDto {
+                    stream,
+                    ai: ai_track.is_some(),
+                    track_id: ai_track.map(|caption| caption.stable_id()),
+                }
+            })
+            .collect();
         let reader = crate::reader_formats::capability(&f.path, f.container.as_deref());
         let reader_revision = reader.map(|_| RevisionDto {
             size: f.size,
@@ -681,7 +712,7 @@ impl FileDto {
             plays_on: Vec::new(),
             bitrate: f.bitrate,
             audio_streams: f.audio_streams,
-            subtitle_streams: f.subtitle_streams,
+            subtitle_streams,
             playback_defaults,
             vod_index_status: None,
             vod_index_refusal: None,

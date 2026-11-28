@@ -28,6 +28,8 @@ struct SubTrackDto {
     source: Option<SubtitleTrackSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     downloaded_subtitle_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    ai: bool,
     pub index: i64,
     pub codec: String,
     pub language: Option<String>,

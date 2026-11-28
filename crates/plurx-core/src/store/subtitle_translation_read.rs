@@ -170,6 +170,7 @@ pub(super) async fn read<T: QueueSql>(
  'preparation_job_id',op.preparation_job_id,'target_node_id',op.target_node_id,
  'preparation_state',(SELECT state FROM background_jobs WHERE id=op.preparation_job_id),'preparation_owner_boot_id',(SELECT owner_boot_id FROM background_jobs WHERE id=op.preparation_job_id),
  'cached_complete',json(CASE WHEN {READABLE_OPERATION} THEN 'true' ELSE 'false' END),
+ 'accepted_duration_ms',COALESCE((SELECT sum(s.end_ms-s.start_ms) FROM subtitle_translation_segments s WHERE s.asset_id=op.asset_id),0),
  'active_job',json((SELECT json_object('job_id',j.id,'kind',j.kind,'state',j.state,'attempt',CAST(j.fence AS TEXT),'fence',CAST(j.fence AS TEXT),'phase',json_extract(j.checkpoint_json,'$.phase'),'core_index',json_extract(j.payload_json,'$.recipe.core_index'),'owner_node_id',j.owner_node_id,'cancellable',json('true')) FROM background_jobs j WHERE j.state IN ('queued','running','cancelling') AND COALESCE(json_extract(j.payload_json,'$.operation_id'),json_extract(j.payload_json,'$.recipe.operation_id'))=op.id AND COALESCE(json_extract(j.payload_json,'$.operation_epoch'),json_extract(j.payload_json,'$.recipe.operation_epoch'))=op.operation_epoch ORDER BY CASE j.state WHEN 'running' THEN 0 WHEN 'cancelling' THEN 1 ELSE 2 END,j.created_at_ms LIMIT 1)),
  'server_now_ms',json_extract($1,'$.now_ms')) AS result_json FROM subtitle_translation_operations op WHERE op.id=json_extract($1,'$.operation_id') AND (json_extract($1,'$.user_id')=0 OR {USER})"#
             )

@@ -12,6 +12,8 @@ pub struct BindTranslationSource {
     pub source: JobPayload,
     pub source_sha256: String,
     pub local_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_language: Option<String>,
     pub now_ms: i64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +151,24 @@ pub(super) async fn bind<T: QueueSql>(
     {
         return Err(StoreError::Task("invalid translation source proof".into()));
     }
+    let (resolved_language, resolved_profile) =
+        match (spoken_language.as_str(), input.resolved_language) {
+            ("auto", Some(language))
+                if super::background_jobs_transcription::whisper_language(&language) =>
+            {
+                let mut resolved = profile.clone();
+                if language == "en" {
+                    resolved.task = super::subtitle_translation::SpeechTask::Transcribe;
+                }
+                (language, resolved)
+            }
+            ("auto", _) | (_, Some(_)) => {
+                return Err(StoreError::Task(
+                    "invalid automatic subtitle language proof".into(),
+                ))
+            }
+            (_, None) => (spoken_language.clone(), profile.clone()),
+        };
     let mut recipe = RangeRecipe {
         asset_id: String::new(),
         operation_id: operation_id.clone(),
@@ -159,28 +179,39 @@ pub(super) async fn bind<T: QueueSql>(
             source_mtime: *source_mtime,
         },
         source_sha256: input.source_sha256.clone(),
-        profile: profile.clone(),
+        profile: resolved_profile,
         audio_index: *audio_index,
-        spoken_language: spoken_language.clone(),
+        spoken_language: resolved_language,
         duration_ms: *duration_ms,
         core_index: 0,
     };
     recipe.asset_id = recipe.expected_asset_id()?;
     recipe.validate()?;
     let body = encode(
-        &json!({"token":input.token,"source":input.source,"recipe":recipe,"local_identity":input.local_identity,"profile_id":profile.id()?,"core_count":recipe.core_count(),"result_ref":recipe.asset_id,"now_ms":input.now_ms}),
+        &json!({"token":input.token,"source":input.source,"recipe":recipe,"local_identity":input.local_identity,"profile_id":recipe.profile.id()?,"core_count":recipe.core_count(),"result_ref":recipe.asset_id,"now_ms":input.now_ms}),
     )?;
     body_size(&body)?;
     let progress = operation_progress();
-    let guard=format!("EXISTS(SELECT 1 FROM background_jobs job WHERE {OWNS}) AND EXISTS(SELECT 1 FROM subtitle_translation_operations op WHERE {CURRENT} AND op.preparation_job_id=json_extract($1,'$.token.job_id') AND op.view_revision<9223372036854775807 AND (op.asset_id IS NULL OR op.asset_id=json_extract($1,'$.recipe.asset_id')) AND NOT EXISTS(SELECT 1 FROM subtitle_translation_source_bindings b WHERE b.operation_id=op.id AND b.operation_epoch=op.operation_epoch AND b.source_sha256!=json_extract($1,'$.recipe.source_sha256')))");
+    let before = CURRENT
+        .replace(
+            "op.profile_json=json(json_extract($1,'$.recipe.profile'))",
+            "op.profile_json=json(json_extract($1,'$.source.profile'))",
+        )
+        .replace(
+            "op.spoken_language=json_extract($1,'$.recipe.spoken_language')",
+            "op.spoken_language=json_extract($1,'$.source.spoken_language')",
+        );
+    let guard=format!("EXISTS(SELECT 1 FROM background_jobs job WHERE {OWNS}) AND EXISTS(SELECT 1 FROM subtitle_translation_operations op WHERE {before} AND op.preparation_job_id=json_extract($1,'$.token.job_id') AND op.view_revision<9223372036854775807 AND (op.asset_id IS NULL OR op.asset_id=json_extract($1,'$.recipe.asset_id')) AND NOT EXISTS(SELECT 1 FROM subtitle_translation_source_bindings b WHERE b.operation_id=op.id AND b.operation_epoch=op.operation_epoch AND b.source_sha256!=json_extract($1,'$.recipe.source_sha256')))");
     store.queue_transaction(vec![
  (format!(r#"INSERT INTO subtitle_translation_assets(id,operation_id,file_id,source_json,source_sha256,profile_json,profile_id,audio_index,spoken_language,duration_ms,core_count,created_at_ms,last_read_at_ms)
  SELECT json_extract($1,'$.recipe.asset_id'),json_extract($1,'$.recipe.operation_id'),json_extract($1,'$.recipe.source.file_id'),json(json_extract($1,'$.recipe.source')),json_extract($1,'$.recipe.source_sha256'),json(json_extract($1,'$.recipe.profile')),json_extract($1,'$.profile_id'),json_extract($1,'$.recipe.audio_index'),json_extract($1,'$.recipe.spoken_language'),json_extract($1,'$.recipe.duration_ms'),json_extract($1,'$.core_count'),json_extract($1,'$.now_ms'),json_extract($1,'$.now_ms') WHERE {guard} AND (SELECT count(*) FROM subtitle_translation_assets WHERE retired_at_ms IS NULL)<128 ON CONFLICT(id) DO UPDATE SET retired_at_ms=NULL,last_read_at_ms=excluded.last_read_at_ms WHERE subtitle_translation_assets.retired_at_ms IS NOT NULL AND subtitle_translation_assets.operation_id=excluded.operation_id AND subtitle_translation_assets.source_json=excluded.source_json AND subtitle_translation_assets.source_sha256=excluded.source_sha256 AND subtitle_translation_assets.profile_json=excluded.profile_json"#),body.clone()),
  (format!(r#"INSERT INTO subtitle_translation_source_bindings(operation_id,operation_epoch,node_id,boot_id,local_identity,source_sha256,verified_at_ms)
  SELECT json_extract($1,'$.recipe.operation_id'),json_extract($1,'$.recipe.operation_epoch'),json_extract($1,'$.token.node_id'),json_extract($1,'$.token.boot_id'),json_extract($1,'$.local_identity'),json_extract($1,'$.recipe.source_sha256'),json_extract($1,'$.now_ms') WHERE {guard} AND EXISTS(SELECT 1 FROM subtitle_translation_assets a WHERE a.id=json_extract($1,'$.recipe.asset_id') AND a.operation_id=json_extract($1,'$.recipe.operation_id') AND a.retired_at_ms IS NULL AND a.source_sha256=json_extract($1,'$.recipe.source_sha256'))
  ON CONFLICT(operation_id,operation_epoch,node_id) DO UPDATE SET boot_id=excluded.boot_id,local_identity=excluded.local_identity,source_sha256=excluded.source_sha256,verified_at_ms=excluded.verified_at_ms"#),body.clone()),
- (format!(r#"UPDATE subtitle_translation_operations AS op SET asset_id=json_extract($1,'$.recipe.asset_id'),{progress},view_revision=view_revision+1,updated_at_ms=json_extract($1,'$.now_ms')
- WHERE {CURRENT} AND op.view_revision<9223372036854775807 AND (op.asset_id IS NULL OR op.asset_id=json_extract($1,'$.recipe.asset_id')) AND NOT EXISTS(SELECT 1 FROM subtitle_translation_source_bindings b WHERE b.operation_id=op.id AND b.operation_epoch=op.operation_epoch AND b.source_sha256!=json_extract($1,'$.recipe.source_sha256')) AND op.preparation_job_id=json_extract($1,'$.token.job_id') AND EXISTS(SELECT 1 FROM subtitle_translation_assets a WHERE a.id=json_extract($1,'$.recipe.asset_id') AND a.operation_id=json_extract($1,'$.recipe.operation_id') AND a.retired_at_ms IS NULL) AND EXISTS(SELECT 1 FROM background_jobs job WHERE {OWNS})"#),body.clone()),
+ (format!(r#"UPDATE subtitle_translation_operations AS op SET asset_id=json_extract($1,'$.recipe.asset_id'),
+ profile_json=json(json_extract($1,'$.recipe.profile')),spoken_language=json_extract($1,'$.recipe.spoken_language'),
+ {progress},view_revision=view_revision+1,updated_at_ms=json_extract($1,'$.now_ms')
+ WHERE {before} AND op.view_revision<9223372036854775807 AND (op.asset_id IS NULL OR op.asset_id=json_extract($1,'$.recipe.asset_id')) AND NOT EXISTS(SELECT 1 FROM subtitle_translation_source_bindings b WHERE b.operation_id=op.id AND b.operation_epoch=op.operation_epoch AND b.source_sha256!=json_extract($1,'$.recipe.source_sha256')) AND op.preparation_job_id=json_extract($1,'$.token.job_id') AND EXISTS(SELECT 1 FROM subtitle_translation_assets a WHERE a.id=json_extract($1,'$.recipe.asset_id') AND a.operation_id=json_extract($1,'$.recipe.operation_id') AND a.retired_at_ms IS NULL) AND EXISTS(SELECT 1 FROM background_jobs job WHERE {OWNS})"#),body.clone()),
  (success_sql(),body.clone()),(SETTLE_WAITERS.into(),body.clone())]).await?;
     settled(store, body).await
 }

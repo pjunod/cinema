@@ -41,6 +41,23 @@ pub(crate) struct CreateRequest {
     target_language: String,
     model_id: String,
 }
+impl CreateRequest {
+    pub(crate) fn ai_start(
+        id: String,
+        file: &plurx_core::domain::MediaFile,
+        language: String,
+    ) -> Self {
+        Self {
+            version: 1,
+            request_id: id,
+            source_size: file.size.to_string(),
+            source_mtime: file.mtime.to_string(),
+            source_language: language,
+            target_language: "en".into(),
+            model_id: MODEL_ID.into(),
+        }
+    }
+}
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RetryRequest {
