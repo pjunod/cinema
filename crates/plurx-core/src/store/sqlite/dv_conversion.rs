@@ -1800,7 +1800,7 @@ mod tests {
             // v144 restores the predecessor mutation trigger and drops only empty tables.
             "CREATE TABLE subtitle_translation_finish_demands(",
             // v145 replaces two lease definitions removed by the lease rewind.
-            "DROP VIEW dispatch_turn_contenders",
+            "DROP TRIGGER IF EXISTS source_lease_resume_admission;",
         ];
 
         assert!(

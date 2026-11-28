@@ -2061,8 +2061,9 @@ mod tests {
             6
         );
         for profile in profiles {
-            assert_eq!(profile["model_id"], "small");
-            assert_eq!(profile["default"], true);
+            let model_id = profile["model_id"].as_str().expect("model");
+            assert!(matches!(model_id, "small" | "large-v3-q5_0"));
+            assert_eq!(profile["default"], model_id == "small");
             assert!(profile["label"]
                 .as_str()
                 .is_some_and(|label| !label.is_empty()));
@@ -2071,18 +2072,24 @@ mod tests {
                 .expect("input languages");
             assert_eq!(
                 input.len(),
-                if profile["task"] == "translate" {
-                    98
-                } else {
-                    99
+                match (model_id, profile["task"].as_str()) {
+                    ("small", Some("translate")) => 98,
+                    ("small", Some("transcribe")) | ("large-v3-q5_0", Some("translate")) => 99,
+                    ("large-v3-q5_0", Some("transcribe")) => 100,
+                    _ => panic!("unexpected registered speech profile: {profile}"),
                 }
             );
-            assert!(!input.iter().any(|language| language == "yue"));
-            let selected = selected_profile(
-                profile["model_id"].as_str().expect("model"),
-                profile["profile_id"].as_str().expect("profile"),
-            )
-            .expect("exact selection");
+            assert_eq!(
+                input.iter().any(|language| language == "yue"),
+                model_id == "large-v3-q5_0"
+            );
+            assert_eq!(
+                input.iter().any(|language| language == "en"),
+                profile["task"] == "transcribe"
+            );
+            let selected =
+                selected_profile(model_id, profile["profile_id"].as_str().expect("profile"))
+                    .expect("exact selection");
             assert_eq!(
                 Some(selected.model_sha256.as_str()),
                 profile["model_sha256"].as_str()

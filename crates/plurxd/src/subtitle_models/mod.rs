@@ -2935,17 +2935,18 @@ mod tests {
         std::fs::create_dir(&model_root).expect("model root");
         std::fs::set_permissions(&model_root, std::fs::Permissions::from_mode(0o700))
             .expect("private models");
-        let cached_path = model_root.join(format!("{}.bin", small().sha256));
-        // Only identity and receipt eligibility are under test; these bytes
-        // do not claim to be a recognizer model.
-        let cache = std::fs::File::create(&cached_path).expect("cache");
-        cache
-            .set_len(small().download_bytes)
-            .expect("sparse metadata fixture");
-        cache
-            .set_permissions(std::fs::Permissions::from_mode(0o400))
-            .expect("model permissions");
-        drop(cache);
+        // Both speech artifacts are present. Their metadata alone cannot
+        // qualify the speech model or authorize automatic verification.
+        for spec in [small(), &crate::subtitle_translation::profile::vad_spec()] {
+            let cached_path = model_root.join(format!("{}.bin", spec.sha256));
+            let cache = std::fs::File::create(&cached_path).expect("cache");
+            cache
+                .set_len(spec.download_bytes)
+                .expect("sparse metadata fixture");
+            cache
+                .set_permissions(std::fs::Permissions::from_mode(0o400))
+                .expect("model permissions");
+        }
         refresh_local(&state).await.expect("observe");
         let observed = state
             .subtitle_models

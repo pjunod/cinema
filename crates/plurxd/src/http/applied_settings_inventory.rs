@@ -67,11 +67,6 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     ("state.rs", "lane_cluster_fragment_index_enabled", 1, true),
     ("state.rs", "lane_subtitle_source_queue_enabled", 1, true),
     ("state.rs", "read_preparation_lanes", 1, true),
-    // The subtitle worker's 15 s passes: whether transcription and the
-    // managed models are on, and how. Their claims and configuration
-    // writes read the Store.
-    ("subtitle_models/config.rs", "read_applied", 1, true),
-    ("subtitle_transcription.rs", "pass_settings", 1, true),
     // Live TV loops: whether this node has recording, reminder, library or
     // guide work. Each pays the Store's read and acts on it when it does.
     ("http/live_tv.rs", "guide_viewed_on", 1, true),
@@ -172,18 +167,6 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
         "confirm_unbound_remote",
         "http/hls/create.rs",
         "create_with_purpose_attempt",
-    ),
-    (
-        "subtitle_models/config.rs",
-        "read_applied",
-        "subtitle_models/mod.rs",
-        "worker_pass",
-    ),
-    (
-        "subtitle_transcription.rs",
-        "pass_settings",
-        "subtitle_transcription.rs",
-        "pass",
     ),
     (
         "http/live_tv.rs",

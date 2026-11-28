@@ -472,6 +472,7 @@ async fn settings_models_and_options_project_saved_preferences_without_qualifyin
     )
     .await;
     assert_eq!(changed["enabled"], false);
+    assert_eq!(changed["preferred_spoken_language"], "de");
     let replay = body(
         update_settings(
             AdminUser(f.admin.clone()),
@@ -489,7 +490,12 @@ async fn settings_models_and_options_project_saved_preferences_without_qualifyin
             .expect("models"),
     )
     .await;
-    assert_eq!(catalog["profiles"].as_array().expect("profiles").len(), 2);
+    assert_eq!(catalog["profiles"].as_array().expect("profiles").len(), 8);
+    assert_eq!(catalog["models"].as_array().expect("models").len(), 2);
+    let default_profile_id = super::super::profile::default_profile()
+        .id()
+        .expect("default profile");
+    assert_eq!(catalog["default_profile_id"], default_profile_id);
     assert!(catalog["workers"]
         .as_array()
         .expect("worker observations")
@@ -510,6 +516,7 @@ async fn settings_models_and_options_project_saved_preferences_without_qualifyin
     )
     .await;
     assert_eq!(options_document["file_id"], f.file.id.to_string());
+    assert_eq!(options_document["default_profile_id"], default_profile_id);
     assert_eq!(options_document["capability"]["supported"], true);
     assert_eq!(
         options_document["audio_tracks"][0]["normalized_language"],
@@ -533,6 +540,20 @@ async fn settings_models_and_options_project_saved_preferences_without_qualifyin
         "invalid_request",
     )
     .await;
+    let model_jobs = f
+        .state
+        .store
+        .job_candidates(plurx_core::store::background_jobs::CandidateQuery {
+            node_id: f.state.node_id.clone(),
+            kinds: vec![JobKind::SubtitleModelOperation],
+            after: None,
+            now_ms: crate::state::clock_ms(),
+            limit: 32,
+            admissible_only: false,
+        })
+        .await
+        .expect("model qualification queue");
+    assert!(model_jobs.jobs.is_empty());
 }
 
 #[tokio::test]
@@ -836,7 +857,7 @@ async fn invalid_create_and_demands_never_leave_partial_jobs_or_authority() {
         )
         .await,
         StatusCode::FORBIDDEN,
-        "permission_denied",
+        "ai_subtitles_admins_only",
     )
     .await;
     let jobs = f
