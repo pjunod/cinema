@@ -216,7 +216,17 @@ android {
         buildConfig = true
         compose = true
     }
-    testOptions { unitTests.isIncludeAndroidResources = true }
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+        unitTests.all {
+            // Robolectric downloads framework jars outside Gradle's repositories.
+            it.systemProperty(
+                "robolectric.dependency.repo.url",
+                providers.systemProperty("robolectric.dependency.repo.url")
+                    .orElse("https://maven-central.storage-download.googleapis.com/maven2/").get(),
+            )
+        }
+    }
     sourceSets {
         // Shared JVM resources: player-input-contract.json and
         // playback-info-fields.json are consumed directly from tests/playback.
