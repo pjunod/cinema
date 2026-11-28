@@ -331,7 +331,7 @@ impl VodServe {
         // One registry read for the rendition and its owner, so both describe
         // the same incarnation. Same answers as `session_rendition`: a
         // tombstoned or rendition-less session has no facts.
-        let (rendition, owner) = {
+        let (rendition, owner, vod_copy_layout) = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(session_id)?;
             if session.tombstone.is_some() {
@@ -340,9 +340,11 @@ impl VodServe {
             (
                 session.live_rendition().map(Arc::clone)?,
                 session.response_owner(),
+                session.vod_copy_layout.clone(),
             )
         };
         Some(VodHlsFacts {
+            vod_copy_layout,
             file: rendition.recipe.file.clone(),
             audio_index: rendition.recipe.audio_index,
             aac: rendition.recipe.aac,
@@ -478,6 +480,8 @@ impl VodServe {
             start: VodStart {
                 session_id: session_id.to_owned(),
                 duration_ms: plan_duration_ms(&session.live_rendition()?.plan),
+                split: session.live_rendition()?.recipe.audio_excluded,
+                vod_copy_layout: session.vod_copy_layout.clone(),
             },
             target_height: session.target_height,
             kind: session.kind,
@@ -1455,12 +1459,17 @@ pub(super) fn verify_cached_shared_audio_interval(
     let Some(Unit::Init(init)) = reader.next_unit().map_err(|error| error.to_string())? else {
         return Err("shared AAC artifact has no complete init".into());
     };
+    let facts =
+        plurx_core::fmp4::aac_lc_sample_entry_facts(&init).map_err(|error| error.to_string())?;
+    let expected = audio.facts();
     if reader.buffered() != 0
         || init.tracks.len() != 1
         || init.tracks[0].kind != plurx_core::fmp4::TrackKind::Audio
         || init.tracks[0].timescale != interval.timescale
-        || &plurx_core::fmp4::aac_lc_sample_entry_facts(&init).map_err(|error| error.to_string())?
-            != audio.facts()
+        || facts.codec != expected.codec
+        || facts.channels != expected.channels
+        || facts.sample_rate != expected.sample_rate
+        || facts.samples_per_frame != expected.samples_per_frame
     {
         return Err("shared AAC init shape or clock changed".into());
     }

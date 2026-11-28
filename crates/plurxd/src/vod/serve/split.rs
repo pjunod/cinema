@@ -14,9 +14,9 @@ pub(super) fn split_family_shares_source<'a>(
 }
 
 /// One verified child of a split copy presentation.
-struct SplitChild {
-    rendition: Arc<Rendition>,
-    init: plurx_core::fmp4::Init,
+pub(super) struct SplitChild {
+    pub(super) rendition: Arc<Rendition>,
+    pub(super) init: plurx_core::fmp4::Init,
 }
 
 impl VodServe {
@@ -51,6 +51,33 @@ impl VodServe {
             .is_some_and(|rendition| {
                 rendition.recipe.audio_excluded && rendition.recipe.encoding.is_none()
             })
+    }
+
+    /// Prove all children using their real, immutable init bytes while the
+    /// caller holds the build gates and any AAC reservations. No session
+    /// reader or published route exists yet.
+    pub(super) async fn prepare_split_copy_group(
+        &self,
+        video: &Arc<Rendition>,
+        audio: &[Arc<Rendition>],
+        requested_audio: Option<i64>,
+    ) -> Result<(), String> {
+        let mut verified = Vec::with_capacity(audio.len() + 1);
+        let meter = Arc::new(crate::meter::Meter::for_method("remux"));
+        for child in std::iter::once(video).chain(audio) {
+            super::init::prepare_init_head(&self.shared, child).await?;
+            let metadata = self
+                .read_split_child(child, Duration::ZERO, Arc::clone(&meter))
+                .await
+                .map_err(|error| format!("{error:?}"))?
+                .ok_or("split child init has no verified identity")?;
+            verified.push(metadata);
+        }
+        split_copy_presentation(verified, requested_audio)
+            .map_err(|error| format!("{error:?}"))?
+            .master_text()
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     /// Verify the shared copy video and every soundtrack from their actual
@@ -115,82 +142,7 @@ impl VodServe {
                     None => return Ok(None),
                 }
             }
-            let fail =
-                |error: plurx_core::fmp4::Fmp4Error| VodError::ProducerFailed(error.to_string());
-            let mut verified = verified.into_iter();
-            let video = verified.next().expect("verified shared video");
-            let file = &video.rendition.recipe.file;
-            let version = video
-                .rendition
-                .recipe
-                .source_object_version
-                .as_deref()
-                .ok_or_else(|| {
-                    VodError::ProducerFailed("split video has no source revision".into())
-                })?;
-            let copy = plurx_core::transcode::VodCopyVideoRendition::from_verified_init(
-                &video.init,
-                &video.rendition.key,
-                version,
-                None,
-            )
-            .map_err(fail)?;
-            let video_budget = copy_video_budget(&video.rendition)?;
-            let mut soundtracks = Vec::new();
-            let mut audio_budgets = Vec::new();
-            for child in verified {
-                let encoding = child
-                    .rendition
-                    .recipe
-                    .encoding
-                    .as_ref()
-                    .expect("encoded soundtrack");
-                let recipe = encoding.shared_audio.as_ref().ok_or_else(|| {
-                    VodError::ProducerFailed("split child is not a soundtrack".into())
-                })?;
-                let source_index = child.rendition.recipe.audio_index.ok_or_else(|| {
-                    VodError::ProducerFailed("soundtrack names no source stream".into())
-                })?;
-                let stream = file
-                    .audio_streams
-                    .iter()
-                    .find(|stream| stream.index == source_index)
-                    .ok_or_else(|| {
-                        VodError::ProducerFailed("soundtrack stream disappeared".into())
-                    })?;
-                let audio = plurx_core::transcode::VodSharedAudioRendition::from_verified_init(
-                    &encoding.plan,
-                    recipe,
-                    &child.init,
-                    &child.rendition.key,
-                    &encoding.source_object_version,
-                )
-                .map_err(fail)?;
-                audio_budgets.push(plurx_core::transcode::VodRenditionBandwidth {
-                    rendition_id: child.rendition.key.clone(),
-                    average_bps: None,
-                    peak_bps: encoding
-                        .continuous_peak_bps(&child.rendition.plan)
-                        .ok_or_else(|| {
-                            VodError::ProducerFailed("audio delivery budget missing".into())
-                        })?,
-                    sustained_bps: encoding.continuous_sustained_bps(),
-                });
-                soundtracks.push(plurx_core::transcode::VodSplitSoundtrack {
-                    audio,
-                    source_index,
-                    language: stream.language.clone(),
-                    title: stream.title.clone(),
-                });
-            }
-            let default = requested_audio
-                .filter(|index| soundtracks.iter().any(|track| track.source_index == *index))
-                .or_else(|| soundtracks.first().map(|track| track.source_index))
-                .ok_or_else(|| VodError::ProducerFailed("split copy has no soundtrack".into()))?;
-            let family = plurx_core::transcode::VodSplitCopyFamily::new(copy, soundtracks, default)
-                .map_err(fail)?;
-            // Recheck every object after rendering: a source change or a new
-            // producer generation must not be advertised under old identities.
+            let presentation = split_copy_presentation(verified, requested_audio)?;
             for rendition in std::iter::once(&primary).chain(children.iter()) {
                 if rendition.closed.load(Relaxed)
                     || rendition.failure().is_some()
@@ -201,10 +153,7 @@ impl VodServe {
                     ));
                 }
             }
-            family
-                .presentation(&video_budget, &audio_budgets, default)
-                .map(Some)
-                .map_err(fail)
+            Ok(Some(presentation))
         }
         .await;
         Some(VodPublication { result, owner })
@@ -235,7 +184,17 @@ impl VodServe {
         let budget = found
             .block_budget
             .min(deadline.saturating_duration_since(Instant::now()));
-        let mut ready = self.serve_init(rendition, budget, found.delivery).await?;
+        self.read_split_child(rendition, budget, found.delivery)
+            .await
+    }
+
+    pub(super) async fn read_split_child(
+        &self,
+        rendition: &Arc<Rendition>,
+        budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
+    ) -> Result<Option<SplitChild>, VodError> {
+        let mut ready = self.serve_init(rendition, budget, delivery).await?;
         let expected = rendition
             .identity
             .lock()
@@ -340,6 +299,84 @@ impl VodServe {
         .and_then(|video| video.media_playlist(&rendition.plan))
         .map_err(|error| VodError::ProducerFailed(error.to_string()))
     }
+}
+
+pub(super) fn split_copy_presentation(
+    verified: Vec<SplitChild>,
+    requested_audio: Option<i64>,
+) -> Result<plurx_core::transcode::split_master::SplitPresentation, VodError> {
+    let fail = |error: plurx_core::fmp4::Fmp4Error| VodError::ProducerFailed(error.to_string());
+    let mut verified = verified.into_iter();
+    let video = verified.next().expect("verified shared video");
+    let file = &video.rendition.recipe.file;
+    let version = video
+        .rendition
+        .recipe
+        .source_object_version
+        .as_deref()
+        .ok_or_else(|| VodError::ProducerFailed("split video has no source revision".into()))?;
+    let copy = plurx_core::transcode::VodCopyVideoRendition::from_verified_init(
+        &video.init,
+        &video.rendition.key,
+        version,
+        None,
+    )
+    .map_err(fail)?;
+    let video_budget = copy_video_budget(&video.rendition)?;
+    let mut soundtracks = Vec::new();
+    let mut audio_budgets = Vec::new();
+    for child in verified {
+        let encoding = child
+            .rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .expect("encoded soundtrack");
+        let recipe = encoding
+            .shared_audio
+            .as_ref()
+            .ok_or_else(|| VodError::ProducerFailed("split child is not a soundtrack".into()))?;
+        let source_index =
+            child.rendition.recipe.audio_index.ok_or_else(|| {
+                VodError::ProducerFailed("soundtrack names no source stream".into())
+            })?;
+        let stream = file
+            .audio_streams
+            .iter()
+            .find(|stream| stream.index == source_index)
+            .ok_or_else(|| VodError::ProducerFailed("soundtrack stream disappeared".into()))?;
+        let audio = plurx_core::transcode::VodSharedAudioRendition::from_verified_init(
+            &encoding.plan,
+            recipe,
+            &child.init,
+            &child.rendition.key,
+            &encoding.source_object_version,
+        )
+        .map_err(fail)?;
+        audio_budgets.push(plurx_core::transcode::VodRenditionBandwidth {
+            rendition_id: child.rendition.key.clone(),
+            average_bps: None,
+            peak_bps: encoding
+                .continuous_peak_bps(&child.rendition.plan)
+                .ok_or_else(|| VodError::ProducerFailed("audio delivery budget missing".into()))?,
+            sustained_bps: encoding.continuous_sustained_bps(),
+        });
+        soundtracks.push(plurx_core::transcode::VodSplitSoundtrack {
+            audio,
+            source_index,
+            language: stream.language.clone(),
+            title: stream.title.clone(),
+        });
+    }
+    let default = requested_audio
+        .filter(|index| soundtracks.iter().any(|track| track.source_index == *index))
+        .or_else(|| soundtracks.first().map(|track| track.source_index))
+        .ok_or_else(|| VodError::ProducerFailed("split copy has no soundtrack".into()))?;
+    let family =
+        plurx_core::transcode::VodSplitCopyFamily::new(copy, soundtracks, default).map_err(fail)?;
+    family
+        .presentation(&video_budget, &audio_budgets, default)
+        .map_err(fail)
 }
 
 /// Peak and average from the copy's own planned bytes. The plan's estimates

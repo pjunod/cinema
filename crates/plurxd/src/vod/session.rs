@@ -641,7 +641,7 @@ impl Drop for TerminalCleanupGuard {
 pub(super) struct HeadChildOwner {
     child: Option<tokio::process::Child>,
     child_job: Option<crate::process_control::ChildJob>,
-    pub(super) permit: Option<crate::vodencode::EncodePermit>,
+    pub(super) permit: Option<crate::vodencode::EncodeWorkerPermit>,
     /// Shared with the reaper task, which outlives the owner.
     hooks: Arc<dyn HeadChildOwnerHooks>,
 }
@@ -861,6 +861,7 @@ pub(super) struct Session {
     /// recipe belongs to whichever viewer created it, so its master marks
     /// this session's own choice as DEFAULT.
     pub(super) requested_audio_index: Option<i64>,
+    pub(super) vod_copy_layout: Option<crate::transcode::VodCopyLayout>,
     /// Keeps a prepared root admitted without adding a stale private reader.
     /// A running worker retains its own clone until physical reap.
     pub(super) root_admission: Option<crate::vodencode::EncodePermit>,
