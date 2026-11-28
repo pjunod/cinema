@@ -744,7 +744,7 @@ impl CreateSession {
                 .is_some_and(plurx_core::playback::DeviceCaps::plays_split_av)
         });
         crate::transcode::SessionRequest {
-            split_audio: self.copy == Some(true) && split_requested,
+            split_audio: split_requested,
             vod_copy_layout: None,
             rolling_hls_layout: None,
             dv_processing_destination: None,
@@ -5109,10 +5109,19 @@ async fn create_with_purpose_attempt(
         crate::transcode::SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
         crate::transcode::SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
     };
-    if !remote_request.request.seal_vod_copy_layout(
-        info.vod_copy_layout.clone(),
-        info.vod && matches!(info.kind, crate::transcode::SessionKind::Copy { .. }),
-    ) {
+    let matching_vod = info.vod
+        && remote_request
+            .request
+            .vod_copy_layout
+            .as_ref()
+            .is_some_and(|layout| {
+                layout.encoded()
+                    == matches!(info.kind, crate::transcode::SessionKind::Transcode { .. })
+            });
+    if !remote_request
+        .request
+        .seal_vod_copy_layout(info.vod_copy_layout.clone(), matching_vod)
+    {
         return Err(ApiError::ServiceUnavailable(
             "the media worker did not seal the VOD copy layout".to_owned(),
         ));

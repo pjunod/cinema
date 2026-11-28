@@ -862,6 +862,8 @@ pub(super) struct Session {
     /// this session's own choice as DEFAULT.
     pub(super) requested_audio_index: Option<i64>,
     pub(super) vod_copy_layout: Option<crate::transcode::VodCopyLayout>,
+    pub(super) encoded_projection:
+        Option<Arc<super::vod_serve_encoded_split::EncodedVodProjection>>,
     /// Keeps a prepared root admitted without adding a stale private reader.
     /// A running worker retains its own clone until physical reap.
     pub(super) root_admission: Option<crate::vodencode::EncodePermit>,
@@ -1079,10 +1081,17 @@ impl Session {
         })
     }
 
+    pub(super) fn encoded_split_only(&self) -> bool {
+        self.vod_copy_layout
+            .as_ref()
+            .is_some_and(|layout| layout.encoded() && (layout.pending() || layout.split()))
+    }
+
     pub(super) fn response_owner(&self) -> ResponseOwner {
         ResponseOwner {
             preferred_start_ms: self.preferred_start_ms,
-            scalar_playlist: self.children.is_empty(),
+            scalar_playlist: self.children.is_empty() && !self.encoded_split_only(),
+            encoded_split_only: self.encoded_split_only(),
             lifecycle: Arc::clone(&self.lifecycle),
             incarnation: Arc::clone(&self.incarnation),
             retained_output: self

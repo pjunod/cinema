@@ -154,18 +154,16 @@ fn completed_layout_is_valid(
         return false;
     };
     let playlist = response["playlist_url"].as_str().unwrap_or_default();
-    match layout {
-        VodCopyLayout::PendingV1 => false,
-        VodCopyLayout::Muxed => {
-            recipe["request"]["split_audio"] != true
-                && playlist.split('?').next() == Some(index.as_str())
-        }
-        VodCopyLayout::SplitV1 { .. } => {
-            recipe["request"]["split_audio"] == true
-                && playlist == master
-                && response.get("prepared_playlist_shape").is_none()
-                && layout.valid()
-        }
+    if layout.pending() || !layout.valid() {
+        return false;
+    }
+    if layout.split() {
+        recipe["request"]["split_audio"] == true
+            && playlist == master
+            && response.get("prepared_playlist_shape").is_none()
+    } else {
+        recipe["request"]["split_audio"] != true
+            && playlist.split('?').next() == Some(index.as_str())
     }
 }
 
@@ -185,9 +183,7 @@ fn seal_values(
     }
     match (layout_from_recipe(&recipe)?, layout) {
         (None, None) => {}
-        (Some(VodCopyLayout::PendingV1), Some(layout))
-            if !matches!(layout, VodCopyLayout::PendingV1) && layout.valid() =>
-        {
+        (Some(pending), Some(layout)) if pending.accepts(layout) => {
             let (index, master) = playlist_paths(&response)?;
             if recipe["request"]["split_audio"] != true
                 || response["playlist_url"].as_str()?.split('?').next() != Some(index.as_str())
@@ -196,7 +192,7 @@ fn seal_values(
             }
             let request = recipe.get_mut("request")?.as_object_mut()?;
             request.insert("vod_copy_layout".into(), serde_json::to_value(layout).ok()?);
-            if matches!(layout, VodCopyLayout::SplitV1 { .. }) {
+            if layout.split() {
                 let response_fields = response.as_object_mut()?;
                 response_fields.insert("playlist_url".into(), Value::String(master));
                 response_fields.remove("prepared_playlist_shape");

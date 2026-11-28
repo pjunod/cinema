@@ -3249,5 +3249,11 @@ fn a_split_copy_successor_keeps_its_soundtrack_alternates() {
     assert!(candidate.split_audio);
     candidate.kind = crate::transcode::SessionKind::Transcode { height: 720 };
     let _ = preserve_prepared_audio(&predecessor, &mut candidate, &source);
-    assert!(!candidate.split_audio, "an encoded successor is not a split copy");
+    assert!(candidate.split_audio);
+    assert_eq!(candidate.vod_copy_layout, Some(crate::transcode::VodCopyLayout::PendingEncodedV1));
+
+    predecessor.split_audio = false;
+    preserve_prepared_audio(&predecessor, &mut candidate, &source).expect("preserved explicit muxed choice");
+    assert!(!candidate.split_audio);
+    assert!(candidate.vod_copy_layout.is_none());
 }

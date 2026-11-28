@@ -766,6 +766,7 @@ async fn vod_ready_metered(
         delivery,
         retained_lease: None,
         cache_pin: None,
+        projection_scratch: None,
         file: tokio::fs::File::open(path)
             .await
             .expect("open VOD response object"),
@@ -2162,9 +2163,8 @@ async fn every_capacity_refusal_class_carries_its_code() {
     }
 }
 
-/// The caps token asks for a split copy; the legacy flag still does; and
-/// `split_audio: false` is the explicit muxed request that outranks the token
-/// (the web player's capacity retry). Neither asks anything of a transcode.
+/// The caps token and legacy flag ask for split VOD. An explicit muxed
+/// request also overrides a token on the transcode path.
 #[test]
 fn split_copy_request_follows_the_token_and_the_explicit_opt_out() {
     let request = |body: serde_json::Value| {
@@ -2179,7 +2179,9 @@ fn split_copy_request_follows_the_token_and_the_explicit_opt_out() {
     assert!(!request(serde_json::json!({"playback_id":"p","copy":true,"split_audio":false,"caps":token})));
     assert!(!request(serde_json::json!({"playback_id":"p","copy":true,"caps":plain})));
     assert!(!request(serde_json::json!({"playback_id":"p","copy":true})));
-    assert!(!request(serde_json::json!({"playback_id":"p","caps":token})));
+    assert!(request(serde_json::json!({"playback_id":"p","caps":token})));
+    assert!(!request(serde_json::json!({"playback_id":"p","split_audio":false,"caps":token})));
+    assert!(!request(serde_json::json!({"playback_id":"p","caps":plain})));
 }
 
 /// The owner's admission and the ingress's placement prediction share this

@@ -1334,10 +1334,8 @@ pub(super) fn preserve_prepared_audio(
     source: &MediaFile,
 ) -> Result<(), ApiError> {
     use plurx_core::playback::audio::{resolve_audio, AudioAction, AudioRoute};
-    // Soundtrack alternates are the client's negotiated presentation, not a
-    // selection: a successor copy keeps them exactly as its predecessor did.
-    candidate.split_audio = predecessor.split_audio
-        && matches!(candidate.kind, crate::transcode::SessionKind::Copy { .. });
+    // Preserve the negotiated transport across a finite VOD successor.
+    candidate.split_audio = predecessor.split_audio;
     candidate.prepare_vod_copy_layout();
     let same_track_and_route = candidate.audio_index == predecessor.audio_index
         && candidate.audio_claim == predecessor.audio_claim
@@ -2991,7 +2989,10 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
     )
     .await;
     if !captures_output
-        && staged_request.vod_copy_layout == Some(crate::transcode::VodCopyLayout::PendingV1)
+        && staged_request
+            .vod_copy_layout
+            .as_ref()
+            .is_some_and(crate::transcode::VodCopyLayout::pending)
     {
         staged_request.split_audio = false;
         staged_request.vod_copy_layout = None;

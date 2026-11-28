@@ -2273,18 +2273,24 @@ impl RemoteStartResponse {
     }
 
     pub(crate) fn is_valid(&self) -> bool {
-        use crate::transcode::VodCopyLayout;
-
-        let copied_vod = self.vod && matches!(self.kind, SessionKind::Copy { .. });
+        let encoded = matches!(self.kind, SessionKind::Transcode { .. });
         let muxed_path = self.playlist_url == format!("/api/v1/hls/{}/index.m3u8", self.session_id);
-        let split_path = copied_vod
-            && self.playlist_url == format!("/api/v1/hls/{}/master.m3u8", self.session_id);
+        let split_path =
+            self.vod && self.playlist_url == format!("/api/v1/hls/{}/master.m3u8", self.session_id);
         uuid::Uuid::parse_str(&self.session_id).is_ok()
             && match &self.vod_copy_layout {
-                None => muxed_path || split_path,
-                Some(VodCopyLayout::PendingV1) => false,
-                Some(VodCopyLayout::Muxed) => copied_vod && muxed_path,
-                Some(layout @ VodCopyLayout::SplitV1 { .. }) => split_path && layout.valid(),
+                None => muxed_path || (!encoded && split_path),
+                Some(layout) => {
+                    self.vod
+                        && layout.encoded() == encoded
+                        && !layout.pending()
+                        && layout.valid()
+                        && if layout.split() {
+                            split_path
+                        } else {
+                            muxed_path
+                        }
+                }
             }
             && self.processed_dv_profile.is_none_or(|profile| {
                 profile == 8
