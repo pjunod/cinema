@@ -865,6 +865,13 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         .await
         .expect("assignment")
         .expect("actual local assignment");
+    #[cfg(unix)]
+    if mode == 0 {
+        crate::copyrange::a_source_owner_through_its_real_binding(&assignment).await;
+        crate::source_generation::local_registration_tests::a_source_viewer_attached_after_capture_refuses_the_local_registration(
+            &assignment,
+        );
+    }
     let media = store.get_file(1).await.expect("file read").expect("file");
     if mode < 5 {
         let crate::fragindex::IndexOutcome::Built(index) = Box::pin(crate::fragindex::build(

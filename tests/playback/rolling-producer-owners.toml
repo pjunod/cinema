@@ -4856,6 +4856,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/copyrange/meter.rs" = 5
 "crates/plurxd/src/copyrange/observed.rs" = 5
 "crates/plurxd/src/copyrange/production.rs" = 4
+# Both bounds are test-only: the first cancels the real range on expiry,
+# and the second bounds the wait for its existing settlement path.
+"crates/plurxd/src/copyrange/storage_tests.rs" = 2
 "crates/plurxd/src/copyseg.rs" = 9
 "crates/plurxd/src/decode_facts.rs" = 22
 "crates/plurxd/src/decode_facts/source_session.rs" = 5

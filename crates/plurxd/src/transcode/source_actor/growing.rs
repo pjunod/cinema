@@ -488,7 +488,7 @@ impl TranscodeManager {
     ) -> Result<Arc<SourceGrowingBacking>, SourceWorkerError> {
         use crate::copyrange::{
             run_source_census, spawn_source_generation, CopyGenerationOwner, CopyRangeFiles,
-            ObservedCopyMux,
+            CopyRangeOwner, ObservedCopyMux,
         };
         *stage = "growing.copy_kind";
         let SessionKind::Copy {
@@ -720,7 +720,7 @@ impl TranscodeManager {
             observation_root,
             namespace.clone(),
             observation_source.clone(),
-            owner.assignment.clone(),
+            CopyRangeOwner::Source(Box::new(owner.assignment.clone())),
             range_id,
             1,
             census.first_dts,

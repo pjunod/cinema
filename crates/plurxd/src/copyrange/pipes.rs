@@ -1,7 +1,9 @@
 //! One owned FFmpeg input, AV stdout, canonical MP4 and source packet clock.
 //! Every pipe task is bounded and joined before the registered writer ack.
-//! The generation's owner is typed: Source playback or an Analysis phase.
+//! The generation's owner is typed: Source playback, a local user's own
+//! playback or an Analysis phase.
 use crate::{
+    copy_analysis::LocalPlaybackOwner,
     prodrun::{ProducerRegistration, ProducerSlot, ProducerWriters},
     source_generation::{SourceGenerationDispatch, SourceRenditionOwners},
     source_input::SourceInput,
@@ -12,7 +14,10 @@ use std::{path::Path, sync::Arc};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Who owns one copy generation's physical work. The recipe, pipes, parsers
-/// and reap are the same code for both; only admission and custody differ.
+/// and reap are the same code for all three; only admission and custody
+/// differ. Whatever admission an owner holds is handed to the producer slot
+/// with the child and its Input, and the slot releases them only after the
+/// registered reap, which follows every pipe task's join.
 pub(crate) enum CopyGenerationOwner<'a> {
     /// Shared Source playback: the rendition's retained admission permit, its
     /// exact generation dispatch and a current media-serving authority.
@@ -25,6 +30,26 @@ pub(crate) enum CopyGenerationOwner<'a> {
     /// Input reads under that phase's byte budget. It holds no admission
     /// permit and no Source grant, and nothing it produces may be served.
     Analysis { phase: &'a AnalysisPhysicalPhase },
+    /// A local user's own named playback in one local VOD session. The
+    /// generation runs in that session's producer slot (the `slot` it is
+    /// spawned with) under the session rendition's own dispatch ledger, which
+    /// holds no Source assignment, gate or grant, and it retains the worker
+    /// claim of the session's admission when the session holds one (a local
+    /// copy rendition holds none today, as its plan-verified generation
+    /// holds none). The Input's own admission is the caller's, as it is for
+    /// Source. The viewer is carried as the owner's proof of who it is: only
+    /// a live local viewer makes one.
+    // Constructed by tests until a local VOD session attaches a range.
+    #[cfg_attr(
+        not(all(test, target_os = "linux")),
+        expect(dead_code, reason = "no local VOD session runs a range yet")
+    )]
+    Local {
+        owners: &'a SourceRenditionOwners,
+        dispatch: SourceGenerationDispatch,
+        viewer: &'a LocalPlaybackOwner,
+        permit: Option<crate::vodencode::EncodeWorkerPermit>,
+    },
 }
 impl CopyGenerationOwner<'_> {
     /// Refusals that need no child. The Input is the caller's to close.
@@ -50,10 +75,20 @@ impl CopyGenerationOwner<'_> {
                 }
                 Ok(())
             }
+            Self::Local { owners, .. } => {
+                // Refused before any child when a Source viewer is already
+                // attached to this rendition, read from the ledger itself.
+                // The registration below decides under the same lock.
+                if owners.is_source_assigned() {
+                    return Err(LOCAL_OWNER_INVALID.into());
+                }
+                Ok(())
+            }
         }
     }
 }
 
+const LOCAL_OWNER_INVALID: &str = "copy_local_owner_invalid";
 const PIPE_CHUNK: usize = 32 * 1024;
 const PIPE_CHANNEL: usize = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,7 +238,7 @@ pub(crate) async fn spawn_source_generation(
     source_path: &Path,
     args: &[String],
     runtime_cache: &Path,
-    owner: CopyGenerationOwner<'_>,
+    mut owner: CopyGenerationOwner<'_>,
     slot: Arc<ProducerSlot>,
 ) -> Result<RunningCopyGeneration, String> {
     // Pair creation is fallible before any child exists. Retain and explicitly
@@ -231,7 +266,7 @@ pub(crate) async fn spawn_source_generation(
     }
     let descriptors = crate::producer_spawn::Descriptors::from_files(None, None, None, false)
         .with_copy_measurements(&canonical_write, &clock_write);
-    let (permit, work): (Option<Box<dyn Send>>, _) = match &owner {
+    let (permit, work): (Option<Box<dyn Send>>, _) = match &mut owner {
         CopyGenerationOwner::Source { owners, .. } => match owners.retained_initial_permit() {
             Some(permit) => (
                 Some(Box::new(permit)),
@@ -245,6 +280,12 @@ pub(crate) async fn spawn_source_generation(
         CopyGenerationOwner::Analysis { .. } => (
             None,
             crate::process_control::ChildWork::background("Analysis observed copy"),
+        ),
+        CopyGenerationOwner::Local { permit, .. } => (
+            permit
+                .take()
+                .map(|permit| Box::new(permit) as Box<dyn Send>),
+            crate::process_control::ChildWork::realtime("Local observed copy"),
         ),
     };
     let spawned = crate::producer_spawn::spawn(
@@ -276,11 +317,41 @@ pub(crate) async fn spawn_source_generation(
             Some(input),
         )
         .await;
-    if let CopyGenerationOwner::Source {
-        owners, dispatch, ..
-    } = owner
-    {
-        owners.registered(&dispatch, &registration);
+    // The dispatch is held until the registration is recorded, so neither
+    // owner's retirement can find no producer while this spawn is unresolved.
+    match owner {
+        CopyGenerationOwner::Source {
+            owners, dispatch, ..
+        } => owners.registered(&dispatch, &registration),
+        CopyGenerationOwner::Local {
+            owners,
+            dispatch,
+            viewer,
+            ..
+        } => {
+            // A Source viewer may have attached to this rendition since the
+            // dispatch was captured. The ledger decides under its own lock;
+            // a refused generation is retired and reaped here, where its
+            // child, Input and permit are, before the refusal is returned.
+            if owners.registered_local(&dispatch, &registration).is_err() {
+                drop(dispatch);
+                drop(spawned.stdout);
+                drop(spawned.stderr);
+                drop(canonical);
+                drop(clock);
+                writers.settled();
+                let _ = slot.request_registered_retirement(&registration).await;
+                let _ = registration.wait_confirmed_reap().await;
+                return Err(LOCAL_OWNER_INVALID.into());
+            }
+            tracing::debug!(
+                target: "plurxd::transcode",
+                user_id = viewer.authority().user_id(),
+                playback_id = viewer.authority().playback_id(),
+                "local observed copy generation registered"
+            );
+        }
+        CopyGenerationOwner::Analysis { .. } => {}
     }
     let (sender, receiver) = tokio::sync::mpsc::channel(PIPE_CHANNEL);
     let tasks = vec![
