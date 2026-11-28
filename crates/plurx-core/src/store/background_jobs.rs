@@ -51,8 +51,9 @@ pub const JOB_RENEW_INTERVAL_MS: i64 = 10_000;
 /// absorbs clock skew between the owner and the sweeper and store latency
 /// on a renewal: six renewal intervals and twice the lease beyond the
 /// moment a healthy owner would have renewed. It equals
-/// `SOURCE_LEASE_GRACE_MS`, so a swept job's expired source lease has
-/// already stopped counting against every claim.
+/// `SOURCE_LEASE_GRACE_MS` only so a swept job's last reader has usually
+/// stopped counting on the sweeper's clock; safety does not depend on it,
+/// because the sweep admits nothing.
 pub const EXPIRED_LEASE_SWEEP_GRACE_MS: i64 = 60_000;
 const _: () = assert!(EXPIRED_LEASE_SWEEP_GRACE_MS >= super::source_leases::SOURCE_LEASE_GRACE_MS);
 pub const CLAIM_RESOLUTION_WINDOW_MS: i64 = 120_000;
@@ -965,11 +966,12 @@ WHERE "#,
 ///   fragment test.
 /// - A lapsed index retry window is the maintenance command's as well.
 /// - `cancelling` is never swept: its expiry settles to `cancelled` there.
-/// - No source clause: the expired worker's lease expires with its job lease
-///   and stays charged through `SOURCE_LEASE_GRACE_MS`, which this grace
-///   equals, so a swept job's last reader is already uncharged. The requeue
-///   does not delete it either (`source_lease_job_settled` keeps an expired
-///   owner's lease to expiry plus grace).
+/// - No source clause: the sweep only revokes and admits no reader. The next
+///   claim of the requeued row runs full source admission, as a takeover at
+///   expiry already does. The requeue does not delete the expired worker's
+///   lease (`source_lease_job_settled` keeps an expired owner's lease to
+///   expiry plus grace), so it stays charged to every other claim through
+///   its grace on each claimant's own clock.
 macro_rules! expired_lease_candidates {
     () => {
         concat!(

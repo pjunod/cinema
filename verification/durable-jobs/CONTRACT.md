@@ -20,13 +20,17 @@ PR #1728 replaces physical source custody with expiring source leases. The
 sweep keeps its statement, grace, attempt budget, `lease_expired` fragment and
 voter-gated caller, but drops the previous-reader custody clause:
 `claim_previous_reader` no longer exists (the successor fence does not wait
-on its own lease; see SOURCE-LEASE-AS-BUILT). A swept job's lease expired with
-its job lease and `EXPIRED_LEASE_SWEEP_GRACE_MS` is asserted at least
-`SOURCE_LEASE_GRACE_MS`, so the expired reader is already uncharged; the
-requeue does not delete it (`source_lease_job_settled` keeps an expired
-owner's lease to expiry plus grace). The `ExpireSweep` model action has no
-custody guard, so the model is unchanged; its row for the removed macro is
-dropped and the remaining pins are refreshed.
+on its own lease; see SOURCE-LEASE-AS-BUILT). The sweep needs no source
+clause because it admits nothing: the next claim of the requeued row runs full
+source admission. The requeue does not delete the expired worker's lease
+(`source_lease_job_settled` keeps an expired owner's lease to expiry plus
+grace), so it stays charged to other claims through its grace on each
+claimant's clock; `EXPIRED_LEASE_SWEEP_GRACE_MS >= SOURCE_LEASE_GRACE_MS` is
+asserted but not load-bearing. The `ExpireSweep` model action has no custody
+guard and releases `held` for the job at once, which is laxer than the kept
+lease; the model does not represent the own-job ghost overlap a takeover
+allows during the grace. The model is unchanged; the row for the removed
+macro is dropped and the remaining pins are refreshed.
 
 ## Expired-lease sweep — model and source review on 2026-11-26
 

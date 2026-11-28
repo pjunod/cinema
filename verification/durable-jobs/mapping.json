@@ -1563,7 +1563,7 @@
         "anchor": "macro_rules! expired_lease_candidates {",
         "scope": "item",
         "item": "macro_rules! expired_lease_candidates",
-        "item_sha256": "cfe94b61150b658fc6eb22bbe27719b378b79f6cfa5ba7e9c2304c5c54dd2ca3"
+        "item_sha256": "50be3bc2444e3b685c74cb99b0839fb10b333b8067d462f40dbaf4997ebb9bc5"
       },
       {
         "table": "same-file dependency of claim_job and ExpireSweep: background_jobs.rs macro_rules! claim_attempt_budget",
@@ -1611,7 +1611,7 @@
         "anchor": "pub const EXPIRED_LEASE_SWEEP_GRACE_MS: i64 = 60_000;",
         "scope": "item",
         "item": "const EXPIRED_LEASE_SWEEP_GRACE_MS",
-        "item_sha256": "1117def5740a8bfd1055af43a101d04251e86e8579d29b1821bd2f28b72a81f8"
+        "item_sha256": "8ea2081c4b33fef9c158f3cecbb8a63f49eaa82b439c1c60843bfdfed0dcf924"
       },
       {
         "table": "source lease root identity outside model",
