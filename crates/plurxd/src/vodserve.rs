@@ -1793,10 +1793,10 @@ use marker_dispatch::*;
 // split: begin vod-generation
 #[path = "vod/generation.rs"]
 mod generation;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) use generation::m7_copy_landing_clock;
 #[cfg(test)]
 pub(crate) use generation::copy_video_pipeline;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use generation::m7_copy_landing_clock;
 use generation::*;
 #[path = "vod/stream_format.rs"]
 mod stream_format;
