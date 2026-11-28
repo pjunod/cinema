@@ -60,6 +60,20 @@ the earlier inference.
 0.5.4 read that level on every render, which kept Cinema's controls on screen
 during Dolby Vision playback; 0.5.5 takes it from the property's notification.
 
+0.5.6 names the EL pill FEL or MEL from the server's title-scan `el_kind`;
+an unclassified layer keeps EL.
+
+0.5.7 names it from the renderer instead: mpv `+rogdv5.8` reports
+`enhancement-layer-nlq-active` in `native-dovi-target-state`, libplacebo's
+per-frame NLQ decision for the presented picture (true: full layer, FEL;
+false with `enhancement-layer-composed`: minimal layer, MEL). Cinema takes
+it from the property notification and the pill follows it. The server's
+`el_kind` is the cross-check: on disagreement the pill keeps the renderer's
+name with a `!` and the Info row names both. An mpv without the field keeps
+the server's name alone. Whole-title runs of one FEL and two MEL titles
+showed no frame of the other kind (rog_hdr_dv
+`evidence/mpv-el-nlq-level-20261127.json`), so no per-title latch is needed.
+
 ## Session control sequence repair (0.5.1)
 
 **Owner:** Codex coordinator; GPT-6.1 Sol implementation. **State:** source

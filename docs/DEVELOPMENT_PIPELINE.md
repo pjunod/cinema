@@ -413,8 +413,10 @@ defect, but it is no longer a wait point for starting the next task.
 - **It does not reuse stale evidence.** Every qualification currently runs all
   surfaces. Reuse lands only after the fingerprint plan proves zero stale
   matches.
-- **It does not expose self-hosted runners to public code.** The repository
-  remains private; runner trust boundaries are unchanged.
+- **It does not expose self-hosted runners to public code.** The public GitHub
+  mirror carries these workflows but has no self-hosted runner registered, and
+  every job is gated off on github.com; runner trust boundaries are unchanged.
+  See docs/VALIDATION.md, "CI control plane".
 
 ## 8. Acceptance — prove the scheduler before using it
 

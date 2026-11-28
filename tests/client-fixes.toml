@@ -1,6 +1,56 @@
 version = 1
 enforce_after = "e8a910f"
 
+# The iOS version picker was a menu, which renders only a row's first line,
+# so each version's Dolby Vision line never appeared on iPhone and iPad.
+[[fixes]]
+id = "apple.ios-version-rows"
+commits = ["ada9f5596fc83f91ef56bbbb83cbab4fb34de3c9", "15b87edcf858fc7ef5cec44fcbacdecfff84d6f1"]
+source = "clients/apple/Sources/DetailView.swift"
+source_anchor = "struct VersionChoiceList: View {"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testIOSVersionRowsShowEachVersionsDolbyVisionLine()"
+
+# The Debian build errored on the playback-info field contract, which the
+# source package does not carry; the check now skips there by name.
+[[fixes]]
+id = "linux-player.deb-build-skips-playback-info-contract"
+commits = ["cf58e5584459465904c7453e44d80deb67e49b32"]
+source = "clients/linux-player/debian/rules"
+source_anchor = "--allow-skip test_badges.Provenance.test_labels_equal_the_contract"
+test = "clients/linux-player/tests/test_badges.py"
+test_anchor = "def test_labels_equal_the_contract"
+
+# PR #1950: a Profile 7 MEL title's processed-route layer row said "FEL: no
+# enhancement-layer detail" instead of the server's MEL classification.
+[[fixes]]
+id = "linux-player.mel-layer-row-from-el-kind"
+commits = ["73af8adf7f29d22503089913876a8d679d6ea162"]
+source = "clients/linux-player/plurx_player/badges.py"
+source_anchor = 'mel = enhancement.get("el_kind") == "mel"'
+test = "clients/linux-player/tests/test_badges.py"
+test_anchor = "def test_mel_title_keeps_the_servers_mel_row_on_a_processed_route"
+
+# PR #1950: Cinema's EL pill names the composed layer FEL or MEL from the
+# server's el_kind instead of saying the kind is not reported.
+[[fixes]]
+id = "linux-player.cinema-el-pill-names-mel"
+commits = ["781b9e845805fa843cb9c65cbd4983ff34444b78"]
+source = "clients/linux-player/plurx_player/scripts/cinema.lua"
+source_anchor = "local EL_KIND = {fel="
+test = "clients/linux-player/tests/test_cinema.lua"
+test_anchor = "a MEL title's EL pill says"
+
+# Cinema's EL pill itself read "EL" while the panel named the layer MEL; the
+# pill now reads FEL or MEL from the server's el_kind.
+[[fixes]]
+id = "linux-player.cinema-el-pill-label-names-kind"
+commits = ["ecd213d3894509296fad77be86d9d328c0c047a9"]
+source = "clients/linux-player/plurx_player/scripts/cinema.lua"
+source_anchor = "local EL_LABEL = {fel='FEL', mel='MEL'}"
+test = "clients/linux-player/tests/test_cinema.lua"
+test_anchor = "a MEL title names its EL pill MEL"
+
 # The Android and Apple version pickers listed filenames only; Android also
 # decoded a nested dolby_vision object the server never sends.
 [[fixes]]
@@ -1256,7 +1306,7 @@ test_anchor = "seekAfterUnpublishedAudioOffsetOrBurnCarriesTheWholeMediaRecipe"
 id = "web.composed-playback-and-attachment-intent"
 commits = ["ca0913c1"]
 source = "crates/plurxd/src/web/player/decode-margin.js"
-source_anchor = "function beginPlaybackMediaAttachment(p)"
+source_anchor = "function beginPlaybackMediaAttachment(p,"
 test = "tests/playback/web-control.test.js"
 test_anchor = "a seek during manifest loading cannot suppress playback startup"
 

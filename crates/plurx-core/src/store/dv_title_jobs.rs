@@ -324,6 +324,84 @@ RETURNING result_json
         .transpose()
 }
 
+/// Title demand a predecessor scanner left with a complete published
+/// aggregate, settled or still open (an index pass's ride-along, or a title
+/// reopened for FEL recipes): `scanner` reproduces exactly that aggregate.
+/// Refusals are never carried: a terminal row without an aggregate may be a
+/// cancellation or an exhausted retry rather than a verdict on the bytes, and
+/// the catalogue's container is the file extension, not what the scanner
+/// sniffs. Nothing with title work in flight.
+const CARRY_FORWARD_FROM: &str = r#"
+FROM dv_title_jobs_demand AS d JOIN files AS f ON f.id=d.file_id
+WHERE json_valid(f.probe_json)
+ AND d.scanner_digest IN (SELECT value FROM json_each(json_extract($1,'$.predecessors')))
+ AND json_extract(f.probe_json,'$.plurx_dv_title_v1.complete')=1
+ AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan'
+  AND j.state IN ('queued','running','cancelling')
+  AND json_extract(j.payload_json,'$.file_id')=d.file_id)
+"#;
+
+/// Re-point title demand from a predecessor scanner to `scanner` in place,
+/// keeping its generation, its terminal state and its published aggregate,
+/// instead of the rotation [`bind`] performs, which drops the aggregate and
+/// reads the whole title again. Everything else still rotates
+/// when the worker reaches it. A read decides first, so a pass with nothing
+/// to carry writes nothing. Returns how many titles were carried.
+pub(super) async fn carry_forward<T: QueueSql>(
+    store: &T,
+    scanner: &str,
+    predecessors: &[String],
+) -> Result<u64, StoreError> {
+    if !digest(scanner)
+        || predecessors
+            .iter()
+            .any(|predecessor| !digest(predecessor) || predecessor == scanner)
+    {
+        return Err(StoreError::Task(
+            "invalid title scanner carry-forward".into(),
+        ));
+    }
+    if predecessors.is_empty() {
+        return Ok(0);
+    }
+    let body = encode(&serde_json::json!({"scanner": scanner, "predecessors": predecessors}))?;
+    #[derive(Deserialize)]
+    struct Count {
+        count: u64,
+    }
+    // Every maintenance turn asks, so ask the local replica, and the write
+    // re-decides. A replica that has not yet applied a predecessor's fresh
+    // aggregate answers no, and this turn may then rotate that title; only a
+    // node still running the predecessor publishes one, which happens only
+    // during a mixed-version rollout, when those nodes rotate titles anyway.
+    let count = format!("SELECT json_object('count',count(*)) AS result_json {CARRY_FORWARD_FROM}");
+    let pending = match store.local_replica_sql(count.clone(), body.clone()).await? {
+        Some(rows) => rows,
+        None => store.queue_sql(count, body.clone(), false, true).await?,
+    };
+    let pending = pending
+        .first()
+        .map(|row| decode::<Count>(row).map(|count| count.count))
+        .transpose()?
+        .unwrap_or(0);
+    if pending == 0 {
+        return Ok(0);
+    }
+    let carried = store
+        .queue_sql(
+            format!(
+                "UPDATE dv_title_jobs_demand SET scanner_digest=json_extract($1,'$.scanner')
+WHERE revision IN (SELECT d.revision {CARRY_FORWARD_FROM})
+RETURNING 'true' AS result_json"
+            ),
+            body,
+            true,
+            true,
+        )
+        .await?;
+    Ok(carried.len() as u64)
+}
+
 pub(super) async fn publish<T: QueueSql>(
     store: &T,
     input: PublishTitleJob,

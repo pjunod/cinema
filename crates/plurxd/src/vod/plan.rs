@@ -39,6 +39,17 @@ pub(super) fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> Strin
             u8::from(recipe.video.preserves_dolby_vision()),
             u8::from(recipe.video.promotes_parameter_sets()),
         ]);
+        // Its soundtracks are bound to the exact source object; so is the
+        // shared video, or a same-size, same-mtime replacement would adopt
+        // the old file's pictures (adoption verifies digests, not the source).
+        hasher.update(b"split-source-object-v1\0");
+        hasher.update(
+            recipe
+                .source_object_version
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+        );
     } else {
         hasher.update(recipe.audio_index.unwrap_or(-1).to_le_bytes());
         hasher.update([

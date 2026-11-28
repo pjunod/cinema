@@ -109,11 +109,18 @@ RUNTIME_INPUTS = {'clients/android/app/build.gradle.kts',
 # compile and test command, image and resource bound is unchanged.
 # main-fast-lane.yml re-reviewed for the TV navigation evidence retention
 # (90 -> 14 days on its upload step); no compile or test step changes.
+# main-fast-lane.yml re-reviewed for worker_control_proof moving into the
+# pinned plurx-ci image (gcc for Kani's goto-cc): only that job's container,
+# prerequisite checks and ownership restore change; every compile and test
+# command, image and resource bound of the pinned recipes is unchanged.
+# rust-unit-inputs.toml re-reviewed for main a264d328b (#1986): one new
+# [[dynamic]] declaration for media_identity_reads_go_through_media_io's
+# source walk; no shard, recipe or existing declaration changes.
 HARNESS = {'.config/nextest.toml': 'b68e6d071b1e441727237de221cb60ac32e78f0ddff3d9636d9004f1e8d38c81',
- '.github/workflows/main-fast-lane.yml': 'c4d8859c5702af12a963a1976857f1257b1ff69f9998ed33d2d31b351c9a3349',
+ '.github/workflows/main-fast-lane.yml': '1d145bca0a46ba2d1173ccb4f274fdb7cfcf6e55fa322ecbb4c0251e84020b3f',
  '.github/workflows/rust-units.yml': '9bac3e8aebfe7fc16025588bef9283799f3c396a68c318f4efcf559422488548',
  'rust-toolchain.toml': '03cbfb27fcdc8253524b3e4c71c832457a504f7e9b1da5e6220178404b77f4e4',
- 'validation/rust-unit-inputs.toml': '009d3107a038f79ed3986d87c96d247717bb6328a89ec179a5a2cbf0255a2372',
+ 'validation/rust-unit-inputs.toml': 'c446565bde747fe56b51d00395d30ff150d467002c6fef457fa014ba54d7825d',
  'validation/rust_units.py': 'ddab14543f580d1f5ed5005c438d705f78fba156d62d1fd5b71bed9792422294'}
 
 

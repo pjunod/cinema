@@ -347,7 +347,7 @@ impl WindowsPathHandoff {
             role,
             path: plurx_core::fs_secure::std_file_path(file)
                 .map_err(|error| format!("resolving held {role} path: {error}"))?,
-            identity: plurx_core::fs_secure::std_file_identity(file)
+            identity: plurx_core::media_io::identity_in_place(file)
                 .map_err(|error| format!("reading held {role} identity: {error}"))?,
             directory: false,
         })

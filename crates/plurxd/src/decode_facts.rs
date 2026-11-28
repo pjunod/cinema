@@ -3676,7 +3676,7 @@ fn probe_file_tuple_from_file(file: &std::fs::File) -> Result<ProbeFileIdentity,
     let metadata = file
         .metadata()
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
-    let held = plurx_core::fs_secure::std_file_identity(file)
+    let held = plurx_core::fs_secure::local_file_identity(file)
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
     let (modified_seconds, modified_nanoseconds) = system_time_parts(
         metadata
@@ -3718,7 +3718,7 @@ fn probe_file_identity_from_file(
     let metadata = file
         .metadata()
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
-    let held = plurx_core::fs_secure::std_file_identity(file)
+    let held = plurx_core::fs_secure::local_file_identity(file)
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
     if !metadata.is_file() || held.size == 0 || held.size > MAX_PROBE_EXECUTABLE_BYTES {
         return Err(DecodeFactError::ProbeIdentity(
@@ -3740,7 +3740,7 @@ fn probe_file_identity_from_file(
             .checked_add(u64::try_from(read).expect("buffer length fits u64"))
             .ok_or_else(|| DecodeFactError::ProbeIdentity("executable size overflow".to_owned()))?;
     }
-    let after = plurx_core::fs_secure::std_file_identity(file)
+    let after = plurx_core::fs_secure::local_file_identity(file)
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
     if offset != held.size || after != held {
         return Err(DecodeFactError::ProbeChanged);
@@ -4938,7 +4938,7 @@ async fn source_observation_with_probe_gate(
 fn source_observation_windows(
     source: &std::fs::File,
 ) -> Result<DecodeSourceObservation, DecodeFactError> {
-    let identity = plurx_core::fs_secure::std_file_identity(source)
+    let identity = plurx_core::media_io::identity_in_place(source)
         .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?;
     let body = serde_json::json!({
         "bytes": identity.size,

@@ -832,14 +832,31 @@ impl ScratchLedger {
         configured: i64,
         headroom: i64,
     ) -> Option<ScratchWrite> {
+        self.authorize_write_keeping(key, bytes, 0, configured, headroom)
+    }
+
+    /// [`Self::authorize_write`] for a write that must leave `keep` bytes of
+    /// the grant unused afterwards. An optional writer uses it so that it is
+    /// paid for by growth on top of what another writer of the same
+    /// allocation still needs, never out of it. Only `bytes` is debited:
+    /// `keep` is a floor on the remaining grant, not a second charge.
+    pub(crate) fn authorize_write_keeping(
+        self: &Arc<Self>,
+        key: ScratchKey,
+        bytes: i64,
+        keep: i64,
+        configured: i64,
+        headroom: i64,
+    ) -> Option<ScratchWrite> {
         let bytes = bytes.max(0);
+        let needed = bytes.saturating_add(keep.max(0));
         let shortfall = {
             let mut state = self.lock();
             let entry = state.entries.get_mut(&key)?;
             if entry.writers_fenced {
                 return None;
             }
-            if entry.grant_unused() >= bytes {
+            if entry.grant_unused() >= needed {
                 entry.pending_bytes = entry.pending_bytes.saturating_add(bytes);
                 state.touch();
                 return Some(ScratchWrite {
@@ -849,12 +866,12 @@ impl ScratchLedger {
                     settled: false,
                 });
             }
-            bytes.saturating_sub(entry.grant_unused())
+            needed.saturating_sub(entry.grant_unused())
         };
         self.grow(key, shortfall.saturating_add(headroom.max(0)), configured)?;
         let mut state = self.lock();
         let entry = state.entries.get_mut(&key)?;
-        if entry.writers_fenced || entry.grant_unused() < bytes {
+        if entry.writers_fenced || entry.grant_unused() < needed {
             // A concurrent regrant or fence moved under us between the grow
             // and here. Refuse rather than write into space the ledger did
             // not keep.
@@ -1487,6 +1504,37 @@ mod tests {
         assert_eq!(ledger.charge_of(key), Some(1_650));
         drop(first);
         drop(permit);
+    }
+
+    #[test]
+    fn scratch_charge_a_kept_reserve_is_paid_by_growth_not_spent() {
+        let ledger = ScratchLedger::new();
+        let permit = ledger.reserve(1_000, 1_500).expect("admission");
+        let key = permit.key();
+        // 1_000 granted. Keeping 800 for another writer leaves room for a
+        // 200-byte optional write without growth, and only by growth beyond.
+        let small = ledger
+            .authorize_write_keeping(key, 200, 800, 1_500, 0)
+            .expect("fits beside the kept reserve");
+        assert_eq!(ledger.grant_of(key), Some(1_000));
+        assert!(
+            ledger
+                .authorize_write_keeping(key, 600, 800, 1_500, 0)
+                .is_none(),
+            "the budget cannot grow by the 600 it would need, so the kept 800 is not spent"
+        );
+        assert_eq!(ledger.grant_of(key), Some(1_000));
+        // The writer the reserve is kept for can still have all of it.
+        let kept = ledger
+            .authorize_write(key, 800, 1_500, 0)
+            .expect("the reserve is intact");
+        drop((small, kept));
+        // With room to grow, the optional write is paid on top of the reserve.
+        let grown = ledger
+            .authorize_write_keeping(key, 400, 800, 10_000, 0)
+            .expect("growth pays for it");
+        assert!(ledger.grant_of(key).expect("grant") >= 1_200);
+        drop((grown, permit));
     }
 
     /// The whole write bound in one case: an authorization is *held*, so two

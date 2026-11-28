@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import importlib.util
 from unittest import mock
+from validation import mirror_guard
 from validation.rust_modules import module_source
 
 
@@ -17,7 +18,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class EvidenceWorkflowCase(unittest.TestCase):
     def read(self, path: str) -> str:
-        return (ROOT / path).read_text(encoding="utf-8")
+        text = (ROOT / path).read_text(encoding="utf-8")
+        return mirror_guard.strip(text) if mirror_guard.is_ci_workflow(path) else text
 
     def test_release_cost_measurement_is_serial_cold_bounded_and_not_ci_acceptance(self) -> None:
         script = self.read("scripts/p02-release-cost.py")

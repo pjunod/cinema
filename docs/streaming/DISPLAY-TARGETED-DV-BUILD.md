@@ -343,9 +343,11 @@ evidence stay on the private `rog_hdr_dv` branch (its `CM4_CLOSED_FORM.md` and
   vertical Gaussian / derivative-of-Gaussian detail; finish and gamut clip).
   `display_target.h` calls it and prints one `display_target_frame` row per
   frame (`curve`, `trim_targets`, `detail_weight`). Method identity:
-  `dolby-closed-form-cm4-cm29-v5` (CM4 closed-form family v1; measured CM29 family v5). Earlier
+  `dolby-closed-form-cm4-cm29-v6` (CM4 closed-form family v2; measured CM29 family v5). Earlier
   versions served no trims (v1), added a fitted CM29 near-black gain (v3),
-  and applied it at absolute output intensity (v4). The helper graph remains
+  applied it at absolute output intensity (v4), and evaluated the CM4 transfer
+  functions with correctly rounded split-float helpers (v5; v6 uses table-driven
+  helpers within 1 ULP of them, checked on every float32 input). The helper graph remains
   `dv-native-master-or-closed-form-dm-v1`.
 - **CM4 creative-trim correction (2026-11-13, qualification open).**
   [Source-gamut hue labels and L8 spatial weights](CM4-TRIM-FIDELITY.md)

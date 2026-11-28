@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   evidence:
+    if: github.server_url != 'https://github.com'
     name: tagged commit passed its promotion gate
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
@@ -52,6 +53,7 @@ jobs:
           chown -R "$owner" "$GITHUB_WORKSPACE"
 
   publish:
+    if: github.server_url != 'https://github.com'
     name: publish image (local registry)
     needs: evidence
     uses: ./.github/workflows/publish-release.yml

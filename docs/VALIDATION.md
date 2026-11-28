@@ -58,10 +58,25 @@ policy; a child job cannot rescue a cancelled parent workflow.
 ## CI control plane — Forgejo is authoritative
 
 Forgejo at `http://forge.lan:3000/noirr/plurx` owns repository events,
-workflow state, logs, artifacts, packages, and runner assignment. GitHub
-Actions is disabled. Forgejo pushes refs to `pjunod/plurx` as an external
-mirror; GitHub does not send source, credentials, or jobs back into the local
+workflow state, logs, artifacts, packages, and runner assignment. Forgejo
+pushes every ref, verbatim, to the public GitHub mirror (`pjunod/cinema`);
+GitHub does not send source, credentials, or jobs back into the local
 pipeline.
+
+**The mirror carries every workflow file, so no lab runner may ever be
+registered to it.** A mirror cannot filter paths, and Forgejo's
+`workflow-shadow-guard` requires that Forgejo execute the reviewed
+`.github/workflows` tree (a `.forgejo/workflows` directory is refused), so the
+files cannot live somewhere GitHub ignores. On GitHub a pull request from a
+fork runs the workflow file *in the pull request*, so a guard inside a file is
+never a boundary against outside code; only the absence of a self-hosted
+runner on the mirror is. That rule is operational and no test can see it:
+re-registering a runner on `pjunod/cinema` reopens the hole. As defence in
+depth every job of every Forgejo workflow starts with
+`github.server_url != 'https://github.com'`, so a new or renamed workflow does
+not arrive on GitHub willing to start a job
+(`test_every_forgejo_job_is_skipped_on_the_public_github_mirror`), and the
+three GitHub-run workflows carry the opposite gate.
 
 The workflow files remain under `.github/workflows/` because Forgejo uses that
 directory when `.forgejo/workflows/` is absent. There is deliberately one

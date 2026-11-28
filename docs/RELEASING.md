@@ -89,13 +89,17 @@ CI passes the tag name automatically when it publishes an image.
    `spikes/hiqlite-m0/Cargo.lock`. It never tags, and it touches no build
    number: those are derived at build time by `scripts/build-number`.
 
-   Review the exact-file fingerprints before pushing. Apple project version
-   changes need a reviewed refresh of `BUILD_SPECS` in
-   `validation/native_receipts.py`. Cargo manifest and lockfile changes also
-   need reviewed fingerprints in the durable-jobs and operation-progress
-   formal mappings, even when only workspace versions changed. The release
-   script leaves these independent review records alone. Preserve their
-   exact-byte checks and record which source changes were reviewed. Run
+   Review the exact-file fingerprints before pushing. The cut re-pins
+   `clients/apple/project.yml`'s reviewed fingerprint and counter-normalized
+   shape in `validation/native_receipts.py`, and its `# release:` line, because
+   its MARKETING_VERSION bump is the only change it makes there; it refuses
+   the cut, writing nothing, if that file no longer matches its pin, so any
+   other project change still gets its own reviewed re-pin first. Cargo
+   manifest and lockfile changes also need reviewed fingerprints in the
+   durable-jobs and operation-progress formal mappings, even when only
+   workspace versions changed; the release script leaves those independent
+   review records alone. Preserve their exact-byte checks and record which
+   source changes were reviewed. Run
    `python3 -m unittest tests.validation.test_native_receipts` and
    `python3 scripts/check-formal check-mapping --package <package>` for
    `durable-jobs`, `operation-progress`, and `worker-refinement` before pushing.

@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   paperwork:
+    if: github.server_url != 'https://github.com'
     name: paperwork
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:

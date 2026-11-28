@@ -132,6 +132,25 @@ class CollectCase(unittest.TestCase):
         entries, lacking = collect(self.root, first)
         self.assertEqual(entries, [])
 
+    def squash(self, number: int, message: str) -> str:
+        """Land a pull request the way a squash merge does: one non-merge commit on main."""
+
+        self.git("checkout", "-q", "-b", f"pr-{number}")
+        (self.root / f"f{number}").write_text("x\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "wip: a branch commit")
+        self.git("checkout", "-q", "main")
+        self.git("merge", "-q", "--squash", f"pr-{number}")
+        self.git("commit", "-qm", message)
+        return self.git("rev-parse", "HEAD")
+
+    def test_a_squash_landing_is_read_and_flagged_like_a_merge(self):
+        self.squash(4, "fix(app): stop the stall (#4)\n\nChangelog: Fixed — from the squash")
+        self.squash(5, "chore(app): tidy (#5)\n\nno field")
+        self.git("commit", "-q", "--allow-empty", "-m", "chore: a direct commit, not a landing")
+        entries, lacking = collect(self.root, None)
+        self.assertEqual(entries, [Entry("Fixed", "from the squash")])
+        self.assertEqual([landing.pull for landing in lacking], [5])
 
     def test_only_landings_after_the_cutover_are_flagged(self):
         before = self.land(1, "chore: old", "landed before the field existed")
