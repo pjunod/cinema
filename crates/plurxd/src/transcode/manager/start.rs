@@ -676,9 +676,7 @@ impl TranscodeManager {
                 .await
                 .map_err(|error| error.to_string())?;
                 if published.is_some_and(|playlist| {
-                    parse_playlist(&String::from_utf8_lossy(&playlist))
-                        .first()
-                        .is_some()
+                    !parse_playlist(&String::from_utf8_lossy(&playlist)).is_empty()
                 }) {
                     return inventory.seal_for_activation().map(Some);
                 }
@@ -1872,7 +1870,14 @@ impl TranscodeManager {
         {
             Ok(layout) => layout,
             Err(reason) => {
-                self.retire_session(&session_id, &session).await;
+                let _ = self
+                    .retire_session_until_with_cause(
+                        &session_id,
+                        &session,
+                        replacement_deadline,
+                        "rolling_layout_refused",
+                    )
+                    .await;
                 start_settlement.disarm();
                 return Err(reason);
             }
@@ -2944,7 +2949,14 @@ impl TranscodeManager {
         {
             Ok(layout) => layout,
             Err(reason) => {
-                self.retire_session(&session_id, &session).await;
+                let _ = self
+                    .retire_session_until_with_cause(
+                        &session_id,
+                        &session,
+                        replacement_deadline,
+                        "rolling_layout_refused",
+                    )
+                    .await;
                 start_settlement.disarm();
                 return Err(copy_start_local_failure(preferred_native, reason));
             }

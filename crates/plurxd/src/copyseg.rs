@@ -909,14 +909,16 @@ async fn rolling_native_split_muxes_the_opening_before_publication_on_refusal() 
     assert!(root.path().join("index.m3u8").exists());
     assert!(!root.path().join("split-audio.mp4").exists());
     assert_eq!(
-        tokio::fs::read(root.path().join("init.mp4")).await.unwrap(),
+        tokio::fs::read(root.path().join("init.mp4"))
+            .await
+            .expect("muxed initialization"),
         init.bytes
     );
     for published in [opening, second] {
         assert_eq!(
             tokio::fs::read(root.path().join(published.name()))
                 .await
-                .unwrap(),
+                .expect("replayed muxed segment"),
             published.segment.bytes,
         );
     }
@@ -971,19 +973,30 @@ async fn rolling_split_reproduces_issued_children_in_a_new_sequence_epoch() {
         .write_segment(&opening)
         .await
         .expect("reproduce paired media");
-    assert_eq!(resumed.seal_for_activation().unwrap(), Some(layout.clone()));
+    assert_eq!(
+        resumed
+            .seal_for_activation()
+            .expect("committed epoch layout"),
+        Some(layout.clone())
+    );
     let playlist = tokio::fs::read_to_string(next.path().join("index.m3u8"))
         .await
-        .unwrap();
+        .expect("epoch playlist");
     assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:1000000000"));
     assert!(playlist.contains("init-e2.mp4"));
     assert!(playlist.contains(&opening.name()));
     assert_eq!(
-        resumed.active_ids().unwrap().for_role("video"),
+        resumed
+            .active_ids()
+            .expect("active video rendition")
+            .for_role("video"),
         Some(video.as_str())
     );
     assert_eq!(
-        resumed.active_ids().unwrap().for_role("audio"),
+        resumed
+            .active_ids()
+            .expect("active audio rendition")
+            .for_role("audio"),
         Some(audio.as_str())
     );
     assert!(!next.path().join("init.mp4").exists());
