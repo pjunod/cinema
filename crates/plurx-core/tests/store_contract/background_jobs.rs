@@ -4774,8 +4774,20 @@ async fn background_subtitles_source_changes_cancel_selected_candidates() {
 // with their published triggers and remove the newer extension's claim.
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn pre_v63_retention_rewind(client: &hiqlite::Client) -> Vec<(String, hiqlite::Params)> {
-    let mut statements: Vec<_> = super::replicated_custody_retention_rewind(client)
-        .await
+    let mut rewind = Vec::new();
+    if let Some(lease_rewind) = super::replicated_source_lease_rewind(client).await {
+        // The exact lease catalogue check covers the overlaid custody-retention
+        // definitions. The same transaction restores their frozen v1 shape.
+        super::require_replicated_fixture_marker(client, "background_custody_retention_schema", 1)
+            .await;
+        rewind.extend(lease_rewind);
+        rewind.extend(
+            super::queue_fixture::source_extensions_fixture::custody_retention_rewind_plan(),
+        );
+    } else {
+        rewind.extend(super::replicated_custody_retention_rewind(client).await);
+    }
+    let mut statements: Vec<_> = rewind
         .into_iter()
         .map(|sql| (sql, hiqlite::params!()))
         .collect();

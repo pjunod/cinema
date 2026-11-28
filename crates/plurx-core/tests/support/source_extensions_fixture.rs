@@ -856,6 +856,10 @@ pub(crate) fn validated_custody_retention_rewind(shape: &[(String, String)]) -> 
         custody_retention_shape(&expected),
         "exact published custody retention required"
     );
+    custody_retention_rewind_plan()
+}
+
+pub(crate) fn custody_retention_rewind_plan() -> [String; 6] {
     [
         "DROP TABLE background_custody_retention_schema;".to_owned(),
         "DROP INDEX background_source_custody_owner_work;".to_owned(),

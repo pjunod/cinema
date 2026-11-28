@@ -13205,7 +13205,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
     }
     for scenario in [
         "source-service-epoch",
-        "custody-retention-shape",
+        "source-lease-shape",
         "translation-job",
         "translation-data",
         "translation-shape",
@@ -13235,9 +13235,9 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "unowned-text-index" => ("CREATE INDEX unexpected_text_fixture_index ON subtitle_text_translation_cues(cue_index)".to_owned(), "DROP INDEX unexpected_text_fixture_index".to_owned()),
             "unowned-managed-index" => ("CREATE INDEX unexpected_managed_fixture_index ON subtitle_model_receipts(model_id)".to_owned(), "DROP INDEX unexpected_managed_fixture_index".to_owned()),
             "text-cue" => ("INSERT INTO subtitle_text_translation_cues VALUES('fixture-tail-data',printf('%064d',0),0,printf('%064d',0),0,1,'{}',0)".to_owned(), "DELETE FROM subtitle_text_translation_cues WHERE job_id='fixture-tail-data'".to_owned()),
-            "custody-retention-shape" | "text-shape" | "caption-shape" => {
+            "source-lease-shape" | "text-shape" | "caption-shape" => {
                 let index = match scenario {
-                    "custody-retention-shape" => "background_source_custody_owner_work",
+                    "source-lease-shape" => "source_leases_work",
                     "text-shape" => "subtitle_text_translation_recipe",
                     _ => "shared_caption_read_expiry",
                 };
@@ -13319,6 +13319,23 @@ async fn replicated_dispatch_turn_upgrade_preserves_pending_turns() {
     let catalog =
         "SELECT name,sql FROM sqlite_master WHERE name GLOB 'dispatch_turn_*' ORDER BY name";
     let current = replicated_fixture_shape(&client, catalog).await;
+    // The deployed turn definitions preceded the lease overlays.
+    let lease_rewind = replicated_source_lease_rewind(&client)
+        .await
+        .expect("empty current lease tail");
+    for result in client
+        .txn(
+            lease_rewind
+                .into_iter()
+                .map(|sql| (sql, hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("pre-lease turn fixture")
+    {
+        result.expect("exact pre-lease statement");
+    }
+    let pre_lease = replicated_fixture_shape(&client, catalog).await;
     let original = include_str!("../src/store/background_job_turns.sql");
     let old_objects: Vec<_> = original
         .split("-- next statement")
@@ -13352,9 +13369,9 @@ async fn replicated_dispatch_turn_upgrade_preserves_pending_turns() {
         .collect::<Result<Vec<_>, _>>()
         .expect("complete old catalog and wait");
     let deployed = replicated_fixture_shape(&client, catalog).await;
-    assert_eq!(current.len(), deployed.len());
+    assert_eq!(pre_lease.len(), deployed.len());
     assert_eq!(
-        current
+        pre_lease
             .iter()
             .zip(&deployed)
             .filter(|(a, b)| a != b)
@@ -14098,20 +14115,7 @@ async fn replicated_source_tail_drops(
         // custody form; full source removal must then restore their predecessor
         // before dropping the custody table they reference.
         require_replicated_fixture_marker(client, "background_custody_retention_schema", 1).await;
-        rewind.extend([
-            "DROP TABLE background_custody_retention_schema".to_owned(),
-            "DROP INDEX background_source_custody_owner_work".to_owned(),
-            "DROP TRIGGER background_job_enqueue_command".to_owned(),
-            "DROP TRIGGER background_job_maintenance_command".to_owned(),
-            queue_fixture::source_extensions_fixture::published_trigger(
-                include_str!("../src/store/background_jobs_retention.sql"),
-                "background_job_enqueue_command",
-            ),
-            queue_fixture::source_extensions_fixture::published_trigger(
-                include_str!("../src/store/background_jobs_receipt_pressure.sql"),
-                "background_job_maintenance_command",
-            ),
-        ]);
+        rewind.extend(queue_fixture::source_extensions_fixture::custody_retention_rewind_plan());
     }
     rewind
         .into_iter()
@@ -20538,6 +20542,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "sharing_rotations",
             "sharing_viewers",
             "sharing_watch",
+            "source_lease_receipt_sources",
             "source_leases",
             "timeline_annotation_sets",
             "timeline_manual_overrides",

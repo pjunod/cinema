@@ -324,10 +324,9 @@ pub use dv_conversion::validation_pre_provenance_admission_trigger;
 #[cfg(feature = "hiqlite-contract-tests")]
 pub fn validation_expanded_source_lease_fixture(
 ) -> Result<(rusqlite::Connection, Vec<String>), crate::error::StoreError> {
-    Ok((
-        sqlite::SqliteStore::open_migrated_through(source_leases::EXPANDED_VERSION)?,
-        source_leases::statements(source_leases::CONTRACT),
-    ))
+    let conn = sqlite::SqliteStore::open_migrated_through(source_leases::EXPANDED_VERSION)?;
+    fragment_publication::install_sqlite(&conn)?;
+    Ok((conn, source_leases::statements(source_leases::CONTRACT)))
 }
 
 pub use dv_conversion::{
