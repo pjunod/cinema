@@ -279,7 +279,7 @@ deploys the effort's landing.
 
 ## 6. Measurements
 
-### Speech on the nuc4 fleet node
+### Speech on a 16-core fleet node
 
 These runs used the packaged Whisper CPU engine, the pinned Silero model
 and 40-second excerpts. The subtitle-reference WER and chrF values use
@@ -341,4 +341,4 @@ publication path has its own qualification.
 
 The production text route uses the [pinned multilingual model](https://huggingface.co/Helsinki-NLP/opus-mt-mul-en/tree/848eae0c1676cfce9bb791c200e8228e5a6396ff).
 The comparison shows where language-specific bundles could improve subtitle
-agreement. Those bundles have not passed production adapter qualification.
+agreement. Production adapter qualification remains open for the language-specific bundles.
