@@ -3361,8 +3361,10 @@ catalog|settings@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidde
 catalog|settings@1280x860|dom|button.settab[role=link aria-current=false text] > span.setdot|1
 catalog|settings@1280x860|dom|button.settab[role=link aria-current=false text] > span.setn[text]|1
 catalog|settings@1280x860|dom|div > h1[text]|1
-catalog|settings@1280x860|dom|div > h2.section[text]|1
-catalog|settings@1280x860|dom|div > p.sub[text]|1
+catalog|settings@1280x860|dom|div > h2.section[text]|2
+catalog|settings@1280x860|dom|div > input#source-readers-per-root[type=number]|1
+catalog|settings@1280x860|dom|div > label[text]|1
+catalog|settings@1280x860|dom|div > p.sub[text]|2
 catalog|settings@1280x860|dom|div > p[text]|1
 catalog|settings@1280x860|dom|div#app > div#pxshell.px-shell|1
 catalog|settings@1280x860|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
@@ -3372,10 +3374,19 @@ catalog|settings@1280x860|dom|div#pxnav.px-scroll > nav.px-nav[aria-label=*]|2
 catalog|settings@1280x860|dom|div#pxshell.px-shell > aside.px-side|1
 catalog|settings@1280x860|dom|div#pxshell.px-shell > main#main|1
 catalog|settings@1280x860|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
+catalog|settings@1280x860|dom|div#setbody.adminwrap > div#source-readers-card.card.setcard|1
 catalog|settings@1280x860|dom|div#setbody.adminwrap > div.card.setcard|1
 catalog|settings@1280x860|dom|div#setbody.adminwrap > div.card|1
 catalog|settings@1280x860|dom|div#setbody.adminwrap > div.sethead|1
 catalog|settings@1280x860|dom|div#setbody.adminwrap > div.setwarn[text]|1
+catalog|settings@1280x860|dom|div#source-readers-card.card.setcard > div#source-readers-error.err[role=alert]|1
+catalog|settings@1280x860|dom|div#source-readers-card.card.setcard > div#source-readers-nodes|1
+catalog|settings@1280x860|dom|div#source-readers-card.card.setcard > div#source-readers-status[role=status]|1
+catalog|settings@1280x860|dom|div#source-readers-card.card.setcard > div.cardhead|1
+catalog|settings@1280x860|dom|div#source-readers-card.card.setcard > div.setfields|1
+catalog|settings@1280x860|dom|div#source-readers-card.card.setcard > div.setfoot|1
+catalog|settings@1280x860|dom|div#source-readers-card.card.setcard > p.hint[text]|1
+catalog|settings@1280x860|dom|div#source-readers-nodes > button.ghost.sm[type=button text]|1
 catalog|settings@1280x860|dom|div#st-1[text] > span[text]|1
 catalog|settings@1280x860|dom|div#st-2[text] > span[text]|1
 catalog|settings@1280x860|dom|div#st-3[text] > span[text]|1
@@ -3387,9 +3398,9 @@ catalog|settings@1280x860|dom|div.card.setcard > div#storage-domain-roots|1
 catalog|settings@1280x860|dom|div.card.setcard > div#storage-domain-status[role=status]|1
 catalog|settings@1280x860|dom|div.card.setcard > div.cardhead|1
 catalog|settings@1280x860|dom|div.card.setcard > p.hint[text]|2
-catalog|settings@1280x860|dom|div.cardhead > div.cardtools|1
-catalog|settings@1280x860|dom|div.cardhead > div|1
-catalog|settings@1280x860|dom|div.cardtools > span.pill[text]|1
+catalog|settings@1280x860|dom|div.cardhead > div.cardtools|2
+catalog|settings@1280x860|dom|div.cardhead > div|2
+catalog|settings@1280x860|dom|div.cardtools > span.pill[text]|2
 catalog|settings@1280x860|dom|div.paths > span.pathchip[text]|3
 catalog|settings@1280x860|dom|div.px-brand > a.logo[text]|1
 catalog|settings@1280x860|dom|div.px-ctl > div.px-pop|1
@@ -3407,6 +3418,9 @@ catalog|settings@1280x860|dom|div.px-user > div.px-pop|1
 catalog|settings@1280x860|dom|div.row > button.ghost.sm[aria-expanded=false text]|3
 catalog|settings@1280x860|dom|div.row > button.ghost.sm[text]|8
 catalog|settings@1280x860|dom|div.row > button.sm[text]|1
+catalog|settings@1280x860|dom|div.setfields > div|1
+catalog|settings@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|1
+catalog|settings@1280x860|dom|div.setfoot > span.setstate[text]|1
 catalog|settings@1280x860|dom|div.sethead > div.row|1
 catalog|settings@1280x860|dom|div.sethead > div|1
 catalog|settings@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
@@ -3491,9 +3505,11 @@ catalog|settings@1280x860|focus|033|button.ghost.sm "Configure ⌄"
 catalog|settings@1280x860|focus|034|button.ghost.sm "Scan"
 catalog|settings@1280x860|focus|035|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
 catalog|settings@1280x860|focus|036|button.ghost.sm "Configure ⌄"
-catalog|settings@1280x860|focus|037|button.ghost "Load library roots"
-catalog|settings@1280x860|focus|038|button.ghost "Save storage domains"
-catalog|settings@1280x860|focus|039|<wrap>
+catalog|settings@1280x860|focus|037|input#source-readers-per-root
+catalog|settings@1280x860|focus|038|button.ghost.sm "Load roots and domains"
+catalog|settings@1280x860|focus|039|button.ghost "Load library roots"
+catalog|settings@1280x860|focus|040|button.ghost "Save storage domains"
+catalog|settings@1280x860|focus|041|<wrap>
 catalog|settings@1280x860|req|GET /api/v1/activity|2
 catalog|settings@1280x860|req|GET /api/v1/dv-conversions|1
 catalog|settings@1280x860|req|GET /api/v1/features|2
@@ -3525,8 +3541,10 @@ catalog|settings@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden
 catalog|settings@390x780|dom|button.settab[role=link aria-current=false text] > span.setdot|1
 catalog|settings@390x780|dom|button.settab[role=link aria-current=false text] > span.setn[text]|1
 catalog|settings@390x780|dom|div > h1[text]|1
-catalog|settings@390x780|dom|div > h2.section[text]|1
-catalog|settings@390x780|dom|div > p.sub[text]|1
+catalog|settings@390x780|dom|div > h2.section[text]|2
+catalog|settings@390x780|dom|div > input#source-readers-per-root[type=number]|1
+catalog|settings@390x780|dom|div > label[text]|1
+catalog|settings@390x780|dom|div > p.sub[text]|2
 catalog|settings@390x780|dom|div > p[text]|1
 catalog|settings@390x780|dom|div#app > div#pxshell.px-shell|1
 catalog|settings@390x780|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
@@ -3536,10 +3554,19 @@ catalog|settings@390x780|dom|div#pxnav.px-scroll > nav.px-nav[aria-label=*]|2
 catalog|settings@390x780|dom|div#pxshell.px-shell > aside.px-side|1
 catalog|settings@390x780|dom|div#pxshell.px-shell > main#main|1
 catalog|settings@390x780|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
+catalog|settings@390x780|dom|div#setbody.adminwrap > div#source-readers-card.card.setcard|1
 catalog|settings@390x780|dom|div#setbody.adminwrap > div.card.setcard|1
 catalog|settings@390x780|dom|div#setbody.adminwrap > div.card|1
 catalog|settings@390x780|dom|div#setbody.adminwrap > div.sethead|1
 catalog|settings@390x780|dom|div#setbody.adminwrap > div.setwarn[text]|1
+catalog|settings@390x780|dom|div#source-readers-card.card.setcard > div#source-readers-error.err[role=alert]|1
+catalog|settings@390x780|dom|div#source-readers-card.card.setcard > div#source-readers-nodes|1
+catalog|settings@390x780|dom|div#source-readers-card.card.setcard > div#source-readers-status[role=status]|1
+catalog|settings@390x780|dom|div#source-readers-card.card.setcard > div.cardhead|1
+catalog|settings@390x780|dom|div#source-readers-card.card.setcard > div.setfields|1
+catalog|settings@390x780|dom|div#source-readers-card.card.setcard > div.setfoot|1
+catalog|settings@390x780|dom|div#source-readers-card.card.setcard > p.hint[text]|1
+catalog|settings@390x780|dom|div#source-readers-nodes > button.ghost.sm[type=button text]|1
 catalog|settings@390x780|dom|div#st-1[text] > span[text]|1
 catalog|settings@390x780|dom|div#st-2[text] > span[text]|1
 catalog|settings@390x780|dom|div#st-3[text] > span[text]|1
@@ -3551,9 +3578,9 @@ catalog|settings@390x780|dom|div.card.setcard > div#storage-domain-roots|1
 catalog|settings@390x780|dom|div.card.setcard > div#storage-domain-status[role=status]|1
 catalog|settings@390x780|dom|div.card.setcard > div.cardhead|1
 catalog|settings@390x780|dom|div.card.setcard > p.hint[text]|2
-catalog|settings@390x780|dom|div.cardhead > div.cardtools|1
-catalog|settings@390x780|dom|div.cardhead > div|1
-catalog|settings@390x780|dom|div.cardtools > span.pill[text]|1
+catalog|settings@390x780|dom|div.cardhead > div.cardtools|2
+catalog|settings@390x780|dom|div.cardhead > div|2
+catalog|settings@390x780|dom|div.cardtools > span.pill[text]|2
 catalog|settings@390x780|dom|div.paths > span.pathchip[text]|3
 catalog|settings@390x780|dom|div.px-brand > a.logo[text]|1
 catalog|settings@390x780|dom|div.px-ctl > div.px-pop|1
@@ -3571,6 +3598,9 @@ catalog|settings@390x780|dom|div.px-user > div.px-pop|1
 catalog|settings@390x780|dom|div.row > button.ghost.sm[aria-expanded=false text]|3
 catalog|settings@390x780|dom|div.row > button.ghost.sm[text]|8
 catalog|settings@390x780|dom|div.row > button.sm[text]|1
+catalog|settings@390x780|dom|div.setfields > div|1
+catalog|settings@390x780|dom|div.setfoot > button.primary.sm[disabled text]|1
+catalog|settings@390x780|dom|div.setfoot > span.setstate[text]|1
 catalog|settings@390x780|dom|div.sethead > div.row|1
 catalog|settings@390x780|dom|div.sethead > div|1
 catalog|settings@390x780|dom|div.setlayout > div#setbody.adminwrap|1
@@ -3648,16 +3678,18 @@ catalog|settings@390x780|focus|026|button.ghost.sm "Configure ⌄"
 catalog|settings@390x780|focus|027|button.ghost.sm "Scan"
 catalog|settings@390x780|focus|028|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
 catalog|settings@390x780|focus|029|button.ghost.sm "Configure ⌄"
-catalog|settings@390x780|focus|030|button.ghost "Load library roots"
-catalog|settings@390x780|focus|031|button.ghost "Save storage domains"
-catalog|settings@390x780|focus|032|a.px-tab "Home"
-catalog|settings@390x780|focus|033|a.px-tab "Channels"
-catalog|settings@390x780|focus|034|a.px-tab "Recordings"
-catalog|settings@390x780|focus|035|button.px-tab "Libraries"
-catalog|settings@390x780|focus|036|button.px-tab "Search"
-catalog|settings@390x780|focus|037|a.px-tab "Shared"
-catalog|settings@390x780|focus|038|a.px-tab "Activity"
-catalog|settings@390x780|focus|039|<wrap>
+catalog|settings@390x780|focus|030|input#source-readers-per-root
+catalog|settings@390x780|focus|031|button.ghost.sm "Load roots and domains"
+catalog|settings@390x780|focus|032|button.ghost "Load library roots"
+catalog|settings@390x780|focus|033|button.ghost "Save storage domains"
+catalog|settings@390x780|focus|034|a.px-tab "Home"
+catalog|settings@390x780|focus|035|a.px-tab "Channels"
+catalog|settings@390x780|focus|036|a.px-tab "Recordings"
+catalog|settings@390x780|focus|037|button.px-tab "Libraries"
+catalog|settings@390x780|focus|038|button.px-tab "Search"
+catalog|settings@390x780|focus|039|a.px-tab "Shared"
+catalog|settings@390x780|focus|040|a.px-tab "Activity"
+catalog|settings@390x780|focus|041|<wrap>
 catalog|settings@390x780|req|GET /api/v1/activity|2
 catalog|settings@390x780|req|GET /api/v1/dv-conversions|1
 catalog|settings@390x780|req|GET /api/v1/features|2
@@ -6435,14 +6467,25 @@ classic|settings@1280x860|dom|div > button.ghost.profile.sm|1
 classic|settings@1280x860|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|settings@1280x860|dom|div > div#profilemenu.amenu|1
 classic|settings@1280x860|dom|div > h1[text]|1
-classic|settings@1280x860|dom|div > h2.section[text]|1
-classic|settings@1280x860|dom|div > p.sub[text]|1
+classic|settings@1280x860|dom|div > h2.section[text]|2
+classic|settings@1280x860|dom|div > input#source-readers-per-root[type=number]|1
+classic|settings@1280x860|dom|div > label[text]|1
+classic|settings@1280x860|dom|div > p.sub[text]|2
 classic|settings@1280x860|dom|div > p[text]|1
 classic|settings@1280x860|dom|div#app > div.layout-frame|1
+classic|settings@1280x860|dom|div#setbody.adminwrap > div#source-readers-card.card.setcard|1
 classic|settings@1280x860|dom|div#setbody.adminwrap > div.card.setcard|1
 classic|settings@1280x860|dom|div#setbody.adminwrap > div.card|1
 classic|settings@1280x860|dom|div#setbody.adminwrap > div.sethead|1
 classic|settings@1280x860|dom|div#setbody.adminwrap > div.setwarn[text]|1
+classic|settings@1280x860|dom|div#source-readers-card.card.setcard > div#source-readers-error.err[role=alert]|1
+classic|settings@1280x860|dom|div#source-readers-card.card.setcard > div#source-readers-nodes|1
+classic|settings@1280x860|dom|div#source-readers-card.card.setcard > div#source-readers-status[role=status]|1
+classic|settings@1280x860|dom|div#source-readers-card.card.setcard > div.cardhead|1
+classic|settings@1280x860|dom|div#source-readers-card.card.setcard > div.setfields|1
+classic|settings@1280x860|dom|div#source-readers-card.card.setcard > div.setfoot|1
+classic|settings@1280x860|dom|div#source-readers-card.card.setcard > p.hint[text]|1
+classic|settings@1280x860|dom|div#source-readers-nodes > button.ghost.sm[type=button text]|1
 classic|settings@1280x860|dom|div#st-1[text] > span[text]|1
 classic|settings@1280x860|dom|div#st-2[text] > span[text]|1
 classic|settings@1280x860|dom|div#st-3[text] > span[text]|1
@@ -6454,15 +6497,18 @@ classic|settings@1280x860|dom|div.card.setcard > div#storage-domain-roots|1
 classic|settings@1280x860|dom|div.card.setcard > div#storage-domain-status[role=status]|1
 classic|settings@1280x860|dom|div.card.setcard > div.cardhead|1
 classic|settings@1280x860|dom|div.card.setcard > p.hint[text]|2
-classic|settings@1280x860|dom|div.cardhead > div.cardtools|1
-classic|settings@1280x860|dom|div.cardhead > div|1
-classic|settings@1280x860|dom|div.cardtools > span.pill[text]|1
+classic|settings@1280x860|dom|div.cardhead > div.cardtools|2
+classic|settings@1280x860|dom|div.cardhead > div|2
+classic|settings@1280x860|dom|div.cardtools > span.pill[text]|2
 classic|settings@1280x860|dom|div.layout-frame > header.top|1
 classic|settings@1280x860|dom|div.layout-frame > main#main|1
 classic|settings@1280x860|dom|div.paths > span.pathchip[text]|3
 classic|settings@1280x860|dom|div.row > button.ghost.sm[aria-expanded=false text]|3
 classic|settings@1280x860|dom|div.row > button.ghost.sm[text]|8
 classic|settings@1280x860|dom|div.row > button.sm[text]|1
+classic|settings@1280x860|dom|div.setfields > div|1
+classic|settings@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|1
+classic|settings@1280x860|dom|div.setfoot > span.setstate[text]|1
 classic|settings@1280x860|dom|div.sethead > div.row|1
 classic|settings@1280x860|dom|div.sethead > div|1
 classic|settings@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
@@ -6550,9 +6596,11 @@ classic|settings@1280x860|focus|033|button.ghost.sm "Configure ⌄"
 classic|settings@1280x860|focus|034|button.ghost.sm "Scan"
 classic|settings@1280x860|focus|035|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
 classic|settings@1280x860|focus|036|button.ghost.sm "Configure ⌄"
-classic|settings@1280x860|focus|037|button.ghost "Load library roots"
-classic|settings@1280x860|focus|038|button.ghost "Save storage domains"
-classic|settings@1280x860|focus|039|<wrap>
+classic|settings@1280x860|focus|037|input#source-readers-per-root
+classic|settings@1280x860|focus|038|button.ghost.sm "Load roots and domains"
+classic|settings@1280x860|focus|039|button.ghost "Load library roots"
+classic|settings@1280x860|focus|040|button.ghost "Save storage domains"
+classic|settings@1280x860|focus|041|<wrap>
 classic|settings@1280x860|req|GET /api/v1/activity|2
 classic|settings@1280x860|req|GET /api/v1/dv-conversions|1
 classic|settings@1280x860|req|GET /api/v1/features|2
@@ -6575,14 +6623,25 @@ classic|settings@390x780|dom|div > button.ghost.profile.sm|1
 classic|settings@390x780|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|settings@390x780|dom|div > div#profilemenu.amenu|1
 classic|settings@390x780|dom|div > h1[text]|1
-classic|settings@390x780|dom|div > h2.section[text]|1
-classic|settings@390x780|dom|div > p.sub[text]|1
+classic|settings@390x780|dom|div > h2.section[text]|2
+classic|settings@390x780|dom|div > input#source-readers-per-root[type=number]|1
+classic|settings@390x780|dom|div > label[text]|1
+classic|settings@390x780|dom|div > p.sub[text]|2
 classic|settings@390x780|dom|div > p[text]|1
 classic|settings@390x780|dom|div#app > div.layout-frame|1
+classic|settings@390x780|dom|div#setbody.adminwrap > div#source-readers-card.card.setcard|1
 classic|settings@390x780|dom|div#setbody.adminwrap > div.card.setcard|1
 classic|settings@390x780|dom|div#setbody.adminwrap > div.card|1
 classic|settings@390x780|dom|div#setbody.adminwrap > div.sethead|1
 classic|settings@390x780|dom|div#setbody.adminwrap > div.setwarn[text]|1
+classic|settings@390x780|dom|div#source-readers-card.card.setcard > div#source-readers-error.err[role=alert]|1
+classic|settings@390x780|dom|div#source-readers-card.card.setcard > div#source-readers-nodes|1
+classic|settings@390x780|dom|div#source-readers-card.card.setcard > div#source-readers-status[role=status]|1
+classic|settings@390x780|dom|div#source-readers-card.card.setcard > div.cardhead|1
+classic|settings@390x780|dom|div#source-readers-card.card.setcard > div.setfields|1
+classic|settings@390x780|dom|div#source-readers-card.card.setcard > div.setfoot|1
+classic|settings@390x780|dom|div#source-readers-card.card.setcard > p.hint[text]|1
+classic|settings@390x780|dom|div#source-readers-nodes > button.ghost.sm[type=button text]|1
 classic|settings@390x780|dom|div#st-1[text] > span[text]|1
 classic|settings@390x780|dom|div#st-2[text] > span[text]|1
 classic|settings@390x780|dom|div#st-3[text] > span[text]|1
@@ -6594,15 +6653,18 @@ classic|settings@390x780|dom|div.card.setcard > div#storage-domain-roots|1
 classic|settings@390x780|dom|div.card.setcard > div#storage-domain-status[role=status]|1
 classic|settings@390x780|dom|div.card.setcard > div.cardhead|1
 classic|settings@390x780|dom|div.card.setcard > p.hint[text]|2
-classic|settings@390x780|dom|div.cardhead > div.cardtools|1
-classic|settings@390x780|dom|div.cardhead > div|1
-classic|settings@390x780|dom|div.cardtools > span.pill[text]|1
+classic|settings@390x780|dom|div.cardhead > div.cardtools|2
+classic|settings@390x780|dom|div.cardhead > div|2
+classic|settings@390x780|dom|div.cardtools > span.pill[text]|2
 classic|settings@390x780|dom|div.layout-frame > header.top|1
 classic|settings@390x780|dom|div.layout-frame > main#main|1
 classic|settings@390x780|dom|div.paths > span.pathchip[text]|3
 classic|settings@390x780|dom|div.row > button.ghost.sm[aria-expanded=false text]|3
 classic|settings@390x780|dom|div.row > button.ghost.sm[text]|8
 classic|settings@390x780|dom|div.row > button.sm[text]|1
+classic|settings@390x780|dom|div.setfields > div|1
+classic|settings@390x780|dom|div.setfoot > button.primary.sm[disabled text]|1
+classic|settings@390x780|dom|div.setfoot > span.setstate[text]|1
 classic|settings@390x780|dom|div.sethead > div.row|1
 classic|settings@390x780|dom|div.sethead > div|1
 classic|settings@390x780|dom|div.setlayout > div#setbody.adminwrap|1
@@ -6690,9 +6752,11 @@ classic|settings@390x780|focus|033|button.ghost.sm "Configure ⌄"
 classic|settings@390x780|focus|034|button.ghost.sm "Scan"
 classic|settings@390x780|focus|035|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
 classic|settings@390x780|focus|036|button.ghost.sm "Configure ⌄"
-classic|settings@390x780|focus|037|button.ghost "Load library roots"
-classic|settings@390x780|focus|038|button.ghost "Save storage domains"
-classic|settings@390x780|focus|039|<wrap>
+classic|settings@390x780|focus|037|input#source-readers-per-root
+classic|settings@390x780|focus|038|button.ghost.sm "Load roots and domains"
+classic|settings@390x780|focus|039|button.ghost "Load library roots"
+classic|settings@390x780|focus|040|button.ghost "Save storage domains"
+classic|settings@390x780|focus|041|<wrap>
 classic|settings@390x780|req|GET /api/v1/activity|2
 classic|settings@390x780|req|GET /api/v1/dv-conversions|1
 classic|settings@390x780|req|GET /api/v1/features|2
@@ -9905,14 +9969,25 @@ meridian|settings@1280x860|dom|button.ghost[type=button] > svg.px-ico[aria-hidde
 meridian|settings@1280x860|dom|button.settab[role=link aria-current=false text] > span.setdot|1
 meridian|settings@1280x860|dom|button.settab[role=link aria-current=false text] > span.setn[text]|1
 meridian|settings@1280x860|dom|div > h1[text]|1
-meridian|settings@1280x860|dom|div > h2.section[text]|1
-meridian|settings@1280x860|dom|div > p.sub[text]|1
+meridian|settings@1280x860|dom|div > h2.section[text]|2
+meridian|settings@1280x860|dom|div > input#source-readers-per-root[type=number]|1
+meridian|settings@1280x860|dom|div > label[text]|1
+meridian|settings@1280x860|dom|div > p.sub[text]|2
 meridian|settings@1280x860|dom|div > p[text]|1
 meridian|settings@1280x860|dom|div#app > div.md-shell|1
+meridian|settings@1280x860|dom|div#setbody.adminwrap > div#source-readers-card.card.setcard|1
 meridian|settings@1280x860|dom|div#setbody.adminwrap > div.card.setcard|1
 meridian|settings@1280x860|dom|div#setbody.adminwrap > div.card|1
 meridian|settings@1280x860|dom|div#setbody.adminwrap > div.sethead|1
 meridian|settings@1280x860|dom|div#setbody.adminwrap > div.setwarn[text]|1
+meridian|settings@1280x860|dom|div#source-readers-card.card.setcard > div#source-readers-error.err[role=alert]|1
+meridian|settings@1280x860|dom|div#source-readers-card.card.setcard > div#source-readers-nodes|1
+meridian|settings@1280x860|dom|div#source-readers-card.card.setcard > div#source-readers-status[role=status]|1
+meridian|settings@1280x860|dom|div#source-readers-card.card.setcard > div.cardhead|1
+meridian|settings@1280x860|dom|div#source-readers-card.card.setcard > div.setfields|1
+meridian|settings@1280x860|dom|div#source-readers-card.card.setcard > div.setfoot|1
+meridian|settings@1280x860|dom|div#source-readers-card.card.setcard > p.hint[text]|1
+meridian|settings@1280x860|dom|div#source-readers-nodes > button.ghost.sm[type=button text]|1
 meridian|settings@1280x860|dom|div#st-1[text] > span[text]|1
 meridian|settings@1280x860|dom|div#st-2[text] > span[text]|1
 meridian|settings@1280x860|dom|div#st-3[text] > span[text]|1
@@ -9924,9 +9999,9 @@ meridian|settings@1280x860|dom|div.card.setcard > div#storage-domain-roots|1
 meridian|settings@1280x860|dom|div.card.setcard > div#storage-domain-status[role=status]|1
 meridian|settings@1280x860|dom|div.card.setcard > div.cardhead|1
 meridian|settings@1280x860|dom|div.card.setcard > p.hint[text]|2
-meridian|settings@1280x860|dom|div.cardhead > div.cardtools|1
-meridian|settings@1280x860|dom|div.cardhead > div|1
-meridian|settings@1280x860|dom|div.cardtools > span.pill[text]|1
+meridian|settings@1280x860|dom|div.cardhead > div.cardtools|2
+meridian|settings@1280x860|dom|div.cardhead > div|2
+meridian|settings@1280x860|dom|div.cardtools > span.pill[text]|2
 meridian|settings@1280x860|dom|div.md-pop > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 meridian|settings@1280x860|dom|div.md-pop > button.ghost.profile[aria-label=*]|1
 meridian|settings@1280x860|dom|div.md-pop > div#lookmenu.amenu.lookmenu|1
@@ -9939,6 +10014,9 @@ meridian|settings@1280x860|dom|div.paths > span.pathchip[text]|3
 meridian|settings@1280x860|dom|div.row > button.ghost.sm[aria-expanded=false text]|3
 meridian|settings@1280x860|dom|div.row > button.ghost.sm[text]|8
 meridian|settings@1280x860|dom|div.row > button.sm[text]|1
+meridian|settings@1280x860|dom|div.setfields > div|1
+meridian|settings@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|1
+meridian|settings@1280x860|dom|div.setfoot > span.setstate[text]|1
 meridian|settings@1280x860|dom|div.sethead > div.row|1
 meridian|settings@1280x860|dom|div.sethead > div|1
 meridian|settings@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
@@ -10031,9 +10109,11 @@ meridian|settings@1280x860|focus|034|button.ghost.sm "Configure ⌄"
 meridian|settings@1280x860|focus|035|button.ghost.sm "Scan"
 meridian|settings@1280x860|focus|036|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
 meridian|settings@1280x860|focus|037|button.ghost.sm "Configure ⌄"
-meridian|settings@1280x860|focus|038|button.ghost "Load library roots"
-meridian|settings@1280x860|focus|039|button.ghost "Save storage domains"
-meridian|settings@1280x860|focus|040|<wrap>
+meridian|settings@1280x860|focus|038|input#source-readers-per-root
+meridian|settings@1280x860|focus|039|button.ghost.sm "Load roots and domains"
+meridian|settings@1280x860|focus|040|button.ghost "Load library roots"
+meridian|settings@1280x860|focus|041|button.ghost "Save storage domains"
+meridian|settings@1280x860|focus|042|<wrap>
 meridian|settings@1280x860|req|GET /api/v1/activity|2
 meridian|settings@1280x860|req|GET /api/v1/dv-conversions|1
 meridian|settings@1280x860|req|GET /api/v1/features|2
@@ -10062,14 +10142,25 @@ meridian|settings@390x780|dom|button.ghost[type=button] > svg.px-ico[aria-hidden
 meridian|settings@390x780|dom|button.settab[role=link aria-current=false text] > span.setdot|1
 meridian|settings@390x780|dom|button.settab[role=link aria-current=false text] > span.setn[text]|1
 meridian|settings@390x780|dom|div > h1[text]|1
-meridian|settings@390x780|dom|div > h2.section[text]|1
-meridian|settings@390x780|dom|div > p.sub[text]|1
+meridian|settings@390x780|dom|div > h2.section[text]|2
+meridian|settings@390x780|dom|div > input#source-readers-per-root[type=number]|1
+meridian|settings@390x780|dom|div > label[text]|1
+meridian|settings@390x780|dom|div > p.sub[text]|2
 meridian|settings@390x780|dom|div > p[text]|1
 meridian|settings@390x780|dom|div#app > div.md-shell|1
+meridian|settings@390x780|dom|div#setbody.adminwrap > div#source-readers-card.card.setcard|1
 meridian|settings@390x780|dom|div#setbody.adminwrap > div.card.setcard|1
 meridian|settings@390x780|dom|div#setbody.adminwrap > div.card|1
 meridian|settings@390x780|dom|div#setbody.adminwrap > div.sethead|1
 meridian|settings@390x780|dom|div#setbody.adminwrap > div.setwarn[text]|1
+meridian|settings@390x780|dom|div#source-readers-card.card.setcard > div#source-readers-error.err[role=alert]|1
+meridian|settings@390x780|dom|div#source-readers-card.card.setcard > div#source-readers-nodes|1
+meridian|settings@390x780|dom|div#source-readers-card.card.setcard > div#source-readers-status[role=status]|1
+meridian|settings@390x780|dom|div#source-readers-card.card.setcard > div.cardhead|1
+meridian|settings@390x780|dom|div#source-readers-card.card.setcard > div.setfields|1
+meridian|settings@390x780|dom|div#source-readers-card.card.setcard > div.setfoot|1
+meridian|settings@390x780|dom|div#source-readers-card.card.setcard > p.hint[text]|1
+meridian|settings@390x780|dom|div#source-readers-nodes > button.ghost.sm[type=button text]|1
 meridian|settings@390x780|dom|div#st-1[text] > span[text]|1
 meridian|settings@390x780|dom|div#st-2[text] > span[text]|1
 meridian|settings@390x780|dom|div#st-3[text] > span[text]|1
@@ -10081,9 +10172,9 @@ meridian|settings@390x780|dom|div.card.setcard > div#storage-domain-roots|1
 meridian|settings@390x780|dom|div.card.setcard > div#storage-domain-status[role=status]|1
 meridian|settings@390x780|dom|div.card.setcard > div.cardhead|1
 meridian|settings@390x780|dom|div.card.setcard > p.hint[text]|2
-meridian|settings@390x780|dom|div.cardhead > div.cardtools|1
-meridian|settings@390x780|dom|div.cardhead > div|1
-meridian|settings@390x780|dom|div.cardtools > span.pill[text]|1
+meridian|settings@390x780|dom|div.cardhead > div.cardtools|2
+meridian|settings@390x780|dom|div.cardhead > div|2
+meridian|settings@390x780|dom|div.cardtools > span.pill[text]|2
 meridian|settings@390x780|dom|div.md-pop > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 meridian|settings@390x780|dom|div.md-pop > button.ghost.profile[aria-label=*]|1
 meridian|settings@390x780|dom|div.md-pop > div#lookmenu.amenu.lookmenu|1
@@ -10096,6 +10187,9 @@ meridian|settings@390x780|dom|div.paths > span.pathchip[text]|3
 meridian|settings@390x780|dom|div.row > button.ghost.sm[aria-expanded=false text]|3
 meridian|settings@390x780|dom|div.row > button.ghost.sm[text]|8
 meridian|settings@390x780|dom|div.row > button.sm[text]|1
+meridian|settings@390x780|dom|div.setfields > div|1
+meridian|settings@390x780|dom|div.setfoot > button.primary.sm[disabled text]|1
+meridian|settings@390x780|dom|div.setfoot > span.setstate[text]|1
 meridian|settings@390x780|dom|div.sethead > div.row|1
 meridian|settings@390x780|dom|div.sethead > div|1
 meridian|settings@390x780|dom|div.setlayout > div#setbody.adminwrap|1
@@ -10179,13 +10273,15 @@ meridian|settings@390x780|focus|025|button.ghost.sm "Configure ⌄"
 meridian|settings@390x780|focus|026|button.ghost.sm "Scan"
 meridian|settings@390x780|focus|027|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
 meridian|settings@390x780|focus|028|button.ghost.sm "Configure ⌄"
-meridian|settings@390x780|focus|029|button.ghost "Load library roots"
-meridian|settings@390x780|focus|030|button.ghost "Save storage domains"
-meridian|settings@390x780|focus|031|a "Home"
-meridian|settings@390x780|focus|032|button.ghost "Libraries"
-meridian|settings@390x780|focus|033|button.ghost "Search"
-meridian|settings@390x780|focus|034|button.ghost "More"
-meridian|settings@390x780|focus|035|<wrap>
+meridian|settings@390x780|focus|029|input#source-readers-per-root
+meridian|settings@390x780|focus|030|button.ghost.sm "Load roots and domains"
+meridian|settings@390x780|focus|031|button.ghost "Load library roots"
+meridian|settings@390x780|focus|032|button.ghost "Save storage domains"
+meridian|settings@390x780|focus|033|a "Home"
+meridian|settings@390x780|focus|034|button.ghost "Libraries"
+meridian|settings@390x780|focus|035|button.ghost "Search"
+meridian|settings@390x780|focus|036|button.ghost "More"
+meridian|settings@390x780|focus|037|<wrap>
 meridian|settings@390x780|req|GET /api/v1/activity|2
 meridian|settings@390x780|req|GET /api/v1/dv-conversions|1
 meridian|settings@390x780|req|GET /api/v1/features|2
@@ -13012,14 +13108,25 @@ theater|settings@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
 theater|settings@1280x860|dom|button.settab[role=link aria-current=false text] > span.setdot|1
 theater|settings@1280x860|dom|button.settab[role=link aria-current=false text] > span.setn[text]|1
 theater|settings@1280x860|dom|div > h1[text]|1
-theater|settings@1280x860|dom|div > h2.section[text]|1
-theater|settings@1280x860|dom|div > p.sub[text]|1
+theater|settings@1280x860|dom|div > h2.section[text]|2
+theater|settings@1280x860|dom|div > input#source-readers-per-root[type=number]|1
+theater|settings@1280x860|dom|div > label[text]|1
+theater|settings@1280x860|dom|div > p.sub[text]|2
 theater|settings@1280x860|dom|div > p[text]|1
 theater|settings@1280x860|dom|div#app > div.layout-frame|1
+theater|settings@1280x860|dom|div#setbody.adminwrap > div#source-readers-card.card.setcard|1
 theater|settings@1280x860|dom|div#setbody.adminwrap > div.card.setcard|1
 theater|settings@1280x860|dom|div#setbody.adminwrap > div.card|1
 theater|settings@1280x860|dom|div#setbody.adminwrap > div.sethead|1
 theater|settings@1280x860|dom|div#setbody.adminwrap > div.setwarn[text]|1
+theater|settings@1280x860|dom|div#source-readers-card.card.setcard > div#source-readers-error.err[role=alert]|1
+theater|settings@1280x860|dom|div#source-readers-card.card.setcard > div#source-readers-nodes|1
+theater|settings@1280x860|dom|div#source-readers-card.card.setcard > div#source-readers-status[role=status]|1
+theater|settings@1280x860|dom|div#source-readers-card.card.setcard > div.cardhead|1
+theater|settings@1280x860|dom|div#source-readers-card.card.setcard > div.setfields|1
+theater|settings@1280x860|dom|div#source-readers-card.card.setcard > div.setfoot|1
+theater|settings@1280x860|dom|div#source-readers-card.card.setcard > p.hint[text]|1
+theater|settings@1280x860|dom|div#source-readers-nodes > button.ghost.sm[type=button text]|1
 theater|settings@1280x860|dom|div#st-1[text] > span[text]|1
 theater|settings@1280x860|dom|div#st-2[text] > span[text]|1
 theater|settings@1280x860|dom|div#st-3[text] > span[text]|1
@@ -13031,9 +13138,9 @@ theater|settings@1280x860|dom|div.card.setcard > div#storage-domain-roots|1
 theater|settings@1280x860|dom|div.card.setcard > div#storage-domain-status[role=status]|1
 theater|settings@1280x860|dom|div.card.setcard > div.cardhead|1
 theater|settings@1280x860|dom|div.card.setcard > p.hint[text]|2
-theater|settings@1280x860|dom|div.cardhead > div.cardtools|1
-theater|settings@1280x860|dom|div.cardhead > div|1
-theater|settings@1280x860|dom|div.cardtools > span.pill[text]|1
+theater|settings@1280x860|dom|div.cardhead > div.cardtools|2
+theater|settings@1280x860|dom|div.cardhead > div|2
+theater|settings@1280x860|dom|div.cardtools > span.pill[text]|2
 theater|settings@1280x860|dom|div.layout-frame > header.th-top|1
 theater|settings@1280x860|dom|div.layout-frame > main#main|1
 theater|settings@1280x860|dom|div.layout-frame > nav.th-pills[aria-label=*]|1
@@ -13041,6 +13148,9 @@ theater|settings@1280x860|dom|div.paths > span.pathchip[text]|3
 theater|settings@1280x860|dom|div.row > button.ghost.sm[aria-expanded=false text]|3
 theater|settings@1280x860|dom|div.row > button.ghost.sm[text]|8
 theater|settings@1280x860|dom|div.row > button.sm[text]|1
+theater|settings@1280x860|dom|div.setfields > div|1
+theater|settings@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|1
+theater|settings@1280x860|dom|div.setfoot > span.setstate[text]|1
 theater|settings@1280x860|dom|div.sethead > div.row|1
 theater|settings@1280x860|dom|div.sethead > div|1
 theater|settings@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
@@ -13133,9 +13243,11 @@ theater|settings@1280x860|focus|033|button.ghost.sm "Configure ⌄"
 theater|settings@1280x860|focus|034|button.ghost.sm "Scan"
 theater|settings@1280x860|focus|035|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
 theater|settings@1280x860|focus|036|button.ghost.sm "Configure ⌄"
-theater|settings@1280x860|focus|037|button.ghost "Load library roots"
-theater|settings@1280x860|focus|038|button.ghost "Save storage domains"
-theater|settings@1280x860|focus|039|<wrap>
+theater|settings@1280x860|focus|037|input#source-readers-per-root
+theater|settings@1280x860|focus|038|button.ghost.sm "Load roots and domains"
+theater|settings@1280x860|focus|039|button.ghost "Load library roots"
+theater|settings@1280x860|focus|040|button.ghost "Save storage domains"
+theater|settings@1280x860|focus|041|<wrap>
 theater|settings@1280x860|req|GET /api/v1/activity|2
 theater|settings@1280x860|req|GET /api/v1/dv-conversions|1
 theater|settings@1280x860|req|GET /api/v1/features|2
@@ -13154,14 +13266,25 @@ theater|settings@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
 theater|settings@390x780|dom|button.settab[role=link aria-current=false text] > span.setdot|1
 theater|settings@390x780|dom|button.settab[role=link aria-current=false text] > span.setn[text]|1
 theater|settings@390x780|dom|div > h1[text]|1
-theater|settings@390x780|dom|div > h2.section[text]|1
-theater|settings@390x780|dom|div > p.sub[text]|1
+theater|settings@390x780|dom|div > h2.section[text]|2
+theater|settings@390x780|dom|div > input#source-readers-per-root[type=number]|1
+theater|settings@390x780|dom|div > label[text]|1
+theater|settings@390x780|dom|div > p.sub[text]|2
 theater|settings@390x780|dom|div > p[text]|1
 theater|settings@390x780|dom|div#app > div.layout-frame|1
+theater|settings@390x780|dom|div#setbody.adminwrap > div#source-readers-card.card.setcard|1
 theater|settings@390x780|dom|div#setbody.adminwrap > div.card.setcard|1
 theater|settings@390x780|dom|div#setbody.adminwrap > div.card|1
 theater|settings@390x780|dom|div#setbody.adminwrap > div.sethead|1
 theater|settings@390x780|dom|div#setbody.adminwrap > div.setwarn[text]|1
+theater|settings@390x780|dom|div#source-readers-card.card.setcard > div#source-readers-error.err[role=alert]|1
+theater|settings@390x780|dom|div#source-readers-card.card.setcard > div#source-readers-nodes|1
+theater|settings@390x780|dom|div#source-readers-card.card.setcard > div#source-readers-status[role=status]|1
+theater|settings@390x780|dom|div#source-readers-card.card.setcard > div.cardhead|1
+theater|settings@390x780|dom|div#source-readers-card.card.setcard > div.setfields|1
+theater|settings@390x780|dom|div#source-readers-card.card.setcard > div.setfoot|1
+theater|settings@390x780|dom|div#source-readers-card.card.setcard > p.hint[text]|1
+theater|settings@390x780|dom|div#source-readers-nodes > button.ghost.sm[type=button text]|1
 theater|settings@390x780|dom|div#st-1[text] > span[text]|1
 theater|settings@390x780|dom|div#st-2[text] > span[text]|1
 theater|settings@390x780|dom|div#st-3[text] > span[text]|1
@@ -13173,9 +13296,9 @@ theater|settings@390x780|dom|div.card.setcard > div#storage-domain-roots|1
 theater|settings@390x780|dom|div.card.setcard > div#storage-domain-status[role=status]|1
 theater|settings@390x780|dom|div.card.setcard > div.cardhead|1
 theater|settings@390x780|dom|div.card.setcard > p.hint[text]|2
-theater|settings@390x780|dom|div.cardhead > div.cardtools|1
-theater|settings@390x780|dom|div.cardhead > div|1
-theater|settings@390x780|dom|div.cardtools > span.pill[text]|1
+theater|settings@390x780|dom|div.cardhead > div.cardtools|2
+theater|settings@390x780|dom|div.cardhead > div|2
+theater|settings@390x780|dom|div.cardtools > span.pill[text]|2
 theater|settings@390x780|dom|div.layout-frame > header.th-top|1
 theater|settings@390x780|dom|div.layout-frame > main#main|1
 theater|settings@390x780|dom|div.layout-frame > nav.th-pills[aria-label=*]|1
@@ -13183,6 +13306,9 @@ theater|settings@390x780|dom|div.paths > span.pathchip[text]|3
 theater|settings@390x780|dom|div.row > button.ghost.sm[aria-expanded=false text]|3
 theater|settings@390x780|dom|div.row > button.ghost.sm[text]|8
 theater|settings@390x780|dom|div.row > button.sm[text]|1
+theater|settings@390x780|dom|div.setfields > div|1
+theater|settings@390x780|dom|div.setfoot > button.primary.sm[disabled text]|1
+theater|settings@390x780|dom|div.setfoot > span.setstate[text]|1
 theater|settings@390x780|dom|div.sethead > div.row|1
 theater|settings@390x780|dom|div.sethead > div|1
 theater|settings@390x780|dom|div.setlayout > div#setbody.adminwrap|1
@@ -13268,16 +13394,18 @@ theater|settings@390x780|focus|026|button.ghost.sm "Configure ⌄"
 theater|settings@390x780|focus|027|button.ghost.sm "Scan"
 theater|settings@390x780|focus|028|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
 theater|settings@390x780|focus|029|button.ghost.sm "Configure ⌄"
-theater|settings@390x780|focus|030|button.ghost "Load library roots"
-theater|settings@390x780|focus|031|button.ghost "Save storage domains"
-theater|settings@390x780|focus|032|a "Home"
-theater|settings@390x780|focus|033|a "Shared libraries"
-theater|settings@390x780|focus|034|a "Live TV"
-theater|settings@390x780|focus|035|a "Recordings"
-theater|settings@390x780|focus|036|a "Library channels"
-theater|settings@390x780|focus|037|a "Activity"
-theater|settings@390x780|focus|038|a.on "Settings"
-theater|settings@390x780|focus|039|<wrap>
+theater|settings@390x780|focus|030|input#source-readers-per-root
+theater|settings@390x780|focus|031|button.ghost.sm "Load roots and domains"
+theater|settings@390x780|focus|032|button.ghost "Load library roots"
+theater|settings@390x780|focus|033|button.ghost "Save storage domains"
+theater|settings@390x780|focus|034|a "Home"
+theater|settings@390x780|focus|035|a "Shared libraries"
+theater|settings@390x780|focus|036|a "Live TV"
+theater|settings@390x780|focus|037|a "Recordings"
+theater|settings@390x780|focus|038|a "Library channels"
+theater|settings@390x780|focus|039|a "Activity"
+theater|settings@390x780|focus|040|a.on "Settings"
+theater|settings@390x780|focus|041|<wrap>
 theater|settings@390x780|req|GET /api/v1/activity|2
 theater|settings@390x780|req|GET /api/v1/dv-conversions|1
 theater|settings@390x780|req|GET /api/v1/features|2
