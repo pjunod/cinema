@@ -86,12 +86,10 @@ WORKFLOW = 'ci.yml'
 # Re-reviewed for the bounded legacy Store deadline (120 -> 150 minutes).
 # Resource bounds, retained evidence and test commands are unchanged.
 # The source-lease workflow uses the consolidated reader and rollout checks.
-# Re-reviewed for the package matrix's concurrency-group string. Runner
-# selection, package commands and result requirements are unchanged.
-# Native full promotions run the Store shards and schema-lineage target
-# separately. Ordinary source-gate continuation still uses the legacy job.
-# ARM package smoke has a bounded per-architecture deadline.
-WORKFLOW_SHA256 = '13a7f30e317fd40b6ce08ab9988edb27a6062f0a7a517577a6b28882a849684e'
+# Package smoke uses a per-architecture deadline and a stable runner group.
+# Direct main image dispatches and fresh native promotions require complete
+# Store shards and schema lineage. Retained Store units use the legacy path.
+WORKFLOW_SHA256 = 'ea8f417a95f47c564c78b6e7cfa0bee319482867c817975d6b19780d26a2c458'
 
 
 def prior_run(api, value, binding, repository, *, current_run=None):

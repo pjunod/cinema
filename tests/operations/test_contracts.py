@@ -3692,48 +3692,76 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--test store_contract -- --test-threads=1", makefile)
         self.assertIn("--features cluster-read-cost-validation,hiqlite-contract-tests", makefile)
 
-    def test_full_promotion_requires_store_shard_union_and_schema_lineage(self):
+    def test_full_store_verdict_requires_exact_shard_union_and_lineage(self):
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
-        for name in ("cluster_store_legacy", "cluster_store_shards", "cluster_store_shadow"):
-            self.assertIn("split_promotion_store != 'true'", jobs[name])
-        self.assertIn("shard-timeout-minutes: 175", jobs["cluster_store_promotion_shards"])
-        self.assertIn("CI_REGISTRY_PULL_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}",
-                      jobs["cluster_store_promotion_shards"])
-        shard_workflow = read(".github/workflows/store-shards.yml")
-        call = shard_workflow.split("  workflow_call:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
-        self.assertNotRegex(call, r"(?m)^    secrets:")
-        lineage = jobs["cluster_store_promotion_lineage"]
-        self.assertIn("split_promotion_store == 'true'", lineage)
-        self.assertIn("PLURX_EXPECT_TEST_NAMES: narrow_schema_lineage_bridge_preserves_and_refuses", lineage)
-        self.assertIn("--test schema_lineage_upgrade -- --test-threads=1", lineage)
         shard_jobs = workflow_job_blocks(".github/workflows/store-shards.yml")
+        scope = workflow_step_blocks(jobs["scope"])["Resolve the fail-safe execution rollout mode"]
+        self.assertIn("mode=official-image", scope)
+        self.assertIn("mode=promotion", scope)
+        self.assertIn('if [ "$binding_schema" = 1 ]', scope)
+        self.assertIn('[ -z "$PREDECESSOR_RUN" ]', scope)
+        self.assertIn('[ "$RETAIN_STORE_UNITS" != true ]', scope)
+        self.assertIn("official-image|promotion) echo \"store_shard_timeout=175\"", scope)
+        self.assertIn("execution_mode != 'promotion'", jobs["cluster_store_legacy"])
+        self.assertIn("execution_mode == 'promotion'", jobs["cluster_store_shards"])
+        self.assertIn("shard-timeout-minutes: ${{ fromJSON(needs.scope.outputs.store_shard_timeout) }}",
+                      jobs["cluster_store_shards"])
+        call = read(".github/workflows/store-shards.yml").split("  workflow_call:\n", 1)[1]
+        call = call.split("  workflow_dispatch:", 1)[0]
+        self.assertNotRegex(call, r"(?m)^    secrets:")
+        self.assertIn("shard-timeout-minutes:\n        type: number", call)
+        self.assertIn("timeout-minutes: ${{ inputs.shard-timeout-minutes }}", shard_jobs["shard"])
         self.assertIn("tested_sha: ${{ steps.validate_store_shards.outputs.tested_sha }}",
                       shard_jobs["aggregate"])
+        for condition in (
+            "github.event_name == 'workflow_dispatch'",
+            "github.ref == 'refs/heads/main'",
+            "inputs.promotion_pr == ''",
+            "inputs.promotion_head_sha == ''",
+            "inputs.promotion_base_sha == ''",
+            "steps.scope.outputs.qualification != 'true'",
+        ):
+            self.assertIn(condition, scope)
+        lineage = shard_jobs["lineage"]
+        self.assertIn("needs: shard", lineage)
+        self.assertIn("inputs.execution-mode == 'official-image'", lineage)
+        self.assertEqual(self_hosted_label_sets(lineage), [("ci-nonvoter-store",)])
+        self.assertIn("inputs.execution-mode == 'promotion'", lineage)
+        self.assertIn('RUST_MIN_STACK: "8388608"', lineage)
+        self.assertIn("PLURX_EXPECT_TEST_NAMES: narrow_schema_lineage_bridge_preserves_and_refuses", lineage)
+        self.assertIn("scripts/require-test-count cargo test --locked -p plurx-core", lineage)
+        self.assertIn("--features cluster-read-cost-validation,hiqlite-contract-tests", lineage)
+        self.assertIn("--test schema_lineage_upgrade -- --test-threads=1", lineage)
+        aggregate = workflow_step_blocks(shard_jobs["aggregate"])
+        proof = aggregate["Require and record the official Store evidence"]
+        self.assertIn("LINEAGE_RESULT: ${{ needs.lineage.result }}", proof)
+        self.assertIn('test "$LINEAGE_RESULT" = success', proof)
+        self.assertGreater(list(aggregate).index("Require and record the official Store evidence"),
+                           list(aggregate).index("Propagate the Store shard aggregate result"))
+        publish = workflow_step_blocks(jobs["publish_main"])["Require the post-merge validation fan-out"]
+        self.assertIn('[ "$CLUSTER_STORE_RESULT" != success ]', publish)
 
         verdict = workflow_step_blocks(jobs["cluster_store"])["Select the required Store graph"]
-        command = "\n".join(workflow_step_literal(verdict, "run"))
-        environment = {
-            **os.environ,
-            "SPLIT_PROMOTION_STORE": "true",
-            "GITHUB_SHA": "a" * 40,
-            "PROMOTION_SHARD_RESULT": "success",
-            "PROMOTION_SHARD_SHA": "a" * 40,
-            "PROMOTION_LINEAGE_RESULT": "success",
-        }
-        self.assertEqual(subprocess.run(["bash", "-c", command], env=environment,
-                                        capture_output=True).returncode, 0)
-        for key, invalid in (
-            ("PROMOTION_SHARD_RESULT", "skipped"),
-            ("PROMOTION_SHARD_SHA", ""),
-            ("PROMOTION_SHARD_SHA", "b" * 40),
-            ("PROMOTION_LINEAGE_RESULT", "failure"),
-            ("PROMOTION_LINEAGE_RESULT", "skipped"),
-        ):
-            with self.subTest(key=key, invalid=invalid):
-                self.assertNotEqual(subprocess.run(
-                    ["bash", "-c", command], env={**environment, key: invalid},
-                    capture_output=True,
-                ).returncode, 0)
+        self.assertIn("OFFICIAL_VERIFIED: ${{ needs.cluster_store_shards.outputs.official_verified }}", verdict)
+        script = "\n".join(workflow_step_literal(verdict, "run"))
+        exact_sha = "a" * 40
+        for mode in ("official-image", "promotion"):
+            for legacy, shards, verified, tested_sha, accepted in (
+                ("skipped", "success", "true", exact_sha, True),
+                ("skipped", "success", "", exact_sha, False),
+                ("skipped", "success", "true", "", False),
+                ("skipped", "success", "true", "b" * 40, False),
+                ("skipped", "skipped", "true", exact_sha, False),
+                ("skipped", "failure", "true", exact_sha, False),
+                ("success", "success", "true", exact_sha, False),
+            ):
+                with self.subTest(mode=mode, legacy=legacy, shards=shards, verified=verified, tested_sha=tested_sha):
+                    result = subprocess.run(["bash", "-c", script], capture_output=True, env={
+                        **os.environ, "EXECUTION_MODE": mode, "LEGACY_RESULT": legacy,
+                        "SHARD_RESULT": shards, "OFFICIAL_VERIFIED": verified,
+                        "GITHUB_SHA": exact_sha, "TESTED_SHA": tested_sha,
+                    })
+                    self.assertEqual(result.returncode == 0, accepted)
 
     def test_store_shards_are_dynamic_disjoint_and_roll_out_behind_one_verdict(self):
         workflow = read(".github/workflows/ci.yml")
@@ -3750,7 +3778,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("execution_mode != 'accelerated'", legacy)
         self.assertIn("execution_mode == 'accelerated'", required)
         self.assertIn("uses: ./.github/workflows/store-shards.yml", required)
-        self.assertIn("execution-mode: accelerated", required)
+        self.assertIn("execution_mode == 'official-image'", required)
+        self.assertIn("execution_mode != 'official-image'", legacy)
+        self.assertIn("execution-mode: ${{ needs.scope.outputs.execution_mode }}", required)
+        self.assertIn("CI_REGISTRY_PULL_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}", required)
         self.assertIn("execution_mode == 'shadow'", shadow)
         self.assertIn("uses: ./.github/workflows/store-shards.yml", shadow)
         self.assertIn("execution-mode: shadow", shadow)
@@ -3854,7 +3885,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("steps.build_store_binary.outcome != 'success'", propagate)
         self.assertIn("steps.store_shard.outcome != 'success'", propagate)
 
-        self.assertIn("needs: shard", aggregate)
+        self.assertIn("needs: [shard, lineage]", aggregate)
         self.assertIn("python3 -m validation.store_shard validate", aggregate)
         self.assertIn("mkdir -p target/validation", aggregate)
         self.assertIn("pattern: cluster-store-shard-*", aggregate)
@@ -5030,12 +5061,12 @@ assert.equal(context.ACT_TIMER, null);
                     expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif (
                     path == ".github/workflows/ci.yml"
-                    and name in {"cluster_store_legacy", "cluster_store_promotion_lineage"}
+                    and name == "cluster_store_legacy"
                 ):
                     expected = ci_store
                 elif (
                     path == ".github/workflows/store-shards.yml"
-                    and name == "shard"
+                    and name in {"shard", "lineage"}
                 ):
                     # Every shard selects the one label set, inline, exactly as
                     # the legacy lane and the weekly backstop do. Reading it
