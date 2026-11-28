@@ -18,6 +18,7 @@ use wasmtime::{
 };
 
 pub const ABI_ID: &str = "plurx-source-wasi-p1-v1-wasmtime-50.0.0";
+const COMPILE_THREADS: usize = 2;
 const MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 const IO_LIMIT: usize = 64 * 1024;
 const BADF: i32 = 8;
@@ -62,7 +63,9 @@ impl Parser {
             return Err("source parser must be a bounded WebAssembly v1 image".into());
         }
         refuse_start_section(bytes)?;
+        let signing_started = Instant::now();
         signing::require_execution_policy()?;
+        let signing_ms = signing_started.elapsed().as_millis();
         let mut config = Config::default();
         config
             // This parser does bounded metadata/packet work, not long-lived
@@ -71,6 +74,7 @@ impl Parser {
             // Keep the deadline and capability boundary; avoid that startup
             // optimization cost instead. Measured guest outputs are unchanged.
             .cranelift_opt_level(wasmtime::OptLevel::None)
+            .parallel_compilation(true)
             .epoch_interruption(true)
             .wasm_memory64(false)
             .wasm_multi_memory(false)
@@ -80,7 +84,20 @@ impl Parser {
             .wasm_custom_page_sizes(false)
             .max_wasm_stack(1024 * 1024);
         let engine = Engine::new(&config).map_err(|e| e.to_string())?;
-        let module = Module::new(&engine, bytes).map_err(|e| e.to_string())?;
+        // Keep startup compilation off the daemon's shared Rayon pool.
+        let compiler = rayon::ThreadPoolBuilder::new()
+            .num_threads(COMPILE_THREADS)
+            .build()
+            .map_err(|error| error.to_string())?;
+        let compile_started = Instant::now();
+        let module = compiler
+            .install(|| Module::new(&engine, bytes))
+            .map_err(|error| error.to_string())?;
+        tracing::debug!(
+            signing_ms,
+            compile_ms = compile_started.elapsed().as_millis(),
+            "prepared the macOS source parser module"
+        );
         // Every import must belong to this small adapter. In particular there
         // are no imported memories/tables, native callbacks or WASI extensions.
         for import in module.imports() {
