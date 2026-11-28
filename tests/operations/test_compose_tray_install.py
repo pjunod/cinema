@@ -122,7 +122,7 @@ class ComposeTrayDesktopTests(unittest.TestCase):
             launch.assert_not_called()
             self.assertEqual(list(Path(work).iterdir()), [])
 
-    def test_install_stages_only_host_tray_and_preserves_existing_login_off(self):
+    def test_install_stages_only_host_tray_restores_a_lost_login_entry_and_keeps_off(self):
         with tempfile.TemporaryDirectory() as work:
             home = Path(work) / "home"
             home.mkdir()
@@ -148,10 +148,11 @@ class ComposeTrayDesktopTests(unittest.TestCase):
                     path.write_text('{"schema_version":1,"installation_id":"fixture-id"}')
                     path.chmod(0o600)
                 else:
-                    self.assertEqual(values[-4:], ["startup", "set", "tray", "on"])
+                    self.assertEqual(values[-4:-1], ["startup", "set", "tray"])
                     entry = home / "config/autostart" / installer.ENTRY
                     entry.parent.mkdir(parents=True, exist_ok=True)
-                    entry.write_text("[Desktop Entry]\nX-Plurx-Installation=fixture-id\n")
+                    hidden = "true" if values[-1] == "off" else "false"
+                    entry.write_text(f"[Desktop Entry]\nHidden={hidden}\nX-Plurx-Installation=fixture-id\n")
             def private(path):
                 path.mkdir(parents=True, mode=0o700, exist_ok=True)
             def write(path, text, mode=0o600):
@@ -173,9 +174,17 @@ class ComposeTrayDesktopTests(unittest.TestCase):
                 record = next((home / "state/plurx-compose").glob("*/installation.json"))
                 self.assertEqual(record.stat().st_mode & 0o777, 0o600)
                 self.assertIn("--window", launch.call_args.args[0])
-                autostart.unlink()  # Existing user's explicit login Off.
+                # The controller never deletes the entry, so a missing one was
+                # lost (not chosen) and the next install restores the default.
+                autostart.unlink()
                 installer.install(args)
-                self.assertFalse(autostart.exists())
+                self.assertIn("Hidden=false", autostart.read_text())
+                # An explicit Off is an entry with Hidden=true; it is kept.
+                autostart.write_text("[Desktop Entry]\nHidden=true\nX-Plurx-Installation=fixture-id\n")
+                startups = sum("startup" in call for call in calls)
+                installer.install(args)
+                self.assertIn("Hidden=true", autostart.read_text())
+                self.assertEqual(sum("startup" in call for call in calls), startups)
                 self.assertTrue(any("--refresh" in call for call in calls))
                 self.assertTrue(all("--stage-tray" in call or "register" in call or "startup" in call for call in calls))
                 self.assertFalse((home / "plurxd").exists())
@@ -328,3 +337,58 @@ class ComposeTrayVersionTests(unittest.TestCase):
     def test_installer_never_labels_container_with_host_tray_build_version(self):
         source = (ROOT / "scripts/install-compose-tray").read_text()
         self.assertNotIn('"--version", facts["version"]', source)
+
+
+class ComposeTrayRefreshTests(unittest.TestCase):
+    """`make docker-up` recreates containers; the tray is re-pinned to them."""
+
+    def fixture(self, work, *, checkout=ROOT, entry=True):
+        home = Path(work) / "home"
+        identity = {"docker": "/usr/bin/docker", "endpoint": "unix:///tmp/docker.sock", "project": "selected",
+                    "server_id": SERVER, "discovery_id": DISCOVERY, "browser_origin": "http://127.0.0.1:32400", "checkout": str(ROOT)}
+        environment = {"XDG_STATE_HOME": str(home / "state"), "XDG_DATA_HOME": str(home / "data"), "XDG_CONFIG_HOME": str(home / "config")}
+        with mock.patch.dict(os.environ, environment):
+            paths = installer.layout(ROOT, identity)
+        paths["record"].parent.mkdir(parents=True)
+        paths["record"].write_text(json.dumps({"installation_id": "fixture-id", "checkout": str(checkout), "update_mode": "published", "image_reference": "registry.example/plurxd:1"}))
+        paths["record"].chmod(0o600)
+        if entry:
+            paths["autostart"].parent.mkdir(parents=True)
+            paths["autostart"].write_text("[Desktop Entry]\nHidden=true\nX-Plurx-Installation=fixture-id\n")
+        return home, identity, environment, paths
+
+    def refresh(self, home, identity, environment):
+        calls = []
+        args = argparse.Namespace(checkout=ROOT, update_mode=None, image_reference=None)
+        with mock.patch.dict(os.environ, environment), mock.patch.object(installer.sys, "platform", "linux"), mock.patch.object(installer.Path, "home", return_value=home), mock.patch.object(installer, "safe_path", side_effect=lambda path, **_kwargs: path), mock.patch.object(installer, "select_deployment", return_value=identity) as select, mock.patch.object(installer, "native_helper") as helper, mock.patch.object(installer, "build_stage") as stage, mock.patch.object(installer.subprocess, "Popen") as launch, mock.patch.object(installer, "run", side_effect=lambda argv, **kw: calls.append(list(map(str, argv)))):
+            installer.refresh_registration(args)
+        return calls, select, helper, stage, launch
+
+    def test_redeploy_repins_registration_without_session_build_or_launch(self):
+        with tempfile.TemporaryDirectory() as work:
+            home, identity, environment, paths = self.fixture(work)
+            calls, _, helper, stage, launch = self.refresh(home, identity, environment)
+            self.assertEqual(len(calls), 1)
+            register = calls[0]
+            self.assertIn("register", register)
+            self.assertIn("--refresh", register)
+            self.assertEqual(register[register.index("--server-id") + 1], SERVER)
+            self.assertEqual(register[register.index("--update-mode") + 1], "published")
+            self.assertEqual(register[register.index("--image-reference") + 1], "registry.example/plurxd:1")
+            helper.assert_not_called()
+            stage.assert_not_called()
+            launch.assert_not_called()
+            self.assertIn("Hidden=true", paths["autostart"].read_text())  # explicit Off kept
+
+    def test_redeploy_restores_a_lost_login_entry(self):
+        with tempfile.TemporaryDirectory() as work:
+            home, identity, environment, _ = self.fixture(work, entry=False)
+            calls, *_ = self.refresh(home, identity, environment)
+            self.assertEqual(calls[-1][-4:], ["startup", "set", "tray", "on"])
+
+    def test_host_without_a_tray_for_this_checkout_is_a_quiet_no_op(self):
+        with tempfile.TemporaryDirectory() as work:
+            home, identity, environment, _ = self.fixture(work, checkout="/elsewhere")
+            calls, select, *_ = self.refresh(home, identity, environment)
+            self.assertEqual(calls, [])
+            select.assert_not_called()

@@ -1829,6 +1829,12 @@ docker-startup-budget-check: ## Prove the resolved Compose startup budget before
 # registry configured, a dirty checkout, or an overlay that pins its own image
 # (the Pi runtime). Neither step can fail the deploy.
 .PHONY: docker-up
+# Recreated containers have new IDs; a host tray registered for this checkout
+# is re-pinned to them (scripts/install-compose-tray --refresh-registration,
+# a no-op without one). The deployment already succeeded, so a refusal warns.
+COMPOSE_TRAY_REFRESH = python3 scripts/install-compose-tray --checkout "$(CURDIR)" --refresh-registration \
+	  || echo >&2 "warning: the host tray still names the replaced containers; rerun: python3 scripts/install-compose-tray --checkout \"$(CURDIR)\" --refresh-registration"
+
 docker-up: ## Build + (re)start Compose after its startup budget passes
 	cd deploy && hardware="$$(mktemp "$${TMPDIR:-/tmp}/plurx-hardware.XXXXXX")" \
 	  && trap 'rm -f "$$hardware"' EXIT HUP INT TERM \
@@ -1845,6 +1851,7 @@ docker-up: ## Build + (re)start Compose after its startup budget passes
 	       PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT="$(PLURX_MEDIA_RUNTIME_REPOSITORY)" PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build \
 	         && case "$$shared" in "share "*) python3 ../scripts/fleet-image push --expect "$${shared#share }" ;; esac ;; \
 	     esac
+	@$(COMPOSE_TRAY_REFRESH)
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 
 # Fleet voters consume the already-qualified registry image. Pulling is safe
@@ -1892,6 +1899,7 @@ docker-image-up: ## Pull + (re)start the prebuilt image after its startup budget
 	  && period="$$(PLURX_IMAGE="$$image_id" python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
 	  && PLURX_IMAGE="$$image_id" PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
 	  && PLURX_IMAGE="$$image_id" PLURX_HEALTH_START_PERIOD="$$period" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --no-build --pull never
+	@$(COMPOSE_TRAY_REFRESH)
 	@echo "image up: $(VERSION)"
 
 .PHONY: release-check
