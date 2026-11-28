@@ -1151,3 +1151,28 @@ async fn off_runtime<T: Send + 'static>(
 ) -> Result<T, Error> {
     tokio::task::spawn_blocking(work).await.map_err(execution)?
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_admission_future_does_not_embed_comparison_state() {
+        fn state_bytes<F: std::future::Future>(
+            _: impl FnOnce(
+                &'static TitleContext<'static>,
+                ComparisonInput,
+                &'static CancellationToken,
+            ) -> F,
+        ) -> usize {
+            std::mem::size_of::<F>()
+        }
+
+        let admitted = state_bytes(|context, input, _| execute(context, input));
+        let comparison = state_bytes(execute_owned);
+        assert!(
+            admitted < comparison,
+            "admission retains {admitted} bytes for {comparison} bytes of comparison state"
+        );
+    }
+}
