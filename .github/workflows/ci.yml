@@ -2186,7 +2186,9 @@ jobs:
     name: package and smoke (${{ matrix.arch }})
     runs-on: ${{ fromJSON(matrix.runs_on) }}
     concurrency:
-      group: ${{ matrix.arch == 'arm64' && 'plurx-apple-silicon-heavy' || format('plurx-package-{0}-{1}', github.run_id, matrix.arch) }}
+      # Forgejo coerces logical operators to booleans. Format the selected
+      # template directly so ARM64 shares the full Apple and device group.
+      group: ${{ format(matrix.concurrency_group, github.run_id) }}
       cancel-in-progress: false
     needs: [scope, preflight]
     if: github.server_url != 'https://github.com' && (needs.scope.outputs.release_build == 'true' || needs.scope.outputs.container == 'true')
@@ -2196,11 +2198,13 @@ jobs:
       matrix:
         include:
           - arch: amd64
+            concurrency_group: plurx-package-{0}-amd64
             target: x86_64-unknown-linux-gnu
             kernel_machine: x86_64
             docker_machine: x86_64
             runs_on: '["ci-nonvoter-heavy-amd64"]'
           - arch: arm64
+            concurrency_group: plurx-apple-silicon-heavy
             target: aarch64-unknown-linux-gnu
             kernel_machine: aarch64
             docker_machine: aarch64

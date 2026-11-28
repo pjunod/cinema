@@ -141,7 +141,12 @@ class AppleTVNavigationGateTests(unittest.TestCase):
         full = job(".github/workflows/ci.yml", "apple")
         package = job(".github/workflows/ci.yml", "package_smoke")
         self.assertIn("group: plurx-apple-silicon-heavy", full)
-        self.assertIn("matrix.arch == 'arm64' && 'plurx-apple-silicon-heavy'", package)
+        self.assertIn("group: ${{ format(matrix.concurrency_group, github.run_id) }}", package)
+        groups = re.findall(r"(?m)^          - arch: (\w+)\n            concurrency_group: (.+)$", package)
+        self.assertEqual(
+            {arch: template.format(42) for arch, template in groups},
+            {"amd64": "plurx-package-42-amd64", "arm64": "plurx-apple-silicon-heavy"},
+        )
         for section in (full, package):
             self.assertIn("cancel-in-progress: false", section)
 
