@@ -195,9 +195,13 @@ jobs:
         env:
           REQUESTED_MODE: ${{ vars.CI_EXECUTION_MODE || 'legacy' }}
           RETAIN_STORE_UNITS: ${{ steps.retention.outputs.retain_store_contract_units }}
+          OFFICIAL_IMAGE: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.promotion_pr == '' && inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' && steps.scope.outputs.qualification != 'true' }}
         run: |
           set -euo pipefail
           mode="$(scripts/ci-execution-mode resolve "$REQUESTED_MODE")"
+          if [ "$OFFICIAL_IMAGE" = true ]; then
+            mode=official-image
+          fi
           if [ "$RETAIN_STORE_UNITS" = true ] && [ "$mode" != legacy ]; then
             echo "Retained Store units require legacy mode; shards would replay them" >&2
             exit 1
@@ -702,6 +706,7 @@ jobs:
       github.server_url != 'https://github.com' && (
       needs.scope.outputs.cluster_auth == 'true' &&
       needs.scope.outputs.execution_mode != 'accelerated' &&
+      needs.scope.outputs.execution_mode != 'official-image' &&
       needs.preflight.outputs.store_retained != 'true' )
     runs-on: [ci-nonvoter-store]
     # Run 9756 passed 470 of 509 serial cases at the 120-minute cutoff.
@@ -773,10 +778,13 @@ jobs:
     if: >-
       github.server_url != 'https://github.com' && (
       needs.scope.outputs.cluster_auth == 'true' &&
-      needs.scope.outputs.execution_mode == 'accelerated' )
+      (needs.scope.outputs.execution_mode == 'accelerated' ||
+      needs.scope.outputs.execution_mode == 'official-image') )
     uses: ./.github/workflows/store-shards.yml
     with:
-      execution-mode: accelerated
+      execution-mode: ${{ needs.scope.outputs.execution_mode }}
+    secrets:
+      CI_REGISTRY_PULL_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
 
   # Shadow evidence is deliberately absent from every required job's `needs`
   # graph. An offline experimental runner can leave this call queued without
@@ -817,7 +825,9 @@ jobs:
           EXECUTION_MODE: ${{ needs.scope.outputs.execution_mode }}
           LEGACY_RESULT: ${{ needs.cluster_store_legacy.result }}
           SHARD_RESULT: ${{ needs.cluster_store_shards.result }}
+          OFFICIAL_VERIFIED: ${{ needs.cluster_store_shards.outputs.official_verified }}
         run: |
+          set -e
           printf 'Store verdict: mode=%s legacy=%s shards=%s\n' "$EXECUTION_MODE" "$LEGACY_RESULT" "$SHARD_RESULT"
           case "$EXECUTION_MODE" in
             legacy|shadow)
@@ -833,9 +843,12 @@ jobs:
                 echo "Store shadow evidence is intentionally outside this gate"
               fi
               ;;
-            accelerated)
+            accelerated|official-image)
               test "$LEGACY_RESULT" = skipped
               test "$SHARD_RESULT" = success
+              if [ "$EXECUTION_MODE" = official-image ]; then
+                test "$OFFICIAL_VERIFIED" = true
+              fi
               ;;
             *)
               echo "::error::Unknown resolved execution mode: $EXECUTION_MODE"
@@ -2493,6 +2506,10 @@ jobs:
           ANDROID_DEVICE_RESULT: ${{ needs.android_device.result }}
           PACKAGE_SMOKE_RESULT: ${{ needs.package_smoke.result }}
         run: |
+          if [ "$CLUSTER_STORE_RESULT" != success ]; then
+            echo "The official image requires a successful Store verdict" >&2
+            exit 1
+          fi
           for result in \
             "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" \
             "$PREFLIGHT_RESULT" "$CHECK_RESULT" \
