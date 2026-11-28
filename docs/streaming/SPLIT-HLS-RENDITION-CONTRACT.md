@@ -191,8 +191,9 @@ New AVC VOD copy starts use the S3 layout when the client negotiates split
 audio. Each supported soundtrack is evaluated against the client's audio
 claim. A bounded source packet scan proves copy for supported 48 kHz AAC-LC,
 AC-3 and E-AC-3. The proof reads at most 64 MiB of packet census output
-per track in two seconds. The AAC path handles tracks outside the proven
-copy envelope. The plans cut on the nearest audio packet boundary to each
+per track in two seconds and retains up to 64 MiB of packet evidence for
+the whole group. The AAC path handles tracks outside the proven copy
+envelope. The plans cut on the nearest audio packet boundary to each
 video boundary. The legacy continuous encoder
 keeps its fixed AAC grid.
 
@@ -202,8 +203,9 @@ session. Alternate tracks use the configured resource budgets and can
 serve larger groups. Refused private preparations use the ordinary muxed
 copy before activation.
 
-Protocol 14 persists the issued layout and each soundtrack's rendition and
-init identities. Recovery of an issued split requires an exact match and
-uses the frozen per-track production mode. Older split recipes rebuild the
-P49 fixed-grid AAC layout. A historical response that issued the muxed media
-playlist rebuilds a muxed session.
+Protocol 14 persists the issued layout, video rendition and index key, and
+each soundtrack's rendition and init identities. Recovery selects that
+index and reproduces the frozen soundtrack modes and URLs. An unambiguous
+historical split master rebuilds the P49 fixed-grid AAC layout. A historical
+media playlist rebuilds a muxed session. An ambiguous native wrapper requires
+a fresh session.

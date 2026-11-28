@@ -2882,7 +2882,7 @@ fn service_vod_only_policy_survives_worker_and_durable_recipe_without_native_ide
 
 #[test]
 fn split_vod_worker_seals_the_owner_layout_and_legacy_recipes_keep_their_shape() {
-    use crate::transcode::{VodCopyLayout, VodSoundtrackIdentity};
+    use crate::transcode::{VodCopyLayout, VodSoundtrackIdentity, VodSplitVideoIdentity};
 
     let mut request = valid_start_request();
     request.request.kind = SessionKind::Copy {
@@ -2914,6 +2914,10 @@ fn split_vod_worker_seals_the_owner_layout_and_legacy_recipes_keep_their_shape()
     assert!(fallback.vod_copy_layout_valid());
 
     let copied = VodCopyLayout::SplitV1 {
+        video: VodSplitVideoIdentity {
+            rendition_id: "a".repeat(64),
+            index_key: Some(format!("copy-index-v3:{}", "b".repeat(64))),
+        },
         soundtracks: (0..4)
             .map(|source_index| VodSoundtrackIdentity {
                 source_index,
@@ -2943,7 +2947,25 @@ fn split_vod_worker_seals_the_owner_layout_and_legacy_recipes_keep_their_shape()
     assert!(!request
         .request
         .seal_vod_copy_layout(Some(VodCopyLayout::Muxed), true));
-    if let Some(VodCopyLayout::SplitV1 { soundtracks }) = &mut response.vod_copy_layout {
+    if let Some(VodCopyLayout::SplitV1 { video, .. }) = &mut response.vod_copy_layout {
+        video.index_key = None;
+    }
+    assert!(
+        response.is_valid(),
+        "local indexes have no shared cache key"
+    );
+    if let Some(VodCopyLayout::SplitV1 { video, .. }) = &mut response.vod_copy_layout {
+        video.index_key = Some("b".repeat(64));
+    }
+    assert!(response.is_valid(), "v2 uses the bare shared cache key");
+    if let Some(VodCopyLayout::SplitV1 { video, .. }) = &mut response.vod_copy_layout {
+        video.index_key = Some("copy-index-v3:../untrusted".to_owned());
+    }
+    assert!(!response.is_valid(), "malformed shared index key");
+    if let Some(VodCopyLayout::SplitV1 { video, .. }) = &mut response.vod_copy_layout {
+        video.index_key = None;
+    }
+    if let Some(VodCopyLayout::SplitV1 { soundtracks, .. }) = &mut response.vod_copy_layout {
         soundtracks.push(soundtracks[0].clone());
     }
     assert!(!response.is_valid(), "duplicate tracks cannot be sealed");

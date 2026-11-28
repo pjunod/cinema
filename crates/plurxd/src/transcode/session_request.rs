@@ -711,7 +711,9 @@ pub enum SourceTelemetry {
     Unknown,
 }
 
-pub(crate) use plurx_core::transcode::{VodCopyLayout, VodSoundtrackIdentity};
+pub(crate) use plurx_core::transcode::{
+    VodCopyLayout, VodSoundtrackIdentity, VodSplitVideoIdentity,
+};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

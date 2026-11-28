@@ -1948,9 +1948,13 @@ async fn first_preparation_output_seal_is_exact_and_idempotent_in_both_layouts()
 
 #[tokio::test]
 async fn prepared_vod_copy_seals_the_layout_and_url_together() {
-    use crate::transcode::{VodCopyLayout, VodSoundtrackIdentity};
+    use crate::transcode::{VodCopyLayout, VodSoundtrackIdentity, VodSplitVideoIdentity};
 
     let split = VodCopyLayout::SplitV1 {
+        video: VodSplitVideoIdentity {
+            rendition_id: "a".repeat(64),
+            index_key: Some("b".repeat(64)),
+        },
         soundtracks: vec![VodSoundtrackIdentity {
             source_index: 3,
             rendition_id: "d".repeat(64),

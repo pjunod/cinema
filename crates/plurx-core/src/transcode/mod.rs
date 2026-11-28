@@ -87,7 +87,7 @@ pub use vod::{
     VOD_AUDIO_RATE, VOD_HEVC_SAMPLE_ENTRY, VOD_SHARED_AUDIO_CPU_THREADS,
 };
 
-pub use vod_copy_layout::{VodCopyLayout, VodSoundtrackIdentity};
+pub use vod_copy_layout::{VodCopyLayout, VodSoundtrackIdentity, VodSplitVideoIdentity};
 
 use crate::domain::MediaFile;
 use std::path::PathBuf;

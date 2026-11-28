@@ -68,26 +68,42 @@ fn native_fel_can_try_vod(error: &str, deadline: Option<tokio::time::Instant>) -
         && deadline.is_none_or(|deadline| tokio::time::Instant::now() < deadline)
 }
 
-fn legacy_vod_response_is_muxed(response_json: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(response_json)
-        .ok()
-        .is_some_and(|response| {
-            response
-                .get("playlist_url")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|url| {
-                    url.split('?')
-                        .next()
-                        .is_some_and(|path| path.ends_with("/index.m3u8"))
-                })
-        })
+#[derive(Clone, Copy)]
+enum LegacyVodPlaylist {
+    Unknown,
+    Media,
+    Master { has_query: bool },
+}
+
+fn legacy_vod_playlist(response_json: &str) -> LegacyVodPlaylist {
+    let Ok(response) = serde_json::from_str::<serde_json::Value>(response_json) else {
+        return LegacyVodPlaylist::Unknown;
+    };
+    let Some(url) = response
+        .get("playlist_url")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return LegacyVodPlaylist::Unknown;
+    };
+    let (path, query) = url
+        .split_once('?')
+        .map_or((url, None), |(path, query)| (path, Some(query)));
+    if path.ends_with("/index.m3u8") {
+        LegacyVodPlaylist::Media
+    } else if path.ends_with("/master.m3u8") {
+        LegacyVodPlaylist::Master {
+            has_query: query.is_some(),
+        }
+    } else {
+        LegacyVodPlaylist::Unknown
+    }
 }
 
 enum VodRecipeAttachment {
     Recovery {
         speculative: bool,
         bootstrap: bool,
-        legacy_muxed: bool,
+        legacy_playlist: LegacyVodPlaylist,
     },
     FirstPreparation {
         owner: PreparedVodOwner,
@@ -4613,40 +4629,50 @@ impl TranscodeManager {
             }));
             requests.push(audio);
         }
-        // Soundtracks are independent recipes over one held source: prepare
-        // them together so start waits for the slowest, not their sum.
-        let mut prepared = Vec::with_capacity(requests.len());
-        for batch in requests.chunks(4) {
-            prepared.extend(
-                futures_util::future::join_all(
-                    batch
-                        .iter()
-                        .map(|audio| self.prepare_vod_encoding(audio, file)),
-                )
-                .await,
-            );
-        }
+        // Bound both simultaneous packet probes and the evidence retained
+        // by this title. A fresh group can encode later tracks as AAC when
+        // its source proof would exceed the memory allowance.
+        let mut remaining_proof_bytes = 64_usize * 1024 * 1024;
         let mut soundtracks = Vec::with_capacity(requests.len());
-        for (audio, outcome) in requests.into_iter().zip(prepared) {
-            match outcome {
-                Ok(Some(soundtrack)) if soundtrack.shared_audio.is_some() => {
-                    soundtracks.push((audio, soundtrack))
+        for batch in requests.chunks(4) {
+            let mut preparations = Vec::with_capacity(batch.len());
+            for audio in batch {
+                preparations.push(self.prepare_vod_encoding(audio, file));
+            }
+            let outcomes = futures_util::future::join_all(preparations).await;
+            for (request, outcome) in batch.iter().zip(outcomes) {
+                let mut soundtrack = outcome
+                    .and_then(|encoding| {
+                        encoding
+                            .filter(|track| track.shared_audio.is_some())
+                            .ok_or("no shared soundtrack recipe was resolved".to_owned())
+                    })
+                    .inspect_err(|reason| {
+                        tracing::info!(
+                            target: "plurxd::transcode",
+                            file_id = file.id,
+                            audio_index = ?request.audio_index,
+                            %reason,
+                            "split copy soundtrack unavailable"
+                        )
+                    })?;
+                let audio = Arc::get_mut(&mut soundtrack)
+                    .and_then(|encoding| encoding.shared_audio.as_mut())
+                    .ok_or("unattached soundtrack recipe is already shared")?;
+                if let Some(proof) = audio.source_copy() {
+                    if let Some(remaining) =
+                        remaining_proof_bytes.checked_sub(proof.packet_evidence_bytes())
+                    {
+                        remaining_proof_bytes = remaining;
+                    } else if matches!(req.vod_copy_layout, Some(VodCopyLayout::PendingV1)) {
+                        audio.discard_source_copy();
+                    } else {
+                        return Err(
+                            "the issued soundtrack group exceeds its packet proof allowance".into(),
+                        );
+                    }
                 }
-                outcome => {
-                    let reason = match outcome {
-                        Err(error) => error,
-                        Ok(Some(_)) => "the soundtrack recipe is not shared AAC".to_owned(),
-                        Ok(None) => "no encoded soundtrack recipe was resolved".to_owned(),
-                    };
-                    tracing::info!(
-                        target: "plurxd::transcode",
-                        file_id = file.id,
-                        audio_index = ?audio.audio_index,
-                        %reason,
-                        "split copy soundtrack unavailable; serving the muxed copy"
-                    );
-                    return Err(reason);
-                }
+                soundtracks.push((request.clone(), soundtrack));
             }
         }
         Ok(soundtracks)
@@ -6130,7 +6156,7 @@ impl TranscodeManager {
                             VodRecipeAttachment::Recovery {
                                 speculative: true,
                                 bootstrap,
-                                legacy_muxed: legacy_vod_response_is_muxed(&route.response_json),
+                                legacy_playlist: legacy_vod_playlist(&route.response_json),
                             },
                         )
                         .await;
@@ -6184,9 +6210,7 @@ impl TranscodeManager {
                                 VodRecipeAttachment::Recovery {
                                     speculative: true,
                                     bootstrap,
-                                    legacy_muxed: legacy_vod_response_is_muxed(
-                                        &route.response_json,
-                                    ),
+                                    legacy_playlist: legacy_vod_playlist(&route.response_json),
                                 }
                             },
                         )
@@ -6333,7 +6357,7 @@ impl TranscodeManager {
             VodRecipeAttachment::Recovery {
                 speculative,
                 bootstrap: false,
-                legacy_muxed: legacy_vod_response_is_muxed(response_json),
+                legacy_playlist: legacy_vod_playlist(response_json),
             },
         ))
     }
@@ -6347,13 +6371,12 @@ impl TranscodeManager {
         deadline: Instant,
         purpose: VodRecipeAttachment,
     ) -> bool {
-        let legacy_muxed = matches!(
-            &purpose,
+        let legacy_playlist = match &purpose {
             VodRecipeAttachment::Recovery {
-                legacy_muxed: true,
-                ..
-            }
-        );
+                legacy_playlist, ..
+            } => Some(*legacy_playlist),
+            VodRecipeAttachment::FirstPreparation { .. } => None,
+        };
         let (speculative, first_owner, bootstrap, processed_predecessor, attachment_owner) =
             match purpose {
                 VodRecipeAttachment::Recovery {
@@ -6467,7 +6490,9 @@ impl TranscodeManager {
                     None
                 };
             let mut req = remote.request;
-            if legacy_muxed && req.vod_copy_layout.is_none() {
+            if matches!(legacy_playlist, Some(LegacyVodPlaylist::Media))
+                && req.vod_copy_layout.is_none()
+            {
                 req.split_audio = false;
             }
             if !req.vod_copy_layout_valid()
@@ -6501,6 +6526,21 @@ impl TranscodeManager {
                 };
                 file
             };
+            if req.vod_copy_layout.is_none()
+                && split_copy_eligible(&req, &file)
+                && legacy_playlist.is_some_and(|playlist| {
+                    matches!(
+                        playlist,
+                        LegacyVodPlaylist::Unknown | LegacyVodPlaylist::Master { has_query: true }
+                    ) || matches!(playlist, LegacyVodPlaylist::Master { .. })
+                        && req.transport.as_deref() == Some("native")
+                })
+            {
+                // Historical native/subtitle masters could wrap either copy
+                // layout. Without the owner's verdict it is unsafe to turn
+                // that same public URL into a different family.
+                return false;
+            }
             file.audio_offset_ms = if file.audio_streams.is_empty() {
                 0
             } else {
@@ -7344,7 +7384,7 @@ fn split_soundtrack_should_copy(
         return false;
     }
     match req.vod_copy_layout.as_ref() {
-        Some(VodCopyLayout::SplitV1 { soundtracks }) => soundtracks
+        Some(VodCopyLayout::SplitV1 { soundtracks, .. }) => soundtracks
             .iter()
             .any(|track| track.source_index == stream.index && track.source_copy),
         Some(VodCopyLayout::PendingV1) => req.audio_claim.as_ref().is_some_and(|claim| {

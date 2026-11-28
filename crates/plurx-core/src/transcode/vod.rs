@@ -1366,6 +1366,10 @@ impl VodSourceAudio {
         })
     }
 
+    pub fn packet_evidence_bytes(&self) -> usize {
+        std::mem::size_of_val(self.packets.as_ref())
+    }
+
     pub fn packet_ticks(&self) -> u64 {
         match self.codec {
             SourceAudioCodec::Aac => VOD_AAC_FRAME_SAMPLES,

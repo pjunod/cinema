@@ -4030,12 +4030,26 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "16")
         .await
         .expect("larger budget");
+    let timed = SessionRequest {
+        block_budget_secs: Some(0.000_001),
+        request_id: Some("split-deadline".into()),
+        ..current.clone()
+    };
+    let timed_fallback = create_local_vod(&manager, &timed, "test")
+        .await
+        .expect("the private split deadline leaves a muxed start");
+    assert!(timed_fallback.playlist_url.ends_with("/index.m3u8"));
+    assert_eq!(
+        timed_fallback.vod_copy_layout,
+        Some(crate::transcode::VodCopyLayout::Muxed)
+    );
+
     current.request_id = Some("split-large-group".into());
     let split = create_local_vod(&manager, &current, "test")
         .await
         .expect("split start");
     assert!(split.playlist_url.ends_with("/master.m3u8"));
-    let Some(crate::transcode::VodCopyLayout::SplitV1 { soundtracks }) =
+    let Some(crate::transcode::VodCopyLayout::SplitV1 { soundtracks, .. }) =
         split.vod_copy_layout.clone()
     else {
         panic!("expected issued split layout: {:?}", split.vod_copy_layout);
@@ -4047,4 +4061,19 @@ async fn split_copy_admission_prepares_every_soundtrack_only_for_an_eligible_cop
         .await
         .expect("rebuild frozen group");
     assert_eq!(rebuilt.vod_copy_layout, current.vod_copy_layout);
+
+    let mut conflicting = SessionRequest {
+        playback_id: "split-rebuild-conflict".into(),
+        request_id: Some("split-rebuild-conflict".into()),
+        ..current
+    };
+    let Some(crate::transcode::VodCopyLayout::SplitV1 { video, .. }) =
+        conflicting.vod_copy_layout.as_mut()
+    else {
+        panic!("issued split video");
+    };
+    video.index_key = Some("a".repeat(64));
+    assert!(create_local_vod(&manager, &conflicting, "test")
+        .await
+        .is_err());
 }
