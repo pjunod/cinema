@@ -83,7 +83,7 @@
         "table": "proposal \u00a74.1 queue protocol trait",
         "scope": "item",
         "item": "trait BackgroundJobStore",
-        "item_sha256": "5194cf079cd0e3d98831a18a9fd968224e1ce002211b25b53964c5f896b77165"
+        "item_sha256": "d9d8e900ab977e784c32f4dab326e5a61ca037f98e39432f6c82bed05915086b"
       },
       {
         "anchor": "pub struct JobToken {",
@@ -99,7 +99,7 @@
         "table": "proposal \u00a74.1 shared queue adapter",
         "scope": "item",
         "item": "impl<T: QueueSql> BackgroundJobStore for T",
-        "item_sha256": "7d4428bb155c4ed21230027c48c8fe8ba50319533842805e4dbfe874fb07667b"
+        "item_sha256": "72bc00a15abcdca4c78735c09001228777e47f835021dc64cf57bfb120e2bff4"
       },
       {
         "anchor": "            || self.now_ms.saturating_sub(self.dispatched_at_ms) >= CLAIM_RESOLUTION_WINDOW_MS",
@@ -587,7 +587,7 @@
         "table": "review \u00a73 citation crates/plurx-core/src/store/sqlite/mod.rs:1255",
         "scope": "item",
         "item": "const MIGRATIONS",
-        "item_sha256": "734a82738b04b560c7e9b86c8f044894b94eb73e52ed87c6fded9ed645a744a8"
+        "item_sha256": "6b44ad2cbef124be9874007afde46c08577773a484eb382aaec62764c81f510d"
       },
       {
         "anchor": "async fn insert_item_fenced(",
@@ -832,10 +832,10 @@
       {
         "table": "caption migration exact-shape recognizer outside selected library model",
         "source": "crates/plurx-core/src/store/subtitle_translation_schema.rs",
-        "anchor": "/// Exact shapes: original=0, producer-retarget=1, claim-continuity=2.",
+        "anchor": "/// Exact shapes: original=0, producer-retarget=1, claim-continuity=2,",
         "scope": "item",
         "item": "fn version",
-        "item_sha256": "6a33ab08d23923e43af7cae6c9bca9f8b1d9e23c46180ea692cbc8b70f49be08"
+        "item_sha256": "c92c41ed922488d70c4d7248ba83c9b4e9485634bd1228bd86ca7cf6507a1441"
       },
       {
         "table": "caption retarget queue effects remain kind-scoped outside selected library model",
@@ -852,6 +852,14 @@
         "scope": "item",
         "item": "trigger subtitle_translation_capture_continuity",
         "item_sha256": "8feb9d732dd136b65e3e28efd2597e393f1a9877714a3e38614f213a09ab29ae"
+      },
+      {
+        "table": "caption settings-authorized continuity effects remain kind-scoped outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_authority.sql",
+        "anchor": "WHEN NEW.kind='subtitle_translation_range' AND NEW.state='running' AND NEW.fence>OLD.fence",
+        "scope": "item",
+        "item": "trigger subtitle_translation_capture_continuity",
+        "item_sha256": "ee0e0f5f60f800c5fbd670fadbb8f4d08f374bc43bdc5a082bd68365f8de3b39"
       },
       {
         "table": "caption demand revocation affects only captured caption grants outside selected library model",
