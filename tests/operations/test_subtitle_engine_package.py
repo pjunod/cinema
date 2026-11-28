@@ -337,10 +337,10 @@ class SubtitleEnginePackageCase(unittest.TestCase):
             self.assertEqual((item["download_bytes"], item["sha256"]), expected[item["id"]])
             self.assertEqual(item["license"], "MIT")
             self.assertIn("/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/", item["url"])
-            # The pinned Small and Large v3 use the newer 100-language vocabulary.
-            language_count = {"base": 99, "small": 100, "large-v3-q5_0": 100}.get(item["id"], 1)
+            # Small keeps its published language list and verification identity.
+            language_count = {"base": 99, "small": 99, "large-v3-q5_0": 100}.get(item["id"], 1)
             self.assertEqual(len(item["languages"]), language_count)
-            self.assertEqual("yue" in item["languages"], language_count == 100)
+            self.assertEqual("yue" in item["languages"], item["id"] == "large-v3-q5_0")
             self.assertEqual(len(set(item["languages"])), len(item["languages"]))
             self.assertNotIn("*", item["languages"])
 
