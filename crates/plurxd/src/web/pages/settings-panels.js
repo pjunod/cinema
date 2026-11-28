@@ -23,8 +23,8 @@ const DEVELOPER_MOVED={"cinema-sharing-settings":"sharing","jellyfin-compatibili
 // address bar names the section and the back button walks between them.
 function isSettingsRoute(h){ return h==="#/settings"||h==="#/admin"||(typeof h==="string"&&h.startsWith("#/settings/")); }
 function settingsRouteTab(h){
-  if(h==="#/settings/developer/enable-subtitle-transcription") return "subtitles";
-  if(h==="#/settings/developer/enable-subtitle-translation") return "subtitles";
+  if(/^#\/settings\/(?:developer|maintenance)\/enable-subtitle-transcription$/.test(h||"")
+    ||/^#\/settings\/(?:developer|playback)\/enable-subtitle-translation$/.test(h||""))return "subtitles";
   const moved=/^#\/settings\/developer\/([a-z0-9-]+)$/.exec(h||"");
   if(moved&&Object.hasOwn(DEVELOPER_MOVED,moved[1])) return DEVELOPER_MOVED[moved[1]];
   const m=/^#\/settings\/([a-z]+)(?:\/[a-z0-9-]+)?$/.exec(h||"");
@@ -64,7 +64,7 @@ let SETTINGS_SHOWN_TAB=null;
 // the live DOM node, so an unsaved edit, the Save it enabled, an open readiness
 // disclosure and focus all survive; the card's own Save replaces it from the
 // server's answer, and a fresh visit to the section draws it anew.
-const SETTINGS_KEPT_MOUNTS={playback:["enable-subtitle-translation"],cluster:["cluster-settings","cluster-backup"],analysis:["subbackfillcard"],maintenance:["enable-subtitle-transcription"]};
+const SETTINGS_KEPT_MOUNTS={subtitles:["subtitle-preferences","ai-subtitle-settings"],cluster:["cluster-settings","cluster-backup"],analysis:["subbackfillcard"]};
 let SETTINGS_PENDING_KEEP=null;
 function captureSettingsMounts(tab){
   const nodes=(SETTINGS_KEPT_MOUNTS[tab]||[]).map(id=>document.getElementById(id))
