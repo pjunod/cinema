@@ -86,7 +86,9 @@ WORKFLOW = 'ci.yml'
 # Re-reviewed for the bounded legacy Store deadline (120 -> 150 minutes).
 # Resource bounds, retained evidence and test commands are unchanged.
 # The source-lease workflow uses the consolidated reader and rollout checks.
-WORKFLOW_SHA256 = '8b2a7c90598e13d0bf658f40eac2f5bbf19d571b90dff132a37c22c22d597c9d'
+# Re-reviewed for the legacy Store deadline (150 -> 240 minutes) after run
+# 9881. The runner, test commands and receipt policy are unchanged.
+WORKFLOW_SHA256 = '93cb9cebbec0d1f5ac6bc32448de20cdd2dc1687dd3bd8e255a8abbda91f2c80'
 
 
 def prior_run(api, value, binding, repository, *, current_run=None):

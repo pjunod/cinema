@@ -705,9 +705,9 @@ jobs:
       needs.preflight.outputs.store_retained != 'true' )
     runs-on: [ci-nonvoter-store]
     # Run 9756 passed 470 of 509 serial cases at the 120-minute cutoff.
-    # That pace puts the original first binary near 130 minutes. Leave
-    # room for additional cases, the lineage bridge and receipts.
-    timeout-minutes: 150
+    # Run 9881 took 1.59 times as long at matching case milestones. Leave
+    # time for all 511 Store cases, the separate lineage suite and receipts.
+    timeout-minutes: 240
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
