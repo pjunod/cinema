@@ -248,6 +248,7 @@ async fn read_regenerated_head(
     Ok(muxer)
 }
 
+#[cfg(test)]
 pub(super) async fn read_muxer_init_bounded<R: AsyncRead + Unpin>(
     src: &mut R,
     max_bytes: usize,

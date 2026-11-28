@@ -1977,11 +1977,13 @@ async fn prepared_vod_copy_seals_the_layout_and_url_together() {
             .await
             .expect("read sealed route")
             .expect("route");
-        let recipe: serde_json::Value = serde_json::from_str(&route.recipe_json).unwrap();
-        let response: serde_json::Value = serde_json::from_str(&route.response_json).unwrap();
+        let recipe: serde_json::Value =
+            serde_json::from_str(&route.recipe_json).expect("sealed recipe");
+        let response: serde_json::Value =
+            serde_json::from_str(&route.response_json).expect("sealed response");
         assert_eq!(
             recipe["request"]["vod_copy_layout"],
-            serde_json::to_value(&layout).unwrap()
+            serde_json::to_value(&layout).expect("serializable VOD layout")
         );
         let split = matches!(layout, VodCopyLayout::SplitV1 { .. });
         let playlist = if split {

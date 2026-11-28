@@ -2796,6 +2796,7 @@ async fn first_preparation_output_seal_is_exact_and_idempotent_on_every_backend(
             now_ms: staged.now_ms + 1,
             already_complete: false,
             retained_output: Some(receipt.clone()),
+            vod_copy_layout: None,
         };
         assert!(
             store

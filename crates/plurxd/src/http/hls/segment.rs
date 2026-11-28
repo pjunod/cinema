@@ -566,7 +566,6 @@ async fn resurrect_vod_before(
             local_user_id,
             adoption,
             deadline,
-            false,
         ),
     )
     .await

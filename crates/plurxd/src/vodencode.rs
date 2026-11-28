@@ -439,7 +439,9 @@ fn source_audio_copy_requires_contiguous_full_packets_on_the_held_clock() {
             "duration": duration, "data_hash": hash, "size": "384", "flags": "K__",
         })
     };
-    let evidence = |packets| serde_json::to_vec(&serde_json::json!({"packets": packets})).unwrap();
+    let evidence = |packets| {
+        serde_json::to_vec(&serde_json::json!({"packets": packets})).expect("packet census fixture")
+    };
     let valid = evidence(vec![packet(4_800, 1_536), packet(6_336, 1_536)]);
     assert_eq!(
         source_audio_packet_evidence(&valid, 2, "1/48000", 100_000, 1_536)

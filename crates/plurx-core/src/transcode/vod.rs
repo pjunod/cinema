@@ -2425,16 +2425,17 @@ mod tests {
             });
         }
         let end = 1_013_333;
-        let audio = shared_audio_plan_aligned_to_video(&video, end, 160).unwrap();
+        let audio = shared_audio_plan_aligned_to_video(&video, end, 160).expect("aligned AAC plan");
         let starts = audio
             .entries
             .iter()
             .map(|entry| entry.start_ticks)
             .collect::<Vec<_>>();
         assert_eq!(starts, [0, 288_768, 726_016]);
-        assert_eq!(audio.entries.last().unwrap().end_ticks(), end);
+        let last = audio.entries.last().expect("final AAC segment");
+        assert_eq!(last.end_ticks(), end);
         assert_eq!(audio.target_duration, 10);
-        assert_eq!(audio.entries.last().unwrap().cut, PlanCut::EndOfStream);
+        assert_eq!(last.cut, PlanCut::EndOfStream);
         assert!(audio
             .entries
             .windows(2)

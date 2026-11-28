@@ -280,10 +280,11 @@ fn dolby_soundtrack_facts_verify_actual_ac3_and_ec3_configuration() {
 fn ec3_soundtrack_facts_include_dependent_channels_and_joc() {
     // One independent 5.1 service, with its dependent rear surround pair.
     let mut config = vec![0, 0, 0x20, 0x0f, 0x02, 0x02];
-    assert_eq!(ec3_config_facts(&config).unwrap().channels, 8);
-    assert!(!ec3_config_facts(&config).unwrap().joc);
+    let facts = ec3_config_facts(&config).expect("dependent-channel configuration");
+    assert_eq!(facts.channels, 8);
+    assert!(!facts.joc);
     config.extend([1, 16]);
-    assert!(ec3_config_facts(&config).unwrap().joc);
+    assert!(ec3_config_facts(&config).expect("JOC configuration").joc);
     assert!(ec3_config_facts(&config[..5]).is_err());
     assert!(ec3_config_facts(&config[..7]).is_err());
     config[1] = 1;

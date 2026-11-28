@@ -549,7 +549,7 @@ video/{b}/index.m3u8\n",
             audio('e', 3, "fre", false),
             audio('f', 4, "fr", false),
         ];
-        let master = p.master_text().unwrap();
+        let master = p.master_text().expect("valid alternate soundtrack master");
         assert!(master.contains("NAME=\"eng\",LANGUAGE=\"en\",DEFAULT=NO,AUTOSELECT=NO"));
         assert!(master.contains("NAME=\"en\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES"));
         assert!(master.contains("NAME=\"fre\",LANGUAGE=\"fr\",DEFAULT=NO,AUTOSELECT=YES"));

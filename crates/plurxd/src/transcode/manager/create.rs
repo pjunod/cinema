@@ -3771,7 +3771,7 @@ impl TranscodeManager {
         };
         let split_copy_audio = file.audio_streams.iter()
             .find(|stream| Some(stream.index) == req.audio_index && split_soundtrack_should_copy(req, stream))
-            .and_then(|stream| source.handle.try_clone().ok().map(|handle| (handle, stream)));
+            .and_then(|stream| Some((source.handle.try_clone().ok()?, stream)));
         note_phase("held_source_probe", phase_started);
         let clock_reporter = if let Some((evidence, _)) = source_evidence {
             evidence.clock_reporter().clone()
@@ -6346,7 +6346,6 @@ impl TranscodeManager {
         user_id: i64,
         adoption: SessionAdoptionToken,
         deadline: Instant,
-        speculative: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         Box::pin(self.resurrect_vod_from_recipe_before(
             recipe_json,
@@ -6355,7 +6354,7 @@ impl TranscodeManager {
             adoption,
             deadline,
             VodRecipeAttachment::Recovery {
-                speculative,
+                speculative: false,
                 bootstrap: false,
                 legacy_playlist: legacy_vod_playlist(response_json),
             },
