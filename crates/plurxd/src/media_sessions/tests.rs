@@ -573,6 +573,36 @@ fn valid_start_response() -> RemoteStartResponse {
 }
 
 #[test]
+fn rolling_split_layout_is_bound_to_the_issued_master_and_durable_takeover() {
+    use crate::transcode::RollingHlsLayout;
+    let layout = RollingHlsLayout::SplitV1 {
+        video: "a".repeat(64),
+        audio: "b".repeat(64),
+        audio_index: 3,
+    };
+    let mut response = valid_start_response();
+    response.vod = false;
+    response.control_lease_timeout_ms = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS;
+    response.rolling_hls_layout = Some(layout.clone());
+    assert!(!response.is_valid(), "split cannot advertise the scalar root");
+    response.playlist_url = format!("/api/v1/hls/{}/master.m3u8", response.session_id);
+    assert!(response.is_valid());
+    response.vod = true;
+    assert!(!response.is_valid(), "rolling layouts are not VOD verdicts");
+
+    let mut durable = valid_start_request();
+    assert!(durable.is_valid());
+    durable.request.rolling_hls_layout = Some(layout.clone());
+    assert!(!durable.is_valid(), "only the owner can issue a rolling layout");
+    assert!(takeover_recipe_is_valid(&durable));
+    let encoded = serde_json::to_vec(&durable).expect("rolling recipe serializes");
+    let recovered: RemoteStartRequest = serde_json::from_slice(&encoded).expect("rolling recipe");
+    assert_eq!(recovered.request.rolling_hls_layout, Some(layout));
+    durable.protocol_version -= 1;
+    assert!(!takeover_recipe_is_valid(&durable));
+}
+
+#[test]
 fn remote_start_status_carries_created_ownership_and_legacy_is_conservative() {
     let body = serde_json::to_vec(&valid_start_response()).expect("start response JSON");
     let created = decode_remote_start_response(crate::http::peer_transport::PeerResponse {

@@ -577,7 +577,7 @@ impl TranscodeManager {
         .ok_or("native FEL copy has no segment inventory")?;
         let index = parse_playlist(std::str::from_utf8(&raw).map_err(|error| error.to_string())?);
         let mut author = observed.author()?;
-        let init = copyseg::NativeSplitInitIds::of(&author);
+        let init = copyseg::NativeSplitInitIds::of(&author).map_err(|error| error.to_string())?;
         let dir = tempfile::Builder::new()
             .prefix("rendered-")
             .tempdir_in(self.work_dir.join("native-fel"))

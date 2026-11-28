@@ -201,13 +201,8 @@ fn native_subtitle_media(
     out
 }
 
-/// The native Safari split, described for the one split master writer.
-///
-/// The video is the converted Dolby Vision copy: the split only runs with
-/// `convert_dolby_vision`, whose Profile 8.1 output is PQ, so that is the
-/// range proved. Audio codec and channels come from the projected init. Both
-/// roles are projected from one muxed copy, so the copy's budget is the
-/// presentation's combined budget (S5 gives each role its own).
+/// Build the rolling master from the codec, color and raster of the
+/// committed projected inits. Both roles share one producer budget.
 pub(super) fn native_split_presentation(
     file: &MediaFile,
     context: &crate::transcode::HlsContext,
@@ -245,7 +240,7 @@ pub(super) fn native_split_presentation(
     let (codec, supplemental_codecs, raster, video_range) = match &ids.video_facts {
         Some(facts) => (
             facts.codec.clone(),
-            None,
+            facts.supplemental_codecs.clone(),
             Some((u32::from(facts.width), u32::from(facts.height))),
             facts.range,
         ),

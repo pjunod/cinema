@@ -2157,13 +2157,6 @@ impl TranscodeManager {
         let target = legacy
             .lines()
             .find(|line| line.starts_with("#EXT-X-TARGETDURATION:"))?;
-        let video_durations: Vec<_> = legacy
-            .lines()
-            .filter(|line| line.starts_with("#EXTINF:"))
-            .collect();
-        if video_durations.len() != entries.len() {
-            return None;
-        }
         let mut playlist =
             format!("#EXTM3U\n#EXT-X-VERSION:7\n{target}\n#EXT-X-MEDIA-SEQUENCE:{first}\n",);
         if let Some(sequence) = legacy
@@ -2172,18 +2165,36 @@ impl TranscodeManager {
         {
             let _ = writeln!(playlist, "{sequence}");
         }
-        if legacy.lines().any(|line| line == "#EXT-X-DISCONTINUITY") {
-            playlist.push_str("#EXT-X-DISCONTINUITY\n");
-        }
         let _ = writeln!(playlist, "#EXT-X-MAP:URI=\"init/{rendition}.mp4\"");
-        for ((index, entry), video_duration) in (first..=last).zip(entries).zip(video_durations) {
-            if role == "audio" {
-                let seconds = entry.audio_ticks as f64 / 48_000.0;
-                let _ = writeln!(playlist, "#EXTINF:{seconds:.6},");
-            } else {
-                let _ = writeln!(playlist, "{video_duration}");
+        let mut entries = entries.into_iter();
+        let mut next_index = first;
+        let mut pending_duration = false;
+        for line in legacy.lines().map(str::trim) {
+            if line == "#EXT-X-DISCONTINUITY" || line.starts_with("#EXT-X-PROGRAM-DATE-TIME:") {
+                let _ = writeln!(playlist, "{line}");
+            } else if line.starts_with("#EXTINF:") {
+                if pending_duration {
+                    return None;
+                }
+                let entry = entries.next()?;
+                pending_duration = true;
+                if role == "audio" {
+                    let seconds = entry.audio_ticks as f64 / 48_000.0;
+                    let _ = writeln!(playlist, "#EXTINF:{seconds:.6},");
+                } else {
+                    let _ = writeln!(playlist, "{line}");
+                }
+            } else if !line.starts_with('#') && !line.is_empty() {
+                if !pending_duration || u64::try_from(segment_index(line)?).ok()? != next_index {
+                    return None;
+                }
+                let _ = writeln!(playlist, "segment/{next_index}.m4s");
+                next_index = next_index.checked_add(1)?;
+                pending_duration = false;
             }
-            let _ = writeln!(playlist, "segment/{index}.m4s");
+        }
+        if pending_duration || next_index.checked_sub(1)? != last || entries.next().is_some() {
+            return None;
         }
         if snapshot.end_list {
             playlist.push_str("#EXT-X-ENDLIST\n");

@@ -226,3 +226,17 @@ projection deadline refusals keep the encoded muxed media URL. The owner
 retains the selected layout, producer identity, and both child identities
 under media-pool protocol 15. Recovery verifies those identities before
 serving the issued child URLs.
+
+### Rolling HLS
+
+The rolling producer commits one fragmented MP4 layout before activation. An
+opening window that proves separate video and AAC objects can publish a split
+master. During that private opening the writer keeps the original packets so a
+projection refusal can publish the muxed presentation. A committed split writes
+one primary video object per segment and one audio object. The native Dolby
+Vision FEL splice verifies the primary video digest and reads that track.
+
+Media-pool protocol 16 carries the issued rolling layout. A takeover reserves
+a new media sequence range and publishes a discontinuity for both children. It
+must reproduce the issued initialization identities before serving the split
+master. Relay requests use the same role and rendition paths as local requests.

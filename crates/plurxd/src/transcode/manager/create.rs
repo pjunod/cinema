@@ -1460,13 +1460,18 @@ impl TranscodeManager {
             },
             None => (req, None),
         };
+        let audio_index = req
+            .rolling_hls_layout
+            .as_ref()
+            .and_then(RollingHlsLayout::audio_index)
+            .or(req.audio_index);
         let mut started = match req.kind {
             SessionKind::Transcode { height } => {
                 self.start_with_audio_offset(
                     req.file_id,
                     height,
                     req.start_seconds,
-                    req.audio_index,
+                    audio_index,
                     req.subtitle_burn,
                     req.audio_offset_ms,
                     user_name,
@@ -1503,7 +1508,7 @@ impl TranscodeManager {
                 self.start_copy_with_audio_offset(
                     req.file_id,
                     req.start_seconds,
-                    req.audio_index,
+                    audio_index,
                     req.audio_offset_ms,
                     CopySessionOptions {
                         convert_dolby_vision,

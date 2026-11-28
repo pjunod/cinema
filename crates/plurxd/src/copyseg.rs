@@ -930,7 +930,9 @@ async fn rolling_split_reproduces_issued_children_in_a_new_sequence_epoch() {
     fmp4::remove_dolby_vision_record(&mut init).expect("plain HDR10 init");
     let root = crate::test_tempdir().expect("rolling split directory");
     let inventory = std::sync::Arc::new(
-        NativeSplitInventory::with_budget(0, u64::MAX).with_unprocessed_projection(),
+        NativeSplitInventory::with_budget(0, u64::MAX)
+            .with_audio_index(Some(2))
+            .with_unprocessed_projection(),
     );
     let mut writer = SessionDir::new(root.path().to_owned(), 0, 16, None);
     writer.split_inventory = Some(std::sync::Arc::clone(&inventory));
@@ -943,13 +945,14 @@ async fn rolling_split_reproduces_issued_children_in_a_new_sequence_epoch() {
         .seal_for_activation()
         .expect("issued layout")
         .expect("fMP4 layout");
-    let RollingHlsLayout::SplitV1 { video, audio } = &layout else {
+    let RollingHlsLayout::SplitV1 { video, audio, .. } = &layout else {
         panic!("split required")
     };
 
     let next = crate::test_tempdir().expect("second owner directory");
     let resumed = std::sync::Arc::new(
         NativeSplitInventory::with_budget(0, u64::MAX)
+            .with_audio_index(Some(2))
             .with_unprocessed_projection()
             .with_expected_layout(Some(layout.clone())),
     );
@@ -994,6 +997,7 @@ async fn rolling_split_reproduces_issued_children_in_a_new_sequence_epoch() {
             .with_expected_layout(Some(RollingHlsLayout::SplitV1 {
                 video: "0".repeat(64),
                 audio: audio.clone(),
+                audio_index: 2,
             })),
     ));
     assert!(writer.write_init(&init).await.is_err());
@@ -1137,6 +1141,12 @@ async fn native_copy_picture_clock_names_why_it_could_not_bind() {
     );
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RollingMuxedRetry {
+    Fragmented,
+    TransportStream,
+}
+
 #[derive(Default)]
 pub(crate) struct NativeSplitInventory {
     /// The ordinary copy's startup sizing: three times the title's average
@@ -1160,7 +1170,7 @@ pub(crate) struct NativeSplitInventory {
     video_format: std::sync::OnceLock<std::sync::Arc<fmp4::video_splice::SpliceVideoFormat>>,
     writer_owns_layout: std::sync::atomic::AtomicBool,
     primary_video: std::sync::atomic::AtomicBool,
-    retry_muxed: std::sync::atomic::AtomicBool,
+    retry_muxed: std::sync::OnceLock<RollingMuxedRetry>,
     expected_layout: Option<crate::transcode::RollingHlsLayout>,
     sealed_layout: std::sync::OnceLock<crate::transcode::RollingHlsLayout>,
     writer_cancellation: tokio_util::sync::CancellationToken,
@@ -1199,6 +1209,7 @@ pub(crate) struct NativeSplitInitIds {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RollingSplitVideoFacts {
     pub(crate) codec: String,
+    pub(crate) supplemental_codecs: Option<String>,
     pub(crate) range: plurx_core::transcode::split_master::VideoRange,
     pub(crate) width: u16,
     pub(crate) height: u16,
@@ -1235,22 +1246,42 @@ impl RollingSplitVideoFacts {
         }
         Ok(Self {
             codec,
+            supplemental_codecs: None,
             range,
             width: facts.width,
             height: facts.height,
         })
     }
+
+    fn of_native(author: &NativeSplitAuthor) -> Result<Self, fmp4::Fmp4Error> {
+        use plurx_core::transcode::split_master::VideoRange;
+        let geometry = fmp4::hevc_hdr10_sample_entry_facts(author.ordinary_video_init())?;
+        let init = author.video.init();
+        let error =
+            || fmp4::Fmp4Error::Unsupported("rolling FEL cannot attest the projected init".into());
+        let codec =
+            crate::http::hls::hevc_codec_from_init(&init.bytes, "hev1").ok_or_else(error)?;
+        let dolby = fmp4::dolby_vision_record(init)?
+            .filter(|record| record.profile == 8 && record.level != 0)
+            .ok_or_else(error)?;
+        Ok(Self {
+            codec,
+            supplemental_codecs: Some(format!("dvhe.08.{:02}/db1p", dolby.level)),
+            range: VideoRange::Pq,
+            width: geometry.width,
+            height: geometry.height,
+        })
+    }
 }
 
 impl NativeSplitInitIds {
-    #[cfg(target_os = "linux")]
-    pub(crate) fn of(author: &NativeSplitAuthor) -> Self {
-        Self::from_pair(
+    pub(crate) fn of(author: &NativeSplitAuthor) -> Result<Self, fmp4::Fmp4Error> {
+        Ok(Self::from_pair(
             author.video.init(),
             author.audio_init(),
             author.audio_facts.clone(),
-            None,
-        )
+            Some(RollingSplitVideoFacts::of_native(author)?),
+        ))
     }
 
     fn from_pair(
@@ -1347,13 +1378,16 @@ impl NativeSplitInventory {
         &self,
     ) -> Result<Option<crate::transcode::RollingHlsLayout>, String> {
         use crate::transcode::RollingHlsLayout;
-        if self.retry_muxed.load(std::sync::atomic::Ordering::Acquire) {
+        if self.retry_muxed.get() == Some(&RollingMuxedRetry::TransportStream) {
             return Ok(None);
         }
         let layout = if let Some(ids) = self.active_ids() {
             RollingHlsLayout::SplitV1 {
                 video: ids.video.clone(),
                 audio: ids.audio.clone(),
+                audio_index: self
+                    .audio_index
+                    .ok_or("rolling split did not bind its source audio")?,
             }
         } else if self.allows_scalar() {
             RollingHlsLayout::FragmentedMuxedV1
@@ -1687,7 +1721,7 @@ impl NativeSplitInventory {
 
     pub(crate) fn allows_scalar(&self) -> bool {
         !self.writer_owns_layout()
-            || self.retry_muxed.load(std::sync::atomic::Ordering::Acquire)
+            || self.retry_muxed.get().is_some()
             || self.chosen.get() == Some(&false)
     }
 
@@ -1705,9 +1739,12 @@ impl NativeSplitInventory {
         (self.writer_cancellation.clone(), complete)
     }
 
-    pub(crate) async fn retire_reader_for_muxed_retry(&self) -> Result<(), String> {
+    pub(crate) async fn retire_reader_for_muxed_retry(
+        &self,
+        output: RollingMuxedRetry,
+    ) -> Result<(), String> {
         if self.sealed_layout.get().is_some() || self.expected_layout.is_some() {
-            return Err("an issued fragmented rolling layout cannot retry with MPEG-TS".into());
+            return Err("a producer retry cannot replace an issued rolling generation".into());
         }
         self.writer_cancellation.cancel();
         let completion = self
@@ -1721,8 +1758,7 @@ impl NativeSplitInventory {
                 .map_err(|_| "the superseded rolling reader did not release scratch".to_owned())?
                 .ok();
         }
-        self.retry_muxed
-            .store(true, std::sync::atomic::Ordering::Release);
+        let _ = self.retry_muxed.set(output);
         Ok(())
     }
 
@@ -1749,9 +1785,7 @@ impl NativeSplitInventory {
     }
 
     pub(crate) fn active_ids(&self) -> Option<&NativeSplitInitIds> {
-        if self.chosen.get() == Some(&true)
-            && !self.retry_muxed.load(std::sync::atomic::Ordering::Acquire)
-        {
+        if self.chosen.get() == Some(&true) && self.retry_muxed.get().is_none() {
             self.init_ids.get()
         } else {
             None
@@ -2374,22 +2408,32 @@ impl SessionDir {
                 .store(true, std::sync::atomic::Ordering::Release);
             let author = RollingSplitAuthor::new(init.clone(), inventory.project_unprocessed)
                 .and_then(|author| {
-                    let (video, audio, audio_facts) = author.inits();
-                    let video_facts = match &author {
+                    let ids = match &author {
+                        RollingSplitAuthor::NativeFel(native) => NativeSplitInitIds::of(native)?,
                         RollingSplitAuthor::Unprocessed(_) => {
-                            Some(RollingSplitVideoFacts::of(video)?)
+                            let (video, audio, audio_facts) = author.inits();
+                            NativeSplitInitIds::from_pair(
+                                video,
+                                audio,
+                                audio_facts,
+                                Some(RollingSplitVideoFacts::of(video)?),
+                            )
                         }
-                        RollingSplitAuthor::NativeFel(_) => None,
                     };
-                    let ids = NativeSplitInitIds::from_pair(video, audio, audio_facts, video_facts);
                     Ok((author, ids))
                 });
             match author {
                 Ok((author, ids)) => {
-                    if let Some(crate::transcode::RollingHlsLayout::SplitV1 { video, audio }) =
-                        &inventory.expected_layout
+                    if let Some(crate::transcode::RollingHlsLayout::SplitV1 {
+                        video,
+                        audio,
+                        audio_index,
+                    }) = &inventory.expected_layout
                     {
-                        if video != &ids.video || audio != &ids.audio {
+                        if video != &ids.video
+                            || audio != &ids.audio
+                            || Some(*audio_index) != inventory.audio_index
+                        {
                             return Err(std::io::Error::other(
                                 "rolling initialization differs from the issued rendition",
                             ));

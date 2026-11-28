@@ -754,11 +754,6 @@ impl TranscodeManager {
         // viewer's per-playback opt-out (`SessionRequest::retain_output`): it
         // stops this session collecting, never its reuse of a copy that
         // already exists.
-        let retained_budget = if allow_rolling_split {
-            None
-        } else {
-            Self::rolling_retained_budget_from(&settings)
-        };
         let collect_retained = retain_output != Some(false);
         let pacing = Self::pacing_from_settings(&settings, false).await;
         let sw_budget = Self::num_from(
@@ -858,6 +853,20 @@ impl TranscodeManager {
                 return Ok(info);
             }
         }
+        let rolling_split = expected_layout.is_some()
+            || allow_rolling_split
+                && takeover.is_none()
+                && plan.options().input_has_audio
+                && opts.audio.as_ref().is_none_or(|audio| {
+                    audio
+                        .presentation_identity()
+                        .is_some_and(|(codec, _)| codec == "aac")
+                });
+        let retained_budget = if rolling_split {
+            None
+        } else {
+            Self::rolling_retained_budget_from(&settings)
+        };
         // The retained lookup's captured production, kept for the producer
         // below when its logical graph is byte-identical: one source fence
         // and engine attestation per start, not one per consumer.
@@ -1216,15 +1225,6 @@ impl TranscodeManager {
         if let Some(provenance) = &rolling_provenance {
             execution_file.path = provenance.input_path();
         }
-        let rolling_split = expected_layout.is_some()
-            || allow_rolling_split
-                && takeover.is_none()
-                && plan.options().input_has_audio
-                && opts.audio.as_ref().is_none_or(|audio| {
-                    audio
-                        .presentation_identity()
-                        .is_some_and(|(codec, _)| codec == "aac")
-                });
         let args = if rolling_split {
             transcode::rolling_fmp4_pipe_args(&plan, &execution)
         } else {
@@ -1616,7 +1616,7 @@ impl TranscodeManager {
                     u64::try_from(RollingScratchSizing::session_ceiling(Self::ahead_limits_from(&settings)))
                         .unwrap_or(0),
                 )
-                .with_audio_index(audio_index)
+                .with_audio_index(audio_index.or_else(|| file.audio_streams.first().map(|stream| stream.index)))
                 .with_unprocessed_projection()
                 .with_expected_layout(expected_layout.cloned())
             )),
@@ -2616,7 +2616,7 @@ impl TranscodeManager {
                 )
                 .with_writer_layout()
                 .with_startup_secs(rolling_startup_media_ms(1.0) as f64 / 1_000.0)
-                .with_audio_index(audio_index)
+                .with_audio_index(audio_index.or_else(|| file.audio_streams.first().map(|stream| stream.index)))
                 .with_expected_layout(expected_layout.cloned());
                 let split = if options.convert_dolby_vision { split } else { split.with_unprocessed_projection() };
                 #[cfg(target_os = "linux")]

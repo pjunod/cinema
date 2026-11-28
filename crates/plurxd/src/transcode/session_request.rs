@@ -1440,7 +1440,11 @@ impl SessionRequest {
 #[serde(tag = "layout", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum RollingHlsLayout {
     FragmentedMuxedV1,
-    SplitV1 { video: String, audio: String },
+    SplitV1 {
+        video: String,
+        audio: String,
+        audio_index: i64,
+    },
 }
 
 impl RollingHlsLayout {
@@ -1453,12 +1457,23 @@ impl RollingHlsLayout {
         }
         match self {
             Self::FragmentedMuxedV1 => true,
-            Self::SplitV1 { video, audio } => video != audio && valid_id(video) && valid_id(audio),
+            Self::SplitV1 {
+                video,
+                audio,
+                audio_index,
+            } => *audio_index >= 0 && video != audio && valid_id(video) && valid_id(audio),
         }
     }
 
     pub(crate) fn split(&self) -> bool {
         matches!(self, Self::SplitV1 { .. })
+    }
+
+    pub(crate) fn audio_index(&self) -> Option<i64> {
+        match self {
+            Self::SplitV1 { audio_index, .. } => Some(*audio_index),
+            Self::FragmentedMuxedV1 => None,
+        }
     }
 
     pub(crate) fn playlist_filename(&self) -> &'static str {

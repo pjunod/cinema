@@ -148,7 +148,9 @@ pub(super) async fn execute_prepublication_transcode_retry(
                 .map_err(|error| format!("resetting held retry input: {error}"))?;
         }
         if let Some(split) = &session.native_split {
-            split.retire_reader_for_muxed_retry().await?;
+            split
+                .retire_reader_for_muxed_retry(copyseg::RollingMuxedRetry::TransportStream)
+                .await?;
         }
         retire_upload_lane(&session).await;
         clear_session_dir(&session.dir)
@@ -375,6 +377,11 @@ async fn execute_prepublication_copy_retry(
             proof
                 .rewind_reaped_input()
                 .map_err(|error| format!("resetting held copy fallback input: {error}"))?;
+        }
+        if let Some(split) = &session.native_split {
+            split
+                .retire_reader_for_muxed_retry(copyseg::RollingMuxedRetry::Fragmented)
+                .await?;
         }
         retire_upload_lane(&session).await;
         clear_session_dir(&session.dir)

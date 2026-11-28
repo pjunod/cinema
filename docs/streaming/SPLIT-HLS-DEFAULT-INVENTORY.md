@@ -1,7 +1,7 @@
 # Split HLS as the default — inventory, client matrix and baseline method
 
 **Status:** open — S1 of P62 (metrics, first copy-HLS baseline) merged; S2
-([contract](SPLIT-HLS-RENDITION-CONTRACT.md)) built; S3 merged; S4 in verification; S5–S8 pending ·
+([contract](SPLIT-HLS-RENDITION-CONTRACT.md)) built; S3 merged; S4 in verification; S5 in development; S6–S8 pending ·
 **Owner:** Claude Opus 5.5 · **Effort:** `E-5F2C2E9EA4` ·
 **Written:** 2026-11-26 against `main` @ `8724851ba`
 

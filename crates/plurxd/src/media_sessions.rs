@@ -2278,9 +2278,19 @@ impl RemoteStartResponse {
         let split_path =
             self.vod && self.playlist_url == format!("/api/v1/hls/{}/master.m3u8", self.session_id);
         uuid::Uuid::parse_str(&self.session_id).is_ok()
-            && match &self.vod_copy_layout {
-                None => muxed_path || (!encoded && split_path),
-                Some(layout) => {
+            && match (&self.vod_copy_layout, &self.rolling_hls_layout) {
+                (None, Some(layout)) => {
+                    !self.vod
+                        && layout.valid()
+                        && self.playlist_url
+                            == format!(
+                                "/api/v1/hls/{}/{}",
+                                self.session_id,
+                                layout.playlist_filename()
+                            )
+                }
+                (None, None) => muxed_path || (!encoded && split_path),
+                (Some(layout), None) => {
                     self.vod
                         && layout.encoded() == encoded
                         && !layout.pending()
@@ -2291,6 +2301,7 @@ impl RemoteStartResponse {
                             muxed_path
                         }
                 }
+                (Some(_), Some(_)) => false,
             }
             && self.processed_dv_profile.is_none_or(|profile| {
                 profile == 8
