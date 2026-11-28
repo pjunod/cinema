@@ -905,8 +905,10 @@ mod receipt_tests {
                     &Ok(model),
                     &receipts,
                     false,
-                    "worker",
-                    boot,
+                    super::super::WorkerBoot {
+                        node_id: "worker",
+                        boot_id: boot,
+                    },
                 )
                 .expect("capability")
             };
@@ -923,8 +925,10 @@ mod receipt_tests {
                 &Ok(FileIdentity { inode: 99, ..model }),
                 &receipts,
                 false,
-                "worker",
-                "boot-one",
+                super::super::WorkerBoot {
+                    node_id: "worker",
+                    boot_id: "boot-one",
+                },
             )
             .expect("capability");
             assert_eq!(replaced["status"], "unverified_cache");

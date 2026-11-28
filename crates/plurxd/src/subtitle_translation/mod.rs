@@ -87,25 +87,34 @@ impl Runtime {
         .then_some(candidate)
     }
 }
+struct WorkerBoot<'a> {
+    node_id: &'a str,
+    boot_id: &'a str,
+}
+
 /// One speech profile's readiness on this node, from the one model receipt.
 /// A profile is verified when the current receipt for its model matches this
 /// node, this boot, the packaged engine and the model file it names
 /// ([`crate::subtitle_models::current_receipt`]); there is no per-profile
 /// record any more.
-pub(crate) fn profile_capability(
+fn profile_capability(
     selected: &TranslationProfile,
     spec: &crate::subtitle_models::artifacts::CatalogModel,
     engine: Result<crate::subtitle_models::EngineIdentity<'_>, &str>,
     model: &Result<plurx_core::fs_secure::FileIdentity, String>,
     receipts: &[plurx_core::store::background_jobs_transcription::SubtitleModelReceipt],
     failed: bool,
-    node_id: &str,
-    boot_id: &str,
+    worker: WorkerBoot<'_>,
 ) -> Result<Value, StoreError> {
     let profile_id = selected.id()?;
     let verified = match (&engine, model) {
         (Ok(engine), Ok(model)) => crate::subtitle_models::current_receipt(
-            receipts, node_id, boot_id, spec, engine, *model,
+            receipts,
+            worker.node_id,
+            worker.boot_id,
+            spec,
+            engine,
+            *model,
         )
         .map(|receipt| receipt.verified_at_ms),
         _ => None,
@@ -164,8 +173,10 @@ pub(crate) async fn workers_public(state: &AppState) -> Result<Vec<Value>, ApiEr
             &models[&spec.sha256],
             &receipts,
             failures.contains(&spec.id),
-            &state.node_id,
-            &state.subtitle_models.boot_id,
+            WorkerBoot {
+                node_id: &state.node_id,
+                boot_id: &state.subtitle_models.boot_id,
+            },
         )?);
     }
     let (cpu_budget, cpu_used, capacity_available) =
