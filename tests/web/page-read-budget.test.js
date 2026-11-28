@@ -936,7 +936,7 @@ test("Settings loads only the active tab manifest", () => {
     analysis: { required: ["settings", "analysis"], secondary: ["developerReadiness"] },
     maintenance: { required: ["settings", "dvConversions"], secondary: ["developerReadiness"] },
     users: { required: ["settings", "users"], secondary: [] },
-    system: { required: ["sys"], secondary: ["https", "sourceRecovery"] },
+    system: { required: ["sys"], secondary: ["https", "sourceLaunch"] },
     cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness", "settings"] },
     sharing: { required: ["settings", "sharingStatus", "sharingImports", "sharingExports"], secondary: ["developerReadiness"] },
     integrations: { required: ["settings", "trakt"], secondary: ["developerReadiness"] },
@@ -1764,7 +1764,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     analysis:{required:["/settings","/analysis/summary"],secondary:["/developer/readiness"]},
     maintenance:{required:["/settings","/dv-conversions"],secondary:["/developer/readiness"]},
     users:{required:["/settings","/users"],secondary:[]},
-    system:{required:["/system"],secondary:["/system/https","/developer/source-recovery"]},
+    system:{required:["/system"],secondary:["/system/https","/developer/source-launch"]},
     // The cluster settings cards fill their own mount when /settings lands; the
     // health board never waits for it.
     cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","/settings","cluster-log"]},
@@ -1787,9 +1787,9 @@ test("Settings executes exact required and secondary waves for every tab", async
     const harness=new Function(
       "location","SETTINGS_ENDPOINTS","SETTINGS_MANIFEST","settingsTab","renderSettings",
       "patchSettingsSecondary","patchSettingsSecondaryError","refreshLogs","refreshClusterLogs",
-      "setPageFailure","setPagePhase","document","applySourceRecovery",
+      "setPageFailure","setPagePhase","document","applySourceLaunch",
       `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
-         SETTINGS_HTTPS_EPOCH=0,SETTINGS_SOURCE_RECOVERY_EPOCH=0,SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map(),
+         SETTINGS_HTTPS_EPOCH=0,SETTINGS_SOURCE_LAUNCH_EPOCH=0,SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map(),
          DV_SETTINGS_POLL_AT=0; const DV_PROGRESS_POLL_MS=10000;
        const SERVER={cluster_enabled:${expected.legacy?"undefined":expected.clustered!==false}};
        ${shippedSource("settingsClusterEnabled")};
@@ -1799,7 +1799,7 @@ test("Settings executes exact required and secondary waves for every tab", async
        ${shippedSource("cacheSettings")};
        ${shippedSource("cacheTrakt")};
        ${shippedSource("loadSettingsKey")};
-       ${shippedSource("loadSourceRecoveryCard")};
+       ${shippedSource("loadSourceLaunchCard")};
        ${shippedSource("loadSettingsTab")};
        return {load:()=>loadSettingsTab(1,${JSON.stringify(tab)})};`,
     )(

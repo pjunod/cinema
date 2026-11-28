@@ -2226,6 +2226,11 @@ async fn final_readable_core_completes_without_gaps_or_loser_downgrade_and_cache
         subtitle_translation_read::{AcquireTranslationLease, TranslationQuery, TranslationRead},
     };
     let (_dir, store, conn) = fixture();
+    conn.execute(
+        "INSERT INTO settings(key,value) VALUES(?1,'1')",
+        [plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT],
+    )
+    .expect("reserve one maintenance reader per root");
     let recipe = prepared(&store).await;
     let observation = |now| TranslationRead {
         user_id: 1,
@@ -2267,15 +2272,25 @@ async fn final_readable_core_completes_without_gaps_or_loser_downgrade_and_cache
         .expect("lease");
     let mut last = recipe.clone();
     last.core_index = 1;
-    // The common queue reserves one source lane for a viewer. Give this
-    // fixture an explicit foreground interest so both attempts acquire real,
-    // counted reservations; two background readers must remain contended.
+    // Both attempts hold a lease on the same root. The winner's viewer
+    // interest lets it use the protected live slot.
     let winner = range_for_consumer(&store, &last, "last-winner", 1700, "playback_fragment").await;
     let loser = range(&store, &last, "last-loser", 1750).await;
-    assert_eq!(conn.query_row(
-        "SELECT count(*) FROM background_job_reservations WHERE resource_key='source_io' AND expires_at_ms>1751",
-        [], |r| r.get::<_, i64>(0)
-    ).expect("two counted live source reservations"), 2);
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(DISTINCT held.work_id) FROM source_leases held
+             JOIN source_lease_effective_resources scope ON scope.lease_id=held.lease_id
+             WHERE held.owner_kind='job' AND held.work_id IN (?1, ?2)
+               AND held.phase!='paused' AND held.expires_at_ms>1751
+               AND scope.resource_key IN (
+                 SELECT resource_key FROM source_lease_file_resources WHERE file_id=1
+               )",
+            [&winner.id, &loser.id],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("two charged leases on the fixture root"),
+        2
+    );
     let publication = |job: &plurx_core::store::background_jobs::BackgroundJob,
                        text: &str,
                        now_ms| PublishTranslationSegment {
@@ -3108,6 +3123,36 @@ async fn non_admin_translation_range_is_claimable_only_when_ai_subtitles_who_is_
     let claimed = range(&store, &recipe, "viewer-core-0", 1300).await;
     assert!(!claimed.id.is_empty());
 
+    conn.execute(
+        "INSERT INTO settings(key,value) VALUES(?1,'1')",
+        [plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT],
+    )
+    .expect("one maintenance reader plus one protected reader");
+    conn.execute_batch(
+        r#"
+        INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms)
+        VALUES('manual','library_scan',1,'{"kind":"library_scan","library_id":1}','manual',0,'queued',0,1300,1300);
+        INSERT INTO background_job_waiters(request_scope,request_id,request_digest,job_id,consumer_kind,consumer_ref,priority,state,receipt_expires_ms,created_at_ms,updated_at_ms,deadline_ms)
+        VALUES('library','manual','digest','manual','library_work','1',0,'pending',9999,1300,1300,NULL);
+        INSERT INTO background_library_requests(request_id,library_id,job_id,input_json)
+        VALUES('manual',1,'manual','{"kind":"full","trigger":"manual"}');
+        INSERT INTO dispatch_turn_ready VALUES('manual','worker',0,9999,'["/media"]');
+        DELETE FROM dispatch_turn_attempt;
+        INSERT INTO dispatch_turn_attempt(singleton,owner,work,keys_json,now_ms,queued_ms,allowed)
+        VALUES(1,'candidate','manual','["source_io"]',1301,1300,0);
+        "#,
+    )
+    .expect("manual scan competing on the same root");
+    let manual_contenders = || {
+        conn.query_row(
+            "SELECT count(*) FROM dispatch_turn_contenders WHERE job_id='manual'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("persistent dispatch view")
+    };
+    assert_eq!(manual_contenders(), 1, "the viewer uses the protected slot");
+
     let mut next = recipe.clone();
     next.core_index = 1;
     let operations = store
@@ -3159,6 +3204,13 @@ async fn non_admin_translation_range_is_claimable_only_when_ai_subtitles_who_is_
         "{outcome:?}"
     );
     set_ai_who(&conn, "admins");
+    assert_eq!(
+        manual_contenders(),
+        0,
+        "revoked viewer authority leaves the held read charged to maintenance"
+    );
+    conn.execute("DELETE FROM dispatch_turn_ready WHERE job_id='manual'", [])
+        .expect("settle the fixture's competing scan");
     let queued = store
         .background_job(&id)
         .await

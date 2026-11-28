@@ -84,7 +84,9 @@ pub(crate) const SOURCE_TAIL_SHAPE: &str = "SELECT type,name,sql FROM sqlite_mas
  OR tbl_name GLOB 'playback_analysis_*' OR tbl_name='analysis_source_checkpoints'
  OR tbl_name GLOB 'dispatch_turn_*') ORDER BY type,name";
 
-fn source_tail_objects(connection: &rusqlite::Connection) -> Vec<(String, String, String)> {
+pub(crate) fn source_tail_objects(
+    connection: &rusqlite::Connection,
+) -> Vec<(String, String, String)> {
     connection
         .prepare(SOURCE_TAIL_SHAPE)
         .expect("source extension fixture inventory")
@@ -94,12 +96,25 @@ fn source_tail_objects(connection: &rusqlite::Connection) -> Vec<(String, String
         .expect("complete source extension fixture objects")
 }
 
-pub(crate) fn validated_source_tail_drops(
-    objects: &[(String, String, String)],
-    counts: &[(String, i64)],
-    schema_version: i64,
-    remove: impl Fn(&str) -> bool,
-) -> Vec<String> {
+/// The published v1 (v122 source, v124 dispatch, optional v136 live-title
+/// dispatch) source tail objects.
+pub(crate) fn published_source_tail(
+    dispatch: bool,
+    live_titles: bool,
+) -> Vec<(String, String, String)> {
+    source_tail_objects(&published_source_tail_witness(dispatch, live_titles))
+}
+
+/// The source tail of a store migrated by this binary (contracted leases).
+#[allow(dead_code)]
+pub(crate) fn current_source_tail() -> Vec<(String, String, String)> {
+    let directory = tempfile::tempdir().expect("current source tail witness");
+    let path = directory.path().join("current.db");
+    drop(plurx_core::store::SqliteStore::open(&path).expect("current SQLite store"));
+    source_tail_objects(&rusqlite::Connection::open(&path).expect("current catalogue"))
+}
+
+fn published_source_tail_witness(dispatch: bool, live_titles: bool) -> rusqlite::Connection {
     let expected = rusqlite::Connection::open_in_memory().expect("published source tail witness");
     expected.execute_batch(
         "CREATE TABLE background_jobs(id TEXT PRIMARY KEY,state TEXT,fence INTEGER);
@@ -110,24 +125,63 @@ pub(crate) fn validated_source_tail_drops(
     expected
         .execute_batch(SOURCE_FIXTURE_SCHEMA)
         .expect("published v122 source extension");
-    if schema_version >= 124 {
+    if dispatch {
         expected
             .execute_batch(include_str!("../../src/store/background_job_turns.sql"))
             .expect("published v124 dispatch extension");
-        if schema_version >= 136 {
+        if live_titles {
             expected
                 .execute_batch(include_str!("../../src/store/background_job_turns_v2.sql"))
                 .expect("published v136 dispatch migration");
         }
-        if schema_version >= 140 {
-            expected
-                .execute_batch(include_str!("../../src/store/background_job_turns_v3.sql"))
-                .expect("published v140 dispatch authority");
-        }
     }
-    assert_eq!(
-        objects,
-        source_tail_objects(&expected),
+    expected
+}
+
+/// The subtitle dispatch migration replaces just the held-viewer view.
+/// An expanded cluster can carry either authority generation.
+pub(crate) fn source_tail_matches_authority(
+    installed: &[(String, String, String)],
+    predecessor: &[(String, String, String)],
+) -> bool {
+    if installed == predecessor {
+        return true;
+    }
+    if installed.len() != predecessor.len() {
+        return false;
+    }
+    static AI_VIEWER: std::sync::OnceLock<(String, String, String)> = std::sync::OnceLock::new();
+    let ai_viewer = AI_VIEWER.get_or_init(|| {
+        let witness = published_source_tail_witness(true, true);
+        witness
+            .execute_batch(include_str!("../../src/store/background_job_turns_v3.sql"))
+            .expect("published v142 dispatch authority");
+        source_tail_objects(&witness)
+            .into_iter()
+            .find(|(_, name, _)| name == "dispatch_turn_translation_viewer")
+            .expect("published AI viewer view")
+    });
+    installed.iter().zip(predecessor).all(|(actual, before)| {
+        actual
+            == if before.1 == ai_viewer.1 {
+                ai_viewer
+            } else {
+                before
+            }
+    })
+}
+
+pub(crate) fn validated_source_tail_drops(
+    objects: &[(String, String, String)],
+    counts: &[(String, i64)],
+    dispatch: bool,
+    live_titles: bool,
+    remove: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let expected = published_source_tail(dispatch, live_titles);
+    assert!(
+        objects == expected.as_slice()
+            || live_titles && source_tail_matches_authority(objects, &expected),
         "exact published source tail required"
     );
     let expected_counts = objects
@@ -339,7 +393,8 @@ fn source_extension_rewind_plan(
     statements.extend(validated_source_tail_drops(
         &objects,
         &counts,
-        version,
+        version >= 124,
+        false,
         |_| true,
     ));
     let marker: i64 = connection
@@ -570,7 +625,7 @@ pub(crate) fn within_fixture_savepoint(connection: &rusqlite::Connection, body: 
 }
 
 /// The published trigger `name` from one migration's own statements.
-fn published_trigger(migration: &str, name: &str) -> String {
+pub(crate) fn published_trigger(migration: &str, name: &str) -> String {
     let mut statements = migration
         .split("-- next statement")
         .filter(|statement| statement.contains(&format!("CREATE TRIGGER IF NOT EXISTS {name}\n")));
@@ -675,19 +730,11 @@ pub(crate) fn rewind_title_v2_to_v131(connection: &rusqlite::Connection) {
     });
 }
 
-const STORAGE_DOMAIN_PENDING_FIXTURE_SHAPE_SQL: &str = "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (
-        name IN ('background_storage_domain_pending','background_storage_domains_live',
-        'background_storage_domain_changed_roots','background_storage_domain_disturbed',
-        'background_storage_domain_holders','background_storage_domain_affected_jobs',
-        'background_storage_domains_apply','background_storage_domain_pending_schema')
-        OR tbl_name IN ('background_storage_domain_pending','background_storage_domain_pending_schema'))
-        ORDER BY type,name";
-
 fn storage_domain_pending_fixture_objects(
     catalogue: &rusqlite::Connection,
 ) -> Vec<(String, String, String)> {
     catalogue
-        .prepare(STORAGE_DOMAIN_PENDING_FIXTURE_SHAPE_SQL)
+        .prepare(STORAGE_PENDING_FIXTURE_SHAPE_SQL)
         .expect("storage domain fixture inventory")
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .expect("storage domain fixture objects")
@@ -695,7 +742,38 @@ fn storage_domain_pending_fixture_objects(
         .expect("complete storage domain fixture objects")
 }
 
+/// The exact published v131 pending-domain extension, before root overlays.
 pub(crate) fn storage_domain_pending_fixture_shape() -> Vec<(String, String, String)> {
+    published_storage_pending_fixture_shape()
+}
+
+/// Rewind an owned, empty v131 storage-domain extension to published v130.
+/// Desired configuration is user data, including an already settled revision,
+/// so no pending-table row may be discarded by a historical fixture.
+pub(crate) const STORAGE_PENDING_FIXTURE_SHAPE_SQL: &str =
+    "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (
+        name IN ('background_storage_domain_pending','background_storage_domains_live',
+        'background_storage_domain_changed_roots','background_storage_domain_disturbed',
+        'background_storage_domain_holders','background_storage_domain_affected_jobs',
+        'background_storage_domains_apply','background_storage_domain_pending_schema')
+        OR tbl_name IN ('background_storage_domain_pending','background_storage_domains_live',
+        'background_storage_domain_changed_roots','background_storage_domain_disturbed',
+        'background_storage_domain_holders','background_storage_domain_affected_jobs',
+        'background_storage_domains_apply','background_storage_domain_pending_schema'))
+        ORDER BY type,name";
+
+pub(crate) const STORAGE_PENDING_REWIND_SQL: &str = "DROP TRIGGER background_storage_domains_apply;
+             DROP VIEW background_storage_domain_affected_jobs;
+             DROP VIEW background_storage_domain_disturbed;
+             DROP VIEW background_storage_domain_changed_roots;
+             DROP VIEW background_storage_domain_holders;
+             DROP VIEW background_storage_domains_live;
+             DROP TABLE background_storage_domain_pending_schema;
+             DROP TABLE background_storage_domain_pending;
+             PRAGMA user_version=130;";
+
+/// The exact published pending-domain extension, before root overlays.
+pub(crate) fn published_storage_pending_fixture_shape() -> Vec<(String, String, String)> {
     let witness = rusqlite::Connection::open_in_memory().expect("published storage domain witness");
     witness.execute_batch("CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);")
         .expect("storage domain trigger dependency");
@@ -705,9 +783,6 @@ pub(crate) fn storage_domain_pending_fixture_shape() -> Vec<(String, String, Str
     storage_domain_pending_fixture_objects(&witness)
 }
 
-/// Rewind an owned, empty v131 storage-domain extension to published v130.
-/// Desired configuration is user data, including an already settled revision,
-/// so no pending-table row may be discarded by a historical fixture.
 fn rewind_empty_storage_domain_pending_to_v130(connection: &rusqlite::Connection) {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -748,17 +823,7 @@ fn rewind_empty_storage_domain_pending_to_v130(connection: &rusqlite::Connection
     // also protects direct callers from a refused or failed DDL statement.
     within_fixture_savepoint(connection, || {
         connection
-            .execute_batch(
-                "DROP TRIGGER background_storage_domains_apply;
-             DROP VIEW background_storage_domain_affected_jobs;
-             DROP VIEW background_storage_domain_disturbed;
-             DROP VIEW background_storage_domain_changed_roots;
-             DROP VIEW background_storage_domain_holders;
-             DROP VIEW background_storage_domains_live;
-             DROP TABLE background_storage_domain_pending_schema;
-             DROP TABLE background_storage_domain_pending;
-             PRAGMA user_version=130;",
-            )
+            .execute_batch(STORAGE_PENDING_REWIND_SQL)
             .expect("published storage domain pending rewind");
     });
 }
@@ -825,6 +890,10 @@ pub(crate) fn validated_custody_retention_rewind(shape: &[(String, String)]) -> 
         custody_retention_shape(&expected),
         "exact published custody retention required"
     );
+    custody_retention_rewind_plan()
+}
+
+pub(crate) fn custody_retention_rewind_plan() -> [String; 6] {
     [
         "DROP TABLE background_custody_retention_schema;".to_owned(),
         "DROP INDEX background_source_custody_owner_work;".to_owned(),
@@ -872,7 +941,249 @@ fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
         .expect("published custody retention rewind");
 }
 
-/// Rewind an owned, empty v127-v135 coordination tail to published v126;
+/// One published statement of a migration, found by its opening text.
+fn published_statement(migration: &str, opening: &str) -> String {
+    let mut statements = migration
+        .split("-- next statement")
+        .map(str::trim)
+        .filter(|statement| {
+            statement
+                .lines()
+                .skip_while(|line| line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .starts_with(opening)
+        });
+    let statement = statements.next().expect("published statement").to_owned();
+    assert!(statements.next().is_none(), "one published {opening}");
+    format!("{};", statement.trim_end_matches(';'))
+}
+
+// Inventory every lease-owned object (including foreign-named indexes/triggers)
+// and every existing object the rewind replaces. Validate before any DROP can
+// hide hostile drift from the older extensions' own strict validators.
+pub(crate) const SOURCE_LEASE_REWIND_SHAPE_SQL: &str = "SELECT type,name,sql FROM sqlite_master
+ WHERE sql IS NOT NULL AND (
+ name GLOB 'source_lease*' OR tbl_name GLOB 'source_lease*'
+ OR name IN (
+ 'background_job_required_resources','analysis_required_resources',
+ 'dispatch_turn_library_resources','dispatch_turn_contenders',
+ 'dispatch_turn_ordinary_occupancy','dispatch_turn_independent',
+ 'background_storage_domain_holders','background_storage_domain_disturbed',
+ 'background_storage_domain_affected_jobs','background_source_pause_effects',
+ 'background_source_resume_effects','background_job_enqueue_command',
+ 'background_job_maintenance_command','background_custody_retention_schema',
+ 'background_source_custody_owner_work')
+ OR tbl_name IN (
+ 'background_job_required_resources','analysis_required_resources',
+ 'dispatch_turn_library_resources','dispatch_turn_contenders',
+ 'dispatch_turn_ordinary_occupancy','dispatch_turn_independent',
+ 'background_storage_domain_holders','background_storage_domain_disturbed',
+ 'background_storage_domain_affected_jobs','background_source_pause_effects',
+ 'background_source_resume_effects','background_job_enqueue_command',
+ 'background_job_maintenance_command','background_custody_retention_schema',
+ 'background_source_custody_owner_work')) ORDER BY type,name";
+
+pub(crate) fn source_lease_rewind_objects(
+    connection: &rusqlite::Connection,
+) -> Vec<(String, String, String)> {
+    connection
+        .prepare(SOURCE_LEASE_REWIND_SHAPE_SQL)
+        .expect("source lease rewind inventory")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("source lease rewind rows")
+        .collect::<Result<_, _>>()
+        .expect("complete source lease rewind inventory")
+}
+
+pub(crate) fn current_source_lease_rewind_shape() -> &'static [(String, String, String)] {
+    static EXPECTED: std::sync::OnceLock<Vec<(String, String, String)>> =
+        std::sync::OnceLock::new();
+    EXPECTED
+        .get_or_init(|| {
+            let directory = tempfile::tempdir().expect("current lease rewind witness");
+            let path = directory.path().join("current.db");
+            drop(
+                plurx_core::store::SqliteStore::open(&path)
+                    .expect("canonical current SQLite store"),
+            );
+            let witness =
+                rusqlite::Connection::open(&path).expect("current lease rewind catalogue");
+            source_lease_rewind_objects(&witness)
+        })
+        .as_slice()
+}
+
+fn verify_current_source_lease_rewind_shape(connection: &rusqlite::Connection) {
+    assert_eq!(
+        source_lease_rewind_objects(connection).as_slice(),
+        current_source_lease_rewind_shape(),
+        "exact current source lease and overlaid catalogue required before rewind"
+    );
+    let marker: (i64, i64) = connection
+        .query_row(
+            "SELECT count(*),count(*) FILTER (WHERE singleton=1 AND version=3) FROM source_lease_schema",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("contracted source lease marker");
+    assert_eq!(
+        marker,
+        (1, 1),
+        "current lease rewind requires its singular contracted marker"
+    );
+}
+
+/// Rewind an owned, empty v140/v141 source-lease tail to pre-lease v139:
+/// drop the lease objects and restore the v1 source owners and the four
+/// dependents the expand replaced, from their own published text.
+fn rewind_empty_source_leases_to_v139(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture source lease ordinal");
+    if version != 141 {
+        return;
+    }
+    verify_current_source_lease_rewind_shape(connection);
+    // A job or analysis lease is also recorded by its owner's claim and
+    // reservations; playback, attestation and offline leases are not.
+    let leases: i64 = connection
+        .query_row(SOURCE_LEASE_UNOWNED_SQL, [], |row| row.get(0))
+        .expect("source leases");
+    assert_eq!(
+        leases, 0,
+        "historical fixture must not discard source leases"
+    );
+    let mut plan = source_lease_rewind_plan();
+    plan.push("PRAGMA user_version=139;".to_owned());
+    connection
+        .execute_batch(&plan.join("\n"))
+        .expect("published source lease rewind");
+}
+
+/// Leases that only the lease table records (playback, attestation,
+/// offline), plus receipt provenance the v1 catalogue cannot represent;
+/// a rewind that would discard either is refused.
+pub(crate) const SOURCE_LEASE_UNOWNED_SQL: &str =
+    "SELECT count(*)+(SELECT count(*) FROM source_lease_receipt_sources) AS value FROM source_leases WHERE owner_kind NOT IN ('job','analysis')";
+
+/// The statements that take a contracted (v3) source-lease tail back to
+/// the published v1 source owners, on either backend: the managed v7 and
+/// analysis-scope (v138) resource views the expand replaced come back
+/// exactly. The claim effects are left as they are: the replicated rewind
+/// restores their v1 text itself, SQLite's v132 already has the open-ended
+/// text.
+pub(crate) fn source_lease_rewind_plan() -> Vec<String> {
+    let foreground = include_str!("../../src/store/background_jobs_foreground.sql");
+    let turns = include_str!("../../src/store/background_job_turns.sql");
+    let pending = include_str!("../../src/store/storage_domain_pending.sql");
+    let retention = include_str!("../../src/store/background_jobs_custody_retention.sql");
+    let managed_v7 = include_str!("../../src/store/subtitle_managed_resources_v7.sql");
+    let analysis = include_str!("../../src/store/analysis_source_scope.sql");
+    let mut plan = Vec::new();
+    for trigger in [
+        "source_lease_job_claim",
+        "source_lease_job_renew",
+        "source_lease_job_cancelling",
+        "source_lease_job_settled",
+        "source_lease_analysis_claim",
+        "source_lease_analysis_renew",
+        "source_lease_analysis_success",
+        "source_lease_attestation_renew",
+        "source_lease_offline_renew",
+        "source_lease_offline_end",
+        "source_lease_offline_delete",
+        "source_lease_resume_admission",
+        "source_lease_service_root_admission",
+        "source_lease_receipt_insert",
+        "source_lease_receipt_update",
+        "dispatch_turn_independent",
+        "background_source_pause_effects",
+        "background_source_resume_effects",
+        "background_job_enqueue_command",
+        "background_job_maintenance_command",
+    ] {
+        plan.push(format!("DROP TRIGGER {trigger};"));
+    }
+    for view in [
+        "dispatch_turn_ordinary_occupancy",
+        "dispatch_turn_contenders",
+        "dispatch_turn_library_resources",
+        "background_storage_domain_holders",
+        "background_storage_domain_disturbed",
+        "background_storage_domain_affected_jobs",
+        "background_job_required_resources",
+        "analysis_required_resources",
+        "source_lease_receipt_resources",
+        "source_lease_service_scopes",
+        "source_lease_permissions",
+        "source_lease_effective_resources",
+        "source_lease_owner_scopes",
+        "source_lease_job_scopes",
+        "source_lease_file_resources",
+        "source_lease_limits",
+        "source_lease_root_resources",
+        "source_lease_roots",
+    ] {
+        plan.push(format!("DROP VIEW {view};"));
+    }
+    plan.extend([
+        "DROP TABLE source_lease_receipt_sources;".to_owned(),
+        "DROP TABLE source_leases;".to_owned(),
+        "DROP TABLE source_lease_schema;".to_owned(),
+    ]);
+    plan.push(foreground.to_owned());
+    for (sql, opening) in [
+        (
+            managed_v7,
+            "CREATE VIEW IF NOT EXISTS background_job_required_resources AS",
+        ),
+        (
+            analysis,
+            "CREATE VIEW IF NOT EXISTS analysis_required_resources AS",
+        ),
+        (turns, "CREATE VIEW dispatch_turn_library_resources AS"),
+        (
+            pending,
+            "CREATE VIEW IF NOT EXISTS background_storage_domain_disturbed AS",
+        ),
+        (
+            pending,
+            "CREATE VIEW IF NOT EXISTS background_storage_domain_affected_jobs AS",
+        ),
+    ] {
+        plan.push(published_statement(sql, opening));
+    }
+    for opening in [
+        "CREATE VIEW dispatch_turn_ordinary_occupancy",
+        "CREATE VIEW dispatch_turn_contenders",
+        "CREATE TRIGGER dispatch_turn_independent",
+    ] {
+        plan.push(published_statement(turns, opening));
+    }
+    plan.push(published_statement(
+        pending,
+        "CREATE VIEW IF NOT EXISTS background_storage_domain_holders",
+    ));
+    for opening in [
+        "CREATE INDEX IF NOT EXISTS background_source_custody_owner_work",
+        "CREATE TRIGGER IF NOT EXISTS background_job_enqueue_command",
+        "CREATE TRIGGER IF NOT EXISTS background_job_maintenance_command",
+    ] {
+        plan.push(published_statement(retention, opening));
+    }
+    plan
+}
+
+/// The published v1 (two-slot) claim effects, as a v1 replicated store has
+/// them: its base job schema is installed only when the cluster is created.
+#[allow(dead_code)]
+pub(crate) const CLAIM_EFFECTS_V1: [&str; 2] = [
+    "DROP TRIGGER background_job_claim_effects;",
+    include_str!("../fixtures/background-job-claim-effects-v1.sql"),
+];
+
+/// Rewind an owned, empty v127–v141 coordination tail to published v126;
 /// a fixture already at or below v126 is left alone. The caller owns
 /// atomicity (see [`within_fixture_savepoint`]).
 pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
@@ -907,7 +1218,9 @@ const ANALYSIS_SCOPE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE
 /// Restore the historical title extension without dropping revisions or
 /// changing SQLite's AUTOINCREMENT sequence.
 fn rewind_title_v3_to_v138(conn: &rusqlite::Connection) {
-    use title_extension_fixture::{assert_title_fixture_generation, title_fixture_shape};
+    use title_extension_fixture::{
+        assert_title_fixture_generation, published_title_v2_restore_plan,
+    };
     let version = conn
         .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
         .expect("title generation ordinal");
@@ -915,28 +1228,8 @@ fn rewind_title_v3_to_v138(conn: &rusqlite::Connection) {
         return;
     }
     assert_title_fixture_generation(conn, 3);
-    let source = title_fixture_shape(2);
-    let mut plan = vec![
-        "DROP TRIGGER dv_title_jobs_bind_authority;".to_owned(),
-        "DROP TRIGGER dv_title_jobs_scanner_authority;".to_owned(),
-        "DROP TRIGGER dv_title_jobs_bind;".to_owned(),
-        "DROP TRIGGER dv_title_jobs_publish;".to_owned(),
-        "ALTER TABLE dv_title_jobs_demand DROP COLUMN aggregate_revision;".to_owned(),
-        "ALTER TABLE dv_title_jobs_demand DROP COLUMN scanner_generation;".to_owned(),
-        "DROP TABLE dv_title_jobs_schema;".to_owned(),
-    ];
-    for name in [
-        "dv_title_jobs_bind",
-        "dv_title_jobs_publish",
-        "dv_title_jobs_schema",
-    ] {
-        let (_, sql) = source
-            .iter()
-            .find(|(object, _)| object == name)
-            .expect("v2 witness");
-        plan.push(format!("{};", sql.trim_end_matches(';')));
-    }
-    plan.push("INSERT INTO dv_title_jobs_schema VALUES(1,2); PRAGMA user_version=138;".into());
+    let mut plan = published_title_v2_restore_plan();
+    plan.push("PRAGMA user_version=138;".into());
     within_fixture_savepoint(conn, || {
         conn.execute_batch(&plan.join("\n"))
             .expect("restore v2 title extension");
@@ -1000,13 +1293,13 @@ fn translation_shape(connection: &rusqlite::Connection) -> Vec<(String, String)>
         .expect("complete translation shape")
 }
 
-/// Restore the published predecessor trigger only when the exact v142
-/// finish extension has no demands, stored tracks, or schedule exclusions.
-fn rewind_empty_translation_finish_to_v141(conn: &rusqlite::Connection) {
+/// Restore the published predecessor trigger only when the exact finish
+/// extension has no demands, stored tracks, or schedule exclusions.
+fn rewind_empty_translation_finish_to_v143(conn: &rusqlite::Connection) {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .expect("AI finish ordinal");
-    if version != 142 {
+    if !matches!(version, 144 | 145) {
         return;
     }
     assert_eq!(
@@ -1035,23 +1328,23 @@ fn rewind_empty_translation_finish_to_v141(conn: &rusqlite::Connection) {
          DROP TABLE subtitle_translation_stored_tracks;
          DROP TABLE subtitle_translation_schedule_exclusions;
          {former_trigger};
-         PRAGMA user_version=141;
+         PRAGMA user_version=143;
          RELEASE rewind_ai_finish;"
     ))
     .expect("published AI finish rewind");
 }
 
 /// Restore the continuity trigger and dispatch view from before AI authority.
-fn rewind_ai_authority_to_v139(conn: &rusqlite::Connection) {
-    rewind_empty_translation_finish_to_v141(conn);
+fn rewind_ai_authority_to_v141(conn: &rusqlite::Connection) {
+    rewind_empty_translation_finish_to_v143(conn);
     let version = conn
         .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
         .expect("AI authority ordinal");
-    if version <= 139 {
+    if version <= 141 {
         return;
     }
     assert!(
-        version <= 141,
+        version <= 143,
         "only the published AI authority tail can rewind"
     );
     let chunk = |source: &str, needle: &str| {
@@ -1063,7 +1356,7 @@ fn rewind_ai_authority_to_v139(conn: &rusqlite::Connection) {
             .to_owned()
     };
     let mut plan = vec!["SAVEPOINT rewind_ai_authority;".to_owned()];
-    if version == 141 {
+    if version == 143 {
         plan.push("DROP TRIGGER subtitle_translation_capture_continuity;".to_owned());
         plan.push(chunk(
             include_str!("../../src/store/subtitle_translation_continuity.sql"),
@@ -1075,7 +1368,7 @@ fn rewind_ai_authority_to_v139(conn: &rusqlite::Connection) {
         include_str!("../../src/store/background_job_turns.sql"),
         "CREATE VIEW dispatch_turn_translation_viewer",
     ));
-    plan.push("PRAGMA user_version=139; RELEASE rewind_ai_authority;".to_owned());
+    plan.push("PRAGMA user_version=141; RELEASE rewind_ai_authority;".to_owned());
     conn.execute_batch(&plan.join("\n"))
         .expect("published AI authority rewind");
 }
@@ -1083,7 +1376,12 @@ fn rewind_ai_authority_to_v139(conn: &rusqlite::Connection) {
 /// Restore the published v136 views and managed marker without discarding
 /// queued work or reservations.
 fn rewind_file_root_scope_to_v136(conn: &rusqlite::Connection) {
-    rewind_ai_authority_to_v139(conn);
+    within_fixture_savepoint(conn, || {
+        // Both rewritten lease objects from v145 are dropped by the lease
+        // rewind, so neither owner shape is exposed at an intermediate marker.
+        rewind_ai_authority_to_v141(conn);
+        rewind_empty_source_leases_to_v139(conn);
+    });
     rewind_title_v3_to_v138(conn);
     let ordinal = |conn: &rusqlite::Connection| {
         conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))

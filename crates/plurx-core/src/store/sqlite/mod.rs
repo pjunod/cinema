@@ -1380,12 +1380,21 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::analysis_source_scope::SCHEMA,
     // v139: monotonic scanner authority and aggregate provenance.
     super::dv_title_jobs::MIGRATION_V3,
-    // v140: a held translation's viewer follows `subtitles.ai.v1` authority.
+    // v140: source leases expand: one lease row per source reader. It
+    // replaces the v137/v138 resource views with root-keyed projections that
+    // keep their per-file root narrowing.
+    super::source_leases::EXPAND,
+    // v141: source leases contract: the v1 source-owner objects go. A
+    // single SQLite process has no older binary to wait for.
+    super::source_leases::CONTRACT,
+    // v142: a held translation's viewer follows `subtitles.ai.v1` authority.
     super::background_job_turns::AI_AUTHORITY_MIGRATION,
-    // v141: translation continuity capture follows `subtitles.ai.v1` authority.
+    // v143: translation continuity capture follows `subtitles.ai.v1` authority.
     super::subtitle_translation_schema::AUTHORITY_MIGRATION,
-    // v142: each new AI audio start can finish independently of live viewers.
+    // v144: each new AI audio start can finish independently of live viewers.
     super::subtitle_translation_schema::FINISH_MIGRATION,
+    // v145: source lease arbitration uses the AI subtitle viewer authority.
+    super::source_leases::AI_AUTHORITY_MIGRATION,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1395,6 +1404,22 @@ pub(crate) const MIGRATIONS: &[&str] = &[
 /// migration list prevents the import gate from drifting away from `open`.
 pub const SQLITE_SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
+/// The catalogue (`name`, `sql`) of a fresh database migrated through
+/// `version`: the shape oracle for extensions whose objects changed between
+/// versions.
+pub(crate) fn catalogue_through(version: usize) -> Result<Vec<(String, String)>, StoreError> {
+    catalogue(&SqliteStore::open_migrated_through(version)?)
+}
+
+/// Every named object of `conn` that has SQL text, by name.
+pub(crate) fn catalogue(conn: &Connection) -> Result<Vec<(String, String)>, StoreError> {
+    let mut statement =
+        conn.prepare("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
 /// Column list matching [`item_from_row`]. Prefix with a table alias via
 /// [`item_cols`].
 const ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, year, overview, \
@@ -1839,6 +1864,25 @@ impl SqliteStore {
         }
     }
 
+    fn contracted_source_lease_schema_matches(
+        conn: &Connection,
+        ai_authority: bool,
+    ) -> Result<bool, StoreError> {
+        use super::source_leases;
+        let shape = catalogue(conn)?;
+        if source_leases::version(&shape)? != Some(3)
+            || source_leases::ai_authority_installed(&shape)? != ai_authority
+        {
+            return Ok(false);
+        }
+        Ok(conn.query_row(
+            "SELECT count(*)=1 AND count(*) FILTER (WHERE singleton=1 AND version=3)=1
+             FROM source_lease_schema",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Apply one migration step and stamp its `user_version` in the same
     /// transaction. Dropping the uncommitted transaction on any error rolls
     /// the DDL and the marker back together. A step whose shape a published
@@ -1881,21 +1925,26 @@ impl SqliteStore {
             if version == 138 {
                 super::analysis_source_scope::verify_predecessor(&tx)?;
             }
-            if version == 140 {
+            if version == 142 {
                 super::background_job_turns::verify_catalog(
                     &tx,
                     super::background_job_turns::LIVE_TITLES,
                 )?;
             }
-            if version == 141 {
+            if version == 143 {
                 super::subtitle_translation_schema::verify_authority_predecessor(&tx)?;
             }
-            if version == 142 {
+            if version == 144 {
                 super::subtitle_translation_schema::verify_finish_predecessor(&tx)?;
+            }
+            if version == 145 && !Self::contracted_source_lease_schema_matches(&tx, false)? {
+                return Err(StoreError::Migration(
+                    "incompatible source lease AI authority predecessor".into(),
+                ));
             }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
-            if version == 142 {
+            if version == 144 {
                 tx.execute(
                     super::subtitle_translation_schema::SUPERSEDE_LEGACY_JOBS,
                     [],
@@ -1920,6 +1969,18 @@ impl SqliteStore {
         tx.pragma_update(None, "user_version", version)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// A fresh in-memory database migrated through `version`.
+    pub(crate) fn open_migrated_through(version: usize) -> Result<Connection, StoreError> {
+        let conn = Connection::open_in_memory()?;
+        for (index, sql) in MIGRATIONS.iter().enumerate().take(version) {
+            conn.pragma_update(None, "foreign_keys", "OFF")?;
+            let applied = Self::apply_migration_step(&conn, index as i64 + 1, sql, false);
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+            applied?;
+        }
+        Ok(conn)
     }
 
     pub(crate) fn migrate(conn: &Connection) -> Result<(), StoreError> {
@@ -1989,6 +2050,11 @@ impl SqliteStore {
         }
 
         super::background_job_turns::verify_catalog(conn, super::background_job_turns::CURRENT)?;
+        if !Self::contracted_source_lease_schema_matches(conn, true)? {
+            return Err(StoreError::Migration(
+                "source lease AI authority schema is incomplete".into(),
+            ));
+        }
         super::subtitle_managed_schema::verify_sqlite(conn)?;
         super::subtitle_translation_schema::verify_sqlite(conn)?;
         super::library_annotations_schema::verify_sqlite(conn)?;
@@ -2384,7 +2450,10 @@ impl MetricsStore for SqliteStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)
                             + (SELECT COUNT(*) FROM analysis_source_reservations
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)),
-                        'source_recovery_pending', (SELECT COUNT(DISTINCT held.custody_id) FROM source_io_occupancy held JOIN background_source_current_owners c ON c.custody_id = held.custody_id WHERE held.active_occupancy=1 AND (CASE WHEN c.authority_expires_at_ms>0 THEN c.authority_expires_at_ms WHEN c.phase='cleanup_pending' THEN c.updated_at_ms WHEN c.phase='paused' THEN 0 ELSE NULL END) <= ?2 * 1000 - 180000),
+                        'source_recovery_pending', (SELECT COUNT(*) FROM source_leases WHERE expires_at_ms <= ?2 * 1000 - 180000),
+                        'source_leases', json_object('playback',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'playback'),'job',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'job'),'analysis',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'analysis'),'lease',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'lease'),'offline',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'offline')),
+                        'source_readers_per_root', COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'jobs.source_readers_per_root' AND CAST(value AS INTEGER) BETWEEN 1 AND 16), 2),
+                        'source_lease_schema_version', COALESCE((SELECT version FROM source_lease_schema WHERE singleton = 1), 0),
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))), ")
                     + &request_health
                     + " FROM offline_packages WHERE node_id = ?1"),

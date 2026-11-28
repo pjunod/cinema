@@ -16,7 +16,7 @@ pub(super) fn catalog(conn: &rusqlite::Connection) -> Result<Vec<(String, String
 
 /// The held-translation viewer view reads `subtitles.ai.v1` (AI subtitles T2).
 pub(super) const AI_AUTHORITY_MIGRATION: &str = include_str!("background_job_turns_v3.sql");
-/// Catalog generations, in order: v124 original, v136 live titles, v140 AI
+/// Catalog generations, in order: v124 original, v136 live titles, v142 AI
 /// subtitles authority.
 pub(super) const ORIGINAL: u8 = 0;
 pub(super) const LIVE_TITLES: u8 = 1;
@@ -52,12 +52,33 @@ pub(super) fn verify_catalog(
     conn: &rusqlite::Connection,
     generation: u8,
 ) -> Result<(), StoreError> {
-    if catalog(conn)? != expected_catalog(generation)? {
+    if !accepts_catalog(&catalog(conn)?, generation)? {
         return Err(StoreError::Migration(
             "incompatible dispatch turn schema".into(),
         ));
     }
     Ok(())
+}
+
+pub(super) fn accepts_catalog(
+    installed: &[(String, String)],
+    generation: u8,
+) -> Result<bool, StoreError> {
+    let expected = expected_catalog(generation)?;
+    if generation == ORIGINAL {
+        return Ok(installed == expected);
+    }
+    // The lease migrations replace four dispatch objects, while the subtitle
+    // migration only replaces the translation viewer. Verify that view against
+    // its own generation before checking the leased shapes of the other objects.
+    let is_translation_viewer =
+        |(name, _): &(String, String)| name == "dispatch_turn_translation_viewer";
+    let (installed_viewer, installed): (Vec<_>, Vec<_>) =
+        installed.iter().cloned().partition(is_translation_viewer);
+    let (expected_viewer, expected): (Vec<_>, Vec<_>) =
+        expected.into_iter().partition(is_translation_viewer);
+    Ok(installed_viewer == expected_viewer
+        && super::source_leases::accepts_extension_shape(&installed, &expected))
 }
 
 pub(super) async fn advertise<T: QueueSql>(
@@ -139,6 +160,11 @@ mod tests {
     fn finite_playback_qualification_precedes_an_admissible_library_turn() {
         let db = rusqlite::Connection::open_in_memory().expect("fixture");
         SqliteStore::apply_migrations_for_test(&db, 135).expect("deployed schema");
+        // This binary's claim statement reads source leases; give the deployed
+        // schema the same lease objects as every other v1-era claim fixture.
+        crate::store::source_leases::install_for_fixture(&db);
+        db.execute_batch(crate::store::subtitle_translation_schema::FINISH_MIGRATION)
+            .expect("subtitle finish-demand objects used by the current claim SQL");
         db.execute_batch(r#"
             INSERT INTO libraries(id,name,kind,paths) VALUES(1,'Movies','movies','["/media"]');
             INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','Movie','Movie');
@@ -164,8 +190,19 @@ mod tests {
             .query_row("SELECT winner FROM dispatch_turn_attempt", [], |r| r.get(0))
             .expect("contended turn");
         assert_eq!(winner, "manual");
-        SqliteStore::apply_next_migration_for_test(&db).expect("upgrade with pending work");
-        verify_catalog(&db, LIVE_TITLES).expect("exact upgraded catalog");
+        // The v136 step's exact-predecessor check runs before the lease expand
+        // in every real upgrade; this fixture already carries leases, so apply
+        // the published v136 statements and check the upgraded catalogue.
+        db.execute_batch(LIVE_TITLE_MIGRATION)
+            .expect("upgrade with pending work");
+        // The hand-made lease fixture keeps v124's library-resources view, so
+        // compare exactly the two objects the v136 step publishes.
+        let published = expected_catalog(LIVE_TITLES).expect("published v136 catalog");
+        let installed = catalog(&db).expect("upgraded catalog");
+        for name in ["dispatch_turn_job", "dispatch_turn_protected_jobs"] {
+            let row = |rows: &[(String, String)]| rows.iter().find(|(n, _)| n == name).cloned();
+            assert_eq!(row(&installed), row(&published), "exact upgraded {name}");
+        }
         db.execute(
             "UPDATE background_job_waiters SET deadline_ms=1000 WHERE request_id='viewer'",
             [],
@@ -193,5 +230,21 @@ mod tests {
             )
             .expect("held classification");
         assert_eq!(held, 1);
+    }
+
+    #[test]
+    fn dispatch_catalog_requires_the_right_translation_viewer_on_leased_shapes() {
+        let db = SqliteStore::open_migrated_through(141).expect("contracted lease schema");
+        verify_catalog(&db, LIVE_TITLES).expect("source-lease predecessor");
+        assert!(verify_catalog(&db, CURRENT).is_err());
+
+        db.execute_batch(AI_AUTHORITY_MIGRATION)
+            .expect("AI subtitles dispatch migration");
+        verify_catalog(&db, CURRENT).expect("source leases and AI subtitles");
+        assert!(verify_catalog(&db, LIVE_TITLES).is_err());
+
+        db.execute_batch("DROP VIEW dispatch_turn_translation_viewer;")
+            .expect("remove viewer authority");
+        assert!(verify_catalog(&db, CURRENT).is_err());
     }
 }

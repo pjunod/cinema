@@ -1774,7 +1774,8 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS background_storage_domain_pending",
             // v132: exact title-v2 triggers and marker are removed by the shared title teardown.
             "INSERT INTO dv_title_jobs_schema VALUES(1,2)",
-            // v133: the empty delegation tail is removed first by the shared title rewind.
+            // v133: the empty delegation tail is removed after the source
+            // lease rewind by the shared title rewind.
             "CREATE TABLE IF NOT EXISTS delegation_schema",
             // v136: the test rewind restores the exact v124 dispatch definitions.
             "DROP TRIGGER dispatch_turn_job",
@@ -1789,11 +1790,17 @@ mod tests {
             // v139: the shared title rewind restores the exact v2 trigger
             // definitions and marker before removing the authority columns.
             "INSERT INTO dv_title_jobs_schema VALUES(1,3)",
-            // v140/v141 are reversed before the shared title rewind.
+            // v140/v141: the shared source-extension fixture drops the empty
+            // lease table and restores the v1 owners and replaced dependents.
+            "CREATE TABLE source_leases",
+            "UPDATE source_lease_schema SET version=3",
+            // v142/v143 are reversed before the shared source-lease rewind.
             "DROP VIEW dispatch_turn_translation_viewer",
             "DROP TRIGGER subtitle_translation_capture_continuity",
-            // v142 restores the predecessor mutation trigger and drops only empty tables.
+            // v144 restores the predecessor mutation trigger and drops only empty tables.
             "CREATE TABLE subtitle_translation_finish_demands(",
+            // v145 replaces two lease definitions removed by the lease rewind.
+            "DROP VIEW dispatch_turn_contenders",
         ];
 
         assert!(

@@ -1,6 +1,6 @@
 # Playback reads keep a valid recovery witness
 
-**Status:** implementation in progress; [execution status](PLAYBACK-READER-WITNESS-STATUS.md) · revised after Fable review · plan only, nothing built ·
+**Status:** superseded (2026-11-15) — phases B0–B3 strengthened the reader-witness model that [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md) step 2 deletes; lease expiry now releases source capacity. The launch access declarations from B0/B1 remain as launch verification. Earlier: implementation in progress; [execution status](PLAYBACK-READER-WITNESS-STATUS.md) · revised after Fable review ·
 **Updated:** 2026-11-12 · **Source baseline:** `origin/main` at `54aebebf9`;
 in-flight `effort/playback-start-phase2` at `50fa67f41`; census stopgap
 PR #1561 (`claude/playback-census-recovery`)

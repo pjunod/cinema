@@ -2,12 +2,6 @@
 use crate::error::StoreError;
 use std::sync::LazyLock;
 pub(crate) const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name GLOB 'dv_title_jobs_*' AND sql IS NOT NULL ORDER BY name";
-#[cfg(feature = "hiqlite-store")]
-pub(crate) const MARKER_SQL_V1: &str =
-    "SELECT count(*) AS count FROM dv_title_jobs_schema WHERE singleton=1 AND version=1";
-#[cfg(feature = "hiqlite-store")]
-pub(crate) const MARKER_SQL_V2: &str =
-    "SELECT count(*) AS count FROM dv_title_jobs_schema WHERE singleton=1 AND version=2";
 pub(crate) const MARKER_SQL: &str =
     "SELECT count(*) AS count FROM dv_title_jobs_schema WHERE singleton=1 AND version=3";
 const DEPENDENCIES: &str = "CREATE TABLE files(id INTEGER PRIMARY KEY,path TEXT,size INTEGER,mtime INTEGER,video_codec TEXT,dv_profile INTEGER,dv_rpu_present INTEGER,probe_json TEXT,scanned_at INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,owner_node_id TEXT,owner_boot_id TEXT,claim_id TEXT,lease_expires_ms INTEGER,result_ref TEXT,updated_at_ms INTEGER); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT); CREATE TABLE background_job_waiters(job_id TEXT,state TEXT,result_ref TEXT,updated_at_ms INTEGER,consumer_kind TEXT,consumer_ref TEXT);";

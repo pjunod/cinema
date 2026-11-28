@@ -9,7 +9,8 @@ use plurx_core::store::Store;
 
 #[allow(unused_imports)]
 pub(crate) use self::source_extensions_fixture::title_extension_fixture::{
-    require_fixture_marker, validated_empty_title_rewind, TITLE_FIXTURE_SHAPE_SQL,
+    published_title_v2_restore_plan, require_fixture_marker, title_fixture_shape,
+    validated_empty_title_rewind, TITLE_FIXTURE_SHAPE_SQL,
 };
 use self::source_extensions_fixture::translation_fixture_shape_at;
 pub(crate) use self::source_extensions_fixture::TRANSLATION_FIXTURE_SHAPE_SQL;
@@ -2024,7 +2025,7 @@ fn source_extension_fixture_preserves_managed_work_and_receipts() {
 fn source_extension_fixture_refuses_retained_source_or_unowned_objects_without_mutation() {
     for injection in [
         "INSERT INTO background_source_service_epochs VALUES('source_io',1,1);",
-        "CREATE INDEX unowned_fixture_index ON foreground_source_owners(lease_expires_at_ms);",
+        "CREATE INDEX unowned_fixture_index ON background_source_pauses(paused_at_ms);",
     ] {
         let directory = tempfile::tempdir().expect("source refusal directory");
         let path = directory.path().join("current.sqlite");

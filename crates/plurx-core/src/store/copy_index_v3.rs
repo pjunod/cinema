@@ -129,7 +129,8 @@ impl CopyIndexSourceAttestation {
             || !analysis_request_id_is_valid(&self.analysis_request_id)
             || self.analysis_fence <= 0
             || self.phase_sequence <= 0
-            || uuid::Uuid::parse_str(&self.custody_id).is_err()
+            // A UUID (attestations before source leases) or a lease id.
+            || !super::source_leases::lease_id_valid(&self.custody_id)
         {
             return Err(invalid());
         }

@@ -12,7 +12,8 @@ impl QueueSql for SqliteStore {
         self.with_conn(move |connection| {
             let transaction = connection.unchecked_transaction()?;
             for (sql, request) in statements {
-                let mut statement = transaction.prepare(&sql)?;
+                // Legacy import pages reuse the same SQL with different payloads.
+                let mut statement = transaction.prepare_cached(&sql)?;
                 let mut rows = statement.query([request])?;
                 while rows.next()?.is_some() {}
             }

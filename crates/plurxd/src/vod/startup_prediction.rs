@@ -473,15 +473,9 @@ async fn run_with_source_custody(
             }
         }
     };
-    if crate::source_custody::activate_background_with_journal(&store, custody.clone())
-        .await
-        .is_err()
-    {
-        settle_read_lease(&store, &owner, Some(custody), false).await;
-        return;
-    }
-    // Live viewer preparation outranks analysis and jobs on this source
-    // domain; wake their pressure checks so they yield now, not at a poll.
+    // The registered read-preparation lease is the reader's authority: live
+    // viewer preparation outranks analysis and jobs on this source root, so
+    // wake their pressure checks and they yield now, not at a poll.
     crate::source_custody::source_pressure_changed().notify_waiters();
     let cancel = shutdown.child_token();
     let budget =

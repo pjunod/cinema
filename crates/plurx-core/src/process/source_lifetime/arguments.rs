@@ -5,7 +5,6 @@ use std::fs::File;
 use std::io;
 
 /// Selects scalar/device operands in a caller-audited command protocol.
-/// Every nondefault profile remains ineligible for a clean recovery witness.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ArgumentProfile {
     #[default]

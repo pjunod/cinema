@@ -195,7 +195,7 @@ pub(crate) fn continuity_already_applied(conn: &rusqlite::Connection) -> Result<
         )),
     }
 }
-/// The v141 authority upgrade applies only to the exact continuity shape.
+/// The v143 authority upgrade applies only to the exact continuity shape.
 pub(crate) fn verify_authority_predecessor(conn: &rusqlite::Connection) -> Result<(), StoreError> {
     if version(&rows(conn)?)? != Some(2) {
         return Err(StoreError::Migration(

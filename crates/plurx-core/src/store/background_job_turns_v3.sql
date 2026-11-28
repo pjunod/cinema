@@ -2,7 +2,7 @@
 -- subtitles.ai.v1 (from_audio, and who='everyone' or an admin demand).
 DROP VIEW dispatch_turn_translation_viewer;
 -- next statement
--- Immutable v140 snapshot of translation_admission! for a held job's fence.
+-- Immutable v142 snapshot of translation_admission! for a held job's fence.
 -- Later changes to translation authority must migrate this catalog definition
 -- explicitly; changing the old text would strand already-upgraded clusters.
 CREATE VIEW dispatch_turn_translation_viewer AS

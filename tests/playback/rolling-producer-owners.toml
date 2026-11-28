@@ -3038,7 +3038,6 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/admission.rs" = 18
 "crates/plurxd/src/availability.rs" = 1
 "crates/plurxd/src/background_jobs.rs" = 3
-"crates/plurxd/src/background_jobs/source/completion.rs" = 1
 "crates/plurxd/src/backup.rs" = 1
 "crates/plurxd/src/cachekeep.rs" = 4
 "crates/plurxd/src/cluster.rs" = 7
@@ -3048,7 +3047,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/copyrange/production.rs" = 3
 "crates/plurxd/src/copyseg.rs" = 7
 "crates/plurxd/src/decode_facts.rs" = 7
-"crates/plurxd/src/decode_facts/tests.rs" = 10
+"crates/plurxd/src/decode_facts/tests.rs" = 8
 "crates/plurxd/src/decoder_health.rs" = 11
 "crates/plurxd/src/desktop_control.rs" = 6
 "crates/plurxd/src/diagnostics.rs" = 2
@@ -3073,7 +3072,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/http/cluster_operations.rs" = 1
 "crates/plurxd/src/http/cluster_operations/tests.rs" = 8
 "crates/plurxd/src/http/comingsoon.rs" = 1
-"crates/plurxd/src/http/developer.rs" = 7
+"crates/plurxd/src/http/developer.rs" = 6
 "crates/plurxd/src/http/extract.rs" = 3
 "crates/plurxd/src/http/hls/control.rs" = 4
 "crates/plurxd/src/http/hls/create.rs" = 8
@@ -3174,7 +3173,6 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/sharing_network.rs" = 1
 "crates/plurxd/src/sharing_playback_client.rs" = 3
 "crates/plurxd/src/source_custody.rs" = 3
-"crates/plurxd/src/source_custody/recovery/reader/tests.rs" = 11
 "crates/plurxd/src/source_generation.rs" = 2
 "crates/plurxd/src/source_input.rs" = 3
 "crates/plurxd/src/source_input/tests.rs" = 7
@@ -3182,8 +3180,6 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/source_probe/dv_refit.rs" = 2
 "crates/plurxd/src/source_probe/fel_qualification.rs" = 6
 "crates/plurxd/src/source_probe/fel_qualification/child_group.rs" = 1
-# DV levels pass: one spawn_blocking pipe fold, awaited by the lane after the
-# child exits; it reaches EOF when the stream copy is reaped.
 "crates/plurxd/src/source_probe/levels_work.rs" = 1
 "crates/plurxd/src/source_probe/refit_work.rs" = 1
 "crates/plurxd/src/source_probe/refit_work_tests.rs" = 2
@@ -3274,6 +3270,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/waitpool.rs" = 1
 "crates/plurxd/src/watched.rs" = 7
 "crates/plurxd/src/windows_service.rs" = 1
+# DV levels pass: one spawn_blocking pipe fold, awaited by the lane after the
+# child exits; it reaches EOF when the stream copy is reaped.
 # 348 since M2: the Dolby Vision facts backfill is spawned from the per-tick
 # maintenance block beside the genre backfill. It is a leased catalogue job
 # (`catalogue:dv-facts`) that walks a node-local cursor and writes columns —
@@ -4667,9 +4665,8 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 "crates/plurx-core/src/process/mod.rs" = 3
 "crates/plurx-core/src/process/priority.rs" = 1
 "crates/plurxd/src/copyseg.rs" = 1
-"crates/plurxd/src/decode_facts.rs" = 2
+"crates/plurxd/src/decode_facts.rs" = 1
 "crates/plurxd/src/decode_facts/macos_wasm.rs" = 1
-"crates/plurxd/src/decode_facts/tests.rs" = 1
 "crates/plurxd/src/desktop_control.rs" = 1
 "crates/plurxd/src/discovery.rs" = 3
 "crates/plurxd/src/dv_runtime.rs" = 6
@@ -4698,11 +4695,6 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 "crates/plurxd/src/mkv_sparse.rs" = 2
 "crates/plurxd/src/pgs_overlay.rs" = 1
 "crates/plurxd/src/prodrun.rs" = 3
-"crates/plurxd/src/source_custody/recovery/abort_tests.rs" = 1
-"crates/plurxd/src/source_custody/recovery/reader/tests.rs" = 4
-"crates/plurxd/src/source_custody/recovery/tests.rs" = 3
-# DV levels pass: the lane future is boxed and owned by LevelsTask; stop()
-# cancels and awaits it, reaping the child before the lane is released.
 "crates/plurxd/src/source_probe/levels_work.rs" = 1
 "crates/plurxd/src/source_probe/title_work_tests.rs" = 1
 "crates/plurxd/src/state.rs" = 1
@@ -4726,6 +4718,8 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 "crates/plurxd/src/vod/tests/chunk_03.rs" = 11
 "crates/plurxd/src/vodencode_tests.rs" = 2
 "crates/plurxd/src/vodgen.rs" = 1
+# DV levels pass: the lane future is boxed and owned by LevelsTask; stop()
+# cancels and awaits it, reaping the child before the lane is released.
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4763,7 +4757,6 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 "crates/plurxd/src/media_pool.rs" = 1
 "crates/plurxd/src/playback_control.rs" = 1
 "crates/plurxd/src/producer_spawn.rs" = 8
-"crates/plurxd/src/source_custody/recovery/reader.rs" = 1
 "crates/plurxd/src/source_probe/dv_refit.rs" = 3
 "crates/plurxd/src/source_probe/refit_work_tests.rs" = 1
 "crates/plurxd/src/transcode/manager/produce.rs" = 1
@@ -4850,10 +4843,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/admission.rs" = 21
 "crates/plurxd/src/artifact_integrity.rs" = 1
 "crates/plurxd/src/availability.rs" = 2
-"crates/plurxd/src/background_jobs.rs" = 19
+"crates/plurxd/src/background_jobs.rs" = 17
 "crates/plurxd/src/background_jobs/analysis_reconcile.rs" = 1
 "crates/plurxd/src/background_jobs/source.rs" = 10
-"crates/plurxd/src/background_jobs/source/completion.rs" = 4
 "crates/plurxd/src/backup.rs" = 7
 "crates/plurxd/src/channel_subjects.rs" = 2
 "crates/plurxd/src/clock_offset.rs" = 21
@@ -4867,7 +4859,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/copyseg.rs" = 9
 "crates/plurxd/src/decode_facts.rs" = 22
 "crates/plurxd/src/decode_facts/source_session.rs" = 5
-"crates/plurxd/src/decode_facts/tests.rs" = 42
+"crates/plurxd/src/decode_facts/tests.rs" = 38
 "crates/plurxd/src/decoder_health.rs" = 3
 "crates/plurxd/src/desktop_control.rs" = 5
 "crates/plurxd/src/diagnostics.rs" = 2
@@ -5033,12 +5025,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/sharing_host.rs" = 4
 "crates/plurxd/src/sharing_network.rs" = 2
 "crates/plurxd/src/sharing_playback_client.rs" = 11
-"crates/plurxd/src/source_custody.rs" = 14
-"crates/plurxd/src/source_custody/recovery/abort_tests.rs" = 1
-"crates/plurxd/src/source_custody/recovery/reader.rs" = 1
-"crates/plurxd/src/source_custody/recovery/reader/tests.rs" = 10
-"crates/plurxd/src/source_custody/recovery/source_census/tests.rs" = 1
-"crates/plurxd/src/source_custody/recovery/tests.rs" = 4
+"crates/plurxd/src/source_custody.rs" = 5
 "crates/plurxd/src/source_input.rs" = 2
 "crates/plurxd/src/source_input/tests.rs" = 3
 "crates/plurxd/src/source_probe.rs" = 13
@@ -7411,9 +7398,6 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 "crates/plurxd/src/ffmpeg.rs" = 22
 "crates/plurxd/src/ffmpeg/linux_dolby.rs" = 3
 "crates/plurxd/src/ffmpeg/output_pipe.rs" = 1
-# +2: `a_metadata_probe_killed_from_outside_is_an_interruption` runs two
-# `/bin/sh` children through `metadata_probe_output`, which owns, kills on
-# its deadline and reaps them.
 "crates/plurxd/src/ffmpeg/tests.rs" = 12
 "crates/plurxd/src/ffmpeg_support.rs" = 3
 "crates/plurxd/src/fontenv.rs" = 1
@@ -7448,16 +7432,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 "crates/plurxd/src/producer_spawn.rs" = 3
 "crates/plurxd/src/scratch_put.rs" = 2
 "crates/plurxd/src/sharing_host.rs" = 1
-"crates/plurxd/src/source_custody/recovery/abort_tests.rs" = 1
-"crates/plurxd/src/source_custody/recovery/reader/tests.rs" = 6
-"crates/plurxd/src/source_custody/recovery/tests.rs" = 3
 "crates/plurxd/src/source_input/tests.rs" = 1
 "crates/plurxd/src/source_probe.rs" = 1
 "crates/plurxd/src/source_probe/dv_refit.rs" = 3
 "crates/plurxd/src/source_probe/dv_title.rs" = 2
 "crates/plurxd/src/source_probe/fel_qualification.rs" = 10
-# DV levels pass: the stream copy (production) and two fixture FFmpeg runs in
-# its own tests; the production child runs under the bounded owner.
 "crates/plurxd/src/source_probe/levels_work.rs" = 3
 "crates/plurxd/src/source_probe/title_work_tests.rs" = 2
 "crates/plurxd/src/startup_tests.rs" = 2
@@ -7500,6 +7479,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 "crates/plurxd/src/vodencode_manager_tests.rs" = 13
 "crates/plurxd/src/vodencode_tests.rs" = 24
 "crates/plurxd/src/vodgen.rs" = 4
+# +2: `a_metadata_probe_killed_from_outside_is_an_interruption` runs two
+# `/bin/sh` children through `metadata_probe_output`, which owns, kills on
+# its deadline and reaps them.
+# DV levels pass: the stream copy (production) and two fixture FFmpeg runs in
+# its own tests; the production child runs under the bounded owner.
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7542,9 +7526,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 "crates/plurxd/src/cluster.rs" = 8
 "crates/plurxd/src/copyrange/production.rs" = 2
 "crates/plurxd/src/copyseg.rs" = 2
-"crates/plurxd/src/decode_facts.rs" = 2
+"crates/plurxd/src/decode_facts.rs" = 1
 "crates/plurxd/src/decode_facts/macos_wasm.rs" = 1
-"crates/plurxd/src/decode_facts/tests.rs" = 4
+"crates/plurxd/src/decode_facts/tests.rs" = 3
 "crates/plurxd/src/desktop_control.rs" = 5
 "crates/plurxd/src/diagnostics_delivery.rs" = 1
 "crates/plurxd/src/diagnostics_snapshot_tests.rs" = 2
@@ -7687,17 +7671,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 "crates/plurxd/src/sharing_host.rs" = 9
 "crates/plurxd/src/sharing_network.rs" = 2
 "crates/plurxd/src/sharing_playback_client.rs" = 7
-"crates/plurxd/src/source_custody/recovery/abort_tests.rs" = 1
-"crates/plurxd/src/source_custody/recovery/reader/tests.rs" = 4
-"crates/plurxd/src/source_custody/recovery/tests.rs" = 3
 "crates/plurxd/src/source_input.rs" = 1
 "crates/plurxd/src/source_input/tests.rs" = 4
 "crates/plurxd/src/source_probe.rs" = 1
 "crates/plurxd/src/source_probe/dv_refit.rs" = 2
 "crates/plurxd/src/source_probe/dv_title.rs" = 1
 "crates/plurxd/src/source_probe/fel_qualification.rs" = 2
-# DV levels pass: the bounded stream copy and its source-lifetime mediation,
-# both awaited inside read_levels.
 "crates/plurxd/src/source_probe/levels_work.rs" = 2
 "crates/plurxd/src/source_probe/title_work_tests.rs" = 2
 "crates/plurxd/src/startup_tests.rs" = 10
@@ -7743,6 +7722,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 "crates/plurxd/src/vodencode_tests.rs" = 26
 "crates/plurxd/src/vodgen.rs" = 1
 "crates/plurxd/src/watched.rs" = 1
+# DV levels pass: the bounded stream copy and its source-lifetime mediation,
+# both awaited inside read_levels.
 # +2 for the Android-DV boundary regressions: one test-only finite FFmpeg
 # `.output()` described by the command-construction entry, plus one Axum
 # `Response::status()` assertion. Only the former launches a child, and it is
@@ -8598,12 +8579,8 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 "crates/plurxd/src/producer_spawn.rs" = 4
 "crates/plurxd/src/shared_cache.rs" = 10
 "crates/plurxd/src/sharing_connection_custody.rs" = 2
-"crates/plurxd/src/source_custody/recovery/abort_tests.rs" = 3
-"crates/plurxd/src/source_custody/recovery/reader/tests.rs" = 6
-"crates/plurxd/src/source_custody/recovery/tests.rs" = 5
 "crates/plurxd/src/source_probe/fel_qualification.rs" = 5
 "crates/plurxd/src/source_probe/fel_qualification/child_group.rs" = 3
-# DV levels pass: LevelsTask::stop cancels and awaits the owned read.
 "crates/plurxd/src/source_probe/levels_work.rs" = 1
 "crates/plurxd/src/source_probe/title_work_tests.rs" = 3
 "crates/plurxd/src/startup_tests.rs" = 2
@@ -8638,6 +8615,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 "crates/plurxd/src/vod/tests/source_lifetime.rs" = 2
 "crates/plurxd/src/vodgen.rs" = 1
 "crates/plurxd/src/waitpool.rs" = 31
+# DV levels pass: LevelsTask::stop cancels and awaits the owned read.
 # +3: the bounded chapter probe kills and reaps oversized output, and reaps
 # ordinary completion. Cancellation/deadline drops the kill-on-drop child.
 # +4: the HTTP marker race fixture's two-party barrier calls `wait` four times;
@@ -9033,7 +9011,6 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 "crates/plurxd/src/producer_spawn.rs" = 1
 "crates/plurxd/src/sharing_host.rs" = 1
 "crates/plurxd/src/source_custody.rs" = 2
-"crates/plurxd/src/source_custody/recovery/tests.rs" = 5
 "crates/plurxd/src/source_probe/fel_qualification/child_group.rs" = 4
 "crates/plurxd/src/startup_tests.rs" = 2
 "crates/plurxd/src/subtitle_ride_along.rs" = 1

@@ -874,10 +874,12 @@ async fn v6_rebuild_preserves_everything() {
     // v137 the managed v7 view and v138 the analysis view, where a per-file
     // reader reserves only the library root holding its file. v139 records
     // ordered title scanner authority and provenance for aggregate reuse.
-    // v140/v141 apply the AI setting to dispatch and playback continuity.
-    // v142 adds durable finish intent and saved AI subtitle tracks.
+    // v140/v141 expand and contract the source-lease catalog.
+    // v142/v143 apply the AI setting to dispatch and playback continuity.
+    // v144 adds durable finish intent and saved AI subtitle tracks.
+    // v145 brings the same viewer authority to source-lease arbitration.
     assert_eq!(
-        version, 142,
+        version, 145,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );
@@ -2275,6 +2277,41 @@ fn v39_to_v41_add_annotations_and_widen_analysis_without_losing_requests() {
             1,
             "missing {table}"
         );
+    }
+}
+
+#[test]
+fn source_lease_ai_authority_requires_the_contracted_marker() {
+    for corrupt_marker in [
+        "UPDATE source_lease_schema SET version=2;",
+        "DELETE FROM source_lease_schema;",
+    ] {
+        let db = SqliteStore::open_migrated_through(144).expect("contracted lease predecessor");
+        let predecessor = catalogue(&db).expect("predecessor catalog");
+        db.execute_batch(corrupt_marker)
+            .expect("damage the predecessor marker");
+        assert!(matches!(
+            SqliteStore::apply_next_migration_for_test(&db),
+            Err(StoreError::Migration(message)) if message.contains("AI authority predecessor")
+        ));
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("unchanged schema version"),
+            144
+        );
+        assert_eq!(catalogue(&db).expect("unchanged catalog"), predecessor);
+
+        db.execute_batch(
+            "DELETE FROM source_lease_schema; INSERT INTO source_lease_schema VALUES(1,3);",
+        )
+        .expect("restore the contracted marker");
+        SqliteStore::apply_next_migration_for_test(&db).expect("apply v145 after repair");
+        db.execute_batch(corrupt_marker)
+            .expect("damage the current marker");
+        assert!(matches!(
+            SqliteStore::migrate(&db),
+            Err(StoreError::Migration(message)) if message.contains("AI authority schema")
+        ));
     }
 }
 
