@@ -3378,17 +3378,16 @@ separate placement cohorts. Build skew alone does not prevent placement.
 Strict media-pool envelope changes require a protocol bump and dated note
 here (`make paperwork` checks this). Newest first:
 
+- 2026-11-27: protocol 13 — an offer for a predicted split copy carries
+  `output_contract` `hls-split-fmp4-v1` and no soundtrack, so every language
+  places on and reuses one shared video. Drain by cohort as above.
+  [Detail](streaming/SPLIT-HLS-RENDITION-CONTRACT.md#4-the-offer-names-its-artifact-protocol-13).
 - 2026-11-22: protocol 12 — `split_audio` on the strict `SessionRequest`
-  media-worker envelope: a copy session whose client selects soundtracks
-  itself is served one shared video with every soundtrack as an alternate.
-  A protocol-11 worker refuses the field, so drain with the cohort procedure
-  above before web clients reach a mixed fleet. Detail:
-  [SHARED-VIDEO-MULTILINGUAL-VOD.md](streaming/SHARED-VIDEO-MULTILINGUAL-VOD.md).
+  (one shared video, soundtracks as alternates); protocol 11 refuses it, so
+  drain by cohort. [Detail](streaming/SHARED-VIDEO-MULTILINGUAL-VOD.md).
 - 2026-11-13: protocol 11 — a server-selected F+ curve digest on the strict
-  `SessionRequest` media-worker envelope, combined with protocol 10 catalog
-  provenance. Use the cohort/drain procedure above; clients send no new
-  platform signal. Detail:
-  [FEL-RPU-REFIT-BUILD.md](streaming/FEL-RPU-REFIT-BUILD.md).
+  `SessionRequest`, with protocol 10 catalog provenance; drain by cohort.
+  [Detail](streaming/FEL-RPU-REFIT-BUILD.md).
 
 - 2026-11-13: protocol 10 — retain validated source, track and full-capability
   catalog-query provenance in `CandidateCatalogContext` so processed commits
