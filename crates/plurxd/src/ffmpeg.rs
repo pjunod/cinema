@@ -1098,15 +1098,7 @@ async fn held_source_packet_probe(
     if let Some(input) = input {
         let cap = usize::try_from(max_stdout_bytes.saturating_add(1))
             .map_err(|error| HeldPacketProbeError::Process(error.to_string()))?;
-        let output = plurx_core::process::source_lifetime::mediated(
-            plurx_core::process::bounded::output_command(
-                &mut command,
-                timeout,
-                cap,
-                crate::process_control::ChildWork::background("fragment index packet probe"),
-            ),
-        )
-        .await;
+        let output = brokered_packet_probe_output(&mut command, timeout, cap).await;
         input.close_and_wait().await.map_err(|error| {
             HeldPacketProbeError::Source(format!("joining packet source input: {error}"))
         })?;
@@ -1184,6 +1176,32 @@ async fn held_source_packet_probe(
         }
     }
     result
+}
+
+async fn brokered_packet_probe_output(
+    command: &mut tokio::process::Command,
+    timeout: Duration,
+    cap: usize,
+) -> std::io::Result<plurx_core::process::bounded::Output> {
+    use plurx_core::process::{bounded, source_lifetime, ChildWork};
+
+    // Only the broker URL is an input. Avoid the daemon's ambient cwd for
+    // an absolute probe while preserving relative tool resolution.
+    if std::path::Path::new(command.as_std().get_program()).is_absolute() {
+        if let Some(cwd) = source_lifetime::daemon_working_directory() {
+            command.current_dir(cwd);
+        }
+    }
+    let manifest = crate::producer_spawn::Descriptors::default()
+        .prepare(command, crate::producer_spawn::ChildStdios::CAPTURED)?;
+    source_lifetime::mediated(bounded::output_command_with_descriptors(
+        command,
+        timeout,
+        cap,
+        ChildWork::background("fragment index packet probe"),
+        manifest,
+    ))
+    .await
 }
 
 async fn read_packet_probe_pipe(

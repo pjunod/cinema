@@ -1,3 +1,73 @@
+#[cfg(unix)]
+#[tokio::test]
+async fn brokered_packet_probe_launches_with_a_bound_descriptor_manifest() {
+    use plurx_core::process::source_lifetime;
+    use std::{os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
+
+    const ROOT: &str = "PLURX_TEST_BROKERED_PACKET_PROBE_ROOT";
+    let Some(root) = std::env::var_os(ROOT) else {
+        // The process registry has immutable roots. Do not configure them
+        // in the test process shared with unrelated tests.
+        let directory = crate::test_tempdir().expect("packet probe fixture");
+        let child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "ffmpeg::tests::brokered_packet_probe_launches_with_a_bound_descriptor_manifest",
+            ])
+            .env(ROOT, directory.path())
+            .current_dir(directory.path())
+            .output()
+            .expect("isolated packet probe test");
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        assert!(
+            child.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        return;
+    };
+    let root = PathBuf::from(root);
+    let owned = root.join("owned");
+    let tools = root.join("tools");
+    std::fs::create_dir(&owned).expect("daemon-owned cwd");
+    std::fs::create_dir(&tools).expect("trusted tools directory");
+    let probe = tools.join("ffprobe");
+    std::fs::write(&probe, "#!/bin/sh\nprintf '%s\\n' '{\"packets\":[]}'\n")
+        .expect("synthetic packet probe");
+    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o700))
+        .expect("executable probe");
+    source_lifetime::set_daemon_roots(&[owned], &[tools])
+        .expect("configure daemon source verifier");
+    let url = "http://127.0.0.1:13451/packet-fixture";
+    let _broker = source_lifetime::register_broker(url).expect("exact broker URL");
+    let mut command = tokio::process::Command::new(probe);
+    command.args([
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-select_streams",
+        "1",
+        "-show_packets",
+        "-show_entries",
+        "packet=stream_index,pts,dts,duration,size,flags,data_hash:packet_side_data=side_data_type",
+        "-show_data_hash",
+        "sha256",
+        url,
+    ]);
+    let before = source_lifetime::launch_snapshot();
+    let output = super::brokered_packet_probe_output(&mut command, Duration::from_secs(5), 1024)
+        .await
+        .expect("bounded brokered packet probe");
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(output.stdout, b"{\"packets\":[]}\n");
+    // A checked broker URL is still counted as unqualified for demuxer confinement.
+    assert_eq!(
+        source_lifetime::launch_snapshot().unverified,
+        before.unverified + 1
+    );
+}
+
 #[test]
 fn dovi_reshape_pairing_proof_uses_a_delivery_raster_every_encoder_accepts() {
     use super::*;

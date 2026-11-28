@@ -87,6 +87,12 @@ pub fn set_daemon_roots(owned: &[PathBuf], tools: &[PathBuf]) -> io::Result<()> 
         }
     }
 }
+
+/// A configured daemon-owned working directory for children without path inputs.
+pub fn daemon_working_directory() -> Option<PathBuf> {
+    STATE.lock().ok()?.roots.as_ref()?.owned.first().cloned()
+}
+
 /// Prepare only an audited no-input candidate. Unqualified tools retain the
 /// caller's program resolution and working directory; setup grants no proof.
 pub fn configure_no_input_probe(command: &mut std::process::Command) {
