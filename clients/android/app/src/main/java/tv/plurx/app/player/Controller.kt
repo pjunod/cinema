@@ -1457,6 +1457,7 @@ class Controller internal constructor(
         }
 
         override fun onTracksChanged(tracks: Tracks) {
+            confirmSplitAudio(tracks)
             applyTextSelection()
             applyAudioSelection()
             completeRecipeExecution()
@@ -2383,21 +2384,86 @@ class Controller internal constructor(
         continuousAttempt = null
     }
 
+    private data class PendingSplitAudio(
+        val epoch: Long,
+        val session: String,
+        val player: ExoPlayer,
+        val authorization: Long,
+        val sequence: Long,
+        val recipe: PlaybackRecipeOwnership.Claim,
+        val option: SplitHlsAudio.Option,
+    )
+    private var pendingSplitAudio: PendingSplitAudio? = null
+    var confirmedSplitAudio by mutableStateOf<Long?>(null)
+        private set
+
+    private fun splitAudioOptions(tracks: Tracks = player.currentTracks): List<SplitHlsAudio.Option> {
+        val session = sessionId ?: return emptyList()
+        val master = (player.currentManifest as? HlsManifest)?.multivariantPlaylist ?: return emptyList()
+        val origin = Session.playbackAuthorization().origin
+        fun owns(url: String) = preparedPlaylistOwnership(url, origin, session) == PreparedPlaylistOwnership.Owned
+        if (!owns(master.baseUri)) return emptyList()
+        return SplitHlsAudio.options(master, tracks, ::owns)
+    }
+
+    private fun confirmSplitAudio(tracks: Tracks) {
+        val observed = splitAudioOptions(tracks).singleOrNull { it.selected }
+        confirmedSplitAudio = observed?.sourceIndex
+        val pending = pendingSplitAudio ?: return
+        if (player !== pending.player || sessionId != pending.session || mediaMutationEpoch != pending.epoch ||
+            pending.authorization != Session.playbackAuthorization().generation ||
+            !playbackIntent.isCurrent(pending.sequence) || currentRecipe() != pending.recipe
+        ) {
+            pendingSplitAudio = null
+            return
+        }
+        if (observed?.sourceIndex != pending.option.sourceIndex ||
+            observed.group != pending.option.group || observed.index != pending.option.index
+        ) return
+        val transport = recipeOwnership.attachedTransport ?: return
+        pendingSplitAudio = null
+        recipeOwnership.attach(pending.recipe, transport)
+        armTrackSelections(pending.recipe)
+        markIntentExecuted(pending.sequence, pending.recipe, inPlace = true)
+    }
+
     fun switchAudio(index: Long) {
         if (!playbackControlBootstrapFence.isActive()) return
         if (index == selectedAudio) return
         val position = positionForPlaybackIntent()
+        val inheritedSeek = playbackIntent.needsSeekForInPlaceSelection()
+        val attached = recipeOwnership.attached
+        val attachedSession = sessionId
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
         progressiveCaptions.off()
         selectedAudio = index
         refreshAutoCatalogForViewerRecipe()
         val pending = playbackIntent.beginSeek(position, position)
-        currentRecipe()
+        val recipe = currentRecipe()
         sampleTargetPresentationDeadline()
         val publicationEpoch = mediaMutationEpoch
+        val incumbent = player
+        val authorization = Session.playbackAuthorization().generation
         scope.launch {
-            if (publishIntent(pending, publicationEpoch = publicationEpoch)) restartAt(position, "audio")
+            if (!publishIntent(pending, publicationEpoch = publicationEpoch) ||
+                authorization != Session.playbackAuthorization().generation
+            ) return@launch
+            val sameMedia = attached?.recipe?.copy(audioIndex = index)?.hasSameMedia(recipe.recipe) == true
+            val alternate = if (!inheritedSeek && sameMedia && attachedSession != null &&
+                sessionId == attachedSession && player === incumbent && recipeOwnership.attached == attached
+            ) splitAudioOptions().singleOrNull { it.sourceIndex == index } else null
+            if (alternate == null || attachedSession == null) {
+                restartAt(position, "audio")
+                return@launch
+            }
+            pendingSplitAudio = PendingSplitAudio(publicationEpoch, attachedSession, incumbent, authorization,
+                pending.sequence, recipe, alternate)
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setOverrideForType(TrackSelectionOverride(alternate.group, alternate.index))
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                .build()
+            confirmSplitAudio(player.currentTracks)
         }
     }
 
@@ -3165,42 +3231,37 @@ class Controller internal constructor(
             .build()
     }
 
-    /**
-     * Pin the audio track the server said would play.
-     *
-     * Only direct play needs this, and only direct play may have it: the raw
-     * file carries every stream, so ExoPlayer picks one — and it picks with
-     * `setPreferredAudioLanguage`, a client-side language preference that can
-     * disagree with the server's `select_tracks` (the dual-audio anime rule
-     * selects Japanese original audio against an English preference). Leaving
-     * that unpinned would make the detail screen's default marker, and any
-     * pre-play choice the server answered with a `direct` verdict, describe a
-     * track other than the one on the speakers.
-     *
-     * Every other transport already delivers exactly one audio stream — the
-     * one the plan's `?audio=` or the session body's `audio` selected — so an
-     * override there would index into a list of one.
-     */
+    /** Pin the resolved soundtrack using the track identity the attached transport exposes. */
     private fun applyAudioSelection() {
         if (!audioSelectionArmed) return
         val index = selectionRecipe?.recipe?.audioIndex
-        if (index == null || !directTransport) {
-            audioSelectionArmed = false
-            return
+        val target = if (directTransport) {
+            if (index == null) {
+                audioSelectionArmed = false
+                return
+            }
+            val ordinal = embeddedAudioTrackIndex(index, plan.audio, embeddedLanguages(C.TRACK_TYPE_AUDIO))
+            ordinal?.let { trackAt(C.TRACK_TYPE_AUDIO, it) } ?: return
+        } else {
+            if (player.currentManifest == null && player.currentTracks.isEmpty) return
+            val options = splitAudioOptions()
+            val option = options.singleOrNull { it.sourceIndex == index }
+                ?: options.singleOrNull { it.default }
+            if (option == null) {
+                audioSelectionArmed = false
+                return
+            }
+            option.group to option.index
         }
-        val ordinal = embeddedAudioTrackIndex(index, plan.audio, embeddedLanguages(C.TRACK_TYPE_AUDIO))
-        // Nothing to select yet — the media is still being prepared, or the
-        // player never published this track. Stay armed and let the next
-        // onTracksChanged retry; ExoPlayer's own pick is the honest fallback
-        // for a track that is genuinely not there.
-        val target = ordinal?.let { trackAt(C.TRACK_TYPE_AUDIO, it) } ?: return
         audioSelectionArmed = !player.currentTracks.groups.any {
             it.mediaTrackGroup == target.first && it.isTrackSelected(target.second)
         }
-        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setOverrideForType(TrackSelectionOverride(target.first, target.second))
-            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
-            .build()
+        if (audioSelectionArmed) {
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setOverrideForType(TrackSelectionOverride(target.first, target.second))
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                .build()
+        }
     }
 
     /** The player's tracks of one type, flattened in publication order. */

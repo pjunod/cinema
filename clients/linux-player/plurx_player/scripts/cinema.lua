@@ -455,7 +455,7 @@ local function playback_info()
     for _,track in ipairs(prop('track-list',{})) do
         if track.type=='audio' and track.selected then selected=track; break end
     end
-    row('Stream audio track',selected and joined(observed(selected.codec),observed(selected.lang)))
+    row('Stream audio track',selected and joined(observed(selected.codec),observed(selected.lang),observed(prop('user-data/cinema-audio-rendition'))))
     heading('Processing')
     row('Method',methods[facts.mode])
     row('Transport',transports[facts.transport])

@@ -529,6 +529,13 @@ final class PlayerController: ObservableObject {
     }
     @Published private(set) var selectedSubtitle: Int?
     @Published private(set) var selectedAudio: Int?
+    private var pendingSplitAudio: Int?
+    @Published private var confirmedSplitAudio: (item: ObjectIdentifier, index: Int)?
+    var selectedSplitAudioRendition: String? {
+        guard let item = player.currentItem, let confirmedSplitAudio,
+              confirmedSplitAudio.item == ObjectIdentifier(item) else { return nil }
+        return "a\(confirmedSplitAudio.index)"
+    }
     @Published private(set) var selectedHeight: Int?
     /// `nil` height means either Auto or Original. Keep the viewer's explicit
     /// no-encode choice distinct so control and replacement bodies do not
@@ -2057,6 +2064,7 @@ final class PlayerController: ObservableObject {
         invalidateResumeAttempt(outcome: "viewer-action")
         let superseded = viewerActionEpoch
         viewerActionEpoch &+= 1
+        pendingSplitAudio = nil
         autoTransferPressure.clear(notBeforeMs: PlaybackControlSession.monotonicMs())
         latestAutoCompletedTransfer = nil
         autoMildSamples = 0
@@ -3082,8 +3090,44 @@ final class PlayerController: ObservableObject {
     }
 
     func selectAudio(_ index: Int) {
-        guard index != selectedAudio else { return }
+        guard index != selectedAudio || pendingSplitAudio != nil else { return }
         let actionEpoch = beginViewerAction()
+        guard index != selectedAudio else { return }
+        let credentials = Session.shared.playbackAuthorization
+        if let sessionId, let item = player.currentItem, let path = activeMediaPath,
+           let url = Session.shared.url(path),
+           SplitHLSAudio.ownsMaster(url, origin: credentials.origin, session: sessionId),
+           seekState.pendingMs == nil, !isChangingStream, !recipeRevision.needsReopen {
+            let isOwner = {
+                !Task.isCancelled && self.started && self.player.currentItem === item
+                    && self.sessionId == sessionId && self.activeMediaPath == path
+                    && self.viewerActionEpoch == actionEpoch
+                    && Session.shared.playbackAuthorization.generation == credentials.generation
+            }
+            pendingSplitAudio = index
+            Task {
+                let selected = await selectSplitHLSAudio(index, in: item, url: url,
+                                                         token: credentials.token, isOwner: isOwner)
+                guard actionEpoch == viewerActionEpoch, pendingSplitAudio == index else { return }
+                pendingSplitAudio = nil
+                guard isOwner() else { return }
+                if selected {
+                    selectedAudio = index
+                    audioOverride = index
+                    confirmedSplitAudio = (ObjectIdentifier(item), index)
+                    configureProgressiveCaptions()
+                    refreshAutoCatalogForViewerRecipe()
+                    retainControlSequence(await playbackControl.reportIntent())
+                } else {
+                    reopenWithAudio(index, actionEpoch: actionEpoch)
+                }
+            }
+            return
+        }
+        reopenWithAudio(index, actionEpoch: actionEpoch)
+    }
+
+    private func reopenWithAudio(_ index: Int, actionEpoch: Int) {
         let destination = seekState.absolute(
             positionForPlaybackIntent(),
             durationMs: knownDurationMs
@@ -3108,6 +3152,37 @@ final class PlayerController: ObservableObject {
                   selectedAudio == index
             else { return }
             await reopen(at: destination.target)
+        }
+    }
+
+    private func selectSplitHLSAudio(_ index: Int, in item: AVPlayerItem, url: URL,
+                                     token: String?, isOwner: () -> Bool) async -> Bool {
+        guard isOwner() else { return false }
+        var request = URLRequest(url: url, timeoutInterval: 2)
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForResource = 2
+        let loader = URLSession(configuration: configuration, delegate: AutoVODPlaylistRedirectRefusal(), delegateQueue: nil)
+        defer { loader.invalidateAndCancel() }
+        do {
+            let (bytes, response) = try await loader.bytes(for: request)
+            guard let response = response as? HTTPURLResponse, response.statusCode == 200,
+                  response.url == url, response.expectedContentLength <= 65_536 else { return false }
+            var body = Data()
+            for try await byte in bytes {
+                guard !Task.isCancelled, body.count < 65_536 else { return false }
+                body.append(byte)
+            }
+            guard let text = String(data: body, encoding: .utf8),
+                  let name = SplitHLSAudio.names(in: text)[index],
+                  let group = try await item.asset.loadMediaSelectionGroup(for: .audible)
+            else { return false }
+            let matches = group.options.filter { $0.displayName == name }
+            guard matches.count == 1, let option = matches.first, isOwner() else { return false }
+            item.select(option, in: group)
+            return item.currentMediaSelection.selectedMediaOption(in: group) == option
+        } catch {
+            return false
         }
     }
 
@@ -8784,19 +8859,16 @@ final class PlayerController: ObservableObject {
         return true
     }
 
-    /// The audible half of owning media selection (P2-8). An HLS session
-    /// carries one muxed audio track — the server already chose it, and
-    /// `selectAudio` reopens to change it — but a direct-play file can carry
-    /// several, and with automatic criteria off nothing else would honor the
-    /// viewer's language there. Best effort: no match leaves AVPlayer's own
-    /// default in place, which is what mismatched criteria used to produce.
+    /// Honor the viewer's preferred language on a direct-play file. The
+    /// server selects HLS startup audio, and explicit split audio changes use
+    /// the matched audible option on the attached HLS item.
     private func applyPreferredAudioSelection(to item: AVPlayerItem, expectedActionEpoch: Int) async {
-        guard audioOverride == nil, prePlaySelection.audioIndex == nil,
+        guard sessionId == nil, audioOverride == nil, prePlaySelection.audioIndex == nil,
               started, player.currentItem === item,
               expectedActionEpoch == viewerActionEpoch else { return }
         let apply = await mediaSelectionPreparation.audio(audioLanguage, item)
-        guard !Task.isCancelled, started, player.currentItem === item, audioOverride == nil,
-              prePlaySelection.audioIndex == nil,
+        guard !Task.isCancelled, started, player.currentItem === item, sessionId == nil,
+              audioOverride == nil, prePlaySelection.audioIndex == nil,
               expectedActionEpoch == viewerActionEpoch else { return }
         apply?()
     }
