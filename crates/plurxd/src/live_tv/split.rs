@@ -35,7 +35,7 @@ impl WindowBudget {
     fn hold(self: &Arc<Self>, bytes: Vec<u8>) -> Result<Bytes, String> {
         let size = bytes.len();
         self.allocated
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(size)
                     .filter(|total| *total <= WINDOW_BYTES)
             })
