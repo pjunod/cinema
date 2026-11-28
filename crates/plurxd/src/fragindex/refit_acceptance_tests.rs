@@ -353,6 +353,7 @@ async fn publish(
         index: Some(index.clone()),
         landing_clock,
         encoded_audio_anchor: None,
+        source_audio: None,
         encoded_frame_ticks: None,
         encoded_video_origin: None,
         identity,

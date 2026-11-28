@@ -6,6 +6,7 @@ use super::*;
 pub(in crate::http) fn ordinary_request(playback_id: &str) -> crate::transcode::SessionRequest {
     crate::transcode::SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         continuous_media: None,
         quality_catalog: None,
