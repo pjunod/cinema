@@ -468,24 +468,26 @@ impl VodServe {
                 )
                 .await;
         }
+        // The materializer can enter its watchdog and VOD admission while
+        // the opening proof is still on the worker stack. Preserve the same
+        // task and custody while moving that nested future off the stack.
         if let Some(index) = index {
-            return self
-                .serve_segment_with_read_custody(
-                    &found.rendition,
-                    session_id,
-                    index,
-                    budget,
-                    Arc::clone(&found.delivery),
-                    custody,
-                )
-                .await;
+            return Box::pin(self.serve_segment_with_read_custody(
+                &found.rendition,
+                session_id,
+                index,
+                budget,
+                Arc::clone(&found.delivery),
+                custody,
+            ))
+            .await;
         }
-        self.serve_init_with_read_custody(
+        Box::pin(self.serve_init_with_read_custody(
             &found.rendition,
             budget,
             Arc::clone(&found.delivery),
             custody,
-        )
+        ))
         .await
     }
 
