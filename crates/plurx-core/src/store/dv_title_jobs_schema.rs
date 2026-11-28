@@ -112,7 +112,10 @@ mod tests {
             for sql in migration_statements(None) {
                 replica.execute_batch(&sql).expect("replica statement");
             }
-            assert_eq!(rows(&conn).unwrap(), rows(&replica).unwrap());
+            assert_eq!(
+                rows(&conn).expect("SQLite schema shape"),
+                rows(&replica).expect("replica schema shape")
+            );
         }
         conn.execute_batch("DROP TRIGGER dv_title_jobs_file_update")
             .expect("partial fixture");
@@ -212,7 +215,10 @@ UPDATE dv_title_jobs_demand SET scanner_digest='old';
             .expect("stranded legacy demands");
         conn.execute_batch(super::super::dv_title_jobs::MIGRATION_V2)
             .expect("upgrade");
-        assert_eq!(version(&rows(&conn).unwrap()).unwrap(), Some(2));
+        assert_eq!(
+            version(&rows(&conn).expect("title v2 schema shape")).expect("title v2 version"),
+            Some(2)
+        );
         let mut query = conn
             .prepare("SELECT terminal FROM dv_title_jobs_demand ORDER BY file_id")
             .expect("query");
