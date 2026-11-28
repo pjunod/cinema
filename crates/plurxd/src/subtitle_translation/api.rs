@@ -2040,13 +2040,13 @@ mod tests {
                 profile_summary(profile, Some("small")).expect("registered profile summary")
             })
             .collect::<Vec<_>>();
-        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles.len(), 8);
         assert_eq!(
             profiles
                 .iter()
                 .filter(|profile| profile["default"] == true)
                 .count(),
-            2
+            6
         );
         for profile in profiles {
             assert_eq!(profile["model_id"], "small");

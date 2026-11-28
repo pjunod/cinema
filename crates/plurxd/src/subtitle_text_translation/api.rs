@@ -196,16 +196,51 @@ pub(crate) async fn create(
         .get_file(file_id)
         .await?
         .ok_or(ApiError::NotFound("file"))?;
+    if input.source_size != file.size.to_string() || input.source_mtime != file.mtime.to_string() {
+        return Err(conflict("source_changed", "The media source changed"));
+    }
+    submit(
+        &state,
+        &file,
+        index,
+        language,
+        user.id,
+        &input.request_id,
+        digest,
+    )
+    .await
+}
+
+pub(crate) async fn schedule(
+    state: &AppState,
+    file: &plurx_core::domain::MediaFile,
+    index: i64,
+    language: String,
+) -> Result<Json<Value>, ApiError> {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let digest = plurx_core::store::subtitle_translation::digest(&json!({
+        "file_id":file.id, "source_size":file.size, "source_mtime":file.mtime,
+        "index":index, "language":language, "target":"en",
+    }))?;
+    submit(state, file, index, language, 0, &request_id, digest).await
+}
+
+async fn submit(
+    state: &AppState,
+    file: &plurx_core::domain::MediaFile,
+    index: i64,
+    language: String,
+    actor: i64,
+    request_id: &str,
+    digest: String,
+) -> Result<Json<Value>, ApiError> {
     if file.downloaded_subtitles.len() >= plurx_core::store::MAX_DOWNLOADED_SUBTITLES {
         return Err(conflict(
             "quota_exceeded",
             "This source already has the maximum number of acquired or generated captions",
         ));
     }
-    if input.source_size != file.size.to_string() || input.source_mtime != file.mtime.to_string() {
-        return Err(conflict("source_changed", "The media source changed"));
-    }
-    if !super::workers(&state)
+    if !super::workers(state)
         .await?
         .iter()
         .any(|worker| worker["status"] == "verified")
@@ -215,17 +250,15 @@ pub(crate) async fn create(
             "Install and test the text translation model in Settings",
         ));
     }
-    let bytes = super::input_bytes(&state, &file, index)
-        .await
-        .map_err(|_| {
-            invalid(
-                "subtitle_unavailable",
-                "A complete text subtitle is required",
-            )
-        })?;
+    let bytes = super::input_bytes(state, file, index).await.map_err(|_| {
+        invalid(
+            "subtitle_unavailable",
+            "A complete text subtitle is required",
+        )
+    })?;
 
     let payload = JobPayload::SubtitleTextTranslateArtifact {
-        file_id,
+        file_id: file.id,
         source_size: file.size,
         source_mtime: file.mtime,
         subtitle_index: index,
@@ -240,9 +273,9 @@ pub(crate) async fn create(
         model_sha256: artifacts::expected_bundle_digest(),
         adapter_contract: ADAPTER_CONTRACT.into(),
         target_node_id: state.node_id.clone(),
-        admin_user_id: user.id,
+        admin_user_id: actor,
     };
-    enqueue(&state, user.id, &input.request_id, digest, payload).await
+    enqueue(state, actor, request_id, digest, payload).await
 }
 pub(crate) async fn retry(
     AuthUser(user): AuthUser,

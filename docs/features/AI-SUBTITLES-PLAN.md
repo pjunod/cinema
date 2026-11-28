@@ -279,4 +279,66 @@ deploys the effort's landing.
 
 ## 6. Measurements
 
-To be filled by T6 from fleet runs.
+### Speech on the nuc4 fleet node
+
+These runs used the packaged Whisper CPU engine, the pinned Silero model
+and 40-second excerpts. The subtitle-reference WER and chrF values use
+time-matched existing subtitle tracks. Those tracks can shorten or adapt
+speech, so the scores serve as comparisons against the same references.
+The speed range spans seven dialogue excerpts at eight threads. It excludes
+queue wait, source preparation and publication.
+
+| Model | Realtime factor | English reference WER, 2 excerpts ↓ | Foreign-audio chrF, 5 excerpts ↑ |
+|---|---:|---:|---:|
+| Small | 2.98–7.40× | 0.603 | 22.14 |
+| Medium Q5 | 0.38–2.80× | 0.671 | 26.57 |
+| Large v3 Q5 | 0.71–1.41× | 0.316 | 30.08 |
+| Large v3 Turbo Q5 | 1.30–2.12× | 0.443 | 10.04 |
+
+All four models emitted zero cues on the 40-second silence and music-only
+windows with VAD. An earlier music sample included a brief spoken line
+at the start, which VAD retained. The public German installation fixture
+produced the expected English anchors with both Small and Large v3 Q5
+at two threads with VAD enabled.
+
+- **Fast** uses Small with beam width 2. Four shared excerpts ran at
+  4.33–8.37×. Beam width 1 dropped most of the English cues on one excerpt,
+  raising reference WER from 0.447 at the default beam width to 0.957.
+  Beam width 2 gave 0.468 on that excerpt.
+- **Balanced** uses Small with the engine's standard beam search. The four
+  two-thread comparison cases ran at 2.48–5.44×. Viewer work may reserve
+  up to eight available threads and background work up to four, within
+  the existing software admission budget.
+- **Best** uses Large v3 Q5 for an item request or ahead-of-time generation.
+  Several dialogue windows ran below 1×. Playback starts with the Balanced
+  recipe when Best is selected for the server. A started recipe retains
+  the same model and options through restart.
+- Turbo's direct foreign-audio translation scored below Small in this
+  comparison. The packaged engine continues to use the measured CPU path.
+
+The sustained playback and surround source-clock checks in §5 still
+require the deployed release. The VAD implementation and engine command
+use the pinned [Whisper.cpp v1.9.2 source](https://github.com/ggml-org/whisper.cpp/tree/v1.9.2)
+and [Silero weights](https://huggingface.co/ggml-org/whisper-vad/tree/9ffd54a1e1ee413ddf265af9913beaf518d1639b).
+
+### Existing text tracks
+
+For each language, 48 foreign and English subtitle cues were paired by
+timestamp overlap and translated with the pinned Marian weights using
+greedy decoding in a local comparison harness. chrF and BLEU reflect
+agreement with independently written subtitle tracks. The harness measures
+translation quality for these windows. The deployed Candle inference and
+publication path has its own qualification.
+
+| Source language | Multilingual chrF / BLEU | Language model chrF / BLEU |
+|---|---:|---:|
+| German | 61.76 / 46.45 | 70.37 / 53.85 |
+| Spanish | 45.24 / 29.67 | 52.06 / 35.22 |
+| French | 32.93 / 13.30 | 38.32 / 13.07 |
+| Italian | 51.67 / 27.52 | 60.74 / 39.86 |
+| Portuguese | 43.43 / 23.95 | 48.18 / 30.41 |
+| Turkish | 32.24 / 13.44 | 45.44 / 23.69 |
+
+The production text route uses the [pinned multilingual model](https://huggingface.co/Helsinki-NLP/opus-mt-mul-en/tree/848eae0c1676cfce9bb791c200e8228e5a6396ff).
+The comparison shows where language-specific bundles could improve subtitle
+agreement. Those bundles have not passed production adapter qualification.

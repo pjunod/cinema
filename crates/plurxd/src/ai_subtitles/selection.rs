@@ -5,14 +5,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum Route {
+pub(crate) enum Route {
     #[default]
     Auto,
     Text,
     Audio,
 }
 
-pub(super) enum Source<'a> {
+pub(crate) enum Source<'a> {
     Text(&'a SubtitleStream, String),
     Audio(&'a AudioStream, Option<String>),
 }
@@ -49,7 +49,7 @@ fn full_text(track: &SubtitleStream) -> bool {
     !track_is_forced(track) && !plurx_core::tracks::is_bitmap_subtitle(&track.codec)
 }
 
-pub(super) fn existing_english(file: &MediaFile) -> Option<i64> {
+pub(crate) fn existing_english(file: &MediaFile) -> Option<i64> {
     file.subtitle_streams
         .iter()
         .filter(|track| {
@@ -69,8 +69,15 @@ pub(super) fn existing_english(file: &MediaFile) -> Option<i64> {
         .map(|track| track.index)
 }
 
-pub(super) fn candidates(file: &MediaFile, route: Route) -> Vec<Source<'_>> {
-    let audio = audio_track(file);
+pub(crate) fn candidates(
+    file: &MediaFile,
+    route: Route,
+    audio_index: Option<i64>,
+) -> Vec<Source<'_>> {
+    let audio = match audio_index {
+        Some(index) => file.audio_streams.iter().find(|track| track.index == index),
+        None => audio_track(file),
+    };
     let audio_language = audio
         .and_then(|track| track.language.as_deref())
         .map(normalized_language)

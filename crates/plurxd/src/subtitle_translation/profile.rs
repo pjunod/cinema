@@ -20,6 +20,31 @@ pub(crate) const SELF_TEST_ATTRIBUTION: &str =
      Full license: licenses/CC-BY-4.0.txt. \
      English references are publisher-provided n-way FLEURS/FLoRes sentence pairs, not agent-generated.";
 
+const VAD_REVISION: &str = "9ffd54a1e1ee413ddf265af9913beaf518d1639b";
+
+pub(crate) fn vad_spec() -> CatalogModel {
+    CatalogModel {
+        id: "silero-v5.1.2".into(),
+        label: "Silero speech detection".into(),
+        languages: vec![],
+        download_bytes: 885_098,
+        sha256: "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf".into(),
+        url: format!("https://huggingface.co/ggml-org/whisper-vad/resolve/{VAD_REVISION}/ggml-silero-v5.1.2.bin"),
+        source: format!("https://huggingface.co/ggml-org/whisper-vad/tree/{VAD_REVISION}"),
+        license: "MIT".into(),
+    }
+}
+
+pub(crate) fn uses_vad(profile: &TranslationProfile) -> bool {
+    matches!(
+        profile.pipeline_revision.as_str(),
+        "translation-window-v2" | "translation-window-v2-fast"
+    )
+}
+pub(crate) fn fast_decode(profile: &TranslationProfile) -> bool {
+    profile.pipeline_revision == "translation-window-v2-fast"
+}
+
 pub(crate) fn self_test_notice() -> String {
     format!(
         "{SELF_TEST_ATTRIBUTION}\n\n{}",
@@ -48,37 +73,83 @@ pub(crate) fn for_task(task: SpeechTask) -> TranslationProfile {
         ..selected_profile()
     }
 }
-/// Defaults retain the registered Small model and its immutable profile IDs.
+/// New requests use speech detection. Previously stored profiles remain registered.
 pub(crate) fn default_profile() -> TranslationProfile {
     default_for_task(SpeechTask::TranslateToEnglish)
 }
 pub(crate) fn default_for_task(task: SpeechTask) -> TranslationProfile {
-    for_task(task)
+    for_quality(task, crate::ai_subtitles::settings::Quality::Balanced)
 }
+
+pub(crate) fn for_quality(
+    task: SpeechTask,
+    quality: crate::ai_subtitles::settings::Quality,
+) -> TranslationProfile {
+    use crate::ai_subtitles::settings::Quality;
+    let spec = model_spec_for_quality(quality);
+    TranslationProfile {
+        model_id: spec.id,
+        model_sha256: spec.sha256,
+        pipeline_revision: match quality {
+            Quality::Fast => "translation-window-v2-fast",
+            Quality::Balanced | Quality::Best => "translation-window-v2",
+        }
+        .into(),
+        ..for_task(task)
+    }
+}
+
 pub(crate) fn legacy_profiles() -> [TranslationProfile; 2] {
     [selected_profile(), for_task(SpeechTask::Transcribe)]
 }
-pub(crate) fn profiles() -> [TranslationProfile; 2] {
-    legacy_profiles()
+pub(crate) fn profiles() -> Vec<TranslationProfile> {
+    use crate::ai_subtitles::settings::Quality;
+    let mut registered = legacy_profiles().to_vec();
+    for quality in [Quality::Balanced, Quality::Fast, Quality::Best] {
+        for task in [SpeechTask::TranslateToEnglish, SpeechTask::Transcribe] {
+            registered.push(for_quality(task, quality));
+        }
+    }
+    registered
 }
 pub(crate) fn registered(profile: &TranslationProfile) -> bool {
     profiles().iter().any(|candidate| candidate == profile)
 }
-/// Only an exact registered profile can choose an artifact. Never fall back
-/// from an unknown or modified model/profile pair to the legacy model.
+/// An exact registered profile determines its immutable model artifact.
 pub(crate) fn model_spec_for(
     profile: &TranslationProfile,
 ) -> Result<CatalogModel, plurx_core::error::StoreError> {
-    if !registered(profile) {
-        return Err(plurx_core::error::StoreError::Task(
-            "translation_profile_unavailable".into(),
-        ));
-    }
-    Ok(model_spec())
+    model_specs()
+        .into_iter()
+        .find(|spec| {
+            spec.id == profile.model_id
+                && spec.sha256 == profile.model_sha256
+                && registered(profile)
+        })
+        .ok_or_else(|| {
+            plurx_core::error::StoreError::Task("translation_profile_unavailable".into())
+        })
 }
-pub(crate) fn model_specs() -> [CatalogModel; 1] {
-    [model_spec()]
+pub(crate) fn model_specs() -> [CatalogModel; 2] {
+    [
+        model_spec(),
+        model_spec_for_quality(crate::ai_subtitles::settings::Quality::Best),
+    ]
 }
+
+fn model_spec_for_quality(quality: crate::ai_subtitles::settings::Quality) -> CatalogModel {
+    let id = match quality {
+        crate::ai_subtitles::settings::Quality::Best => "large-v3-q5_0",
+        _ => "small",
+    };
+    crate::subtitle_models::catalog()
+        .models
+        .iter()
+        .find(|model| model.id == id)
+        .expect("registered speech tier")
+        .clone()
+}
+
 /// Task-specific production-path evidence using the publisher's German words.
 /// This is a bounded smoke qualification, not a broad recognition quality claim.
 pub(crate) fn transcription_self_test(cues: &[TranslationCue]) -> bool {
@@ -173,15 +244,18 @@ mod tests {
                 let model = model_spec_for(&profile).expect("exact registered model");
                 assert_eq!(model.id, profile.model_id);
                 assert_eq!(model.sha256, profile.model_sha256);
-                assert_eq!(model.languages.len(), 99);
-                assert!(!model.languages.iter().any(|language| language == "yue"));
-                assert_eq!(model.id, "small");
-                assert_eq!(model.download_bytes, 487_601_967);
+                if model.id == "small" {
+                    assert_eq!(model.languages.len(), 99);
+                    assert!(!model.languages.iter().any(|language| language == "yue"));
+                    assert_eq!(model.download_bytes, 487_601_967);
+                } else {
+                    assert_eq!(model.id, "large-v3-q5_0");
+                }
                 profile.id().expect("profile identity")
             })
             .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(ids.len(), 2);
-        assert_eq!(default_profile(), profiles()[0]);
+        assert_eq!(ids.len(), 8);
+        assert!(registered(&default_profile()));
         assert_eq!(for_task(SpeechTask::Transcribe).model_id, "small");
         let mut crosswired = default_profile();
         crosswired.model_sha256 = "0".repeat(64);

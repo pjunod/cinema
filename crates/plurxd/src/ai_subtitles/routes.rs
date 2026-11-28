@@ -23,6 +23,7 @@ use serde_json::{json, Value};
 #[derive(Deserialize)]
 pub(crate) struct Options {
     target: Option<String>,
+    audio_index: Option<i64>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -33,6 +34,8 @@ pub(crate) struct Start {
     #[serde(default)]
     route: selection::Route,
     spoken_language: Option<String>,
+    quality: Option<settings::Quality>,
+    audio_index: Option<i64>,
     playback_id: Option<String>,
     position_ms: Option<i64>,
 }
@@ -51,6 +54,13 @@ fn conflict(code: &'static str, message: &str) -> ApiError {
 
 fn now() -> i64 {
     crate::state::clock_ms()
+}
+
+fn audio_quality(quality: settings::Quality, viewer: bool) -> settings::Quality {
+    match (quality, viewer) {
+        (settings::Quality::Best, true) => settings::Quality::Balanced,
+        (quality, _) => quality,
+    }
 }
 
 pub(crate) async fn start(
@@ -100,13 +110,47 @@ pub(crate) async fn start(
     if intent.is_none() {
         super::may_start(&state, &user).await?;
         let options = settings::read(&state).await?.settings;
+        if options.download_match && input.route == selection::Route::Auto && language.is_none() {
+            if selection::existing_english(&file).is_none() {
+                if let Err(error) =
+                    crate::http::subtitle_downloads::try_english_match(&state, file.id).await
+                {
+                    tracing::debug!(
+                        file_id = file.id,
+                        code = error.code(),
+                        "Automatic subtitle match unavailable"
+                    );
+                }
+            }
+            let latest = state
+                .store
+                .get_file(file.id)
+                .await?
+                .filter(|latest| source(latest) == source(&file))
+                .ok_or_else(|| conflict("source_changed", "The media source changed"))?;
+            if let Some(index) = selection::existing_english(&latest) {
+                let track_id = latest
+                    .downloaded_subtitle(index)
+                    .map(|caption| caption.stable_id());
+                return Ok(Json(json!({
+                    "id":input.request_id, "route":"download", "state":"complete",
+                    "ready_from_ms":0, "ready_to_ms":latest.duration_ms, "duration_ms":latest.duration_ms,
+                    "progress":1.0, "reason":null, "track_index":index, "track_id":track_id, "spoken_language":null
+                })));
+            }
+        }
+        if input.quality.is_some() && input.route != selection::Route::Audio {
+            return Err(ApiError::BadRequest(
+                "Choose the audio route to override AI quality".into(),
+            ));
+        }
         let requested = if language.is_some() {
             selection::Route::Audio
         } else {
             input.route
         };
         let mut chosen = None;
-        let choices = selection::candidates(&file, requested);
+        let choices = selection::candidates(&file, requested, input.audio_index);
         let text_ready = options.translate_text
             && choices
                 .iter()
@@ -139,6 +183,20 @@ pub(crate) async fn start(
                 "No enabled AI subtitle route can use the available tracks",
             )
         })?;
+        let speech_profile_id = if route == IntentRoute::Audio {
+            let task = if language.as_deref() == Some("en") {
+                SpeechTask::Transcribe
+            } else {
+                SpeechTask::TranslateToEnglish
+            };
+            let quality = audio_quality(
+                input.quality.unwrap_or(options.quality),
+                input.playback_id.is_some() || input.position_ms.is_some(),
+            );
+            Some(crate::subtitle_translation::profile::for_quality(task, quality).id()?)
+        } else {
+            None
+        };
         let id = uuid::Uuid::new_v4().to_string();
         let issued_at_ms = now();
         intent = state
@@ -158,6 +216,7 @@ pub(crate) async fn start(
                         source: source(&file),
                         route,
                         track_index,
+                        speech_profile_id,
                         language,
                         position_ms: input.position_ms.unwrap_or(0),
                         issued_at_ms,
@@ -248,11 +307,23 @@ async fn start_audio(
         return operation_id(&receipt);
     }
     let language = intent.language.as_deref().unwrap_or("auto");
-    let profile = profile::for_task(if language == "en" {
-        SpeechTask::Transcribe
+    let profile = if let Some(id) = &intent.speech_profile_id {
+        profile::profiles()
+            .into_iter()
+            .find(|profile| profile.id().ok().as_ref() == Some(id))
+            .ok_or_else(|| {
+                conflict(
+                    "profile_unavailable",
+                    "The subtitle profile is no longer available",
+                )
+            })?
     } else {
-        SpeechTask::TranslateToEnglish
-    });
+        profile::for_task(if language == "en" {
+            SpeechTask::Transcribe
+        } else {
+            SpeechTask::TranslateToEnglish
+        })
+    };
     let clock = selected_file_capability(state, file, intent.track_index)
         .await
         .map_err(|reason| conflict("source_clock_unsupported", reason))?;
@@ -270,12 +341,23 @@ async fn start_audio(
         .await?;
     let joining = rows.first().and_then(|row| row["operation_id"].as_str());
     super::may_start_new(state, user, joining).await?;
-    let target_node_id =
-        if let Some(node) = rows.first().and_then(|row| row["target_node_id"].as_str()) {
-            node.to_owned()
-        } else {
-            eligible_worker(state, file, &profile).await?
-        };
+    let target_node_id = if let Some(node) =
+        rows.first().and_then(|row| row["target_node_id"].as_str())
+    {
+        node.to_owned()
+    } else if profile.model_id == "large-v3-q5_0" {
+        let spec = crate::subtitle_translation::profile::model_spec_for(&profile)?;
+        let requirement = crate::subtitle_models::self_install::ensure_speech(state, &spec).await?;
+        if requirement.state == "unsupported" {
+            return Err(conflict(
+                "no_capable_node",
+                "This server cannot install the selected subtitle quality",
+            ));
+        }
+        crate::subtitle_translation::source_worker(state, file).await?
+    } else {
+        eligible_worker(state, file, &profile).await?
+    };
     let now_ms = now();
     let receipt = state
         .store
@@ -694,7 +776,7 @@ pub(crate) async fn describe(
     let current = settings::read(&state).await?.settings;
     let may_start = user.is_admin || current.who == settings::Who::Everyone;
     let existing = selection::existing_english(&file);
-    let candidates = selection::candidates(&file, selection::Route::Auto);
+    let candidates = selection::candidates(&file, selection::Route::Auto, input.audio_index);
     let text_ready = async {
         if !current.translate_text
             || !candidates
@@ -716,16 +798,33 @@ pub(crate) async fn describe(
         {
             return Ok::<bool, ApiError>(false);
         }
+        let profile_id = crate::subtitle_translation::profile::for_quality(
+            SpeechTask::TranslateToEnglish,
+            audio_quality(current.quality, true),
+        )
+        .id()?;
         Ok(crate::subtitle_translation::workers_public(&state)
             .await?
             .iter()
-            .any(|worker| worker["eligible"] == true))
+            .any(|worker| {
+                worker["eligible"] == true
+                    && worker["capabilities"]
+                        .as_array()
+                        .is_some_and(|capabilities| {
+                            capabilities.iter().any(|capability| {
+                                capability["profile_id"] == profile_id
+                                    && capability["status"] == "verified"
+                            })
+                        })
+            }))
     };
     let (text_ready, audio_ready) = if may_start && existing.is_none() {
         tokio::try_join!(text_ready, audio_ready)?
     } else {
         (false, false)
     };
+    let online = crate::http::subtitle_downloads::configured(&state).await?;
+    let auto_download = may_start && existing.is_none() && current.download_match && online;
     let selected = candidates.iter().find(|source| match source {
         selection::Source::Text(..) => text_ready,
         selection::Source::Audio(..) => audio_ready,
@@ -737,6 +836,8 @@ pub(crate) async fn describe(
             "admins_only",
             "An administrator has limited AI subtitles to admins",
         )
+    } else if auto_download {
+        Value::Null
     } else if !current.from_audio && !current.translate_text {
         block("disabled", "AI subtitle creation is off")
     } else if candidates.is_empty() {
@@ -788,8 +889,9 @@ pub(crate) async fn describe(
         "allowed":may_start && blocked.is_null(),
         "blocked":blocked,
         "existing_index":existing,
-        "route":selected.map(selection::Source::route),
-        "label":selected.map(selection::Source::label),
+        "route": if auto_download && selected.is_none() { json!("download") } else { json!(selected.map(selection::Source::route)) },
+        "label": selected.map(selection::Source::label).or_else(|| auto_download.then(|| "Download a match".to_owned())),
+        "search_online": online,
         "estimate":estimate,
         "source":source_descriptor,
         "alternatives":alternatives,

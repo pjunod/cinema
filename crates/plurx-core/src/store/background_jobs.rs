@@ -137,12 +137,13 @@ macro_rules! text_admission {
     // `admin_user_id` is the requesting user (the field name predates AI
     // subtitles opening to every user). Model setup is an admin's, or the
     // node's own self-install (`admin_user_id` 0); a translation needs that
-    // user to exist and to be an admin or allowed by `subtitles.ai.v1`
-    // who='everyone', and the document's translate_text.
+    // user to exist and to be an admin or allowed by `subtitles.ai.v1`.
+    // Scheduled jobs use actor 0 under the saved ahead-of-time setting.
     ($payload:literal, $now:literal) => { concat!(r#"((json_extract("#,$payload,r#",'$.kind')='subtitle_text_model_operation'
     AND (json_extract("#,$payload,r#",'$.admin_user_id')=0 OR EXISTS(SELECT 1 FROM users WHERE id=json_extract("#,$payload,r#",'$.admin_user_id') AND is_admin=1))) OR (
     json_extract("#,$payload,r#",'$.kind')!='subtitle_text_model_operation'
-    AND EXISTS(SELECT 1 FROM users WHERE id=json_extract("#,$payload,r#",'$.admin_user_id') AND (is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END)))
+    AND ((json_extract("#,$payload,r#",'$.admin_user_id')=0 AND EXISTS(SELECT 1 FROM settings ai_schedule WHERE ai_schedule.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_schedule.value) THEN json_extract(ai_schedule.value,'$.version')=1 AND json_type(ai_schedule.value,'$.ahead_of_time')='true' ELSE 0 END))
+        OR EXISTS(SELECT 1 FROM users WHERE id=json_extract("#,$payload,r#",'$.admin_user_id') AND (is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))))
     AND EXISTS(SELECT 1 FROM files WHERE id=json_extract("#,$payload,r#",'$.file_id') AND size=json_extract("#,$payload,r#",'$.source_size') AND mtime=json_extract("#,$payload,r#",'$.source_mtime') AND probe_json IS NOT NULL)
     AND EXISTS(SELECT 1 FROM settings WHERE key='subtitles.ai.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.version')=1 AND json_type(value,'$.translate_text')='true' ELSE 0 END)))"#) };
 }
@@ -2181,7 +2182,7 @@ impl JobPayload {
                     && digest(model_sha256)
                     && adapter_contract == "candle-marian-0.11-v1"
                     && identifier(target_node_id)
-                    && *admin_user_id > 0
+                    && *admin_user_id >= 0
             }
             Self::SubtitleTextModelOperation {
                 action,

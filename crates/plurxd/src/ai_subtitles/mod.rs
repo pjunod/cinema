@@ -2,7 +2,7 @@
 //! route shares. The queue SQL enforces the same `who` rule at claim time.
 pub(crate) mod readiness;
 pub(crate) mod routes;
-mod selection;
+pub(crate) mod selection;
 pub(crate) mod settings;
 
 use crate::{
@@ -17,13 +17,11 @@ use plurx_core::{domain::User, store::Store};
 
 /// The speech models the audio route needs at a quality tier; every node
 /// that can run them installs them by itself
-/// ([`crate::subtitle_models::self_install`]). Every tier uses `small`
-/// until the tiers are measured, which also adds the speech-detection model.
+/// ([`crate::subtitle_models::self_install`]).
 pub(crate) fn required_speech_models(quality: settings::Quality) -> &'static [&'static str] {
     match quality {
-        settings::Quality::Fast | settings::Quality::Balanced | settings::Quality::Best => {
-            &["small"]
-        }
+        settings::Quality::Fast | settings::Quality::Balanced => &["small"],
+        settings::Quality::Best => &["small", "large-v3-q5_0"],
     }
 }
 
