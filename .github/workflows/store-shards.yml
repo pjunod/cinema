@@ -12,9 +12,6 @@ on:
         description: Validated rollout mode selected by the caller.
         required: true
         type: string
-    secrets:
-      CI_REGISTRY_PULL_TOKEN:
-        required: false
     outputs:
       official_verified:
         description: Complete Store union and schema lineage passed for the official image.
