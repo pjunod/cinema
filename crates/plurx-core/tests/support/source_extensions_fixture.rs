@@ -940,12 +940,16 @@ pub(crate) fn translation_fixture_shape_at(version: u8) -> Vec<(String, String)>
     }
     if version >= 3 {
         expected
-            .execute_batch(include_str!("../../src/store/subtitle_translation_authority.sql"))
+            .execute_batch(include_str!(
+                "../../src/store/subtitle_translation_authority.sql"
+            ))
             .expect("published translation authority");
     }
     if version >= 4 {
         expected
-            .execute_batch(include_str!("../../src/store/subtitle_translation_finish.sql"))
+            .execute_batch(include_str!(
+                "../../src/store/subtitle_translation_finish.sql"
+            ))
             .expect("published translation finish extension");
     }
     translation_shape(&expected)
@@ -979,13 +983,15 @@ fn rewind_empty_translation_finish_to_v140(conn: &rusqlite::Connection) {
         .into_iter()
         .find_map(|(name, sql)| (name == "subtitle_translation_mutate").then_some(sql))
         .expect("published translation mutation trigger");
-    let count: i64 = conn.query_row(
-        "SELECT (SELECT count(*) FROM subtitle_translation_finish_demands)
+    let count: i64 = conn
+        .query_row(
+            "SELECT (SELECT count(*) FROM subtitle_translation_finish_demands)
               + (SELECT count(*) FROM subtitle_translation_stored_tracks)
               + (SELECT count(*) FROM subtitle_translation_schedule_exclusions)",
-        [],
-        |r| r.get(0),
-    ).expect("finish data inventory");
+            [],
+            |r| r.get(0),
+        )
+        .expect("finish data inventory");
     assert_eq!(count, 0, "AI finish data cannot be discarded");
     conn.execute_batch(&format!(
         "SAVEPOINT rewind_ai_finish;
