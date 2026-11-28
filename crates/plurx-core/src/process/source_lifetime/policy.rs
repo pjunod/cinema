@@ -892,6 +892,8 @@ fn verify_state(
     let mut lavfi = false;
     for (index, arg) in args.iter().enumerate() {
         let role = roles.get(index).copied().unwrap_or(ArgumentRole::Ordinary);
+        let output_boundary = role == ArgumentRole::FfmpegOutput && !probe;
+        let path_operand = matches!(role, ArgumentRole::Ordinary | ArgumentRole::FfmpegOutput);
         if fd_next {
             fd_option = Some(*arg);
             fd_next = false;
@@ -909,7 +911,7 @@ fn verify_state(
         let input =
             source_next || script_next || (probe && !arg.starts_with('-') && input_path.exists());
         if input {
-            if role != ArgumentRole::Ordinary {
+            if !path_operand {
                 return Err(Refusal::configured("argument_profile_input_role"));
             }
             media_input = true;
@@ -948,7 +950,12 @@ fn verify_state(
         if FILTER_INPUTS.is_match(arg) {
             media_input = true;
         }
-        if role == ArgumentRole::Ordinary {
+        if output_boundary {
+            // FFmpeg collects options per file, so a completed output consumes
+            // its own -fd and cannot affect a later fd: input.
+            fd_option = None;
+        }
+        if path_operand {
             check_argument(arg, &cwd, context).map_err(Refusal::configured)?;
         }
         if matches!(*arg, "-filter_script" | "-filter_complex_script") {
@@ -1239,6 +1246,33 @@ mod tests {
             verify(&["-i", "fd:", "-f", "null", "pipe:1", "-fd"], 6),
             Err(("missing_option_value", true))
         );
+    }
+
+    #[test]
+    fn ffmpeg_fd_output_option_ends_at_the_output_operand() {
+        let mut fixture = Fixture::new();
+        let media = fixture.data.join("source.mp4");
+        std::fs::write(&media, b"source").unwrap();
+        fixture.asset(&media);
+        let command = fixture.command("ffmpeg", &["-fd", "7", "-f", "null", "pipe:1", "-i", "fd:"]);
+        let mut manifest = fixture.manifest(
+            &command,
+            vec![
+                InheritedFd::duplicate(&File::open(&media).unwrap(), 6).expect("source descriptor")
+            ],
+        );
+        manifest.argument_profile = ArgumentProfile::Ffmpeg { drm_device: None };
+        let refusal = verify_state(
+            &fixture.state,
+            &command,
+            SourceAccess::NoSource,
+            Some(&manifest),
+            "policy fixture",
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(refusal.check, "asset_input_confinement_unqualified");
+        assert!(!refusal.enforce);
     }
     #[test]
     fn m7_np1_child_argv_passes_the_input_checks() {

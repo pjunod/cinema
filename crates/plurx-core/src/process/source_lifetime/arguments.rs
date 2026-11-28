@@ -21,6 +21,7 @@ pub(super) enum ArgumentRole {
     Ordinary,
     Scalar,
     DrmDevice,
+    FfmpegOutput,
 }
 
 impl ArgumentProfile {
@@ -136,12 +137,15 @@ impl ArgumentProfile {
                         roles[index + 1] = ArgumentRole::DrmDevice;
                         device_seen = true;
                         index += 2;
-                    } else if option.starts_with('-') && !ffmpeg_flag(option) {
+                    } else if option.starts_with('-') && option != "-" && !ffmpeg_flag(option) {
                         // FFmpeg value options consume one argv element, even
                         // when it resembles another option. Unknown zero-value
                         // options stay conservative rather than invent roles.
                         index += 2;
                     } else {
+                        if !option.starts_with('-') || option == "-" {
+                            roles[index] = ArgumentRole::FfmpegOutput;
+                        }
                         index += 1;
                     }
                 }
@@ -349,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn ffmpeg_rate_roles_do_not_reclassify_input_output_or_other_option_values() {
+    fn ffmpeg_rate_roles_distinguish_inputs_and_outputs_from_option_values() {
         let profile = ArgumentProfile::Ffmpeg { drm_device: None };
         let args = [
             "-hide_banner",
@@ -364,12 +368,12 @@ mod tests {
         let roles = profile.argument_roles(&args).expect("rate protocol");
         assert_eq!(roles[2], ArgumentRole::Scalar);
         assert_eq!(roles[4], ArgumentRole::Ordinary);
-        assert_eq!(roles[7], ArgumentRole::Ordinary);
+        assert_eq!(roles[7], ArgumentRole::FfmpegOutput);
         assert_eq!(
             profile
                 .argument_roles(&["-i", "-r", "0/1"])
                 .expect("input named -r")[2],
-            ArgumentRole::Ordinary
+            ArgumentRole::FfmpegOutput
         );
         assert_eq!(
             profile
