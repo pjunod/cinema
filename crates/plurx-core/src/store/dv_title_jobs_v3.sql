@@ -14,7 +14,9 @@ WHEN NEW.scanner_generation<OLD.scanner_generation
  OR (OLD.scanner_digest IS NOT NULL AND NEW.scanner_digest IS NOT OLD.scanner_digest
   AND NEW.scanner_generation<=OLD.scanner_generation)
 BEGIN
- SELECT RAISE(ABORT,'stale or conflicting title scanner generation');
+ -- A draining legacy worker sees no carried work and continues to its job
+ -- page even if some predecessor titles remain settled.
+ SELECT RAISE(IGNORE);
 END;
 -- next statement
 CREATE TRIGGER dv_title_jobs_bind_authority
