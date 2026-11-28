@@ -187,6 +187,7 @@ pub use subtitle_playlist::*;
 // split: begin hls-context
 #[path = "hls/context.rs"]
 mod context;
+pub(crate) use context::hevc_codec_from_init;
 use context::*;
 // split: end hls-context
 

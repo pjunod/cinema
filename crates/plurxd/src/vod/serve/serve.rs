@@ -473,14 +473,18 @@ impl VodServe {
     pub async fn recovered_start(&self, session_id: &str) -> Option<RecoveredVod> {
         let sessions = self.shared.sessions.lock().await;
         let session = sessions.get(session_id)?;
-        if session.tombstone.is_some() {
+        if session.tombstone.is_some()
+            || session.encoded_split_only() && session.encoded_projection.is_none()
+        {
             return None;
         }
         Some(RecoveredVod {
             start: VodStart {
+                incarnation: Arc::clone(&session.incarnation),
                 session_id: session_id.to_owned(),
                 duration_ms: plan_duration_ms(&session.live_rendition()?.plan),
-                split: session.live_rendition()?.recipe.audio_excluded,
+                split: session.encoded_projection.is_some()
+                    || session.live_rendition()?.recipe.audio_excluded,
                 vod_copy_layout: session.vod_copy_layout.clone(),
             },
             target_height: session.target_height,

@@ -427,6 +427,7 @@ pub(super) async fn open_ready(
         delivery: Arc::clone(delivery),
         retained_lease: None,
         cache_pin,
+        projection_scratch: None,
     })
 }
 

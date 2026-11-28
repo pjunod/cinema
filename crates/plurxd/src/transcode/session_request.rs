@@ -1125,58 +1125,59 @@ impl SessionKind {
 }
 
 impl SessionRequest {
-    /// Select the current split recipe for a newly negotiated copy.
+    /// Negotiate a private split attempt for a fresh finite VOD request.
     pub(crate) fn prepare_vod_copy_layout(&mut self) {
-        self.vod_copy_layout = (self.split_audio
+        self.vod_copy_layout = if self.split_audio
             && self.presentation == Presentation::Vod
-            && matches!(
-                self.kind,
+            && self.continuous_media.is_none()
+        {
+            match self.kind {
                 SessionKind::Copy {
                     preserve_dolby_vision: false,
                     convert_dolby_vision: false,
                     ..
-                }
-            )
-            && self.continuous_media.is_none()
-            && self.subtitle_burn.is_none())
-        .then_some(VodCopyLayout::PendingV1);
+                } if self.subtitle_burn.is_none() => Some(VodCopyLayout::PendingV1),
+                SessionKind::Transcode { .. } => Some(VodCopyLayout::PendingEncodedV1),
+                SessionKind::Copy { .. } => None,
+            }
+        } else {
+            None
+        };
     }
 
     pub(crate) fn vod_copy_layout_valid(&self) -> bool {
         self.vod_copy_layout.as_ref().is_none_or(|layout| {
             self.presentation == Presentation::Vod
-                && matches!(self.kind, SessionKind::Copy { .. })
+                && layout.encoded() == matches!(self.kind, SessionKind::Transcode { .. })
                 && self.continuous_media.is_none()
-                && self.subtitle_burn.is_none()
-                && self.split_audio != matches!(layout, VodCopyLayout::Muxed)
+                && (layout.encoded() || self.subtitle_burn.is_none())
+                && self.split_audio == (layout.pending() || layout.split())
                 && layout.valid()
         })
     }
 
-    /// Freeze the owner's verdict for first activation or a replay of the
-    /// same verdict. A non-copy result can only consume a pending request.
+    /// Freeze the owner's verdict for first activation or replay it exactly.
     pub(crate) fn seal_vod_copy_layout(
         &mut self,
         issued: Option<VodCopyLayout>,
-        copied_vod: bool,
+        matching_vod: bool,
     ) -> bool {
-        match (&self.vod_copy_layout, &issued) {
-            (Some(VodCopyLayout::PendingV1), Some(layout)) if copied_vod => {
-                if !layout.valid() || matches!(layout, VodCopyLayout::PendingV1) {
-                    return false;
-                }
-                self.split_audio = matches!(layout, VodCopyLayout::SplitV1 { .. });
+        if let Some(pending) = self
+            .vod_copy_layout
+            .as_ref()
+            .filter(|layout| layout.pending())
+        {
+            let valid = match issued.as_ref() {
+                Some(layout) => matching_vod && pending.accepts(layout),
+                None => !matching_vod,
+            };
+            if valid {
+                self.split_audio = issued.as_ref().is_some_and(VodCopyLayout::split);
                 self.vod_copy_layout = issued;
-                true
             }
-            (Some(VodCopyLayout::PendingV1), None) if !copied_vod => {
-                self.split_audio = false;
-                self.vod_copy_layout = None;
-                true
-            }
-            (Some(VodCopyLayout::PendingV1), _) => false,
-            (current, issued) => current == issued,
+            return valid;
         }
+        self.vod_copy_layout == issued
     }
 
     /// The one processed-upgrade ask for this request: its Auto candidate's,

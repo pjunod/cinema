@@ -1585,7 +1585,9 @@ pattern = "VodPublication"
 # ResponseOwner, beside the continuous master. It creates no producer or
 # response owner and transfers none.
 [module_symbols.occurrences]
-"crates/plurxd/src/vod/serve/delivery.rs" = 34
+"crates/plurxd/src/vod/serve/delivery.rs" = 35
+# Projected master, child playlists, and child bytes use the exact encoded owner.
+"crates/plurxd/src/vod/serve/encoded_split.rs" = 8
 "crates/plurxd/src/vod/serve/end.rs" = 2
 "crates/plurxd/src/vod/serve/serve.rs" = 4
 "crates/plurxd/src/vod/serve/split.rs" = 2
@@ -1740,6 +1742,8 @@ pattern = "commit_guard_before"
 "crates/plurxd/src/http/hls/tests/chunk_05.rs" = 2
 "crates/plurxd/src/serving_fence.rs" = 4
 "crates/plurxd/src/vod/serve/create.rs" = 2
+# Recheck serving authority when committing the selected encoded layout.
+"crates/plurxd/src/vod/serve/encoded_split.rs" = 1
 "crates/plurxd/src/vod/tests/chunk_02.rs" = 2
 "crates/plurxd/src/vodserve.rs" = 2
 
@@ -3250,6 +3254,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/vod/retained.rs" = 8
 "crates/plurxd/src/vod/rolling_retained.rs" = 3
 "crates/plurxd/src/vod/serve/delivery.rs" = 1
+# Offload one bounded projection and retain its scratch and worker permits.
+"crates/plurxd/src/vod/serve/encoded_split.rs" = 1
 "crates/plurxd/src/vod/serve/end.rs" = 1
 "crates/plurxd/src/vod/serve/quality.rs" = 1
 "crates/plurxd/src/vod/serve/serve.rs" = 1
@@ -5113,6 +5119,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/vod/rolling_retained.rs" = 1
 "crates/plurxd/src/vod/serve/create.rs" = 7
 "crates/plurxd/src/vod/serve/delivery.rs" = 3
+# Use the inherited private verification and child delivery deadlines.
+"crates/plurxd/src/vod/serve/encoded_split.rs" = 2
 "crates/plurxd/src/vod/serve/end.rs" = 4
 "crates/plurxd/src/vod/serve/quality.rs" = 3
 "crates/plurxd/src/vod/serve/serve.rs" = 3
