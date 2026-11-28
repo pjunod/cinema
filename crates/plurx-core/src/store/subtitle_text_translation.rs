@@ -573,4 +573,93 @@ mod tests {
             "{claimed:?}"
         );
     }
+
+    #[tokio::test]
+    async fn scheduled_text_publication_requires_ahead_of_time_at_claim_and_publish() {
+        let (_dir, store, conn, _) = fixture().await;
+        let schedule = |enabled: bool| {
+            conn.execute(
+                "UPDATE settings SET value=json_set(value,'$.ahead_of_time',json(?1)) WHERE key='subtitles.ai.v1'",
+                [if enabled { "true" } else { "false" }],
+            )
+            .expect("toggle the saved schedule");
+        };
+        schedule(true);
+        let mut payload = source().into_artifact_text();
+        let JobPayload::SubtitleTextTranslateArtifact { admin_user_id, .. } = &mut payload else {
+            unreachable!("typed subtitle source");
+        };
+        *admin_user_id = 0;
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .enqueue_job(EnqueueJob {
+                id: id.clone(),
+                payload: payload.clone(),
+                dedupe_key: "scheduled-text-slice".into(),
+                priority: 1,
+                not_before_ms: 1000,
+                now_ms: 1000,
+                request: JobRequest {
+                    scope: "subtitle-text-user:0".into(),
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    request_digest: "d".repeat(64),
+                    consumer_kind: "subtitle_text_translation".into(),
+                    consumer_ref: "scheduled-text".into(),
+                    target_node_id: Some("worker".into()),
+                    deadline_ms: Some(86400000),
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("scheduled text enqueue");
+        let queued = store
+            .background_job(&id)
+            .await
+            .expect("read")
+            .expect("queued job");
+        let mut claim = ClaimJob {
+            job_id: id,
+            expected_revision: queued.revision,
+            node_id: "worker".into(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            kind: JobKind::SubtitleTextTranslateArtifact,
+            payload_version: 1,
+            now_ms: 1100,
+            dispatched_at_ms: 1100,
+        };
+        schedule(false);
+        assert!(!matches!(
+            store
+                .claim_artifact_job(claim.clone())
+                .await
+                .expect("claim attempt"),
+            ClaimOutcome::Claimed { .. }
+        ));
+        schedule(true);
+        claim.claim_id = uuid::Uuid::new_v4().to_string();
+        let ClaimOutcome::Claimed { job } = store
+            .claim_artifact_job(claim)
+            .await
+            .expect("scheduled claim")
+        else {
+            panic!("scheduled translation must be admitted when ahead-of-time is enabled");
+        };
+        let mut publish = PublishTextSlice {
+            token: job.token.expect("claimed token"),
+            source: payload,
+            cues: vec![cue(0)],
+            now_ms: 1200,
+        };
+        assert!(store
+            .publish_text_translation_slice(publish.clone())
+            .await
+            .expect("publish with schedule"));
+        schedule(false);
+        publish.cues = vec![cue(1)];
+        assert!(!store
+            .publish_text_translation_slice(publish)
+            .await
+            .expect("refuse once unscheduled"));
+    }
 }
