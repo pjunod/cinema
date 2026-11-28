@@ -283,6 +283,12 @@ Main had moved 1,645 commits on before the batch could land. The port merges mai
 - **Viewer preparation** (main `40609d31e`, `0fec6b022`). A read attestation is admitted without counting analysis or job holders. While a preparation lease's authority is live (no grace), analysis and jobs are refused continuation, resume and byte service. This uses `claim_preparation_window`, which the old-binary resume trigger shares.
 - **Previous reader** (main `2d4a8e30c`). Main refuses a re-claim while the job's previous *registered* physical custody is charged. A lease exists from the claim, with no separate registration, so this rule would also delay every ordinary takeover. Instead the successor fence does not wait on its own ghost lease (review decision 2, `a05011f26`). The ghost keeps charging every other claim through its grace, and the old worker loses publication by fence. Main's title-maintenance contract test asserts that form.
 - **Settings.** Main's Developer cleanup (#1802) moved the source diagnostics card to System. The read-only launch-verification card now lives there.
+- **Replicated session maintenance.** A sweep with due retirements prepares
+  one update for expired preparations, drains and leases. Each selection
+  keeps its original batch limit, deadline and precedence. A sweep with
+  only orphaned ledger entries skips the retirement update. This keeps
+  repeated compilation of the lease-aware trigger graph out of the
+  maintenance transaction.
 
 The claim's lease terms remain the same macros used by source registration,
 analysis and resume. Claim, replica verdict and candidate listing wrap those

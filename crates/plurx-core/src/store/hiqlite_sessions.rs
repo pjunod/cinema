@@ -1561,11 +1561,15 @@ fn abort_statements(
     ]
 }
 
-struct PendingMaintenanceRow(i64);
+struct PendingMaintenanceRow {
+    retire_sessions: bool,
+}
 
 impl From<&mut Row<'_>> for PendingMaintenanceRow {
     fn from(row: &mut Row<'_>) -> Self {
-        Self(row.get("pending"))
+        Self {
+            retire_sessions: row.get::<i64>("retire_sessions") != 0,
+        }
     }
 }
 
@@ -6573,18 +6577,23 @@ impl MediaSessionStore for HiqliteAuthStore {
             .session_client()
             .query_consistent_map::<PendingMaintenanceRow, _>("maintain_media_sessions",
                 format!(
-                    "SELECT 1 AS pending WHERE
-                    EXISTS (SELECT 1 FROM media_sessions
-                      WHERE state = 'active' AND lease_expires_at_ms <= $1)
-                    -- A lapsed drain is work even when the row's lease is
-                    -- still in the future, which it usually is: a dead owner
-                    -- renewed it up to twelve seconds before it died, and the
-                    -- retirement cutoff above is a minute behind that. Without
-                    -- this the backstop proposes nothing and the row waits for
-                    -- a condition that has nothing to do with draining.
-                    OR EXISTS (SELECT 1 FROM media_sessions
-                      WHERE state = 'active' AND drain_deadline_ms IS NOT NULL
-                        AND drain_deadline_ms <= $2)
+                    "WITH due AS (
+                        SELECT EXISTS (
+                            SELECT 1 FROM media_sessions
+                            WHERE state = 'active' AND lease_expires_at_ms <= $1
+                        ) OR EXISTS (
+                            SELECT 1 FROM media_sessions
+                            WHERE state = 'active' AND drain_deadline_ms <= $2
+                        ) OR EXISTS (
+                            SELECT 1 FROM media_session_preparations staged
+                            JOIN media_sessions session
+                              ON session.incarnation_id = staged.staged_incarnation_id
+                              AND session.{owner_column} = staged.{owner_column}
+                              AND session.playback_id = staged.playback_id
+                            WHERE staged.deadline_ms <= $2
+                        ) AS retire_sessions
+                    )
+                    SELECT retire_sessions FROM due WHERE retire_sessions
                     OR EXISTS (SELECT 1 FROM job_leases lease
                       JOIN media_sessions session
                         ON lease.resource = 'session:' || session.incarnation_id
@@ -6604,8 +6613,6 @@ impl MediaSessionStore for HiqliteAuthStore {
                         AND session.{owner_column} = preparation.{owner_column}
                         AND session.playback_id = preparation.playback_id
                       WHERE session.incarnation_id IS NULL OR session.state != 'active')
-                    OR EXISTS (SELECT 1 FROM media_session_preparations
-                      WHERE deadline_ms <= $2)
                     OR EXISTS (SELECT 1 FROM media_session_requests
                       WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'starting' AND claim_expires_at_ms <= $2)
                     OR EXISTS (SELECT 1 FROM media_session_requests
@@ -6644,61 +6651,55 @@ impl MediaSessionStore for HiqliteAuthStore {
             )
             .await?
             .into_iter()
-            .next()
-            .is_some_and(|row| row.0 == 1);
-        if !pending {
+            .next();
+        let Some(pending) = pending else {
             return Ok(());
-        }
-        let statements = vec![
-            // A preparation expires on its own deadline; see the SQLite
-            // backend's maintenance for why this is the durable enforcement.
-            // (It said "nothing else enforces it" until 2026-09-08; an
-            // in-process timer also fires, for the actor's in-memory slot.)
-            (
-                format!("UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = $1,
-                        publication_ready_at_ms = $2, updated_at_ms = $1
-                  WHERE incarnation_id IN (
-                    SELECT staged.staged_incarnation_id FROM media_session_preparations staged
-                     JOIN media_sessions staged_session
-                       ON staged_session.incarnation_id = staged.staged_incarnation_id
-                      AND staged_session.{owner_column} = staged.{owner_column}
-                      AND staged_session.playback_id = staged.playback_id
-                     WHERE staged.deadline_ms <= $1
-                     ORDER BY staged.deadline_ms, staged.staged_incarnation_id LIMIT $3)"),
-                params!(now_ms, MEDIA_SESSION_PUBLICATION_BLOCKED, MAINTENANCE_BATCH),
-            ),
-            (
-                // The cross-node backstop for a drain; see the SQLite twin.
-                // Only reached when the owner stopped running, because the
-                // owner ends its own draining rows on its three-second tick.
-                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'superseded',
-                        lease_expires_at_ms = $1, publication_ready_at_ms = $2,
-                        updated_at_ms = $1
-                  WHERE incarnation_id IN (
+        };
+        let mut statements = Vec::new();
+        if pending.retire_sessions {
+            // Compile the retirement trigger graph once per transaction. Each
+            // pass keeps its own limit and excludes rows an earlier pass ends.
+            // The consistent read only avoids preparing an idle update. All
+            // ownership and deadline predicates run again at apply time.
+            statements.push((
+                format!("WITH staged AS MATERIALIZED (
+                    SELECT staged.staged_incarnation_id AS incarnation_id
+                    FROM media_session_preparations staged
+                    JOIN media_sessions session
+                      ON session.incarnation_id = staged.staged_incarnation_id
+                      AND session.{owner_column} = staged.{owner_column}
+                      AND session.playback_id = staged.playback_id
+                    WHERE staged.deadline_ms <= $1
+                    ORDER BY staged.deadline_ms, staged.staged_incarnation_id LIMIT $2
+                  ), draining AS MATERIALIZED (
                     SELECT incarnation_id FROM media_sessions
-                     WHERE state = 'active' AND drain_deadline_ms IS NOT NULL
-                       AND drain_deadline_ms <= $1
-                     ORDER BY drain_deadline_ms, incarnation_id LIMIT $3)".to_owned(),
+                    WHERE state = 'active' AND drain_deadline_ms <= $1
+                      AND incarnation_id NOT IN (SELECT incarnation_id FROM staged)
+                    ORDER BY drain_deadline_ms, incarnation_id LIMIT $2
+                  ), expired AS MATERIALIZED (
+                    SELECT incarnation_id FROM media_sessions
+                    WHERE state = 'active' AND lease_expires_at_ms <= $3
+                      AND incarnation_id NOT IN (SELECT incarnation_id FROM staged)
+                      AND incarnation_id NOT IN (SELECT incarnation_id FROM draining)
+                    ORDER BY lease_expires_at_ms, incarnation_id LIMIT $2
+                  )
+                  UPDATE media_sessions SET state = 'ended',
+                    terminal_reason = CASE WHEN incarnation_id IN (SELECT incarnation_id FROM draining)
+                        THEN 'superseded' ELSE 'replaced' END,
+                    lease_expires_at_ms = $1, publication_ready_at_ms = $4, updated_at_ms = $1
+                  WHERE incarnation_id IN (
+                    SELECT incarnation_id FROM staged UNION ALL
+                    SELECT incarnation_id FROM draining UNION ALL
+                    SELECT incarnation_id FROM expired)"),
                 params!(
                     now_ms,
-                    MEDIA_SESSION_PUBLICATION_BLOCKED,
-                    MAINTENANCE_BATCH
-                ),
-            ),
-            (
-                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = $1,
-                        publication_ready_at_ms = $2, updated_at_ms = $1
-                  WHERE incarnation_id IN (
-                    SELECT incarnation_id FROM media_sessions
-                     WHERE state = 'active' AND lease_expires_at_ms <= $3
-                     ORDER BY lease_expires_at_ms, incarnation_id LIMIT $4)".to_owned(),
-                params!(
-                    now_ms,
-                    MEDIA_SESSION_PUBLICATION_BLOCKED,
+                    MAINTENANCE_BATCH,
                     retire_before,
-                    MAINTENANCE_BATCH
+                    MEDIA_SESSION_PUBLICATION_BLOCKED
                 ),
-            ),
+            ));
+        }
+        statements.extend([
             (
                 "DELETE FROM cache_consumer_pins
                   WHERE consumer_kind = 'media_session'
@@ -6842,7 +6843,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     ORDER BY lease.updated_at_ms, lease.rowid LIMIT $2)".to_owned(),
                 params!(retained_cutoff, MAINTENANCE_BATCH),
             ),
-        ];
+        ]);
         self.session_client()
             .txn("maintain_media_sessions", statements)
             .await?
