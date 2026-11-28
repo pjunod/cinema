@@ -252,7 +252,7 @@ pub(super) async fn exact_hls_context_at(
         None => {
             let opened = match state
                 .transcode
-                .segment_for_publication_before(session, &init_object, deadline)
+                .rolling_init_for_inspection_before(session, &init_object, deadline)
                 .await
             {
                 Ok(crate::transcode::SegmentPublication::Ready(opened)) => *opened,
@@ -441,7 +441,7 @@ pub(super) fn dolby_vision_codec_from_init(init: &[u8], sample_entry: &str) -> O
 }
 
 /// RFC 6381 identifier from the HEVCDecoderConfigurationRecord in `hvcC`.
-pub(super) fn hevc_codec_from_init(init: &[u8], sample_entry: &str) -> Option<String> {
+pub(crate) fn hevc_codec_from_init(init: &[u8], sample_entry: &str) -> Option<String> {
     let type_at = init.windows(4).position(|window| window == b"hvcC")?;
     let box_start = type_at.checked_sub(4)?;
     let box_size = u32::from_be_bytes(init.get(box_start..type_at)?.try_into().ok()?) as usize;

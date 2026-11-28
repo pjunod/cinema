@@ -317,6 +317,7 @@ pub(super) fn valid_start_request() -> RemoteStartRequest {
         request: SessionRequest {
             split_audio: false,
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -551,6 +552,7 @@ fn valid_start_response() -> RemoteStartResponse {
     let session_id = "00000000-0000-4000-8000-0000000000b1".to_owned();
     RemoteStartResponse {
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         processed_fel: None,
         processed_dv_profile: None,
         retained_output: None,
@@ -4803,6 +4805,7 @@ fn a_split_copy_route_is_reopened_not_taken_over_and_its_wire_keeps_the_split() 
             presentation: crate::transcode::Presentation::Vod,
             split_audio: true,
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             ..eligible.request.clone()
         },
         ..eligible.clone()

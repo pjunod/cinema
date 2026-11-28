@@ -242,20 +242,34 @@ pub(super) fn native_split_presentation(
         .zip(file.height)
         .and_then(|(width, height)| Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?)))
         .filter(|(width, height)| *width > 0 && *height > 0);
+    let (codec, supplemental_codecs, raster, video_range) = match &ids.video_facts {
+        Some(facts) => (
+            facts.codec.clone(),
+            None,
+            Some((u32::from(facts.width), u32::from(facts.height))),
+            facts.range,
+        ),
+        None => (
+            codec,
+            context
+                .supplemental_codecs
+                .as_ref()
+                .map(|codecs| codecs.replacen("dvh1.", "dvhe.", 1)),
+            raster,
+            VideoRange::Pq,
+        ),
+    };
     SplitPresentation {
         variants: vec![SplitVideo {
             rendition_id: ids.video.clone(),
             codec,
-            supplemental_codecs: context
-                .supplemental_codecs
-                .as_ref()
-                .map(|codecs| codecs.replacen("dvh1.", "dvhe.", 1)),
+            supplemental_codecs,
             width: raster.map(|(width, _)| width),
             height: raster.map(|(_, height)| height),
             frame_rate: context
                 .frame_rate
                 .filter(|rate| rate.is_finite() && *rate > 0.0),
-            video_range: VideoRange::Pq,
+            video_range,
             budget: None,
         }],
         audio: vec![SplitAudio {

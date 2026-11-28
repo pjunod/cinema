@@ -809,6 +809,8 @@ pub struct SessionRequest {
     /// Absent on P49 recipes, which use the original AAC grid on recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) vod_copy_layout: Option<VodCopyLayout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rolling_hls_layout: Option<RollingHlsLayout>,
     /// The client asked for the HDR10 re-encode grade rather than the SDR
     /// ladder: it decodes and presents HEVC Main10 PQ (`hdr10t=1` at
     /// `/decision`, `CreateSession::hdr10` here).
@@ -1431,8 +1433,45 @@ impl SessionRequest {
     }
 }
 
+/// The writer's first committed rolling presentation. Split identities are
+/// frozen across ownership changes, while media sequence ranges advance.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "layout", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RollingHlsLayout {
+    FragmentedMuxedV1,
+    SplitV1 { video: String, audio: String },
+}
+
+impl RollingHlsLayout {
+    pub(crate) fn valid(&self) -> bool {
+        fn valid_id(id: &str) -> bool {
+            id.len() == 64
+                && id
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        }
+        match self {
+            Self::FragmentedMuxedV1 => true,
+            Self::SplitV1 { video, audio } => video != audio && valid_id(video) && valid_id(audio),
+        }
+    }
+
+    pub(crate) fn split(&self) -> bool {
+        matches!(self, Self::SplitV1 { .. })
+    }
+
+    pub(crate) fn playlist_filename(&self) -> &'static str {
+        if self.split() {
+            "master.m3u8"
+        } else {
+            "index.m3u8"
+        }
+    }
+}
+
 pub struct StartInfo {
     pub(crate) vod_copy_layout: Option<VodCopyLayout>,
+    pub(crate) rolling_hls_layout: Option<RollingHlsLayout>,
     /// Profile of an admitted, prepared processed presentation. Independent
     /// of the physical transcode kind and its PQ base grade; never source tags.
     pub(crate) processed_dv_profile: Option<u8>,

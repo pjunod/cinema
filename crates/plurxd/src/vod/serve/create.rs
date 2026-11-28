@@ -2429,6 +2429,7 @@ impl ReservedSourceVodRendition {
         Ok(SourcePendingStartInfo {
             info: crate::transcode::StartInfo {
                 vod_copy_layout: None,
+                rolling_hls_layout: None,
                 processed_dv_profile: self
                     .rendition
                     .recipe
@@ -3765,6 +3766,7 @@ mod principal_demand_tests {
         let request = SessionRequest {
             split_audio: false,
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             source_telemetry: None,
             quality_catalog: None,
             candidate_context: None,

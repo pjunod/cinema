@@ -44,6 +44,7 @@ async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
     let request = crate::transcode::SessionRequest {
         split_audio: false,
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -214,6 +215,7 @@ async fn started_session_cleanup_shipped_shape() {
     let request = crate::transcode::SessionRequest {
         split_audio: false,
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2216,6 +2218,7 @@ fn split_copy_eligibility_is_one_rule_for_owner_and_ingress() {
 
     let legacy = crate::transcode::SessionRequest {
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         ..split.clone()
     };
     assert!(eligible(&legacy, &file));

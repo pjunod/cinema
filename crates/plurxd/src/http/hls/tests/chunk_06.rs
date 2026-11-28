@@ -2354,6 +2354,7 @@ fn native_split_master_is_written_from_proved_facts() {
         audio: "b".repeat(64),
         audio_codec: "mp4a.40.2",
         audio_channels: 6,
+        video_facts: None,
     };
     let master = native_split_presentation(&file, &context, &ids, Some(1))
         .master_text()

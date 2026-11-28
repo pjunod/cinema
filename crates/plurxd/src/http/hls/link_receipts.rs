@@ -1876,6 +1876,7 @@ mod tests {
         let mut request = SessionRequest {
             split_audio: false,
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,

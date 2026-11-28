@@ -746,6 +746,7 @@ impl CreateSession {
         crate::transcode::SessionRequest {
             split_audio: self.copy == Some(true) && split_requested,
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             dv_processing_destination: None,
             // The player's per-playback choice; `SessionRequest` never
             // serializes it.
@@ -5117,6 +5118,12 @@ async fn create_with_purpose_attempt(
         ));
     }
     request.split_audio = remote_request.request.split_audio;
+    if let Some(layout) = info.rolling_hls_layout.clone() {
+        remote_request.request.rolling_hls_layout = Some(layout);
+        remote_request.request.vod_only = false;
+        remote_request.request.kind = info.kind;
+        remote_request.request.audio_delivery = info.audio_delivery.clone();
+    }
     let native_split_master = request.transport.as_deref() == Some("native")
         && request
             .candidate_context

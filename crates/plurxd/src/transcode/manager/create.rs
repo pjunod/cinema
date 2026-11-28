@@ -1483,6 +1483,13 @@ impl TranscodeManager {
                     req.audio_delivery.as_ref(),
                     req.retain_output,
                     req.source_telemetry == Some(crate::transcode::SourceTelemetry::FilmV1),
+                    req.split_audio
+                        && req
+                            .candidate_context
+                            .as_ref()
+                            .and_then(|context| context.canonical_caps.as_ref())
+                            .is_some_and(|caps| caps.plays_split_av()),
+                    req.rolling_hls_layout.as_ref(),
                     plan,
                 )
                 .await
@@ -1517,6 +1524,8 @@ impl TranscodeManager {
                     native_fel_transport(req)
                         && (initial_native_fel
                             || (req.start_seconds == 0.0 && replacement_deadline.is_none())),
+                    req.split_audio,
+                    req.rolling_hls_layout.as_ref(),
                     plan,
                     #[cfg(target_os = "linux")]
                     prepared_native_fel,
@@ -5440,6 +5449,7 @@ impl TranscodeManager {
         }
         Ok(StartInfo {
             vod_copy_layout: start.vod_copy_layout,
+            rolling_hls_layout: None,
             processed_dv_profile,
             processed_fel,
             degraded_processing,

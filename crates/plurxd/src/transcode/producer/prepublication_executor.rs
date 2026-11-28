@@ -147,6 +147,9 @@ pub(super) async fn execute_prepublication_transcode_retry(
                 .rewind_reaped_input()
                 .map_err(|error| format!("resetting held retry input: {error}"))?;
         }
+        if let Some(split) = &session.native_split {
+            split.retire_reader_for_muxed_retry().await?;
+        }
         retire_upload_lane(&session).await;
         clear_session_dir(&session.dir)
             .await
@@ -621,6 +624,10 @@ pub(super) fn spawn_copy_reader_owner(
     grants: Option<crate::copyseg::WriteGrants>,
     #[cfg(target_os = "linux")] picture_clock: Option<crate::copyseg::CopyPicturePipe>,
 ) {
+    let reader_registration = session
+        .native_split
+        .as_ref()
+        .map(|split| split.register_reader());
     tokio::spawn(async move {
         // The outer owner retains the pipe until the actor has accepted the
         // typed reader fact. Structural `Unsupported` deliberately stops
@@ -641,6 +648,7 @@ pub(super) fn spawn_copy_reader_owner(
             .expect("copy observation lock") = Some(Arc::clone(&measurement));
         let retained = session.rolling_collection.clone();
         let native_split = session.native_split.clone();
+        let epoch = session.takeover.clone();
         let worker_measurement = Arc::clone(&measurement);
         let measurement_dir = dir.clone();
         // The completion barrier is installed *before* the worker is spawned
@@ -683,6 +691,9 @@ pub(super) fn spawn_copy_reader_owner(
         let worker = tokio::spawn(async move {
             let _writer = writer;
             let mut stdout = reader_stdout.lock_owned().await;
+            let cancellation = reader_registration
+                .as_ref()
+                .map(|(cancellation, _)| cancellation);
             copyseg::run_observed_retained(
                 &mut *stdout,
                 dir,
@@ -696,7 +707,8 @@ pub(super) fn spawn_copy_reader_owner(
                 native_split,
                 #[cfg(target_os = "linux")]
                 picture_clock,
-                None,
+                epoch.as_ref(),
+                cancellation,
             )
             .await
         });

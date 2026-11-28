@@ -274,6 +274,7 @@ pub(crate) async fn test_reorder_candidate_cost_isolation(
     let mut request = SessionRequest {
         split_audio: false,
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2274,6 +2275,7 @@ mod tests {
         let mut request = SessionRequest {
             split_audio: false,
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -3646,6 +3648,7 @@ mod tests {
         let request = SessionRequest {
             split_audio: false,
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
