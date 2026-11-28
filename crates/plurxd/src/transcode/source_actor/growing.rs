@@ -5,6 +5,7 @@ use crate::{
     copyrange::{CopyRangeProduction, SplitRangeRequest},
     source_generation::{SourceRenditionOwner, SourceRenditionOwners},
 };
+use plurx_core::sharing_resources::SharingHlsRole;
 
 pub(crate) struct SourceGrowingPreparation {
     owners: Arc<SourceRenditionOwners>,
@@ -311,7 +312,9 @@ impl SourceViewerActor {
                         let payload = files.payload.clone();
                         let directory = files.payload_path.clone();
                         let path = directory.join(&name);
-                        let row = projected.and_then(|(_, index)| files.split_row(index));
+                        let row = projected
+                            .map(|(role, index)| files.split_row(index, role).ok_or(unsupported))
+                            .transpose()?;
                         drop(files);
                         let mut ready = custody
                             .open_ready_child(&payload, &path, &name, &etag, &backing.delivery)
@@ -530,7 +533,13 @@ impl SourceViewerActor {
         // Every authenticated resource the viewer fetches is activity; only
         // a served media segment is presentation evidence.
         backing.note_activity();
-        if kind == SharingHlsResourceKind::MediaSegment {
+        if matches!(
+            kind,
+            SharingHlsResourceKind::MediaSegment
+                | SharingHlsResourceKind::ChildSegment {
+                    role: SharingHlsRole::Video
+                }
+        ) {
             backing.note_media_served().await;
         }
         drop(custody);

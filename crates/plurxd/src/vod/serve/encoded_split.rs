@@ -378,6 +378,7 @@ impl EncodedVodProjection {
         index: u32,
         source: SegmentReady,
         audio: bool,
+        custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
     ) -> Result<SegmentReady, VodError> {
         let mut recent = self.recent.lock().await;
         let delivery = Arc::clone(&source.delivery);
@@ -408,11 +409,14 @@ impl EncodedVodProjection {
             let projector = Arc::clone(&self.projector);
             let directory = rendition.dir.path().to_owned();
             let peak_bps = self.peak_bps;
+            let custody = custody.cloned();
             let projected = tokio::task::spawn_blocking(move || {
                 let _worker = worker;
-                let ProjectedVodWindow { video, audio } = projector
-                    .vod_window(&bytes, index)
-                    .map_err(|error| invalid(error.to_string()))?;
+                let _custody = custody;
+                let ProjectedVodWindow { video, audio, .. } =
+                    projector
+                        .vod_window(&bytes, index)
+                        .map_err(|error| invalid(error.to_string()))?;
                 let total = (video.len() as u64).saturating_add(audio.len() as u64);
                 if total > output_limit
                     || duration.is_none_or(|duration| {
@@ -560,7 +564,7 @@ impl VodServe {
             let projection =
                 EncodedVodProjection::new(&found.rendition, init, recipe.encoding.is_none())?;
             projection
-                .project_segment(&found.rendition, entry, first, false)
+                .project_segment(&found.rendition, entry, first, false, None)
                 .await?;
             Ok::<_, VodError>(projection)
         };
@@ -772,7 +776,13 @@ impl VodServe {
                 .encoded_split_input(session_id, &found, &owner, Some(index), budget, custody)
                 .await?;
             let ready = projection
-                .project_segment(&found.rendition, index, source, request.role == "audio")
+                .project_segment(
+                    &found.rendition,
+                    index,
+                    source,
+                    request.role == "audio",
+                    custody,
+                )
                 .await?;
             if self.source_changed(&found.rendition) {
                 return Err(invalid("encoded split source changed during projection"));

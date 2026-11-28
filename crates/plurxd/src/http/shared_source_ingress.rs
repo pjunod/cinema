@@ -266,6 +266,15 @@ pub(super) async fn receiver_effective_body(
         );
         if !unassigned {
             let selected = entry.identity.recipe.clone();
+            if receiver_presentation::recipe_uses_split(&selected)
+                && !path.ends_with("/end")
+                && !path.ends_with("/status")
+            {
+                current_reference(state, headers, &input.reference).await?;
+                if !receiver_presentation::authenticated_receiver_split(headers) {
+                    return Err(receiver_presentation::unavailable());
+                }
+            }
             return receiver_presentation::operation_body(path, bytes, &selected);
         }
     }

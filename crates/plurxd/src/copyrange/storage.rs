@@ -335,10 +335,16 @@ impl CopyRangeFiles {
             .flatten()
     }
 
-    pub(crate) fn split_row(&self, index: u32) -> Option<PairRow> {
+    pub(crate) fn split_row(
+        &self,
+        index: u32,
+        role: plurx_core::sharing_resources::SharingHlsRole,
+    ) -> Option<PairRow> {
         (self.split_sealed && (index as usize) < self.committed_segments)
-            .then(|| self.split_rows.get(index as usize).cloned())
+            .then(|| self.split_rows.get(index as usize))
             .flatten()
+            .filter(|row| row.duration(role).is_some())
+            .cloned()
     }
 
     pub(crate) fn split_playlist(
@@ -354,11 +360,9 @@ impl CopyRangeFiles {
             .iter()
             .enumerate()
         {
-            let _ = writeln!(
-                playlist,
-                "#EXTINF:{:.6},\nsegment/{index}.m4s",
-                row.duration(role)
-            );
+            if let Some(duration) = row.duration(role) {
+                let _ = writeln!(playlist, "#EXTINF:{duration:.6},\nsegment/{index}.m4s");
+            }
         }
         if self.committed_eof {
             playlist.push_str("#EXT-X-ENDLIST\n");
@@ -503,6 +507,8 @@ impl CopyRangeFiles {
                     &segment.media.bytes,
                     segment.output_index,
                     self.split_rows.last(),
+                    segment.video_entry().is_none(),
+                    retirement,
                 )
                 .await
             {

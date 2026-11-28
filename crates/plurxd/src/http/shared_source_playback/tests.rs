@@ -1116,6 +1116,7 @@ async fn actual_source_split_delivery(mode: SourceFixtureMode) {
     };
     let (_, master) = get("master.m3u8".into()).await;
     let master = std::str::from_utf8(&master).expect("split master");
+    let mut growing_counts = Vec::new();
     for role in ["video", "audio"] {
         let marker = format!("{role}/");
         let rest = master
@@ -1124,6 +1125,20 @@ async fn actual_source_split_delivery(mode: SourceFixtureMode) {
             .1;
         let id = &rest[..rest.find('/').expect("rendition")];
         let (_, playlist) = get(format!("{role}/{id}/index.m3u8")).await;
+        let playlist = if matches!(mode, SourceFixtureMode::RangeSplitCopy) {
+            tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                let mut playlist = playlist;
+                while !playlist.ends_with(b"#EXT-X-ENDLIST\n") {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    playlist = get(format!("{role}/{id}/index.m3u8")).await.1;
+                }
+                playlist
+            })
+            .await
+            .expect("range playlists close after the final verified audio flush")
+        } else {
+            playlist
+        };
         let playlist = std::str::from_utf8(&playlist).expect("split child");
         let init = playlist
             .lines()
@@ -1134,12 +1149,33 @@ async fn actual_source_split_delivery(mode: SourceFixtureMode) {
             .lines()
             .find(|line| line.starts_with("segment/"))
             .expect("child segment");
+        if matches!(mode, SourceFixtureMode::RangeSplitCopy) {
+            let count = playlist
+                .lines()
+                .filter(|line| line.starts_with("segment/"))
+                .count();
+            growing_counts.push(count);
+            if role == "audio" {
+                let last = playlist
+                    .lines()
+                    .rfind(|line| line.starts_with("segment/"))
+                    .expect("audio tail");
+                assert!(!get(format!("{role}/{id}/{last}")).await.1.is_empty());
+            }
+        }
         for child in [init, segment] {
             let (mime, bytes) = get(format!("{role}/{id}/{child}")).await;
             assert!(!bytes.is_empty(), "{role} child object");
             let mime = mime.expect("typed child MIME");
             assert!(mime.to_str().expect("MIME text").starts_with(role));
         }
+    }
+    if let [video, audio] = growing_counts.as_slice() {
+        assert_eq!(
+            *audio,
+            video + 1,
+            "the audio-only tail must never advertise a video object"
+        );
     }
     let _ = stop.send(());
     server.await.expect("server").expect("shutdown");

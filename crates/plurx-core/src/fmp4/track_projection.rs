@@ -22,6 +22,13 @@ pub struct ProjectedCopySegment {
 pub struct ProjectedVodWindow {
     pub audio: Vec<u8>,
     pub video: Vec<u8>,
+    pub audio_decode: std::ops::Range<u64>,
+    pub video_decode: std::ops::Range<u64>,
+}
+
+pub struct ProjectedWindowTrack {
+    pub bytes: Vec<u8>,
+    pub decode: std::ops::Range<u64>,
 }
 
 // A fixed range per window keeps sequence numbers independent of seek and
@@ -107,17 +114,40 @@ impl CopyTrackProjection {
     /// Project a complete encoded VOD segment. The segment can concatenate
     /// muxed pairs and pairs containing only one of its two admitted tracks.
     pub fn vod_window(&self, bytes: &[u8], index: u32) -> Result<ProjectedVodWindow, Fmp4Error> {
+        let (audio, video) = self.window_tracks(bytes, index)?;
+        let (Some(audio), Some(video)) = (audio, video) else {
+            return malformed("split VOD window does not contain both admitted tracks");
+        };
+        Ok(ProjectedVodWindow {
+            audio: audio.bytes,
+            video: video.bytes,
+            audio_decode: audio.decode,
+            video_decode: video.decode,
+        })
+    }
+
+    /// Preserve a terminal verified range-copy soundtrack flush without
+    /// adding a video row to the independent picture playlist.
+    pub fn audio_tail(&self, bytes: &[u8], index: u32) -> Result<ProjectedWindowTrack, Fmp4Error> {
+        match self.window_tracks(bytes, index)? {
+            (Some(audio), None) => Ok(audio),
+            _ => malformed("split range tail must contain only its admitted audio track"),
+        }
+    }
+
+    fn window_tracks(
+        &self,
+        bytes: &[u8],
+        index: u32,
+    ) -> Result<(Option<ProjectedWindowTrack>, Option<ProjectedWindowTrack>), Fmp4Error> {
         if bytes.len() > MAX_BOX_BYTES {
             return Err(unsupported("split VOD window exceeds the fMP4 size limit"));
         }
         let sequence_base = index
             .checked_mul(VOD_WINDOW_FRAGMENT_LIMIT)
             .ok_or_else(|| unsupported("split VOD window index exceeds the sequence limit"))?;
-        let mut output = ProjectedVodWindow {
-            audio: Vec::new(),
-            video: Vec::new(),
-        };
-        let (mut audio_end, mut video_end) = (None, None);
+        let (mut audio, mut video) = (Vec::new(), Vec::new());
+        let (mut audio_decode, mut video_decode): (Option<std::ops::Range<u64>>, _) = (None, None);
         let mut offset = 0;
         let mut ordinal = 0;
         while offset < bytes.len() {
@@ -160,15 +190,15 @@ impl CopyTrackProjection {
             };
             check_media_extents(&fragment)?;
             for track in &fragment.tracks {
-                let (init, decode_end, child) = if track.track_id == self.audio.tracks[0].id {
-                    (&self.audio, &mut audio_end, &mut output.audio)
+                let (init, decode, child) = if track.track_id == self.audio.tracks[0].id {
+                    (&self.audio, &mut audio_decode, &mut audio)
                 } else if track.track_id == self.video.tracks[0].id {
-                    (&self.video, &mut video_end, &mut output.video)
+                    (&self.video, &mut video_decode, &mut video)
                 } else {
                     return Err(unsupported("split VOD window contains an unknown track"));
                 };
                 if track.track_id == self.video.tracks[0].id
-                    && decode_end.is_none()
+                    && decode.is_none()
                     && track
                         .runs
                         .iter()
@@ -180,24 +210,29 @@ impl CopyTrackProjection {
                         "split VOD window has no independently decodable video start",
                     );
                 }
-                if decode_end.is_some_and(|end| end != track.base_decode_time) {
+                let start = track.base_decode_time;
+                if decode.as_ref().is_some_and(|bounds| bounds.end != start) {
                     return malformed("split VOD track fragments are not contiguous");
                 }
-                *decode_end = Some(
-                    track
-                        .base_decode_time
-                        .checked_add(track.duration())
-                        .ok_or_else(|| unsupported("split VOD track decode time overflows"))?,
-                );
+                let end = start
+                    .checked_add(track.duration())
+                    .ok_or_else(|| unsupported("split VOD track decode time overflows"))?;
+                *decode = Some(decode.as_ref().map_or(start, |bounds| bounds.start)..end);
                 let projected = project_track(&fragment, track, init, sequence)?;
                 child.extend_from_slice(&projected.bytes);
             }
             offset = end;
         }
-        if audio_end.is_none() || video_end.is_none() {
-            return malformed("split VOD window does not contain both admitted tracks");
-        }
-        Ok(output)
+        Ok((
+            audio_decode.map(|decode| ProjectedWindowTrack {
+                bytes: audio,
+                decode,
+            }),
+            video_decode.map(|decode| ProjectedWindowTrack {
+                bytes: video,
+                decode,
+            }),
+        ))
     }
 }
 

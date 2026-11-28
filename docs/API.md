@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-24, plurx has 448 routes declared by the ordinary listener's
+As of 2026-11-24, plurx has 449 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 448 routes across the registered routers.
+plurx has 449 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -4287,7 +4287,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/internal/media/subtitle-range` | Range identity (file ID, stamp, ordinal, anchor, span and sampled source attestation) | Produces one indexed Matroska text playback window. Exact signed request and response; 4 KiB request body, 8 MiB VTT bound, two workers per node and one per requesting peer, 25 s worker deadline. Source is resolved from the catalog and checked before and after extraction. Partial ranges never become whole-track publications. |
 | POST | `/_internal/v1/live-tv/snapshot` | 16 KiB | Tuner readiness and lineup for the current generation |
 | POST | `/_internal/v1/live-tv/guide` | 16 KiB | The owner's cached programme guide, relayed verbatim. Deliberately not gated on the Live TV protocol capability: an owner that predates the guide answers 404 and the ingress renders "no guide yet" rather than taking Live TV down across a mixed fleet |
-| POST | `/_internal/v1/live-tv/start`, `/_internal/v2/live-tv/start`, `/_internal/v1/live-tv/activate` | 16 KiB | Starts and activates a tuner session on the owner; v2 carries the exact signed live playback envelope |
+| POST | `/_internal/v1/live-tv/start`, `/_internal/v2/live-tv/start`, `/_internal/v2/live-tv/start-split`, `/_internal/v1/live-tv/activate` | 16 KiB | Starts and activates a tuner session on the owner. The signed v2 split route affirms ingress support for split child URLs. |
 | POST | `/_internal/v1/live-tv/resource` | 16 KiB | Fetches a playlist, segment or status for an owned capability |
 | POST | `/_internal/v1/live-tv/stop` | 16 KiB | Releases a capability. (The single-owner model's generation drain beside it was removed on 2026-10-04: since #537 nothing sent it.) |
 | POST | `/_internal/v1/live-tv/retire`, `/_internal/v1/live-tv/resume`, `/_internal/v1/live-tv/start-state` | 1 KiB | Retires a viewer's public start id on the owner, hands back the session it still owns, or reports what became of it. Three paths rather than one with a mode flag: `resume` selects a session, cancels the others and fences an id it has never seen, and a status read may do none of that. New paths rather than new fields on the signed start bodies: an owner that predates them answers 404, which an ingress renders as a typed answer that proves nothing about the tuner |

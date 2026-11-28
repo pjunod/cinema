@@ -276,7 +276,15 @@ async fn serve(
     };
     let response = native_resource(state, &session, &resource, inline, query, headers).await?;
     // Native errors are typed locally; private capability-bearing response bodies are never relayed.
-    if !response.status().is_success() && response.status() != StatusCode::NOT_MODIFIED {
+    let unsatisfied = response.status() == StatusCode::RANGE_NOT_SATISFIABLE
+        && matches!(
+            resource,
+            Resource::ChildInit(..) | Resource::ChildSegment(..)
+        );
+    if !response.status().is_success()
+        && response.status() != StatusCode::NOT_MODIFIED
+        && !unsatisfied
+    {
         return Err(ApiError::ServiceUnavailable(
             "native media temporarily unavailable".into(),
         ));
@@ -378,7 +386,10 @@ async fn serve(
     if route(state, &fresh).await? != session {
         return Err(ApiError::Conflict("native play replaced".into()));
     }
-    if method == Method::HEAD {
+    if unsatisfied {
+        response.headers_mut().remove(header::CONTENT_LENGTH);
+    }
+    if unsatisfied || method == Method::HEAD {
         *response.body_mut() = Body::empty();
     }
     Ok(response)

@@ -422,6 +422,7 @@ fn test_session(directory: PathBuf, generation: i64) -> Arc<LiveTvSession> {
             config_generation: generation,
             source_serving_generation: 0,
             playback: None,
+            split_ingress: true,
         },
         channel: LiveTvChannel {
             id: "7.1".into(),
@@ -7870,6 +7871,7 @@ fn start_request_with_id(request_id: &str) -> LiveTvStartRequest {
         config_generation: 1,
         source_serving_generation: 0,
         playback: None,
+        split_ingress: true,
     }
 }
 

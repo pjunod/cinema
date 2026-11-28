@@ -770,6 +770,7 @@ fn http_route_group(path: &str) -> usize {
         | crate::live_tv::SNAPSHOT_PATH
         | crate::live_tv::START_PATH
         | crate::live_tv::START_V2_PATH
+        | crate::live_tv::START_SPLIT_PATH
         | crate::live_tv::ACTIVATE_PATH
         | crate::live_tv::RESOURCE_PATH
         | crate::live_tv::STOP_PATH
@@ -2608,6 +2609,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             crate::live_tv::START_V2_PATH,
             post(internal_live_tv::start_v2).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::START_SPLIT_PATH,
+            post(internal_live_tv::start_split).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
         )

@@ -1220,6 +1220,10 @@ impl SourceViewerActor {
         #[cfg(not(unix))]
         let frozen = true;
         let vod_segment = segment && self.0.direct.is_none() && frozen;
+        let split_object = matches!(
+            resource.kind(),
+            SharingHlsResourceKind::ChildInit { .. } | SharingHlsResourceKind::ChildSegment { .. }
+        );
         let actor = self.clone();
         let resource = resource.clone();
         let job = tokio::spawn(Box::pin(async move {
@@ -1235,7 +1239,9 @@ impl SourceViewerActor {
                 // Lock-free: the timed-out read may still hold the range.
                 Err(self.deadline_refusal(backing.production.stalled_since(waited)))
             }
-            Err(_) if vod_segment => Err(LiveRefusal::terminal(SourceWorkerError::Deadline)),
+            Err(_) if vod_segment && !split_object => {
+                Err(LiveRefusal::terminal(SourceWorkerError::Deadline))
+            }
             Err(_) => Err(LiveRefusal::transient(SourceWorkerError::Deadline)),
         }
     }
@@ -1404,7 +1410,15 @@ impl SourceViewerActor {
                     .ok_or(unsupported)?;
                 (
                     SourceResourcePayload::File(
-                        publication.result.map_err(|_| ended)?.ok_or(unsupported)?,
+                        publication
+                            .result
+                            .map_err(|error| match error {
+                                crate::vodserve::VodError::Pending { .. }
+                                | crate::vodserve::VodError::CapacityUnavailable { .. }
+                                | crate::vodserve::VodError::Busy(_) => pending,
+                                _ => ended,
+                            })?
+                            .ok_or(unsupported)?,
                     ),
                     publication.owner,
                 )

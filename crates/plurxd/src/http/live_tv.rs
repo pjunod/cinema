@@ -18,7 +18,8 @@ use crate::live_tv::{
     LiveTvError, LiveTvGuide, LiveTvResourceRequest, LiveTvSessionStatus, LiveTvSnapshot,
     LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStopRequest, SnapshotFreshness,
     SnapshotRequest, ACTIVATE_PATH, GUIDE_PATH, MAX_SNAPSHOT_BYTES, RESOURCE_PATH, RESUME_PATH,
-    RETIRE_PATH, SNAPSHOT_PATH, START_PATH, START_STATE_PATH, START_V2_PATH, STOP_PATH,
+    RETIRE_PATH, SNAPSHOT_PATH, START_PATH, START_SPLIT_PATH, START_SPLIT_PROTOCOL,
+    START_STATE_PATH, START_V2_PATH, STOP_PATH,
 };
 use crate::live_tv_delivery::LivePlaybackRequest;
 use crate::state::AppState;
@@ -517,6 +518,7 @@ pub(crate) async fn issue_start(
         config_generation: config.generation,
         source_serving_generation: generation,
         playback,
+        split_ingress: true,
     };
     let ticket = state
         .live_tv
@@ -580,7 +582,16 @@ pub(crate) async fn start_session(
         config_generation: config.generation,
         source_serving_generation: ingress_generation,
         playback,
+        split_ingress: true,
     };
+    if request.allows_split() {
+        request.split_ingress = tokio::time::timeout_at(
+            stage_deadline(Duration::from_millis(750), deadline),
+            state.cluster.live_tv_split_ready(),
+        )
+        .await
+        .is_ok_and(|result| result.unwrap_or(false));
+    }
     // A failure here is deliberately *not* followed by a retire from this node.
     // The start may have been admitted on the owner, and the client's answer
     // says so: anything the owner did not decide leaves the client holding its
@@ -1312,8 +1323,16 @@ async fn owner_start_within(
     }
     let (node_id, base) = owner_peer(state, &config.owner_node_id).await?;
     let (path, body) = if request.playback.is_some() {
+        let split_compatible = request.allows_split()
+            && owner_snapshot_within(state, config, false, false, budget)
+                .await
+                .is_ok_and(|snapshot| snapshot.start_protocols.contains(&START_SPLIT_PROTOCOL));
         (
-            START_V2_PATH,
+            if split_compatible {
+                START_SPLIT_PATH
+            } else {
+                START_V2_PATH
+            },
             serde_json::to_vec(&LiveTvStartRequestV2::from(request))
                 .map_err(|error| ApiError::Internal(error.to_string()))?,
         )

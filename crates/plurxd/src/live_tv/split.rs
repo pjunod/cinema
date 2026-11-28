@@ -126,6 +126,7 @@ struct Layout {
     video_init: Bytes,
     audio_init: Bytes,
     master: String,
+    peak_bps: u64,
 }
 
 #[derive(Default)]
@@ -346,6 +347,36 @@ impl Projection {
                         .map(|end| (start, end))
                         .ok_or("live-TV sample time overflow")
                 };
+                let span = |track: &fmp4::TrackFragment, timescale: u32| {
+                    let mut decode = i128::from(track.base_decode_time);
+                    let (mut first, mut last) = (i128::MAX, i128::MIN);
+                    for sample in track.samples() {
+                        let start = decode + i128::from(sample.cto);
+                        decode += i128::from(sample.duration);
+                        first = first.min(start);
+                        last = last.max(decode + i128::from(sample.cto));
+                    }
+                    (
+                        first as f64 / f64::from(timescale),
+                        last as f64 / f64::from(timescale),
+                    )
+                };
+                let video_time = span(
+                    &parts.video.tracks[0],
+                    author.video_init().tracks[0].timescale,
+                );
+                let audio_time = span(&parts.audio.tracks[0], 48_000);
+                // Allow AAC quantization and a reordered picture at the cut.
+                if (video_time.0 - audio_time.0).abs() > 0.12
+                    || (video_time.1 - audio_time.1).abs() > 0.12
+                    || (parts.video.bytes.len() + parts.audio.bytes.len()) as f64 * 8.0
+                        > layout.peak_bps as f64
+                            * (video_time.1 - video_time.0).min(audio_time.1 - audio_time.0)
+                {
+                    return Err(
+                        "live-TV split clocks or bandwidth do not prove an aligned pair".into(),
+                    );
+                }
                 let video_span = extent(&parts.video.tracks[0])?;
                 let audio_span = extent(&parts.audio.tracks[0])?;
                 Segment {
@@ -518,6 +549,10 @@ fn layout(
     if facts.dolby_vision_config {
         return Err("live split has no Dolby Vision proof".into());
     }
+    let peak_bps = delivery
+        .max_bitrate_bps
+        .unwrap_or(8_000_000)
+        .saturating_add(192_000);
     let master = SplitPresentation {
         variants: vec![SplitVideo {
             rendition_id: video_id.clone(),
@@ -543,10 +578,7 @@ fn layout(
             budget: None,
         }],
         bandwidth: SplitBandwidth::Combined(SplitBudget {
-            peak_bps: delivery
-                .max_bitrate_bps
-                .unwrap_or(8_000_000)
-                .saturating_add(192_000),
+            peak_bps,
             average_bps: None,
         }),
         subtitles: String::new(),
@@ -560,5 +592,6 @@ fn layout(
         video_init: budget.hold(video.bytes.clone())?,
         audio_init: budget.hold(audio.bytes.clone())?,
         master,
+        peak_bps,
     })
 }

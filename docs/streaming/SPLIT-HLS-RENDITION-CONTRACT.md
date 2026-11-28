@@ -231,8 +231,12 @@ serving the issued child URLs.
 
 Live TV projects the selected fMP4 audio and video from the tuner session's
 existing writer. Before the first ready manifest, the owner reserves the
-retained window and verifies both tracks. The owner keeps muxed delivery for
-an unproved opening or for the existing caption presentation. Both split
+retained window and verifies the alignment, format and combined peak of both
+tracks. The owner keeps muxed delivery for an unproved opening or for the
+existing caption presentation. On a remote start, the ingress must use the
+signed split-aware start route advertised by the owner. The ingress requires
+fresh fleet support for the child routes before requesting split. Legacy
+ingress and mixed-fleet starts continue to receive muxed delivery. Both split
 children preserve the producer's sequence and discontinuity positions.
 Recently advertised fragments retain their read authority after they leave
 the sliding playlist.
@@ -244,9 +248,10 @@ transport capability. The Source and Receiver validate the role and rendition
 on every child resource, including relative playlist links. The original
 Source owner serves the issued presentation. A bounded growing Source
 range may project a verified AVC/AAC pair from its committed range objects.
-Each row must pass the pair proof before either child advertises it. The
-issued range and payload digests bind projected reads throughout the
-owner's response lease. Refused openings publish the muxed route.
+Each row must pass the pair proof before either child advertises it. An
+audio-only flush at EOF joins the soundtrack clock and appears in the audio
+playlist. The issued range and payload digests bind projected reads throughout
+the owner's response lease. Refused openings publish the muxed route.
 
 Jellyfin negotiates this layout with a device profile whose
 `PlurxHlsTransports` contains `hls-split-av-v1`. It rewrites the master and

@@ -14,6 +14,9 @@ use tokio::{
 };
 
 const MAX_WINDOW_BYTES: usize = 16 * 1024 * 1024;
+// Publication has separate credit so completed HTTP replies cannot stall the producer.
+static PROOF_WORKERS: std::sync::LazyLock<Semaphore> =
+    std::sync::LazyLock::new(|| Semaphore::new(4));
 const SCRATCH_PAGE: usize = 64 * 1024;
 static WORKERS: std::sync::LazyLock<Arc<Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(Semaphore::new(4)));
@@ -72,7 +75,7 @@ pub(crate) struct SplitRange {
 
 #[derive(Clone)]
 pub(crate) struct PairRow {
-    video: TrackRow,
+    video: Option<TrackRow>,
     audio: TrackRow,
 }
 
@@ -85,14 +88,14 @@ struct TrackRow {
 }
 
 impl PairRow {
-    fn track(&self, role: SharingHlsRole) -> &TrackRow {
+    fn track(&self, role: SharingHlsRole) -> Option<&TrackRow> {
         match role {
-            SharingHlsRole::Video => &self.video,
-            SharingHlsRole::Audio => &self.audio,
+            SharingHlsRole::Video => self.video.as_ref(),
+            SharingHlsRole::Audio => Some(&self.audio),
         }
     }
-    pub(crate) fn duration(&self, role: SharingHlsRole) -> f64 {
-        self.track(role).duration
+    pub(crate) fn duration(&self, role: SharingHlsRole) -> Option<f64> {
+        self.track(role).map(|track| track.duration)
     }
 }
 
@@ -182,27 +185,26 @@ impl SplitRange {
         input: &[u8],
         sequence: u32,
         previous: Option<&PairRow>,
+        audio_tail: bool,
+        retirement: &tokio_util::sync::CancellationToken,
     ) -> Result<PairRow, String> {
-        let (worker, scratch) = reserve(input.len())?;
+        validate_size(input.len())?;
+        let permit = tokio::select! {
+            biased;
+            () = retirement.cancelled() => return Err("Source range projection retired".into()),
+            permit = PROOF_WORKERS.acquire() => permit.map_err(|error| error.to_string())?,
+        };
         let author = Arc::clone(self);
         let input = input.to_vec();
         let previous = previous.cloned();
         tokio::task::spawn_blocking(move || {
-            let _credits = (worker, scratch);
-            let parts = author
-                .author
-                .segment(&input, sequence)
-                .map_err(|error| error.to_string())?;
-            let track_row = |role, part: &fmp4::Fragment| {
+            let _permit = permit;
+            let track_row = |role, bytes: &[u8], span: std::ops::Range<u64>| {
                 let (_, init) = author.child(role);
-                let track = part.tracks.first().ok_or("missing projected range track")?;
-                let start = track.base_decode_time;
-                let end = start
-                    .checked_add(track.duration())
-                    .ok_or("range split clock overflow")?;
+                let std::ops::Range { start, end } = span;
                 if previous
                     .as_ref()
-                    .is_some_and(|previous| previous.track(role).end != start)
+                    .is_some_and(|previous| previous.track(role).is_none_or(|row| row.end != start))
                 {
                     return Err("range split track does not join its previous segment");
                 }
@@ -218,16 +220,36 @@ impl SplitRange {
                     start,
                     end,
                     duration,
-                    digest: digest(&part.bytes),
+                    digest: digest(bytes),
                 })
             };
-            let video = track_row(SharingHlsRole::Video, &parts.video)?;
-            let audio = track_row(SharingHlsRole::Audio, &parts.audio)?;
+            let broken_window = |error| format!("range split segment {sequence}: {error}");
+            if audio_tail {
+                let part = author
+                    .author
+                    .audio_tail(&input, sequence)
+                    .map_err(broken_window)?;
+                let audio = track_row(SharingHlsRole::Audio, &part.bytes, part.decode)?;
+                if previous.is_none()
+                    || part.bytes.len() as f64 * 8.0 > author.peak_bps as f64 * audio.duration
+                {
+                    return Err(
+                        "range split audio flush does not join a proved presentation".into(),
+                    );
+                }
+                return Ok(PairRow { video: None, audio });
+            }
+            let parts = author
+                .author
+                .vod_window(&input, sequence)
+                .map_err(broken_window)?;
+            let video = track_row(SharingHlsRole::Video, &parts.video, parts.video_decode)?;
+            let audio = track_row(SharingHlsRole::Audio, &parts.audio, parts.audio_decode)?;
             let displacement = |video, audio| {
                 video as f64 / f64::from(author.author.video_init().tracks[0].timescale)
                     - audio as f64 / f64::from(author.author.audio_init().tracks[0].timescale)
             };
-            let bytes = parts.video.bytes.len() + parts.audio.bytes.len();
+            let bytes = parts.video.len() + parts.audio.len();
             if displacement(video.start, audio.start).abs() > 0.1
                 || displacement(video.end, audio.end).abs() > 0.1
                 || bytes as f64 * 8.0 / video.duration.min(audio.duration) > author.peak_bps as f64
@@ -236,7 +258,10 @@ impl SplitRange {
                     "range split clocks or bandwidth do not prove an aligned pair".to_owned(),
                 );
             }
-            Ok(PairRow { video, audio })
+            Ok(PairRow {
+                video: Some(video),
+                audio,
+            })
         })
         .await
         .map_err(|error| error.to_string())?
@@ -281,21 +306,30 @@ impl SplitRange {
             if bytes.len() != len || digest(&bytes) != source.etag || custody.source().is_err() {
                 return Err("Source range payload no longer matches its committed digest".into());
             }
-            let parts = self
-                .author
-                .segment(&bytes, sequence)
-                .map_err(|error| error.to_string())?;
-            let bytes = match role {
-                SharingHlsRole::Video => &parts.video.bytes,
-                SharingHlsRole::Audio => &parts.audio.bytes,
+            let contract = row
+                .track(role)
+                .ok_or("Source range row has no such child")?;
+            let bytes = if row.video.is_none() {
+                self.author
+                    .audio_tail(&bytes, sequence)
+                    .map_err(|error| error.to_string())?
+                    .bytes
+            } else {
+                let parts = self
+                    .author
+                    .vod_window(&bytes, sequence)
+                    .map_err(|error| error.to_string())?;
+                match role {
+                    SharingHlsRole::Video => parts.video,
+                    SharingHlsRole::Audio => parts.audio,
+                }
             };
-            let contract = row.track(role);
-            if digest(bytes) != contract.digest {
+            if digest(&bytes) != contract.digest {
                 return Err("Source range child no longer matches the advertised digest".into());
             }
             write_child(
                 directory,
-                bytes,
+                &bytes,
                 Some((contract.duration * 1000.0).ceil() as u32),
                 source.delivery,
                 scratch,
@@ -306,10 +340,15 @@ impl SplitRange {
     }
 }
 
-fn reserve(bytes: usize) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), String> {
+fn validate_size(bytes: usize) -> Result<(), String> {
     if bytes == 0 || bytes > MAX_WINDOW_BYTES {
         return Err("Source range projection input is outside its byte budget".into());
     }
+    Ok(())
+}
+
+fn reserve(bytes: usize) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), String> {
+    validate_size(bytes)?;
     let worker = Arc::clone(&WORKERS)
         .try_acquire_owned()
         .map_err(|_| "Source range projection worker is busy")?;
