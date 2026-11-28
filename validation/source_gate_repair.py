@@ -91,7 +91,7 @@ WORKFLOW = 'ci.yml'
 # Native full promotions run the Store shards and schema-lineage target
 # separately. Ordinary source-gate continuation still uses the legacy job.
 # ARM package smoke has a bounded per-architecture deadline.
-WORKFLOW_SHA256 = '9587d03dde7aa84c1e5cca08cb397c073b3c1b02128d410b245d392bf22edfc5'
+WORKFLOW_SHA256 = '72c652403fc9555b05cbd04e0bdd0d30cb0c862be61f8d6bc7c59f4b8308ae6c'
 
 
 def prior_run(api, value, binding, repository, *, current_run=None):

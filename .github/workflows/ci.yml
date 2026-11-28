@@ -2284,15 +2284,15 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            timeout_minutes: 90
             concurrency_group: plurx-package-{0}-amd64
+            timeout_minutes: 90
             target: x86_64-unknown-linux-gnu
             kernel_machine: x86_64
             docker_machine: x86_64
             runs_on: '["ci-nonvoter-heavy-amd64"]'
           - arch: arm64
-            timeout_minutes: 175
             concurrency_group: plurx-apple-silicon-heavy
+            timeout_minutes: 175
             target: aarch64-unknown-linux-gnu
             kernel_machine: aarch64
             docker_machine: aarch64
