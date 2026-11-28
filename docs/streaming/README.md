@@ -135,9 +135,8 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [CONTENT-ANALYSIS-REPAIR-STATUS.md](CONTENT-ANALYSIS-REPAIR-STATUS.md) | Live implementation ledger for selected-video completion, bounded retry, exact-identity repair, review, promotion. | open |
 | [CONTENT-ANALYSIS-FAILURES-RCA-AND-FIX.md](CONTENT-ANALYSIS-FAILURES-RCA-AND-FIX.md) | Why complete video indexes were labelled incomplete: fleet evidence, selected-stream duration, timeout policy, recovery constraints. | open |
 | [CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md](CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md) | Independent design review that found retry expiry and lost video identity before implementation. | done |
-| [CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md](CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md) | Build contract for selected-video completion, typed diagnostics, bounded retry, exact-identity recovery, rollout. | open |
-| [HEVC-IN-BAND-PARAMETER-SETS.md](HEVC-IN-BAND-PARAMETER-SETS.md) | Why a chunk-encoded WEB-DL copied with pink and green blotches, and the census that keeps redefined parameter sets in band. | open |
-| [HEVC-LIVE-TRACE-RCA-AND-FIX.md](HEVC-LIVE-TRACE-RCA-AND-FIX.md) | Why glued trace lines and an extradata check refused HEVC copies. | open |
+| [CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md](CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md) | Build contract for selected-video completion, typed diagnostics, bounded retry cycles, exact-identity recovery, migrations, tests, rollout. | open |
+| [HEVC-IN-BAND-PARAMETER-SETS.md](HEVC-IN-BAND-PARAMETER-SETS.md) | Why a chunk-encoded WEB-DL copies with pink and green blotches, why PR #535 never shipped, per-file census that keeps redefined parameter sets in band. | open |
 | [HEVC-SAMPLE-ENTRY-STATUS.md](HEVC-SAMPLE-ENTRY-STATUS.md) | Live execution ledger for the HEVC sample-entry admission repair: implementation, evidence, review, promotion state. | open |
 | [SAFARI-DIAGNOSIS-AND-FIX.md](SAFARI-DIAGNOSIS-AND-FIX.md) | Why HEVC-in-MP4 admission fails on Safari, decoder evidence behind the repair, accepted review findings. | open |
 | [HEVC-SAMPLE-ENTRY-IMPLEMENTATION.md](HEVC-SAMPLE-ENTRY-IMPLEMENTATION.md) | Executable contract for source sample-entry facts, compatible packaging, client admission, downgrade safety, focused acceptance. | open |
