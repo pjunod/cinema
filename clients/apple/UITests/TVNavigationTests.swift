@@ -153,6 +153,9 @@ final class TVNavigationTests: TVNavigationTestCase {
     }
 
     private func toolsJourney(itemCount: Int, presentation: String) throws {
+        // Four real remote traversals and toolbar round trips can reach the
+        // default three-minute allowance on a loaded simulator.
+        executionTimeAllowance = 240
         let server = try TVNavigationServer(itemCount: itemCount)
         let origin = try server.start()
         defer { server.stop() }
