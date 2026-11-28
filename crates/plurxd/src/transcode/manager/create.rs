@@ -5291,6 +5291,7 @@ impl TranscodeManager {
                 .await
                 .unwrap_or_else(|_| {
                     tracing::info!(
+                        target: "plurxd::transcode",
                         file_id = file.id,
                         "split soundtrack planning timed out; preparing muxed copy"
                     );

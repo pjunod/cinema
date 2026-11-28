@@ -1296,7 +1296,12 @@ impl VodServe {
             if crate::transcode::vod_refusal(error).is_some_and(|(code, _)| {
                 matches!(code, "vod_family_invalid" | "vod_family_capacity")
             }) {
-                tracing::info!(file_id = file.id, %error, "split copy refused before publication; preparing muxed copy");
+                tracing::info!(
+                    target: "plurxd::vodserve",
+                    file_id = file.id,
+                    %error,
+                    "split copy refused before publication; preparing muxed copy"
+                );
                 return self
                     .attach_vod_session(fallback, file, settings, attribution, session_id, &fences)
                     .await;
