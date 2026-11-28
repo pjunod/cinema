@@ -4962,13 +4962,38 @@ async fn local_hevc_index_refreshes_object_proof_without_cluster_queue() {
         .as_ref()
         .expect("refreshed proof")
         .current_on_node(&object, jobs.coordinator.node_id()));
-    // A completed refusal on this exact object must remain untouched.
+
+    let proof = rebuilt
+        .promotion
+        .hevc_configuration
+        .as_mut()
+        .expect("proof");
+    proof.refusal = Some("completed unsupported configuration".into());
+    // An unstamped refusal from the old reader must be analysed again.
+    proof.parser = 0;
+    store
+        .put_fragment_index(id, &rebuilt)
+        .await
+        .expect("old refusal row");
+    jobs.clone().build_fragment_indexes(transcode.clone()).await;
+    assert!(store
+        .fragment_index(id, &identity)
+        .await
+        .expect("read")
+        .expect("re-examined index")
+        .promotion
+        .hevc_configuration
+        .as_ref()
+        .expect("re-examined proof")
+        .permits_on_node(&object, jobs.coordinator.node_id()));
+
+    // A completed refusal from the current reader must remain untouched.
     rebuilt
         .promotion
         .hevc_configuration
         .as_mut()
         .expect("proof")
-        .refusal = Some("completed unsupported configuration".into());
+        .parser = plurx_core::hevc_configuration::PARSER;
     store
         .put_fragment_index(id, &rebuilt)
         .await
