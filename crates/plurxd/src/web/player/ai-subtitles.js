@@ -343,34 +343,77 @@ async function aiCaptionSearch(file,panel,language){
   }catch(error){if(panel.isConnected)panel.textContent=error.message;}
 }
 
-function aiCaptionBindItem(node,file){
+function aiCaptionBindPreplay(node,page){
+  for(const host of node.querySelectorAll("[data-ai-caption-preplay]")){
+    const file=page.files.find(row=>String(row.id)===host.dataset.aiCaptionPreplay);
+    aiCaptionBindItem(host,file,page);
+  }
+}
+
+function aiCaptionBindItem(node,file,preplay=null){
   if(!aiCaptionLocal(file))return;
   const mount=node.querySelector("[data-ai-caption-file]");
-  if(!mount)return;
+  if(!mount||mount._aiCaptionBound)return;
+  mount._aiCaptionBound=true;
   const panel=mount.querySelector("[data-ai-caption-actions]");
   const status=mount.querySelector("[data-ai-caption-status]");
   const owner=WATCH,auth=AUTH_GENERATION;
-  const current=()=>mount.isConnected&&owner===WATCH&&watchCurrentFile()===file&&auth===AUTH_GENERATION;
+  const ownsFile=()=>auth===AUTH_GENERATION&&owner===WATCH&&
+    (preplay?WATCH_ITEM_PAGE===preplay&&location.hash===`#/item/${preplay.id}`:watchCurrentFile()===file);
+  const current=()=>mount.isConnected&&ownsFile();
   const itemState=AI_CAPTION_ITEM.get(file)||{};
   AI_CAPTION_ITEM.set(file,itemState);
+  const refreshTracks=async()=>{
+    const item=await api(`/items/${encodeURIComponent((preplay||owner.page).id)}`);
+    if(!ownsFile())return;
+    const updated=item.files?.find(row=>String(row.id)===String(file.id));
+    if(!updated)return;
+    const tracks=updated.subtitle_streams||[];
+    file.subtitle_streams=tracks;
+    AI_CAPTION_OPTIONS.delete(file);
+    if(PLAYER?.started&&String(PLAYER.fileId)===String(file.id)){
+      const selected=PLAYER.subs?.find(track=>track.index===PLAYER.curSub);
+      const selectedId=selected?.downloaded_subtitle_id||selected?.track_id;
+      PLAYER.subs=tracks;
+      if(selectedId){
+        const updated=tracks.find(track=>(track.downloaded_subtitle_id||track.track_id)===selectedId);
+        if(updated)PLAYER.curSub=updated.index;
+        else await setSub(-1);
+      }
+    }
+    if(!ownsFile())return;
+    if(preplay){
+      const parent=node.parentElement;
+      if(!parent)return;
+      node.outerHTML=prePlayPickers(file);
+      aiCaptionBindPreplay(parent,preplay);
+    }else watchRenderLedger();
+  };
   const show=()=>{
     const op=itemState.operation;
-    status.textContent=aiCaptionActive(op)?`English · AI · ${Math.round((op.progress||0)*100)}%`:
+    const message=aiCaptionActive(op)?`English · AI · ${Math.round((op.progress||0)*100)}%`:
       op?.state==="complete"?"English · AI is ready.":op?.state==="failed"?"AI subtitles could not finish.":"";
+    for(const label of itemState.labels){
+      if(label.isConnected)label.textContent=message;
+      else itemState.labels.delete(label);
+    }
   };
+  (itemState.labels ||= new Set()).add(status);
   const poll=async()=>{
-    if(!current()||!aiCaptionActive(itemState.operation))return;
+    if(itemState.polling||!ownsFile()||!aiCaptionActive(itemState.operation))return;
+    itemState.polling=true;
     try{
       const options=await api(aiCaptionPath(file));
-      if(!current())return;
+      if(!ownsFile())return;
       itemState.operation=options.operation;
       show();
-      if(options.operation?.state==="complete"){
-        await viewItem(ITEM_FOR_FILE[file.id]);
-        return;
-      }
+      if(options.operation?.state==="complete")await refreshTracks();
     }catch(error){if(current())status.textContent=error.message;}
-    if(current()&&aiCaptionActive(itemState.operation))setTimeout(()=>void poll(),4000);
+    finally{
+      if(ownsFile()&&aiCaptionActive(itemState.operation)){
+        setTimeout(()=>{itemState.polling=false;void poll();},4000);
+      }else itemState.polling=false;
+    }
   };
   const start=async(route,quality)=>{
     panel.replaceChildren();
@@ -379,12 +422,12 @@ function aiCaptionBindItem(node,file){
       const body={request_id:translationUuid(),route,target:"en"};
       if(quality)body.quality=quality;
       const operation=await api(aiCaptionPath(file),{method:"POST",body});
-      if(!current())return;
+      if(!ownsFile())return;
       itemState.operation=operation;
       AI_CAPTION_OPTIONS.delete(file);
       show();
       if(aiCaptionActive(operation))void poll();
-      if(operation.state==="complete")await viewItem(ITEM_FOR_FILE[file.id]);
+      if(operation.state==="complete")await refreshTracks();
     }catch(error){if(current())status.textContent=error.message;}
   };
   const button=(text,action)=>{
@@ -427,7 +470,7 @@ function aiCaptionBindItem(node,file){
     button("Delete",async()=>{
       try{
         await api(`/files/${file.id}/subtitles/${track.index}?track_id=${encodeURIComponent(track.track_id)}`,{method:"DELETE"});
-        if(current())await viewItem(ITEM_FOR_FILE[file.id]);
+        if(ownsFile())await refreshTracks();
       }catch(error){if(current())status.textContent=error.message;}
     });
   }));
