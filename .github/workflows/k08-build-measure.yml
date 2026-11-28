@@ -13,6 +13,7 @@ env:
 
 jobs:
   measure:
+    if: github.server_url != 'https://github.com'
     name: k08 build measure (${{ matrix.mode }})
     strategy:
       fail-fast: false

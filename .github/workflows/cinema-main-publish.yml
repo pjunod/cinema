@@ -9,7 +9,7 @@ on:
 jobs:
   publish:
     name: publish verified Cinema main image
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: github.server_url != 'https://github.com' && (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: [self-hosted, Linux, X64, lab, ci-topology]
     timeout-minutes: 90
     concurrency:

@@ -495,6 +495,19 @@ pub fn std_file_identity(file: &File) -> io::Result<FileIdentity> {
     file_identity(file)
 }
 
+/// [`std_file_identity`] for a descriptor on the node's own disk: an engine,
+/// a model, private scratch, the playback cache.
+///
+/// A descriptor that can be on media storage (library, recording or source
+/// files, which may be on NFS or SMB) reads its identity through
+/// `media_io::identity` or `media_io::identity_in_place` instead. Its `fstat`
+/// can park the thread on a hung mount. A guard test in plurxd fails on a
+/// direct `std_file_identity` call outside `fs_secure` and `media_io`, so a
+/// call site's name says which kind of descriptor it holds.
+pub fn local_file_identity(file: &File) -> io::Result<FileIdentity> {
+    file_identity(file)
+}
+
 pub fn std_file_path(file: &File) -> io::Result<PathBuf> {
     let handle = file.as_raw_handle().cast();
     // SAFETY: a null output buffer with size zero asks Windows for the

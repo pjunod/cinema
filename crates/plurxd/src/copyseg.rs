@@ -333,6 +333,9 @@ const SPLIT_YIELDS: &str = "an undecided native split holds scratch an ordinary 
 /// only within that same extent before publication.
 pub(crate) struct NativeSplitAuthor {
     tracks: fmp4::track_projection::CopyTrackProjection,
+    /// The projected soundtrack's proved sample entry. The split master
+    /// writes CODECS and CHANNELS from it, never from a constant.
+    audio_facts: fmp4::AacSampleEntryFacts,
     pub(crate) video: fmp4::video_splice::SpliceVideoFormat,
     audio_end: Option<u64>,
     video_end: Option<u64>,
@@ -490,8 +493,13 @@ impl NativeSplitAuthor {
     pub(crate) fn new(init: Init) -> Result<Self, fmp4::Fmp4Error> {
         let tracks = fmp4::track_projection::CopyTrackProjection::new(init)?;
         let video = fmp4::video_splice::SpliceVideoFormat::new(tracks.video_init(), 48_000)?;
+        // Only AAC sample entries can be proved today. Any other soundtrack
+        // keeps the ordinary mux rather than a master that names a codec it
+        // cannot attest (P62 S2 rule 6; S3 adds AC-3 and E-AC-3 facts).
+        let audio_facts = fmp4::aac_lc_sample_entry_facts(tracks.audio_init())?;
         Ok(Self {
             tracks,
+            audio_facts,
             video,
             audio_end: None,
             video_end: None,
@@ -782,6 +790,9 @@ pub(crate) struct NativeSplitInventory {
     /// fit under it, or the split could never be served beside the ordinary
     /// copy it mirrors.
     session_ceiling: u64,
+    /// The source audio stream the copy carries, for the master's NAME,
+    /// LANGUAGE and stable rendition id.
+    audio_index: Option<i64>,
     init_ids: std::sync::OnceLock<NativeSplitInitIds>,
     chosen: std::sync::OnceLock<bool>,
     /// Why the layout settled on the ordinary mux, set by the decision itself.
@@ -808,6 +819,9 @@ pub(crate) struct NativeSplitInventory {
 pub(crate) struct NativeSplitInitIds {
     pub(crate) video: String,
     pub(crate) audio: String,
+    /// RFC 6381 codec and channel count proved by the audio init.
+    pub(crate) audio_codec: &'static str,
+    pub(crate) audio_channels: u16,
 }
 
 impl NativeSplitInitIds {
@@ -816,6 +830,8 @@ impl NativeSplitInitIds {
         Self {
             video: hex::encode(sha2::Sha256::digest(&author.video.init().bytes)),
             audio: hex::encode(sha2::Sha256::digest(&author.audio_init().bytes)),
+            audio_codec: author.audio_facts.codec,
+            audio_channels: author.audio_facts.channels,
         }
     }
 
@@ -872,6 +888,17 @@ impl NativeSplitInventory {
             session_ceiling,
             ..Self::default()
         }
+    }
+
+    /// Name the source audio stream the copy carries.
+    pub(crate) fn with_audio_index(mut self, audio_index: Option<i64>) -> Self {
+        self.audio_index = audio_index;
+        self
+    }
+
+    /// The source audio stream the copy carries.
+    pub(crate) fn audio_index(&self) -> Option<i64> {
+        self.audio_index
     }
 
     /// The media seconds the ordinary copy writes before its first served
@@ -1011,6 +1038,8 @@ impl NativeSplitInventory {
         let ids = NativeSplitInitIds {
             video: "a".repeat(64),
             audio: "b".repeat(64),
+            audio_codec: "mp4a.40.2",
+            audio_channels: 2,
         };
         self.init_ids
             .set(ids.clone())

@@ -19,6 +19,7 @@ env:
 
 jobs:
   platform:
+    if: github.server_url != 'https://github.com'
     name: media dependencies (${{ matrix.arch }})
     runs-on: ${{ fromJSON(matrix.runs_on) }}
     timeout-minutes: 90
@@ -217,6 +218,7 @@ jobs:
           retention-days: 30
 
   index:
+    if: github.server_url != 'https://github.com'
     name: publish private index and candidate receipt
     needs: platform
     runs-on: [self-hosted, Linux, X64, lab, general]

@@ -2048,7 +2048,7 @@ impl TranscodeManager {
         self: &Arc<Self>,
         session_id: &str,
         deadline: Instant,
-    ) -> Option<crate::copyseg::NativeSplitInitIds> {
+    ) -> Option<(crate::copyseg::NativeSplitInitIds, Option<i64>)> {
         let session = self.sessions.lock().await.get(session_id).cloned()?;
         let Some(split) = session.native_split.as_ref() else {
             if matches!(
@@ -2113,7 +2113,7 @@ impl TranscodeManager {
             last_segment = range.map(|(_, last)| last),
             "selected native HLS layout"
         );
-        chosen
+        chosen.map(|ids| (ids, split.audio_index()))
     }
 
     pub(crate) async fn native_split_child_playlist(
