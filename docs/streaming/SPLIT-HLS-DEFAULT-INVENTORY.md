@@ -53,6 +53,11 @@ Split allocated 155,920 KiB versus 300,432 KiB muxed, made about twice
 the requests, and used more sampled CPU. This is one aligned title on one
 isolated host. Representative capacity remains open.
 
+The [isolated three-voter rollout](../performance/evidence/split-hls-mixed-protocol-20261128.json)
+reported remote placement ineligible with protocol 12 and 16 peers. The
+directory reported ready after all three voters ran protocol 16. The
+test kept remote placement disabled.
+
 If qualification exposes incorrect A/V alignment, a missing issued child
 object, failure on a previously supported client, or a sustained capacity
 regression, stop expanding split negotiation. Reopen affected playback

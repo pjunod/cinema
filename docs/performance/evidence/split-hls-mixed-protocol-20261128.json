@@ -1,0 +1,51 @@
+{
+  "legacy": {
+    "protocol": {
+      "protocol_version": 12,
+      "remote_placement_rollout_ready": false,
+      "remote_placement_ready": false,
+      "session_takeover_ready": false
+    },
+    "build": {
+      "version": "0.9.2",
+      "build": "v0.9.2"
+    },
+    "voters": 3
+  },
+  "mixed": {
+    "candidate": {
+      "protocol_version": 16,
+      "remote_placement_rollout_ready": false,
+      "remote_placement_ready": false,
+      "session_takeover_ready": false
+    },
+    "legacy": {
+      "protocol_version": 12,
+      "remote_placement_rollout_ready": false,
+      "remote_placement_ready": false,
+      "session_takeover_ready": false
+    },
+    "build": {
+      "version": "0.9.3",
+      "build": "v0.9.2-347-g3f04dd31c-dirty"
+    },
+    "voters": 3
+  },
+  "homogeneous": {
+    "candidate": {
+      "protocol_version": 16,
+      "remote_placement_rollout_ready": true,
+      "remote_placement_ready": false,
+      "session_takeover_ready": false
+    },
+    "build": {
+      "version": "0.9.3",
+      "build": "v0.9.2-347-g3f04dd31c-dirty"
+    },
+    "voters": 3
+  },
+  "status": "passed",
+  "scope": "Three isolated loopback voters. Upgraded a physical process at a time, as represented in the local cluster membership. Remote placement and takeover settings stayed off. Checks operational readiness of the directory, without creating a remote playback.",
+  "candidate_source_head": "c8a35356513d711dc107e3dd220fa56a46b890dd",
+  "candidate_binary_sha256": "c0637c06bdf620a87349fcdf1440bd8674abb30ece25c58362fd3be1c8af4409"
+}
