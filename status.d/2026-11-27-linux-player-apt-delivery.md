@@ -1,0 +1,1 @@
+- **2026-11-27 · Linux Player APT delivery:** Codex owns the Forgejo package producer. The private release workflow builds and verifies package revisions for the shared APT publisher. The end-to-end publish and upgrade receipt is pending. [Packaging](../clients/linux-player/README.md#packaging).
