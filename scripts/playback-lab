@@ -381,6 +381,7 @@ Usage:
                              [--network-profile NAME] [--json PATH] [--junit PATH]
                              [--preparation-measurement] [--frame-diagnostics] [--d3-acquisition]
                              [--server-metrics] [--hls-layout muxed|split] [--warm-repeat]
+                             [--repeat-audio-track INDEX]
                              [--fixtures DIR] [--server PATH]
                              [--chrome PATH] [--edge PATH]
                              [--firefox PATH] [--geckodriver PATH]
@@ -4555,6 +4556,9 @@ async function runOneCaseBody(driver, server, manifest, fixture, testCase, brows
     throw new Error("diagnostic start position must be within the fixture");
   }
   await setCasePreferences(driver, testCase.quality, frameDiagnostics, d3Acquisition);
+  if (testCase.requestedAudio !== undefined) {
+    await driver.exec(`PREPLAY[playbackFileKey(${Number(file.id)})] = {audio: ${testCase.requestedAudio}}; return true;`);
+  }
   const decision = await api(server.baseUrl,
     `/files/${file.id}/decision?${browserInfo.caps_q}&force=${qualityForce(testCase.quality)}`,
     { token: server.token });
@@ -4900,6 +4904,11 @@ async function runSuite(manifest, options, dependencies = {}) {
   }
   const warmRepeat = enabledOption(options.warm_repeat);
   if (warmRepeat && !hlsLayout) throw new Error("--warm-repeat requires --hls-layout");
+  const repeatAudio = options.repeat_audio_track === undefined ? undefined : Number(options.repeat_audio_track);
+  if (repeatAudio !== undefined && (!warmRepeat || options.repeat_audio_track === true
+      || !Number.isSafeInteger(repeatAudio) || repeatAudio < 0 || repeatAudio > 4095)) {
+    throw new Error("--repeat-audio-track requires --warm-repeat and a nonnegative track index");
+  }
   const preparationMeasurement = enabledOption(options.preparation_measurement);
   const browserName = options.browser || "chrome";
   if (!new Set(["chrome", "safari", "edge", "firefox"]).has(browserName)) {
@@ -4928,7 +4937,7 @@ async function runSuite(manifest, options, dependencies = {}) {
   if (warmRepeat) {
     plan.cases = plan.cases.flatMap((testCase) => [
       { ...testCase, attachment: "first" },
-      { ...testCase, name: `${testCase.name} :: repeat`, attachment: "repeat" },
+      { ...testCase, name: `${testCase.name} :: repeat`, attachment: "repeat", requestedAudio: repeatAudio },
     ]);
   }
   const wanted = new Set(plan.cases.map((testCase) => testCase.fixture));
@@ -5038,6 +5047,14 @@ async function runSuite(manifest, options, dependencies = {}) {
         // cadence. Truncation and observer overhead are explicit diagnostics;
         // these records do not participate in any score or threshold.
         if (result && testCase.attachment) result.hls_attachment = testCase.attachment;
+        if (result && testCase.requestedAudio !== undefined) {
+          const audio = await driver.eval("PLAYER ? selectedAudioIndex(PLAYER) : null").catch(() => null);
+          result.hls_audio_track = { requested: testCase.requestedAudio, observed: audio };
+          if (result.status === "passed" && audio !== testCase.requestedAudio) {
+            result.status = "failed";
+            result.errors.push(`requested audio track ${testCase.requestedAudio}, observed ${audio}`);
+          }
+        }
         if (finishHlsResources) {
           const resources = await finishHlsResources();
           if (result) result.hls_resources = resources;
