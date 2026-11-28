@@ -1,0 +1,8 @@
+# Playback decisions use the peak from the AppModel's injected settings store.
+[[fixes]]
+id = "apple.hdr-display-peak"
+commits = ["65253f480cab077da7fbcb100a82b49852d02f03"]
+source = "clients/apple/Sources/AppModel.swift"
+source_anchor = "let snapshot = Caps.snapshot(displayPeak: hdrDisplayPeak)"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testPlaybackDecisionSendsThePeakOfTheInjectedSettings()"
