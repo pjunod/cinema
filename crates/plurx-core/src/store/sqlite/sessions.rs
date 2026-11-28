@@ -2983,7 +2983,7 @@ impl MediaSessionStore for SqliteStore {
                       WHERE incarnation_id = ?1 AND {owner_3}
                         AND playback_id = ?4 AND state = 'active'
                         AND CASE WHEN json_valid(recipe_json) THEN
-                          COALESCE(json_extract(recipe_json, '$.request.vod_copy_layout.kind'), '') <> 'pending_v1'
+                          COALESCE(json_extract(recipe_json, '$.request.vod_copy_layout.kind'), '') NOT IN ('pending_v1', 'pending_encoded_v1')
                           ELSE TRUE END)
                     -- The ask has to still be the one this successor is for.
                     -- Carried in the CAS rather than checked before it, and

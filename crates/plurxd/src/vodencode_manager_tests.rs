@@ -1710,6 +1710,91 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     assert_eq!(file.hdr, None);
     assert_eq!(context.frame_rate, Some(24.0));
     manager.stop_session(&start.session_id, "test").await;
+
+    let mut split = SessionRequest {
+        playback_id: "encoded-manager-split".to_owned(),
+        request_id: Some("qualification-vod-split".into()),
+        split_audio: true,
+        start_seconds: 3.0,
+        ..req
+    };
+    split.prepare_vod_copy_layout();
+    let timed = SessionRequest {
+        request_id: Some("qualification-vod-split-deadline".into()),
+        block_budget_secs: Some(0.000_001),
+        ..split.clone()
+    };
+    let fallback = create_local_vod(&manager, &timed, "test")
+        .await
+        .expect("the split deadline still allows a muxed start");
+    assert_eq!(fallback.vod_copy_layout, Some(crate::transcode::VodCopyLayout::EncodedMuxed));
+    assert!(fallback.playlist_url.ends_with("/index.m3u8"));
+    manager.stop_session(&fallback.session_id, "test").await;
+
+    let start = create_local_vod(&manager, &split, "test")
+        .await
+        .expect("encoded split create");
+    let Some(crate::transcode::VodCopyLayout::EncodedSplitV1 {
+        video_rendition_id,
+        video_init_id,
+        soundtrack,
+        ..
+    }) = start.vod_copy_layout else {
+        panic!("expected verified split, got {:?}", start.vod_copy_layout);
+    };
+    assert!(start.playlist_url.ends_with("/master.m3u8"));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let master = manager
+        .vod_continuous_master_before(&start.session_id, deadline)
+        .await
+        .expect("VOD projection")
+        .result
+        .expect("verified manifest")
+        .expect("split presentation")
+        .master_text()
+        .expect("rendered manifest");
+    assert!(master.contains(&format!("video/{video_rendition_id}/index.m3u8")));
+    assert!(master.contains(&format!("audio/{}/index.m3u8", soundtrack.rendition_id)));
+    for (role, rendition, init_id) in [
+        ("video", video_rendition_id, video_init_id),
+        ("audio", soundtrack.rendition_id, soundtrack.init_id),
+    ] {
+        let playlist = manager
+            .vod_child_playlist_before(&start.session_id, role, &rendition, deadline)
+            .await
+            .expect("VOD child")
+            .result
+            .expect("child playlist")
+            .expect("owned child");
+        let playlist = String::from_utf8(playlist).expect("UTF-8 playlist");
+        assert!(playlist.contains(&format!("init/{init_id}.mp4")));
+        let mut reader = plurx_core::fmp4::FragmentReader::new();
+        for (kind, object) in [("init", format!("{init_id}.mp4")), ("segment", "0.m4s".into())] {
+            let request = crate::vodserve::ChildMediaRequest {
+                role: role.into(),
+                rendition: rendition.clone(),
+                kind: kind.into(),
+                object,
+            };
+            let mut ready = manager.vod_child_segment_before(&start.session_id, &request, deadline)
+                .await.expect("VOD child").result.expect("projected object").expect("authorized child");
+            let mut body = Vec::new();
+            ready.file.read_to_end(&mut body).await.expect("served projection");
+            reader.push(&body);
+        }
+        let Some(plurx_core::fmp4::Unit::Init(init)) = reader.next_unit().expect("child init") else {
+            panic!("missing child init");
+        };
+        assert_eq!(init.tracks.len(), 1);
+        assert_eq!(init.video().is_some(), role == "video");
+        let Some(plurx_core::fmp4::Unit::Fragment(fragment)) = reader.next_unit().expect("child fragment") else {
+            panic!("missing child segment");
+        };
+        assert_eq!(fragment.tracks.len(), 1);
+        assert_eq!(fragment.tracks[0].track_id, init.tracks[0].id);
+    }
+    manager.stop_session(&start.session_id, "test").await;
+
 }
 
 /// A catalog row that reports the derived E-AC-3 Atmos profile, read on a node

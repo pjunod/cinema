@@ -2746,6 +2746,7 @@
             Session {
                 requested_audio_index: None,
                 vod_copy_layout: None,
+                encoded_projection: None,
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -2890,6 +2891,7 @@
             Session {
                 requested_audio_index: None,
                 vod_copy_layout: None,
+                encoded_projection: None,
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,

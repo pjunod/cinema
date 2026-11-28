@@ -888,6 +888,12 @@ impl VodServe {
     ) -> Option<VodPublication<Vec<u8>>> {
         let publication = self.session_rendition(session_id).await?;
         let (result, owner) = match publication.result {
+            Ok(_) if publication.owner.encoded_split_only => (
+                Err(VodError::ProducerFailed(
+                    "this VOD requires its split master playlist".into(),
+                )),
+                publication.owner,
+            ),
             Ok((rendition, _, _)) => (
                 Ok(playlist_with_acquisition_start(
                     &rendition.playlist,
@@ -925,6 +931,9 @@ impl VodServe {
         deadline: Instant,
     ) -> Option<VodPublication<Option<plurx_core::transcode::split_master::SplitPresentation>>>
     {
+        if let Some(split) = self.encoded_split_master(session_id).await {
+            return Some(split);
+        }
         // A split copy is the other role-split family: one shared copy video
         // and every soundtrack, served through the same master and children.
         if let Some(split) = self.split_copy_master_before(session_id, deadline).await {
@@ -1351,6 +1360,12 @@ impl VodServe {
         if !ChildMediaRequest::valid_identity(role, rendition_id) {
             return None;
         }
+        if let Some(split) = self
+            .encoded_split_playlist(session_id, role, rendition_id)
+            .await
+        {
+            return Some(split);
+        }
         let publication = self
             .session_media_rendition(session_id, Some(rendition_id))
             .await?;
@@ -1707,6 +1722,12 @@ impl VodServe {
         preparing: bool,
     ) -> Option<VodPublication<Option<SegmentReady>>> {
         let name = request.media_name()?;
+        if let Some(split) = self
+            .encoded_split_segment(session_id, request, deadline)
+            .await
+        {
+            return Some(split);
+        }
         let publication = self
             .session_media_rendition(session_id, Some(&request.rendition))
             .await?;
@@ -1898,6 +1919,12 @@ impl VodServe {
             budget = budget.min(deadline.saturating_duration_since(Instant::now()));
         }
         let owner = publication.owner;
+        if owner.encoded_split_only {
+            return Some(VodPublication {
+                result: Ok(None),
+                owner,
+            });
+        }
         if let Some(artifact) = owner.retained_output.as_ref() {
             let index = if name == INIT_NAME {
                 None

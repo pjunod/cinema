@@ -166,6 +166,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
             Session {
                 requested_audio_index: None,
                 vod_copy_layout: None,
+                encoded_projection: None,
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -222,6 +223,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
             Session {
                 requested_audio_index: None,
                 vod_copy_layout: None,
+                encoded_projection: None,
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -4338,6 +4340,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
             Session {
                 requested_audio_index: None,
                 vod_copy_layout: None,
+                encoded_projection: None,
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,

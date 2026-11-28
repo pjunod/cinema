@@ -93,6 +93,7 @@ impl SourceResourceReadCustody {
             observed_media_duration_ms: None,
             retained_lease: None,
             cache_pin,
+            projection_scratch: None,
             file: tokio::fs::File::from_std(file),
             len,
             etag: etag.to_owned(),
@@ -294,6 +295,7 @@ impl SourceResourceReadCustody {
             // retained-cache admission cannot confer authority in this namespace.
             retained_lease: None,
             cache_pin,
+            projection_scratch: None,
             file: tokio::fs::File::from_std(file),
             len,
             etag: format!("{etag_stem}-{len}"),
