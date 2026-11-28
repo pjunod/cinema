@@ -436,12 +436,26 @@ async fn exercise_cluster_converting_artifact(stale_refusal: bool) {
         );
         let purpose = super::shared::AttachmentPurpose::SelectedDetail;
         assert!(serve
-            .try_cluster_fragment_index_matching(&file, video, None, purpose, Some(&cache_key), true)
+            .try_cluster_fragment_index_matching(
+                &file,
+                video,
+                None,
+                purpose,
+                Some(&cache_key),
+                true,
+            )
             .await
             .expect("verify the issued v2 artifact")
             .is_none());
         assert!(serve
-            .try_cluster_fragment_index_matching(&file, video, None, purpose, Some(&cache_key), false)
+            .try_cluster_fragment_index_matching(
+                &file,
+                video,
+                None,
+                purpose,
+                Some(&cache_key),
+                false,
+            )
             .await
             .expect("unverified recovery keeps the issued artifact")
             .is_some());
