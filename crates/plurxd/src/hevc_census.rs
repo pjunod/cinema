@@ -47,6 +47,7 @@ static IN_FLIGHT: LazyLock<Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>> =
 enum CensusScope {
     Playback,
     Index,
+    Source,
 }
 
 /// Successful verdicts are shared. The two admission paths have different
@@ -244,11 +245,96 @@ pub(crate) async fn ensure_index_census(
     answer
 }
 
+/// Record the census for a Source (shared) copy start before it decides the
+/// copy's argv.
+///
+/// The Source actor calls this under its own preparation authority, after
+/// the grant's file witness was taken. The census is not part of the shared
+/// file revision (`store::sharing_catalogue_details`), so recording it here
+/// leaves that witness standing; without it a Source-first play of a title
+/// that redefines its parameter sets copied it with them deleted. The read
+/// is the index census's: a held fence on the file, a bounded input, and
+/// bounded single-keyframe children that are joined when the run completes
+/// and killed with the future when a start's deadline abandons it. Like the
+/// local playback census, it runs before the copy's admission: seven
+/// one-keyframe copies within `CENSUS_BUDGET`. A local playback or index
+/// census already measuring the file is waited for rather than duplicated. A run that fails or concludes nothing leaves
+/// the stored decision, and the copy's own HEVC trace then refuses a
+/// configuration change as `hevc_configuration_unsupported`.
+pub(crate) async fn ensure_source_census(
+    store: &dyn Store,
+    file: &MediaFile,
+) -> Result<(), StoreError> {
+    let probe = store.get_file_probe_json(file.id).await?;
+    if !hevc_census::needs_census(file, probe.as_deref())
+        || recently_failed(file, CensusScope::Source)
+    {
+        return Ok(());
+    }
+    let lock = {
+        let mut in_flight = IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        Arc::clone(in_flight.entry(file.id).or_default())
+    };
+    let answer = async {
+        let _measuring = lock.lock().await;
+        // Another owner may have recorded it while this one waited.
+        let probe = store.get_file_probe_json(file.id).await?;
+        if !hevc_census::needs_census(file, probe.as_deref())
+            || recently_failed(file, CensusScope::Source)
+        {
+            return Ok(());
+        }
+        let started = Instant::now();
+        match measure_held(
+            file,
+            // A viewer on the receiver waits on the copy this decides.
+            plurx_core::process::ChildWork::realtime("HEVC Source census"),
+        )
+        .await
+        {
+            Ok(Some(census)) => {
+                record_census(store, file, probe, census, started, CensusScope::Source).await?;
+            }
+            // As for the index census: an inconclusive complete run is
+            // remembered, a cancelled one and an unreadable source are not,
+            // so a transient mount fault does not cost the next start its
+            // census.
+            Ok(None) => {
+                if plurx_core::process::bounded::check_cancellation().is_ok() {
+                    note_failure(file, CensusScope::Source);
+                }
+            }
+            Err(reason) => {
+                tracing::debug!(file_id = file.id, %reason, "Source census source unavailable");
+            }
+        }
+        Ok(())
+    }
+    .await;
+    forget_census_lock(file.id, &lock);
+    answer
+}
+
 /// Own one finite census input until its children and queued reads settle.
 /// A study under the shared source budget never exposes a raw descriptor to
 /// the child. The local lane uses the same held-descriptor policy as its
 /// fragment pass.
 async fn measure_for_index(file: &MediaFile) -> Result<Option<Census>, String> {
+    measure_held(
+        file,
+        plurx_core::process::ChildWork::background("HEVC index census"),
+    )
+    .await
+}
+
+/// [`measure_for_index`]'s held-source read, with the children classed for
+/// whoever waits on the answer.
+async fn measure_held(
+    file: &MediaFile,
+    work: plurx_core::process::ChildWork,
+) -> Result<Option<Census>, String> {
     use plurx_core::process::bounded;
     let object = crate::fragment_index_cluster::inspect_source(file).await?;
     let source = crate::fragment_index_cluster::open_source_fence(file, Some(&object)).await?;
@@ -290,6 +376,7 @@ async fn measure_for_index(file: &MediaFile) -> Result<Option<Census>, String> {
                 at,
                 remaining.min(SAMPLE_WALL_TIME),
                 cancel.as_ref(),
+                work,
             )
             .await
             {
@@ -326,6 +413,7 @@ async fn sample_for_index(
     at_seconds: f64,
     budget: Duration,
     cancel: Option<&tokio_util::sync::CancellationToken>,
+    work: plurx_core::process::ChildWork,
 ) -> Result<InBandParameterSets, String> {
     if input_url.is_none() {
         file.rewind().map_err(|error| error.to_string())?;
@@ -358,9 +446,9 @@ async fn sample_for_index(
         command,
         budget,
         SAMPLE_MAX_BYTES as u64,
-        "HEVC index census",
+        work.purpose,
         cancel,
-        plurx_core::process::ChildWork::background("HEVC index census"),
+        work,
         descriptors,
     );
     let output = if input_url.is_some() {
