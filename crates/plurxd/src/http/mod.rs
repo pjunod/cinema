@@ -11,6 +11,7 @@ pub(crate) mod annotations;
 mod auth;
 pub(crate) mod background_jobs;
 pub(crate) mod curation;
+pub(crate) mod playback_devices;
 mod preparation;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
@@ -32,6 +33,7 @@ pub(crate) mod playback_handoffs;
 pub(crate) use extract::CacheOnlyAdminProofCache;
 pub(crate) mod activity_starts;
 pub(crate) mod hls;
+mod hls_request_metrics;
 mod https_admin;
 pub(crate) mod images;
 pub(crate) mod index_coverage;
@@ -395,6 +397,8 @@ fn http_route_group(path: &str) -> usize {
         // attributed here rather than opening a group of their own.
         | "/api/v1/me/devices"
         | "/api/v1/me/devices/{prefix}"
+        // The same sign-ins, with the capabilities each last reported.
+        | "/api/v1/playback/devices"
         | "/api/v1/users/{id}/devices"
         | "/api/v1/users/{id}/devices/{prefix}"
         | "/api/v1/keys"
@@ -552,6 +556,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/scrobble"
         | "/api/v1/items/{id}/unscrobble"
         | "/api/v1/files/{id}/decision"
+        | "/api/v1/files/{id}/hls/startup-decision"
         | "/api/v1/files/{id}/subtitle-translation"
         | "/api/v1/subtitle-translation/operations/{id}"
         | "/api/v1/subtitle-translation/operations/{id}/demands/{demand}"
@@ -591,6 +596,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/hls/continuous-sessions"
         | "/api/v1/files/{id}/hls/continuous-candidates"
         | "/api/v1/files/{id}/hls/start"
+        | "/api/v1/files/{id}/hls/prepare-startup"
         | "/api/v1/offline/packages/{id}"
         | "/api/v1/offline/packages/{id}/lease"
         | "/api/v1/offline/packages/{id}/complete"
@@ -1270,6 +1276,8 @@ impl HttpRequestMetrics {
 
 static HTTP_REQUEST_METRICS: LazyLock<HttpRequestMetrics> =
     LazyLock::new(HttpRequestMetrics::default);
+static HLS_REQUEST_METRICS: hls_request_metrics::HlsRequestMetrics =
+    hls_request_metrics::HlsRequestMetrics::new();
 
 /// At most one 5xx access line per route group per second, carrying how many
 /// it swallowed since the last one.
@@ -1365,6 +1373,9 @@ struct MeasuredBody {
     /// Data bytes this body has yielded to the connection so far.
     delivered: u64,
     recorded: bool,
+    /// The HLS object class this response serves, when it serves one; its
+    /// delivered bytes are also credited there.
+    hls_object: Option<usize>,
 }
 
 impl MeasuredBody {
@@ -1382,7 +1393,13 @@ impl MeasuredBody {
             declared,
             delivered: 0,
             recorded: false,
+            hls_object: None,
         }
+    }
+
+    fn with_hls_object(mut self, hls_object: Option<usize>) -> Self {
+        self.hls_object = hls_object;
+        self
     }
 
     /// Whether everything this body promised has been handed over: it is at
@@ -1401,6 +1418,9 @@ impl MeasuredBody {
         self.recorded = true;
         self.metrics
             .record_body(self.group, self.started_at.elapsed(), complete);
+        if let Some(object) = self.hls_object {
+            HLS_REQUEST_METRICS.record_bytes(object, self.delivered);
+        }
     }
 }
 
@@ -1508,6 +1528,11 @@ async fn measure_http_request(
         .map_or(HTTP_ROUTE_GROUPS.len() - 1, |path| {
             http_route_group(path.as_str())
         });
+    // Classified from the template plus fixed-vocabulary path values only;
+    // see `hls_request_metrics::classify`, which also counts GETs only.
+    let hls_object = request.extensions().get::<MatchedPath>().and_then(|path| {
+        hls_request_metrics::classify(request.method(), path.as_str(), request.uri().path())
+    });
     let method = http_method_index(request.method());
     let head_request = request.method() == Method::HEAD;
     let target = safe_trace_target(request.uri());
@@ -1521,6 +1546,9 @@ async fn measure_http_request(
     let response = next.run(request).await;
     let status = response.status();
     metrics.record_request(group, method, http_status_class_index(status));
+    if let Some(object) = hls_object {
+        HLS_REQUEST_METRICS.record_request(object, status);
+    }
     if status.is_server_error() {
         // Only 5xx, and at most one line per route group per second.
         // `logbuf::LogBuffer` is a bounded ring and it is the only log the
@@ -1543,11 +1571,15 @@ async fn measure_http_request(
         }
     }
     let declared = declared_body_length(head_request, status, &response);
-    response.map(|body| axum::body::Body::new(MeasuredBody::new(metrics, group, body, declared)))
+    response.map(|body| {
+        axum::body::Body::new(
+            MeasuredBody::new(metrics, group, body, declared).with_hls_object(hls_object),
+        )
+    })
 }
 
 pub(crate) fn prometheus_http_request_metrics() -> String {
-    HTTP_REQUEST_METRICS.render()
+    HTTP_REQUEST_METRICS.render() + &HLS_REQUEST_METRICS.render()
 }
 
 // ---------------------------------------------------------------------------
@@ -1959,6 +1991,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/auth/logout", post(auth::logout))
         .route("/me/devices", get(users::list_my_devices))
+        .route("/playback/devices", get(playback_devices::list))
         .route("/me/devices/{prefix}", delete(users::revoke_my_device))
         .route("/users/{id}/devices", get(users::list_user_devices))
         .route(
@@ -2325,6 +2358,14 @@ pub fn router(state: AppState) -> Router {
                 // the same reason. A real create is under a kilobyte; a
                 // browser holding the full 256 learned limits is about 40 KiB.
                 .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/files/{id}/hls/prepare-startup",
+            post(hls::prepare_startup).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/files/{id}/hls/startup-decision",
+            post(stream::startup_decision_post).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
             "/files/{id}/hls/continuous-candidates",
@@ -2725,6 +2766,9 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             desktop_http_admission_gate,
+        ))
+        .layer(axum::middleware::from_fn(
+            crate::cluster::calls::auth_refusal_response,
         ))
         .layer(axum::middleware::from_fn(http_request_metrics))
         // Outermost: every layer inside reads the id back out of the request

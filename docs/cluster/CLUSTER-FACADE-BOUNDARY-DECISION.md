@@ -1,10 +1,17 @@
 # Cluster facade boundary — private mechanisms across two crates
 
-**Status:** open — proposed implementation decision; not yet built or reviewed.
+**Status:** built — adopted boundary, implemented and independently reviewed.
 **Owner:** Codex. **Date:** 2026-11-17.
 
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811). Earlier branch
+names and checkpoint receipts below are historical. Fleet acceptance remains
+after Paul’s deployment.
+
 Companion to the repository's cluster facade build contract. This decision accompanies [the final-stage plan](CLUSTER-FACADE-SLICE-7-BUILD.md),
-committed before source edits. Independent review and qualification remain required.
+committed before source edits. Its preparatory decision and checkpoint
+evidence remain historical; use the promotion record for qualification and
+landing.
 
 ## Context
 

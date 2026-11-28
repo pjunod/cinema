@@ -6,7 +6,7 @@ use crate::scan::dv_title::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-pub const DISPLAY_TARGET_METHOD: &str = "dolby-closed-form-cm4-cm29-v5";
+pub const DISPLAY_TARGET_METHOD: &str = "dolby-closed-form-cm4-cm29-v6";
 pub const DISPLAY_TARGET_BUCKETS: [u32; 6] = [400, 600, 1000, 1600, 2000, 4000];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -550,6 +550,26 @@ fn export_max_cll(peak_nits: f64) -> u16 {
 /// The MaxCLL a display-targeted render of an eligible title declares.
 pub fn display_target_max_cll(nits: u32) -> u16 {
     export_max_cll(f64::from(nits))
+}
+
+/// The scanned L1 maximum of an eligible title, in whole nits, for the
+/// Playback info `Title peak` row. `None` when the scan cannot qualify the
+/// title, so a partial scan's maximum is never shown as the title's.
+pub fn title_peak_nits(stats: DvTitleStats) -> Option<u32> {
+    if stats.eligibility() != TitleEligibility::Eligible {
+        return None;
+    }
+    Some(pq_nits(stats.max_l1_pq?).round() as u32)
+}
+
+/// Whether the policy's "title already fits" decline holds for this HDR
+/// bucket: the same comparison [`DvDisplayTarget::for_title`] makes, so a
+/// reporter can state it without re-deciding or reading the note's words.
+pub fn title_fits_display(stats: DvTitleStats, bucket_nits: u32) -> bool {
+    stats.eligibility() == TitleEligibility::Eligible
+        && stats
+            .max_l1_pq
+            .is_some_and(|code| pq_nits(code) <= f64::from(bucket_nits))
 }
 
 /// ST 2084 inverse EOTF of absolute nits (the helper's `dm_pq_oetf`).

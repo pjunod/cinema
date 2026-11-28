@@ -2,7 +2,6 @@
 
 **Status:** built.
 
-Build: 269
 Issue: #1204
 
 Settings → Account → Server reads the server's `display_name` from the

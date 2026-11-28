@@ -281,5 +281,49 @@ class MergeTemplateCase(unittest.TestCase):
         self.assertTrue(row.resolved)
 
 
+SQUASH_TEMPLATE = TEMPLATE.with_name("SQUASH_TEMPLATE.md")
+
+
+class SquashTemplateCase(unittest.TestCase):
+    """`SQUASH_TEMPLATE.md`: a squash landing keeps the description's fields.
+
+    `main` accepts merge commits only today. Forgejo's built-in squash message
+    is the branch's commit messages, so a squash would drop the description's
+    `Changelog:` and `Regression-Test:` lines; this template keeps them, and
+    its subject is the squash shape `landing_commit_title` recognises.
+    """
+
+    def template(self) -> str:
+        return SQUASH_TEMPLATE.read_text(encoding="utf-8")
+
+    def test_the_template_uses_only_variables_forgejo_defines(self):
+        names = {
+            match.group("braced") or match.group("bare")
+            for match in _VARIABLE_RE.finditer(self.template())
+        }
+        self.assertIn("PullRequestDescription", names)
+        self.assertEqual(names - FORGEJO_VARIABLES, set())
+
+    def test_a_rendered_squash_is_a_landing_carrying_the_description(self):
+        from validation.changelog_field import parse  # noqa: PLC0415
+
+        title = "fix(app): stop the stall (at #3)"
+        description = (
+            "Stops the stall.\n\n"
+            "Regression-Test: tests/app_test.rs::the_reader_stops_stalling\n"
+            "Changelog: Fixed — The reader no longer stalls.\n"
+        )
+        rendered_title, body = render(self.template(), pull_request(title, 9, description))
+        message = web_message(rendered_title, body)
+        subject = message.split("\n", 1)[0]
+        self.assertEqual(subject, f"{title} (#9)")
+        self.assertEqual(landing_commit_title(subject), (title, "9"))
+        self.assertEqual(
+            parse_regression_fields(message), ("tests/app_test.rs::the_reader_stops_stalling",)
+        )
+        self.assertEqual([entry.text for entry in parse(message).entries],
+                         ["The reader no longer stalls."])
+
+
 if __name__ == "__main__":
     unittest.main()

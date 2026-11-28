@@ -653,7 +653,7 @@ pub(super) async fn run(
             return Err(transient(format!("joining F+ source input: {error}")));
         }
     }
-    if !source.unchanged() || source.reopen(file).await.is_err() {
+    if !source.unchanged().await || source.reopen(file).await.is_err() {
         // What the helper read may straddle two sources: keep nothing.
         spool.discard().await;
         return Err(transient("source changed during the F+ fit".into()));

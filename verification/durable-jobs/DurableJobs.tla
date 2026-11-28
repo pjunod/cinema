@@ -220,6 +220,19 @@ Takeover(j,w,b,c,sample) ==
   /\ UNCHANGED <<sourceKey,sourcePause,fragment,domain,binding,removed,workerBoot,tokens,localLease,phase,requests,
        publications,items,renewed,domainChanged,replayed,resolved,pruned,compacted,retired,
        quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
+\* The expired-lease sweep (`requeue_expired_running_jobs`) is the takeover's
+\* revocation with no new owner: fence and revision advance, the lapsed
+\* attempt finishes, its reservations go, and the row is queued unowned.
+ExpireSweep(j,sample) ==
+  /\ ~environment /\ jobs[j].state = "running" /\ jobs[j].exp <= sample
+  /\ jobs' = [jobs EXCEPT ![j].state = "queued", ![j].owner = NoOwner,
+               ![j].fence = @+1, ![j].revision = @+1]
+  /\ attempts' = {IF a.job = j THEN [a EXCEPT !.finished = TRUE] ELSE a : a \in attempts}
+  /\ held' = {r \in held : r.job /= j}
+  /\ environment' = TRUE
+  /\ UNCHANGED <<sourceKey,sourcePause,fragment,domain,binding,removed,workerBoot,tokens,localLease,phase,requests,
+       publications,items,nextClaim,ledger,renewed,domainChanged,replayed,resolved,pruned,compacted,retired,
+       quorum,now,polled,oldReply,recoveryDelay,claimRecords,callStarted>>
 Outage ==
   /\ ~environment /\ quorum /\ quorum' = FALSE /\ environment' = TRUE
   /\ UNCHANGED <<sourceKey,sourcePause,fragment,jobs,attempts,held,domain,binding,removed,workerBoot,tokens,localLease,
@@ -546,6 +559,7 @@ SafetyNext ==
   \/ \E w \in Workers : Remove(w) \/ Restart(w)
   \/ \E k \in ResourceKeys : LoseResource(k)
   \/ \E j \in Jobs,w \in Workers,b \in 1..MaxBoots,c \in 1..MaxClaims,s \in Samples : Takeover(j,w,b,c,s)
+  \/ \E j \in Jobs,s \in Samples : ExpireSweep(j,s)
   \/ Outage
   \/ \E w \in Workers,s \in Samples : PauseSource(w,s) \/ ResumeSource(w,s) \/ SendRenew(w,s) \/ BindAttempt(w,s) \/ RefusalRelease(w,s) \/ RefusalSettle(w,s) \/ FacadePrecheck(w,s)
            \/ ComputeSuccessor(w,s) \/ ApplyPublication(w,s) \/ ReplayClaim(w,s) \/ ResolveClaim(w,s)

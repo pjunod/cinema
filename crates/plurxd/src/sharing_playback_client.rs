@@ -403,6 +403,7 @@ impl PeerConnection {
                 .await
                 .map_err(|_| PeerError::Unavailable)?;
             let status = response.status();
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
             let bytes = axum::body::to_bytes(
                 Body::new(
                     response
@@ -420,7 +421,10 @@ impl PeerConnection {
                 return Err(PeerError::ProtocolUnsupported);
             }
             if status != StatusCode::OK {
-                return Err(PeerError::Rejected(status));
+                return Err(crate::sharing_client::peer_status_refusal(
+                    status,
+                    retry_after.as_ref(),
+                ));
             }
             SourceEndReceipt::parse(&bytes, session, known)
         })
@@ -687,6 +691,16 @@ pub(crate) struct SourceStatusReceipt {
     direct: Option<SourceDirectStart>,
 }
 impl SourceStatusReceipt {
+    /// The receiver's own Status parse, unchanged, for a test that checks
+    /// what any receiver reads a Source's answer as.
+    #[cfg(test)]
+    pub(crate) fn parse_for_test(
+        bytes: &[u8],
+        session: &SourcePeerSession,
+        known: &SourcePeerLineage,
+    ) -> Result<Self, PeerError> {
+        Self::parse_with_receiver(bytes, session, known, true)
+    }
     #[cfg(test)]
     fn parse(
         bytes: &[u8],
@@ -798,7 +812,7 @@ impl PeerConnection {
                 .await
                 .map_err(|_| PeerError::Unavailable)?;
             let status = response.status();
-            let retry_after = response.headers().contains_key(header::RETRY_AFTER);
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
             let bytes = axum::body::to_bytes(
                 Body::new(
                     response
@@ -820,7 +834,10 @@ impl PeerConnection {
                 return Err(PeerError::ProtocolUnsupported);
             }
             if status != StatusCode::OK {
-                return Err(crate::sharing_client::peer_status_refusal(status, retry_after));
+                return Err(crate::sharing_client::peer_status_refusal(
+                    status,
+                    retry_after.as_ref(),
+                ));
             }
             SourceStatusReceipt::parse_with_receiver(&bytes, session, known, true)
         })
@@ -1104,7 +1121,7 @@ impl PeerConnection {
             status => {
                 return Err(crate::sharing_client::peer_status_refusal(
                     status,
-                    response.headers().contains_key(header::RETRY_AFTER),
+                    response.headers().get(header::RETRY_AFTER),
                 ))
             }
         }
@@ -1305,6 +1322,141 @@ mod resource_tests {
                     "a genuine refusal must not become resource busy: {error:?}"
                 );
             }
+            tokio::time::timeout(Duration::from_secs(5), serving)
+                .await
+                .expect("actual HTTP fixture driver closes")
+                .expect("HTTP fixture joined");
+        }
+    }
+    /// Regression (M4 Air, 2026-11-23 16:06:36Z): the decision and catalogue
+    /// reads' generic request turned the ingress's typed 429 into a plain
+    /// refusal, dropping its Retry-After. Over actual HTTP decoding it is
+    /// `Busy` with the Source's own wait; an untyped 429 is busy after the default wait.
+    #[tokio::test]
+    async fn sharing_catalogue_request_http_429_with_retry_after_is_busy() {
+        for (status, retry_after) in [
+            (StatusCode::TOO_MANY_REQUESTS, Some("3")),
+            (StatusCode::TOO_MANY_REQUESTS, None),
+            (StatusCode::SERVICE_UNAVAILABLE, Some("3")),
+        ] {
+            let (mut peer, server) = wire_peer().await;
+            let serving = tokio::spawn(async move {
+                let service = hyper::service::service_fn(move |_request| async move {
+                    let mut response = axum::http::Response::builder().status(status);
+                    if let Some(retry_after) = retry_after {
+                        response = response.header(header::RETRY_AFTER, retry_after);
+                    }
+                    Ok::<_, std::convert::Infallible>(
+                        response.body(Body::from("busy")).expect("fixture response"),
+                    )
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(server), service)
+                    .await;
+            });
+            let error = match peer
+                .catalogue_libraries(&Secret::from_cleartext("fixture credential"))
+                .await
+            {
+                Ok(_) => panic!("an HTTP refusal cannot produce libraries"),
+                Err(error) => error,
+            };
+            match (status, retry_after) {
+                (StatusCode::TOO_MANY_REQUESTS, Some(_)) => assert!(
+                    matches!(
+                        error,
+                        PeerError::Busy {
+                            retry_after_secs: 3
+                        }
+                    ),
+                    "{error:?}"
+                ),
+                (StatusCode::TOO_MANY_REQUESTS, None) => assert!(
+                    matches!(
+                        error,
+                        PeerError::Busy {
+                            retry_after_secs: 1
+                        }
+                    ),
+                    "{error:?}"
+                ),
+                _ => assert!(matches!(error, PeerError::Unavailable), "{error:?}"),
+            }
+            drop(peer);
+            tokio::time::timeout(Duration::from_secs(5), serving)
+                .await
+                .expect("actual HTTP fixture driver closes")
+                .expect("HTTP fixture joined");
+        }
+    }
+    /// Regression (M4 Air, 2026-11-22 22:15:30Z): the ingress's full credit
+    /// pool answered a status renewal 429 with `Retry-After`, and the status
+    /// client turned it into a refusal that retired a live session. Over the
+    /// actual HTTP decoding: typed busy is `Busy` with the Source's wait.
+    #[tokio::test]
+    async fn sharing_status_http_429_with_retry_after_is_busy_not_a_refusal() {
+        for (status, retry_after) in [
+            (StatusCode::TOO_MANY_REQUESTS, Some("3")),
+            (StatusCode::TOO_MANY_REQUESTS, None),
+            (StatusCode::SERVICE_UNAVAILABLE, Some("3")),
+        ] {
+            let (mut peer, server) = wire_peer().await;
+            peer.verified_endpoint = Some(Endpoint {
+                ipv4: "100.64.0.1".parse().expect("fixture address"),
+                ipv6: None,
+                ts_fqdn: "source.fixture.ts.net".into(),
+                port: 443,
+                spki_sha256: "a".repeat(64),
+            });
+            let serving = tokio::spawn(async move {
+                let service = hyper::service::service_fn(move |_request| async move {
+                    let mut response = axum::http::Response::builder().status(status);
+                    if let Some(retry_after) = retry_after {
+                        response = response.header(header::RETRY_AFTER, retry_after);
+                    }
+                    Ok::<_, std::convert::Infallible>(
+                        response.body(Body::from("busy")).expect("fixture response"),
+                    )
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(server), service)
+                    .await;
+            });
+            let (session, known, _, _) = fixture();
+            let error = match peer
+                .file_status(
+                    &Secret::from_cleartext("fixture credential"),
+                    &"b".repeat(64),
+                    &session,
+                    &known,
+                )
+                .await
+            {
+                Ok(_) => panic!("an HTTP refusal cannot produce a status receipt"),
+                Err(error) => error,
+            };
+            match (status, retry_after) {
+                (StatusCode::TOO_MANY_REQUESTS, Some(_)) => assert!(
+                    matches!(
+                        error,
+                        PeerError::Busy {
+                            retry_after_secs: 3
+                        }
+                    ),
+                    "{error:?}"
+                ),
+                (StatusCode::TOO_MANY_REQUESTS, None) => assert!(
+                    matches!(
+                        error,
+                        PeerError::Busy {
+                            retry_after_secs: 1
+                        }
+                    ),
+                    "{error:?}"
+                ),
+                _ => assert!(matches!(error, PeerError::Unavailable), "{error:?}"),
+            }
+            drop(peer);
             tokio::time::timeout(Duration::from_secs(5), serving)
                 .await
                 .expect("actual HTTP fixture driver closes")
@@ -1889,6 +2041,7 @@ impl PeerConnection {
                 .await
                 .map_err(|_| PeerError::Unavailable)?;
             let status = response.status();
+            let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
             let bytes = axum::body::to_bytes(
                 Body::new(
                     response
@@ -1906,7 +2059,10 @@ impl PeerConnection {
                 return Err(PeerError::ProtocolUnsupported);
             }
             if status != StatusCode::OK {
-                return Err(PeerError::Rejected(status));
+                return Err(crate::sharing_client::peer_status_refusal(
+                    status,
+                    retry_after.as_ref(),
+                ));
             }
             Ok(bytes.to_vec())
         })

@@ -39,6 +39,8 @@ use plurx_core::store::SubtitleSourcePublication;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use futures_util::StreamExt;
+
 use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 
 pub(crate) use crate::fragment_index_cluster::SourceStamp;
@@ -643,7 +645,7 @@ pub(crate) enum Live<'a> {
 impl Live<'_> {
     async fn stamp(self) -> Option<SourceStamp> {
         let metadata = match self {
-            Self::Handle(handle) => handle.metadata().ok()?,
+            Self::Handle(handle) => plurx_core::media_io::fstat(handle).ok()?,
             Self::Path(path) => tokio::fs::metadata(path).await.ok()?,
             #[cfg(test)]
             Self::Stamp(stamp) => return Some(stamp),
@@ -862,7 +864,7 @@ pub(crate) async fn hydrate_from_peers(
     if !access.is_enabled().await || ordinal < 0 || file.size < 0 {
         return false;
     }
-    let rows = match catalog
+    let mut rows = match catalog
         .list_subtitle_source_publications(file.id, file.size, file.mtime)
         .await
     {
@@ -888,7 +890,7 @@ pub(crate) async fn hydrate_from_peers(
                 return false;
             }
         };
-    let Ok(metadata) = attested.handle.metadata() else {
+    let Ok(metadata) = plurx_core::media_io::fstat(&attested.handle) else {
         return false;
     };
     let bound = crate::fragment_index_cluster::source_stamp(&metadata);
@@ -911,51 +913,67 @@ pub(crate) async fn hydrate_from_peers(
                 .map(|base| (peer.node_id.clone(), base))
         })
         .collect();
-    for row in rows {
+    let path = format!(
+        "/internal/media/subtitle-source/{}/{}/{}",
+        file.id,
+        ordinal,
+        format.publication_name()
+    );
+    let peer_budget = plurx_core::cluster::timing::holders::SUBTITLE_PEER_DEADLINE;
+    rows.sort_by_cached_key(|row| {
+        reachable.get(&row.node_id).map_or(1, |base| {
+            transport.preference(&row.node_id, base, peer_budget)
+        })
+    });
+    let deadline = tokio::time::Instant::now() + peer_budget;
+    let source_attestation = &attested.observation.source_sha256;
+    let requests = rows.into_iter().filter_map(|row| {
         if row.ordinal != ordinal
             || row.format != format.publication_name()
             || row.verdict != "kept"
-            || row.source_attestation != attested.observation.source_sha256
+            || &row.source_attestation != source_attestation
             || row.bytes <= 0
             || row.bytes as u64 > MAX_TRACK_BYTES
         {
-            continue;
+            return None;
         }
-        let Some(base) = reachable.get(&row.node_id) else {
+        let base = reachable.get(&row.node_id)?;
+        let path = &path;
+        Some(async move {
+            let response = transport
+                .request(
+                    &row.node_id,
+                    base,
+                    reqwest::Method::GET,
+                    path,
+                    Vec::new(),
+                    deadline,
+                    MAX_TRACK_BYTES as usize,
+                    PeerAuthMode::ExactRequest,
+                )
+                .await;
+            let Ok(response) = response else { return None };
+            match peer_artifact_verdict(&row, &response) {
+                PeerArtifactVerdict::Forget => {
+                    // A stale-row cleanup waits only inside this candidate;
+                    // the other holder futures continue to make progress.
+                    forget_stale_publication(catalog, &row).await;
+                    None
+                }
+                PeerArtifactVerdict::Skip => None,
+                PeerArtifactVerdict::Accept => Some((row, response.body)),
+            }
+        })
+    });
+    let responses = crate::cluster::calls::race_holders(requests, deadline);
+    futures_util::pin_mut!(responses);
+    while let Some(candidate) = responses.next().await {
+        let Some((row, body)) = candidate else {
             continue;
         };
-        let path = format!(
-            "/internal/media/subtitle-source/{}/{}/{}",
-            file.id,
-            ordinal,
-            format.publication_name()
-        );
-        let response = transport
-            .request(
-                &row.node_id,
-                base,
-                reqwest::Method::GET,
-                &path,
-                Vec::new(),
-                tokio::time::Instant::now() + Duration::from_secs(8),
-                MAX_TRACK_BYTES as usize,
-                PeerAuthMode::ExactRequest,
-            )
-            .await;
-        let Ok(response) = response else { continue };
-        match peer_artifact_verdict(&row, &response) {
-            PeerArtifactVerdict::Forget => {
-                forget_stale_publication(catalog, &row).await;
-                continue;
-            }
-            PeerArtifactVerdict::Skip => continue,
-            PeerArtifactVerdict::Accept => {}
-        }
-        if install_hydrated(access, file, &attested.handle, bound, &row, &response.body).await {
+        if install_hydrated(access, file, &attested.handle, bound, &row, &body).await {
             crate::telemetry::record_subtitle_source(
-                crate::telemetry::SubtitleSourceMetric::HydrationFetchedBytes(
-                    response.body.len() as u64
-                ),
+                crate::telemetry::SubtitleSourceMetric::HydrationFetchedBytes(body.len() as u64),
             );
             crate::telemetry::record_subtitle_source(
                 crate::telemetry::SubtitleSourceMetric::LookupHydrated,
@@ -1150,8 +1168,7 @@ async fn hydration_source_still_bound(
     path: &Path,
     bound: SourceStamp,
 ) -> bool {
-    let held_after = held
-        .metadata()
+    let held_after = plurx_core::media_io::fstat(held)
         .ok()
         .map(|metadata| crate::fragment_index_cluster::source_stamp(&metadata));
     let path_after = tokio::fs::metadata(path)
@@ -1427,7 +1444,7 @@ pub(crate) async fn open_verified_for_peer(
     let Opened::Verified(file) = opened else {
         return None;
     };
-    let bytes = file.metadata().ok()?.len();
+    let bytes = plurx_core::media_io::fstat(&file).ok()?.len();
     Some((
         PinnedSubtitleBlob {
             file: tokio::fs::File::from_std(file),

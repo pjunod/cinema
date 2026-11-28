@@ -976,6 +976,36 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(fixture.page.items?.first?.rollup?.leaves, 20)
         XCTAssertEqual(fixture.decision.delivery?.mode, "remux")
         XCTAssertEqual(fixture.decision.deliveredDynamicRange, "dolby_vision")
+
+        // A version's Dolby Vision line and how it plays, as the version
+        // picker and the Media section show them.
+        let file = try XCTUnwrap(fixture.itemDetail.files?.first)
+        XCTAssertEqual(file.dvFacts, "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base")
+        XCTAssertEqual(
+            DetailView.episodeMediaInfoRows(file).first { $0.label == "Dolby Vision" }?.value,
+            "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base"
+        )
+        let device = try XCTUnwrap(file.playsOn?.first)
+        XCTAssertEqual(device.deviceName, "Living room")
+        XCTAssertEqual(device.label, "EL dropped · plays as 8.1")
+        XCTAssertTrue(device.isCaution)
+        XCTAssertFalse(PlaysOn(id: "full", label: "Full FEL", elDropped: false, fullQuality: true).isCaution)
+        XCTAssertNil(DetailView.episodeMediaInfoRows(MediaFile(id: 1)).first { $0.label == "Dolby Vision" })
+    }
+
+    func testIOSVersionRowsShowEachVersionsDolbyVisionLine() {
+        // An iOS menu shows only a row's first line, so the versions are rows
+        // on the page and each carries the server's Dolby Vision line.
+        let rows = VersionChoiceList.rows([
+            MediaFile(id: 1, filename: "Film.2160p.REMUX.DV.mkv", dvFacts: "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base"),
+            MediaFile(id: 2, filename: "Film.1080p.mkv"),
+            MediaFile(id: 3),
+        ], selectedID: 2)
+        XCTAssertEqual(rows, [
+            .init(id: 1, title: "Film.2160p.REMUX.DV.mkv", detail: "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base", selected: false),
+            .init(id: 2, title: "Film.1080p.mkv", detail: nil, selected: true),
+            .init(id: 3, title: "Version 3", detail: nil, selected: false),
+        ])
     }
 
     func testReadingStateDecodesItsRevisionAndRendererNeutralLocator() throws {
@@ -6559,6 +6589,45 @@ final class AppleClientTests: XCTestCase {
         let stagedOpen = surface("client_preparing", title: nil, detail: nil)
         XCTAssertFalse(PlaybackWaitPresentation.isWait(stagedOpen), "the bare staged open is not a wait")
         XCTAssertNil(PlaybackWaitPresentation.detail(for: stagedOpen, live: live))
+    }
+
+    #if os(tvOS)
+    @MainActor
+    func testUnnamedNativeAutoCanPrepareTheAuthoritativeCopyRecipe() throws {
+        var negotiation = Decision(fileId: 42, method: "remux", playUrl: "/files/42/hls/sessions")
+        negotiation.displayAwareAutoProtocol = "route-v1"
+        var caps = Caps.capsDocument(hevc: true, av1: false, displayHDR: true, dolbyVision: true)
+        caps.display.presentationTarget = PresentationTarget(widthPx: 3840, heightPx: 2160, revision: 1)
+        let request = try XCTUnwrap(PlayerController.startupPreparationRequest(
+            decision: negotiation, caps: caps, selection: .none, quality: .auto,
+            startMs: 1_424_363, deviceSubtitlesOff: false, subtitleReadiness: .onDemand,
+            routeV1: true, playbackId: UUID().uuidString
+        ))
+
+        XCTAssertEqual(request.intent?.selection.quality, .auto)
+        XCTAssertEqual(request.copy, true)
+        XCTAssertEqual(request.start, 1_424.363)
+    }
+    #endif
+
+    func testStartupPreparationIsAClosedLocalFileResource() throws {
+        let local = try PlaybackFileContext.local(42)
+        XCTAssertEqual(try local.apiPath("hls/prepare-startup"), "files/42/hls/prepare-startup")
+        XCTAssertThrowsError(try local.path("hls/prepare-startup", query: [URLQueryItem(name: "file", value: "7")]))
+        XCTAssertThrowsError(try local.path("hls/prepare-startup/extra"))
+        XCTAssertEqual(try local.apiPath("hls/startup-decision"), "files/42/hls/startup-decision")
+        XCTAssertThrowsError(try local.path("hls/startup-decision/extra"))
+        let session = try local.withSession("00000000-0000-4000-8000-000000000001")
+        XCTAssertThrowsError(try session.path("hls/prepare-startup"))
+        XCTAssertThrowsError(try session.path("hls/startup-decision"))
+    }
+
+    func testNativeStartupSeekRequiresTheRequestedItemClock() {
+        XCTAssertTrue(PlayerController.initialItemSeekLanded(.finished(true), positionMs: 6_174, targetMs: 6_200))
+        XCTAssertFalse(PlayerController.initialItemSeekLanded(.finished(true), positionMs: 5_172, targetMs: 6_200))
+        XCTAssertFalse(PlayerController.initialItemSeekLanded(.finished(false), positionMs: 6_200, targetMs: 6_200))
+        XCTAssertFalse(PlayerController.initialItemSeekLanded(.timedOut, positionMs: 6_200, targetMs: 6_200))
+        XCTAssertFalse(PlayerController.initialItemSeekLanded(.cancelled, positionMs: 6_200, targetMs: 6_200))
     }
 
     func testLiveCopyRecoverySeeksPastThePrecedingKeyframe() {

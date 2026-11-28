@@ -8,6 +8,7 @@
 
 use plurx_core::{
     fmp4::Hdr10OutputMetadata,
+    store::dv_m7_attempts::M7_LEGACY_MIN_TARGET_KBPS as LEGACY_MIN_TARGET_KBPS,
     transcode::{
         dv_fel_qualification::pq_eotf,
         dv_m7_scoring::{
@@ -31,7 +32,6 @@ type Hash = [u8; 32];
 
 const RECIPE_REVISION: u32 = 2;
 const BENEFIT_MAP_REVISION: u32 = 1;
-const LEGACY_MIN_TARGET_KBPS: u32 = 83_334;
 const INPUT_FORMAT: &str = "plurx-composed-model-b-topleft-v2";
 const MODE: &str = "lumazfsp";
 const GRID: usize = 16;

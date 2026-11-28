@@ -1,7 +1,7 @@
 //! M7 experiment lifecycle owned by a maintenance title attempt.
 
 use super::m7_comparison::{HeldTitle, TitleContext};
-use crate::fragment_index_cluster::{open_source_fence, SourceFence};
+use crate::fragment_index_cluster::{open_source_playback_fence, SourceFence};
 use plurx_core::{
     process::bounded,
     store::dv_m7_attempts::{M7CandidateAnchor, M7CandidatePlan, M7CandidateScope},
@@ -37,11 +37,13 @@ impl From<String> for EvaluationError {
 
 /// A scanner refusal of the unchanged source under current tools ends the
 /// title as unsupported; any other scan failure is retried.
-impl From<dv_title::CensusScanError> for EvaluationError {
-    fn from(error: dv_title::CensusScanError) -> Self {
+impl From<dv_title::TitleScanError> for EvaluationError {
+    fn from(error: dv_title::TitleScanError) -> Self {
         match error {
-            dv_title::CensusScanError::Refused(message) => Self::Unsupported(message),
-            dv_title::CensusScanError::Transient(message) => Self::Deferred(message),
+            dv_title::TitleScanError::Refused(message) => Self::Unsupported(message),
+            dv_title::TitleScanError::SourceInterrupted(message)
+            | dv_title::TitleScanError::SourceReadFailed(message)
+            | dv_title::TitleScanError::Failed(message) => Self::Deferred(message),
         }
     }
 }
@@ -275,7 +277,7 @@ async fn historical(
 }
 
 async fn held_title(context: &TitleContext<'_>) -> Result<HeldTitle, String> {
-    let source = open_source_fence(context.file, None).await?;
+    let source = open_source_playback_fence(context.file, None).await?;
     let probe = M7SourceProbe::from_probe_json(&context.demand.probe_json)
         .map_err(|error| error.to_string())?;
     let hash = super::run_source_admitted_probe(
@@ -286,16 +288,20 @@ async fn held_title(context: &TitleContext<'_>) -> Result<HeldTitle, String> {
         None,
         context.fence,
         || async {
-            source.unchanged()
+            source.unchanged().await
                 && context.tools.is_current().await
-                && source.reopen(context.file).await.is_ok()
+                && open_source_playback_fence(context.file, Some(source.object_version()))
+                    .await
+                    .is_ok()
         },
         raw_sha256(context, &source),
     )
     .await?;
     if context.cancel.is_cancelled()
-        || !source.unchanged()
-        || source.reopen(context.file).await.is_err()
+        || !source.unchanged().await
+        || open_source_playback_fence(context.file, Some(source.object_version()))
+            .await
+            .is_err()
     {
         return Err("M7 source changed while measuring its content".into());
     }
@@ -315,7 +321,7 @@ async fn raw_sha256(context: &TitleContext<'_>, source: &SourceFence) -> Result<
     // receives it, so it is not a daemon-owned asset: registering it as one
     // is refused whenever reader roots are configured (library media never
     // sits under the daemon's owned roots) and deferred every M7 title.
-    let reopened = source.reopen(context.file).await?;
+    let reopened = open_source_playback_fence(context.file, Some(source.object_version())).await?;
     let mut reader = tokio::fs::File::from_std(reopened.handle);
     let budget = context.fence.source_budget();
     let mut remaining = u64::try_from(context.file.size).map_err(|e| e.to_string())?;
@@ -546,7 +552,7 @@ async fn measure_new_title(
             let reservation = crate::playback_cache::reserve(scratch.path(), reserve_bytes)
                 .await.map_err(string)?;
             let (_, census) = dv_title::scan_with_m7_census(
-                context.file, &context.demand.probe_json, context.tools,
+                context.file, &title.source, &context.demand.probe_json, context.tools,
                 &context.state.runtime_cache_dir, &source.windows,
             ).await?;
             title.whole_source_census = Some(census);
@@ -923,7 +929,7 @@ async fn held_source_st2086_frames(
     if source_read_failed {
         return Err(Transient("held source read failed".into()));
     }
-    if !title.source.unchanged() {
+    if !title.source.unchanged().await {
         return Err(Transient(
             "held source changed during the frame projection".into(),
         ));
@@ -1578,13 +1584,11 @@ mod tests {
         assert_eq!(record(Ok(Evaluated::Skipped)), None);
         assert_eq!(record(Err(EvaluationError::Deferred("busy".into()))), None);
         assert_eq!(
-            record(Err(
-                dv_title::CensusScanError::Transient("killed".into()).into()
-            )),
+            record(Err(dv_title::TitleScanError::Failed("killed".into()).into())),
             None
         );
         assert!(matches!(
-            EvaluationError::from(dv_title::CensusScanError::Refused("refused".into())),
+            EvaluationError::from(dv_title::TitleScanError::Refused("refused".into())),
             EvaluationError::Unsupported(message) if message == "refused"
         ));
         for (evaluation, kind, gate) in [

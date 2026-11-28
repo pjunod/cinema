@@ -1708,6 +1708,9 @@ impl TranscodeManager {
             {
                 return Err(MediaResponsePublicationRejection::StateChanged);
             }
+            if let Some(artifact) = &session.rolling_artifact {
+                return Ok(artifact.segment_window_seconds(segment_index));
+            }
             let window = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(deadline),
                 session.segments.lock(),
@@ -1792,7 +1795,7 @@ impl TranscodeManager {
             .ok_or("native splice has no FEL renderer")?;
         if !encoding.preserves_processed_dv()
             || encoding.processed_fel() != Some(true)
-            || !runtime.source.unchanged()
+            || !runtime.source.unchanged().await
         {
             return Ok(false);
         }
@@ -1867,7 +1870,7 @@ impl TranscodeManager {
                 || session.control.is_retired()
                 || session.failed.load(Relaxed)
                 || session.control.current_producer_attempt() != attempt
-                || !runtime.source.unchanged()
+                || !runtime.source.unchanged().await
             {
                 return Ok(had_commit);
             }
@@ -2013,7 +2016,7 @@ impl TranscodeManager {
                 && !session.replacing_child.load(Acquire)
                 && session.control.current_producer_attempt() == attempt
                 && !session.control.is_retired()
-                && runtime.source.unchanged()
+                && runtime.source.unchanged_in_place()
                 && clock.served.as_ref().is_some_and(|snapshot| {
                     snapshot.producer_attempt == attempt
                         && u64::try_from(snapshot.last_segment).is_ok_and(|last| last < index)
@@ -2045,7 +2048,7 @@ impl TranscodeManager {
         self: &Arc<Self>,
         session_id: &str,
         deadline: Instant,
-    ) -> Option<crate::copyseg::NativeSplitInitIds> {
+    ) -> Option<(crate::copyseg::NativeSplitInitIds, Option<i64>)> {
         let session = self.sessions.lock().await.get(session_id).cloned()?;
         let Some(split) = session.native_split.as_ref() else {
             if matches!(
@@ -2065,10 +2068,26 @@ impl TranscodeManager {
             }
             return None;
         };
-        if session.publication.lock().await.served.is_none() {
-            self.playlist_with_owner_before(session_id, deadline)
+        if session.publication.lock().await.served.is_none()
+            && self
+                .playlist_with_owner_before(session_id, deadline)
                 .await
-                .ok()?;
+                .is_err()
+        {
+            // The handler now serves the muxed master. Record that as the
+            // layout, so a prepared or resumed start stops owning FEL
+            // processing and its upgrade can use the successor instead of a
+            // splice that can no longer be selected.
+            let _ = split.choose(None);
+            tracing::info!(
+                target: "plurxd::http::hls",
+                session = %session_log_id(session_id),
+                file_id = session.file_id,
+                layout = "muxed",
+                reason = split.decline_reason().unwrap_or("-"),
+                "selected native HLS layout before the first publication"
+            );
+            return None;
         }
         let published = session.publication.lock().await;
         let range = published
@@ -2089,11 +2108,12 @@ impl TranscodeManager {
             session = %session_log_id(session_id),
             file_id = session.file_id,
             layout = if chosen.is_some() { "split" } else { "muxed" },
+            reason = split.decline_reason().unwrap_or("-"),
             first_segment = range.map(|(first, _)| first),
             last_segment = range.map(|(_, last)| last),
             "selected native HLS layout"
         );
-        chosen
+        chosen.map(|ids| (ids, split.audio_index()))
     }
 
     pub(crate) async fn native_split_child_playlist(

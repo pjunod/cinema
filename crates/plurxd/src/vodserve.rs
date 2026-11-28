@@ -397,6 +397,10 @@ pub struct VodSettings {
     /// the 50 GB the settings page shows. Distinct from
     /// `completed_cache_bytes`, whose unset value keeps admission closed.
     pub output_budget_bytes: u64,
+    /// `playback.hls_burst_secs`: seconds of media a producer generation's
+    /// transfer input reads at source speed before epoch pacing engages, the
+    /// burst half of the same burst-then-hold shape rolling input uses.
+    pub source_burst_secs: f64,
 }
 
 /// The Developer switch for complete-output preparation queued by a VOD
@@ -857,6 +861,19 @@ impl ProcessingActivity {
     }
 }
 
+/// The session's display-target facts beside its current processing report:
+/// what the client reported and what the policy concluded, for the Playback
+/// info `Display target` row. Observation only.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct DvReportDisplay {
+    pub(crate) display: Option<plurx_core::playback::caps::DisplayCaps>,
+    pub(crate) note: Option<String>,
+    /// Frozen beside the policy at session start; `None` for a route that
+    /// carries no display-target policy.
+    pub(crate) facts: Option<plurx_core::playback::dv_provenance::DvRowFacts>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct DisplayTargetActivity {
     pub reported_peak_nits: Option<i64>,
@@ -965,6 +982,9 @@ pub(crate) struct VerifiedContinuousFamily {
     pub family: plurx_core::transcode::VodPresentationFamily,
     pub video_budgets: Vec<plurx_core::transcode::VodRenditionBandwidth>,
     pub audio_budget: Option<plurx_core::transcode::VodRenditionBandwidth>,
+    /// The source stream behind the shared soundtrack, for its NAME,
+    /// LANGUAGE and stable rendition id.
+    pub audio_source: Option<plurx_core::transcode::split_master::SplitAudioSource>,
     pub candidates: HashMap<String, plurx_core::playback::candidate::CandidateId>,
 }
 
@@ -1175,7 +1195,7 @@ impl ProcessedRootReuse {
                 .rendition
                 .source
                 .as_ref()
-                .is_none_or(|source| source.unchanged())
+                .is_none_or(|source| source.unchanged_in_place())
     }
 }
 
@@ -1401,6 +1421,7 @@ struct Shared {
     /// backlog ([`VodServe::local_index_demand`]). Bounded: it is a priority
     /// hint, and a refused start asks again.
     local_index_demand: StdMutex<VecDeque<i64>>,
+    resume_predictions: vod_startup_prediction::ResumePredictions,
     /// Startup-discovered obsolete encoded generations. The directory remains
     /// present until its exact plan row is deleted, so cancellation or Store
     /// failure remains rediscoverable after either a later tick or restart.
@@ -1737,6 +1758,8 @@ mod vod_serve_construct;
 mod vod_serve_control;
 #[path = "vod/serve/create.rs"]
 mod vod_serve_create;
+#[path = "vod/startup_prediction.rs"]
+mod vod_startup_prediction;
 #[cfg(test)]
 pub(crate) use vod_serve_create::AdmittedSourceVodRendition;
 pub(crate) use vod_serve_create::ReservedSourceVodRendition;
@@ -1786,6 +1809,8 @@ use output_measurement::PublishedOutputMeasurement;
 mod copy_preparation;
 #[path = "vod/preparation_storage.rs"]
 pub(crate) mod preparation_storage;
+#[path = "vod/resume_preparation.rs"]
+mod resume_preparation;
 #[path = "vod/retained.rs"]
 pub(crate) mod retained;
 #[path = "vod/retained_manifest.rs"]

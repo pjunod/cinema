@@ -180,6 +180,7 @@ impl NativeFelWindow {
     fn package_splice_window(
         &self,
         format: &plurx_core::fmp4::video_splice::SpliceVideoFormat,
+        copy_static: &plurx_core::fmp4::video_splice::CopyStaticMetadata,
         times: &[plurx_core::fmp4::video_splice::CopyPictureTime],
         copy_timescale: u32,
         decode_start: u64,
@@ -219,6 +220,7 @@ impl NativeFelWindow {
         format
             .admit(&video_init)
             .map_err(media_error)?
+            .replacing(copy_static)
             .fragment_at_copy_times(
                 &video,
                 times,
@@ -271,6 +273,9 @@ pub(crate) fn package_fel_segment(
     let times =
         plurx_core::fmp4::video_splice::match_splice_pictures(ordinary, ordinary_video, &digests)
             .map_err(|error| error.to_string())?;
+    let copy_static =
+        plurx_core::fmp4::video_splice::CopyStaticMetadata::of(ordinary, ordinary_video)
+            .map_err(|error| error.to_string())?;
     let mut bytes = Vec::new();
     let mut consumed = 0;
     for (subwindow, window) in windows.iter().enumerate() {
@@ -278,6 +283,7 @@ pub(crate) fn package_fel_segment(
         let ordinal = u32::try_from(subwindow).map_err(|_| "FEL fragment sequence overflows")?;
         let fragment = window.package_splice_window(
             format,
+            &copy_static,
             &times[consumed..end],
             ordinary_video.timescale,
             decode_start,
@@ -606,6 +612,9 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
     pub(crate) display: Option<plurx_core::playback::caps::DisplayCaps>,
     pub(crate) display_target_note: Option<String>,
+    /// The title facts the Playback info rows report, frozen beside the
+    /// display-target policy from the same probe snapshot. Observation only.
+    pub(crate) dv_row_facts: Option<plurx_core::playback::dv_provenance::DvRowFacts>,
     pub(crate) destination: plurx_core::transcode::dv_processing::DvDestination,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
     /// Where the renderer was admitted to decode; it sized the graph's CPU debit.
@@ -665,7 +674,7 @@ impl RuntimeRecipe {
         let mut selected = required.cloned();
         let mut windows = Vec::with_capacity(entries.len());
         for entry in entries {
-            if cancellation.is_cancelled() || !self.source.unchanged() {
+            if cancellation.is_cancelled() || !self.source.unchanged().await {
                 return Err("native splice lost its source or owner".into());
             }
             let worker = permit
@@ -1091,7 +1100,7 @@ impl RuntimeRecipe {
                 || !entry
                     .start_ticks
                     .is_multiple_of(u64::from(grid.denominator))
-                || !self.source.unchanged()
+                || !self.source.unchanged().await
                 || !self.tools.is_current().await
             {
                 return Err("source/backend/window changed before processing".into());
@@ -1139,6 +1148,22 @@ impl RuntimeRecipe {
                 .map_err(str::to_owned)?;
             tracing::debug!(target: "plurxd::dv", entry = entry.index, encoder = ?args,
                 "processed window encoder recipe");
+            // The next plan entry's encoder recipe, computed with its own
+            // start and end, so a window run can start that window's encoder
+            // as soon as this one's is reaped. It must equal what that
+            // window computes when it is asked for, or the run is not used.
+            let next_encoder = following.first().and_then(|next| {
+                let mut options = options.clone();
+                options.start_seconds = next.start_ticks as f64 / f64::from(grid.numerator);
+                let execution =
+                    TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
+                        .ok()?;
+                let end =
+                    (next.start_ticks + next.duration_ticks) as f64 / f64::from(grid.numerator);
+                self.window_encoder_args(file, plan, &execution, grid, end)
+                    .ok()
+                    .map(|args| (next.index, args))
+            });
             let deadline = crate::media_pool::create_stage_deadline(self.preparation_budget);
             let deadline = absolute_deadline.map_or(deadline, |absolute| deadline.min(absolute));
             stages.deadline(deadline);
@@ -1198,6 +1223,7 @@ impl RuntimeRecipe {
                 entry,
                 following,
                 grid,
+                next_encoder,
             ))
             .await?
             {
@@ -1347,7 +1373,7 @@ impl RuntimeRecipe {
                             .then_some(plan.options().audio_channels),
                     )
                     .await?;
-                if !self.source.unchanged() || !self.tools.is_current().await {
+                if !self.source.unchanged().await || !self.tools.is_current().await {
                     return Err("source/backend changed before publication validation".into());
                 }
                 trace_window_stage(entry.index, "finalize_and_backend", &mut stage_started);
@@ -1473,7 +1499,16 @@ async fn run_private_window(
             .take_helper_completion()
             .ok_or("missing helper completion")?;
         let source_registrations = producer.source_registrations();
-        let (registration, writers, stdout, stderr) = producer.into_parts();
+        let (registration, writers, streams) = match producer.take_drained() {
+            Some(drained) => {
+                let (registration, writers) = producer.into_registered_parts();
+                (registration, writers, EncoderStreams::Drained(drained))
+            }
+            None => {
+                let (registration, writers, stdout, stderr) = producer.into_parts();
+                (registration, writers, EncoderStreams::Pipes(stdout, stderr))
+            }
+        };
         if let Some(registered) = registration_hook {
             registered(&source_registrations);
         }
@@ -1481,8 +1516,7 @@ async fn run_private_window(
             &slot,
             &registration,
             writers,
-            stdout,
-            stderr,
+            streams,
             helper,
             &cancel,
             deadline,
@@ -1509,13 +1543,19 @@ async fn run_private_window(
     result.map(|outcome| (outcome, started))
 }
 
+/// Where a window encoder's output comes from: its live pipes, or a
+/// pre-started run window encoder's output already being read.
+enum EncoderStreams {
+    Pipes(tokio::process::ChildStdout, tokio::process::ChildStderr),
+    Drained(crate::dv_segment::DrainedOutput),
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn capture_private_output(
     slot: &crate::prodrun::ProducerSlot,
     registration: &crate::prodrun::ProducerRegistration,
     writers: crate::prodrun::ProducerWriters,
-    stdout: tokio::process::ChildStdout,
-    stderr: tokio::process::ChildStderr,
+    streams: EncoderStreams,
     helper: crate::dv_segment::HelperCompletion,
     cancel: &tokio_util::sync::CancellationToken,
     deadline: tokio::time::Instant,
@@ -1523,37 +1563,64 @@ async fn capture_private_output(
 ) -> Result<WindowOutcome<Vec<u8>>, String> {
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
-    const OUTPUT_LIMIT: u64 = 64 * 1024 * 1024;
+    const OUTPUT_LIMIT: u64 = crate::dv_segment::ENCODER_OUTPUT_LIMIT;
+    const DIAGNOSTIC_LIMIT: u64 = crate::dv_segment::ENCODER_DIAGNOSTIC_LIMIT;
     let retirement = registration.retirement();
     let observed_helper = helper.clone();
+    // A pre-started encoder's reader is joined after the encoder's reap below,
+    // on every outcome, cancellation included.
+    let (pipes, mut drained) = match streams {
+        EncoderStreams::Pipes(stdout, stderr) => (Some((stdout, stderr)), None),
+        EncoderStreams::Drained(drained) => (None, Some(drained)),
+    };
     let result = {
         let capture = async {
-            let output = async {
-                let mut bytes = Vec::new();
-                stdout
-                    .take(OUTPUT_LIMIT + 1)
-                    .read_to_end(&mut bytes)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                // Only an over-limit spool fails here: the reader stopped,
-                // so the encoder can never finish. An empty spool waits for
-                // the helper and encoder outcomes, which name the real cause.
+            // Only an over-limit spool fails here: the reader stopped, so the
+            // encoder can never finish. An empty spool waits for the helper
+            // and encoder outcomes, which name the real cause.
+            let bounded = |bytes: Vec<u8>| {
                 if bytes.len() as u64 > OUTPUT_LIMIT {
-                    return Err("DV encoder private-output bound exceeded".to_owned());
+                    Err("DV encoder private-output bound exceeded".to_owned())
+                } else {
+                    Ok(bytes)
                 }
-                Ok(bytes)
             };
-            let diagnostic = async {
-                let mut text = Vec::new();
-                stderr
-                    .take(64 * 1024 + 1)
-                    .read_to_end(&mut text)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                if text.len() > 64 * 1024 {
-                    return Err("DV encoder diagnostic bound exceeded".to_owned());
+            let bounded_text = |text: Vec<u8>| {
+                if text.len() as u64 > DIAGNOSTIC_LIMIT {
+                    Err("DV encoder diagnostic bound exceeded".to_owned())
+                } else {
+                    Ok(text)
                 }
-                Ok(text)
+            };
+            let streams = async {
+                match (pipes, drained.as_mut()) {
+                    (Some((stdout, stderr)), _) => {
+                        let output = async {
+                            let mut bytes = Vec::new();
+                            stdout
+                                .take(OUTPUT_LIMIT + 1)
+                                .read_to_end(&mut bytes)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            bounded(bytes)
+                        };
+                        let diagnostic = async {
+                            let mut text = Vec::new();
+                            stderr
+                                .take(DIAGNOSTIC_LIMIT + 1)
+                                .read_to_end(&mut text)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            bounded_text(text)
+                        };
+                        tokio::try_join!(output, diagnostic)
+                    }
+                    (None, Some(drained)) => {
+                        let (bytes, text) = drained.output().await?;
+                        Ok((bounded(bytes)?, bounded_text(text)?))
+                    }
+                    (None, None) => Err("DV window encoder has no output".to_owned()),
+                }
             };
             let completed_helper = async {
                 let outcome = helper.wait().await;
@@ -1579,8 +1646,8 @@ async fn capture_private_output(
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             };
-            let (bytes, diagnostic, (), status) =
-                tokio::try_join!(output, diagnostic, completed_helper, exit)?;
+            let ((bytes, diagnostic), (), status) =
+                tokio::try_join!(streams, completed_helper, exit)?;
             private_window_outcome(bytes, &diagnostic, status)
         };
         tokio::pin!(capture);
@@ -1607,6 +1674,9 @@ async fn capture_private_output(
         }
     }
     registration.wait_confirmed_reap().await;
+    if let Some(drained) = drained {
+        drained.join().await;
+    }
     let _ = observed_helper.wait().await;
     result
 }
@@ -2665,8 +2735,7 @@ mod private_window_outcome_tests {
             &slot,
             &registration,
             writers,
-            stdout,
-            stderr,
+            super::EncoderStreams::Pipes(stdout, stderr),
             completion,
             &cancel,
             deadline,

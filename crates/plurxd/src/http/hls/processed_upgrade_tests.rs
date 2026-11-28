@@ -10,6 +10,7 @@ pub(in crate::http) fn ordinary_request(playback_id: &str) -> crate::transcode::
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         retain_output: None,
         dv_refit_digest: None,
         vod_only: false,
@@ -75,6 +76,77 @@ fn an_upgrade_is_scheduled_only_by_its_own_sessions_first_frame() {
     assert!(take_on_first_frame(11, &session).is_none());
     drop(run);
     assert!(!is_running(&session) && !is_waiting(&session));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_busy_reconstruction_slot_holds_the_waiting_upgrade_without_running_it() {
+    let (_, session, incarnation) = waiting(81);
+    // Another viewer or generation proves nothing about this session.
+    assert!(!hold_while_reconstruction_busy(82, &session, &incarnation));
+    assert!(!hold_while_reconstruction_busy(
+        81,
+        &session,
+        &uuid::Uuid::new_v4().to_string()
+    ));
+    // Its own exchange keeps it waiting; nothing starts.
+    assert!(hold_while_reconstruction_busy(81, &session, &incarnation));
+    assert!(is_waiting(&session) && !is_running(&session));
+    // Once the slot frees, the next exchange takes it as before.
+    let (_, run) = take_on_rendering(81, &session, &incarnation).expect("slot freed");
+    // A running upgrade is not held.
+    assert!(!hold_while_reconstruction_busy(81, &session, &incarnation));
+    drop(run);
+
+    // An HDR10 upgrade never takes the reconstruction slot, so it is not held.
+    let playback = uuid::Uuid::new_v4().to_string();
+    let hdr10 = uuid::Uuid::new_v4().to_string();
+    let hdr10_incarnation = uuid::Uuid::new_v4().to_string();
+    register(UpgradeIntent {
+        user_id: 81,
+        playback_id: playback.clone(),
+        session_id: hdr10.clone(),
+        incarnation_id: hdr10_incarnation.clone(),
+        request: ordinary_request(&playback),
+        hdr10_intent: true,
+        auto_policy: true,
+        network: None,
+        network_prior: None,
+        incumbent_receipt: None,
+    });
+    assert!(!hold_while_reconstruction_busy(
+        81,
+        &hdr10,
+        &hdr10_incarnation
+    ));
+}
+
+#[test]
+fn the_trial_and_release_paths_keep_their_reconstruction_contracts() {
+    // A trial refused for another play's slot must reach the upgrade
+    // recognisably, not wrapped as a terminal "processed window refused".
+    let create = include_str!("../../transcode/manager/create.rs");
+    let arm = create
+        .find("if pending_fel_qualification(&reason).is_some()")
+        .expect("the trial's refusal arm");
+    let wrapped = arm
+        + create[arm..]
+            .find("processed window refused")
+            .expect("the trial's wrapped refusal");
+    assert!(create[arm..wrapped].contains("Self::is_reconstruction_slot_busy(&reason)"));
+    // Releasing a session retires the successor staged to replace it, after
+    // its terminal is published and before any remote stop await.
+    let release = include_str!("release.rs");
+    let terminal = release
+        .find(".begin_session_terminal(&session, projected_terminal, projected_reason)")
+        .expect("terminal publication");
+    let retire = release
+        .find("super::preparation::cancel_preparations_for_released_incumbent(&route.incarnation_id);")
+        .expect("released incumbent retirement");
+    let stop = release
+        .find(".complete_release_with_route(")
+        .expect("durable release");
+    assert!(terminal < retire && retire < stop);
 }
 
 #[test]
@@ -288,12 +360,18 @@ fn an_unproven_pre_trial_admission_never_skips_the_check_after_the_trial() {
 #[test]
 fn an_unreadable_recovery_memory_lets_the_trial_run_but_never_grants_after_it() {
     use super::{recovery_admission, Admission, AdmissionStage};
-    use crate::http::hls::candidate_recovery::ProcessedRecoveryEvidence as Evidence;
-    assert_eq!(
-        recovery_admission(Evidence::Unavailable, AdmissionStage::BeforeTrial),
-        Ok(Admission::Unproven)
-    );
-    assert!(recovery_admission(Evidence::Unavailable, AdmissionStage::AfterTrial).is_err());
+    use crate::http::hls::candidate_recovery::{
+        ProcessedRecoveryEvidence as Evidence, RecoveryUnavailable,
+    };
+    for reason in RecoveryUnavailable::ALL {
+        assert_eq!(
+            recovery_admission(Evidence::Unavailable(reason), AdmissionStage::BeforeTrial),
+            Ok(Admission::Unproven)
+        );
+        assert!(
+            recovery_admission(Evidence::Unavailable(reason), AdmissionStage::AfterTrial).is_err()
+        );
+    }
     assert!(recovery_admission(Evidence::Rejected, AdmissionStage::BeforeTrial).is_err());
     assert!(recovery_admission(Evidence::Rejected, AdmissionStage::AfterTrial).is_err());
     assert_eq!(
@@ -355,4 +433,116 @@ fn an_upgrade_displaced_by_another_preparation_waits_for_the_free_slot() {
     run.wait_again(intent);
     drop(run);
     assert!(!is_waiting(&session) && !is_running(&session));
+}
+
+#[test]
+fn an_unreadable_recovery_memory_names_the_read_that_missed() {
+    use super::{recovery_admission, AdmissionStage};
+    use crate::http::hls::candidate_recovery::{
+        ProcessedRecoveryEvidence as Evidence, RecoveryUnavailable,
+    };
+    // A deadline names the read it cut, and keeps the deadline wording.
+    let Err(deadline) = recovery_admission(
+        Evidence::Unavailable(RecoveryUnavailable::DeadlineSourceIdentity),
+        AdmissionStage::AfterTrial,
+    ) else {
+        panic!("a deadline read refuses after the trial");
+    };
+    assert!(deadline.contains("before its deadline"), "{deadline}");
+    assert!(
+        deadline.ends_with("(deadline_source_identity)"),
+        "{deadline}"
+    );
+    // An answered miss is not called a deadline.
+    let Err(answered) = recovery_admission(
+        Evidence::Unavailable(RecoveryUnavailable::RouteLeaseExpired),
+        AdmissionStage::AfterTrial,
+    ) else {
+        panic!("an answered miss refuses after the trial");
+    };
+    assert!(!answered.contains("deadline"), "{answered}");
+    assert!(answered.ends_with("(route_lease_expired)"), "{answered}");
+    // Every reason has its own label, and only the four deadline reads are
+    // deadlines.
+    let labels: std::collections::BTreeSet<_> = RecoveryUnavailable::ALL
+        .iter()
+        .map(|reason| reason.label())
+        .collect();
+    assert_eq!(labels.len(), RecoveryUnavailable::ALL.len());
+    assert_eq!(
+        RecoveryUnavailable::ALL
+            .iter()
+            .filter(|reason| reason.is_deadline())
+            .count(),
+        4
+    );
+    for reason in RecoveryUnavailable::ALL {
+        assert_eq!(
+            reason.is_deadline(),
+            reason.label().starts_with("deadline_")
+        );
+    }
+}
+
+#[test]
+fn each_unavailable_recovery_reason_is_counted_by_stage_and_exported() {
+    use super::{recovery_admission, AdmissionStage};
+    use crate::http::hls::candidate_recovery::{
+        ProcessedRecoveryEvidence as Evidence, RecoveryUnavailable,
+    };
+    use crate::playback_control::processed_recovery_unavailable_count as count;
+    // Every reason has the slot its exhaustive index names.
+    for (index, reason) in RecoveryUnavailable::ALL.iter().enumerate() {
+        assert_eq!(reason.index(), index, "{}", reason.label());
+    }
+    // The admission records the reason under its own stage; only the
+    // after-trial read is a refusal. Counters are process-global, so other
+    // tests may add to them concurrently: only a lower bound is exact.
+    let reason = RecoveryUnavailable::RouteRereadMissing;
+    let (before, after) = (count(reason, false), count(reason, true));
+    let _ = recovery_admission(Evidence::Unavailable(reason), AdmissionStage::BeforeTrial);
+    assert!(count(reason, false) > before);
+    let _ = recovery_admission(Evidence::Unavailable(reason), AdmissionStage::AfterTrial);
+    assert!(count(reason, true) > after);
+    let metrics = crate::playback_control::prometheus();
+    for stage in ["before_trial", "after_trial"] {
+        for reason in RecoveryUnavailable::ALL {
+            let series = format!(
+                "plurx_playback_preparation_processed_recovery_unavailable_total{{stage=\"{stage}\",reason=\"{}\"}}",
+                reason.label()
+            );
+            assert!(metrics.contains(&series), "missing {series}");
+        }
+    }
+}
+
+#[test]
+fn a_recovery_deadline_names_the_read_it_was_waiting_on() {
+    use crate::http::hls::candidate_recovery::{RecoveryReadStage, RecoveryUnavailable};
+    let stage = RecoveryReadStage::default();
+    // Nothing entered yet is the first read: the route.
+    assert_eq!(stage.deadline(), RecoveryUnavailable::DeadlineRouteRead);
+    for (entered, named) in [
+        (
+            RecoveryReadStage::SOURCE,
+            RecoveryUnavailable::DeadlineSourceIdentity,
+        ),
+        (
+            RecoveryReadStage::REREAD,
+            RecoveryUnavailable::DeadlineRouteReread,
+        ),
+        (
+            RecoveryReadStage::MEMORY,
+            RecoveryUnavailable::DeadlineMemoryRead,
+        ),
+        // The second bind enters the route read again, so a memory stage
+        // left from the first bind never labels it.
+        (
+            RecoveryReadStage::ROUTE,
+            RecoveryUnavailable::DeadlineRouteRead,
+        ),
+    ] {
+        stage.enter(entered);
+        assert_eq!(stage.deadline(), named);
+    }
 }

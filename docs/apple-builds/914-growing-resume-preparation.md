@@ -2,7 +2,6 @@
 
 **Status:** built; physical acceptance open
 
-Build: 218
 Issue: #914
 
 A resume correction no longer reports that preparation failed after 15 seconds

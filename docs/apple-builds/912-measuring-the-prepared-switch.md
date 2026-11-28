@@ -1,6 +1,5 @@
 # Measure what the prepared switch cost the viewer
 
-Build: 167
 Issue: #912
 
 The prepared quality handoff now reports what it did to the picture and the

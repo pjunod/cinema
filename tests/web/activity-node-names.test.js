@@ -256,11 +256,13 @@ test("authentication refusals and HTTP failures stay distinct in the banner", ()
         { node_id: NODE_A, status: "refused" },
         { node_id: NODE_B, status: "http_error" },
         { node_id: "node-c", status: "unsupported" },
+        { node_id: "node-d", status: "local_unavailable" },
       ],
     }),
   );
   assert.match(html, /Node lab3 · refused the activity request/);
   assert.match(html, /Node node-c · does not publish Activity HTTP/);
+  assert.match(html, /Node node-d · could not be asked from this server/);
   assert.match(html, /Node lab6 · returned an HTTP error/);
   assert.doesNotMatch(html, /Node (lab3|lab6) · unreachable/);
 });

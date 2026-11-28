@@ -1,6 +1,7 @@
 # Transport-recovery resource contract — the decision
 
-**Status:** decided and built — Option A, as a campaign *envelope* (§0) ·
+**Status:** decided and built — Option A, as a campaign *envelope* (§0), a
+leak only when it also trends or steps (§0.7, 2026-11-23) ·
 **Decides:** what the campaign's resource check asserts · **Companion to:**
 [TRANSPORT-RECOVERY-RESOURCE-BASELINE.md](TRANSPORT-RECOVERY-RESOURCE-BASELINE.md)
 (the measurement) · **Written:** 2026-09-08 · **Decided:** 2026-09-08
@@ -173,9 +174,10 @@ Leaks that must fail, and do, naming node, resource, edge and both values:
 onset at cycle 13, caught at the ceiling with the floor untouched, and one
 socket leaked at cycle 15; on the alternating series: one connection leaked
 at cycle 12 caught and at 15 missed, a per-cycle leak from 15 caught and
-from 18 missed — the boundaries in §0.2, pinned both ways) · `a_thread_envelope_past_the_allowance_is_rejected` (including
+from 18 missed — the boundaries in §0.2, pinned both ways; §0.7 replaces the
+alternating-series boundaries) · `a_thread_envelope_past_the_allowance_is_rejected` (including
 one thread every third recovery, and every fourth as the documented miss) ·
-`three_high_closing_samples_are_spikes_and_four_are_a_trend` (and a
+`three_high_closing_samples_are_spikes_and_four_are_a_leak_only_as_a_trend` (and a
 baseline written as 99 sockets bounds nothing at the ceiling) ·
 `owned_async_task_growth_has_no_resource_slack` — name kept, the Makefile
 and `test_contracts.py` pin it; it now proves the sampler records a high
@@ -207,6 +209,99 @@ predicate is still `operation_owns_work`, and it is still wrong on its own
 terms — Option C. The campaign stops being broken by it; nothing else that
 reads it gets better until C is built, and C is also what would let the
 windows shrink and the boundaries in §0.2 tighten with evidence.
+
+### 0.7 Amendment, 2026-11-23 — a rise is a leak only when it trends or steps
+
+**What failed.** CI run 9084's voter campaign failed `node 4 sockets floor
+rose 12 -> 13 (allowance 0); node 4 owned async tasks floor rose 19 -> 22`.
+Node 4 is the restarted target. It sampled 12/19 once, at cycle 7 — the cycle
+where nodes 1–3 were replacing connections (44/20/20 sockets) — and never
+below 13/22 again. No node's series rises: the exact upward-trend p-value of
+every node and resource is above 0.38.
+
+**Why the envelope alone cannot hold.** §2.3's two-state drain is not what CI
+samples any more. Each hiqlite websocket transport is one socket and three
+owned tasks (`raft_server.rs`, `raft_client.rs`, `api.rs`), and the number
+open at the sample moves by several connections: node 1 between 23 and 44
+sockets, followers between 9 and 20, node 4 between 12 and 16. The envelope's
+edges are extremes, and the opening floor is one sample. Reordering run
+9084's own cycles at random — the same values, any trend removed by
+construction — fails the envelope in 78% of orderings (20,000 shuffles). No
+floor statistic fixes that: the second-lowest opening sample still fails
+27%, the fourth-lowest 9%, and widening the allowance only trades this noise
+for a blind spot of the same size.
+
+**What was decided.** A rise past the allowance is a leak only when the same
+node's series of that resource, in cycle order, is also significantly unlike a
+series with nothing changing in it. Two exact tests share a family bound of
+1/10,000 (`RESOURCE_LEAK_SIGNIFICANCE_DENOMINATOR`), half each:
+
+- **Growth** — `upward_trend_is_significant`: a one-sided rank trend on the
+  inversion count. Under "no change" every ordering of the recorded values is
+  equally likely whatever their distribution, and the number of orderings
+  with each inversion count is the q-multinomial coefficient of the value
+  multiplicities, so the p-value is counted exactly in integers, ties
+  included.
+- **A step** — `step_separation_is_significant`: every sample from some cycle
+  on sits above every earlier one by a gap `g`. That puts the largest values
+  last, which an exchangeable series does with probability `1/C(n, s)`; the
+  p-value is bounded by the sum over the sorted gaps of at least `g`. Ranks
+  ignore size, so without this a large one-time leak on a noisy node would
+  pass.
+
+Both take their null from the run's own values, so the false-positive rate is
+fixed by the bound rather than by a runner's noise, which is what the
+envelope alone could never give. The envelope stays the effect size and the
+allowances keep their meaning: thread jitter, a warmup plateau and one thread
+every fourth recovery still pass on the allowance alone.
+
+| on run 9084's shuffled series | per role campaign |
+|---|---|
+| envelope alone (before) | 78% fail |
+| envelope and (trend or step) (now) | 0.02% fail |
+
+What it catches, by the same shuffles (300 per case), with the leak added to
+the sockets and owned tasks of one node:
+
+| leak | node 1 (leader, 23–44) | node 2 | node 4 |
+|---|---|---|---|
+| one socket every recovery from cycle 1 | 69% | 100% | 100% |
+| the same from cycle 9 | 14% | 87% | 100% |
+| one every 2nd recovery | 11% | 82% | 100% |
+| one every 4th recovery | 1% | 24% | 84% |
+| fifty at once at cycle 8, 11 or 14 | 100% | 100% | 100% |
+| fifty at once at cycle 17 | 1% | 2% | 1% |
+
+Pinned on the synthetic alternating 8/9 drain
+(`a_leak_that_begins_late_in_the_campaign_is_rejected`): a per-cycle leak from
+any onset up to cycle 13; a socket every *k*-th recovery for *k* ≤ 6; and on a
+flat series one socket leaked at any cycle from 7 to 15 and held.
+
+What it gives up, and this is the real cost: **a leak smaller than the noise,
+or a step with fewer than six cycles on either side of it.** One connection
+leaked once on a drain that already moves by one is indistinguishable from the
+drain changing phase; a slow periodic leak on the leader hides in its 23–44
+swing; the step bound `1/C(20, s)` beats 1/20,000 only for a step at cycles
+7–15, so a one-time leak of any size starting in cycles 2–6 (which looks like
+warmup settling) or 16–20 is missed. Those windows are set by twenty samples
+*at this bound*: halving the 1/10,000 between two tests is what narrowed the
+flat-series window to 7–15, and a looser bound would widen it a cycle at a
+time at the price of false positives. The old envelope "caught" these only in the sense
+that it failed 78% of campaigns regardless — on this measurement it had no
+power to lose. A leak that persists is drawn again in every campaign it runs
+in. Getting the small and late cases back needs a quieter measurement, not a
+sharper statistic: that is Option C (§5), sampling once the recovery's
+transports are released.
+
+A rise that is not a leak is printed beside the per-node series, so it is
+never silent. The artifact's fields and schema are unchanged: both tests are
+recomputed from the recorded cycles by the same `resource_envelope_verdict`
+the run used, as `RESOURCE_ENVELOPE_WINDOW_SAMPLES` already is. Pinning:
+`run_9084_voter_campaign_is_sampling_noise_not_growth` (the run, sample for
+sample, passes; the same values with a socket leaked every cycle on node 4 or
+on the leader, or fifty at once on the leader at cycle 8, fail),
+`the_trend_null_distribution_counts_every_ordering_exactly` and
+`the_step_separation_bound_is_the_chance_the_largest_values_land_last`.
 
 ---
 

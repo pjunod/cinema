@@ -3057,6 +3057,7 @@ fn configure_probe_execution(
     Ok(supervisor)
 }
 
+#[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn configure_probe_execution_untracked(
     command: &mut tokio::process::Command,
@@ -3769,7 +3770,7 @@ fn probe_file_tuple_from_file(file: &std::fs::File) -> Result<ProbeFileIdentity,
     let metadata = file
         .metadata()
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
-    let held = plurx_core::fs_secure::std_file_identity(file)
+    let held = plurx_core::fs_secure::local_file_identity(file)
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
     let (modified_seconds, modified_nanoseconds) = system_time_parts(
         metadata
@@ -3811,7 +3812,7 @@ fn probe_file_identity_from_file(
     let metadata = file
         .metadata()
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
-    let held = plurx_core::fs_secure::std_file_identity(file)
+    let held = plurx_core::fs_secure::local_file_identity(file)
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
     if !metadata.is_file() || held.size == 0 || held.size > MAX_PROBE_EXECUTABLE_BYTES {
         return Err(DecodeFactError::ProbeIdentity(
@@ -3833,7 +3834,7 @@ fn probe_file_identity_from_file(
             .checked_add(u64::try_from(read).expect("buffer length fits u64"))
             .ok_or_else(|| DecodeFactError::ProbeIdentity("executable size overflow".to_owned()))?;
     }
-    let after = plurx_core::fs_secure::std_file_identity(file)
+    let after = plurx_core::fs_secure::local_file_identity(file)
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
     if offset != held.size || after != held {
         return Err(DecodeFactError::ProbeChanged);
@@ -5051,7 +5052,7 @@ async fn source_observation_with_probe_gate(
 fn source_observation_windows(
     source: &std::fs::File,
 ) -> Result<DecodeSourceObservation, DecodeFactError> {
-    let identity = plurx_core::fs_secure::std_file_identity(source)
+    let identity = plurx_core::media_io::identity_in_place(source)
         .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?;
     let body = serde_json::json!({
         "bytes": identity.size,
@@ -5892,12 +5893,15 @@ pub(crate) fn legacy_ordinal_facts(
 ) -> Result<DecodeFacts, plurx_core::transcode::PlanError> {
     // The catalog row describes the film. Applied to an attached picture it
     // would claim that a JPEG is Dolby Vision.
-    match catalog.filter(|_| first_playable_video_index(json) == Some(index)) {
+    let facts = match catalog.filter(|_| first_playable_video_index(json) == Some(index)) {
         Some(catalog) => {
             DecodeFacts::from_ffprobe_json_at_with_catalog(json, source_identity, index, catalog)
         }
         None => DecodeFacts::from_ffprobe_json_at(json, source_identity, index),
-    }
+    }?;
+    // A scan verdict an earlier probe persisted for this revision answers the
+    // missing scan metadata without probing the source again.
+    Ok(facts.with_stored_hevc_scan(json))
 }
 
 pub(crate) fn absolute_video_ordinal(json: &serde_json::Value, ordinal: u32) -> Option<u32> {

@@ -1607,6 +1607,31 @@ fn k06_durable_activation_settlement_keeps_original_phase_and_refuses_next_submi
     }
 }
 
+/// A loopback singleton config whose Raft and API sockets the config owns, and
+/// the socket its HTTP origin names.
+///
+/// Reading ports from bound listeners and dropping them lets any other socket
+/// on the host take a port before the voter binds it. The voter serves on the
+/// config's sockets instead; the HTTP socket only reserves the origin, so the
+/// caller keeps it for as long as the node is published under it.
+fn owned_singleton_config(
+    data_dir: &std::path::Path,
+) -> (crate::config::Config, std::net::TcpListener) {
+    let http = std::net::TcpListener::bind("127.0.0.1:0").expect("owned HTTP origin");
+    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("owned Raft port");
+    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("owned API port");
+    let mut config = crate::config::Config::default();
+    config.storage.data_dir = data_dir.into();
+    config.server.bind = http.local_addr().expect("owned HTTP address");
+    config.cluster.raft_bind = raft.local_addr().expect("owned Raft address");
+    config.cluster.api_bind = api.local_addr().expect("owned API address");
+    config.cluster.listeners = crate::config::ClusterListeners::owned(raft, api);
+    config.cluster.advertise_host = "localhost".into();
+    config.cluster.join_url = format!("http://{}", config.server.bind);
+    config.cluster.artwork_url = config.cluster.join_url.clone();
+    (config, http)
+}
+
 #[test]
 fn k06_direct_activation_phase_precedes_clock_refusal_before_and_after_capture() {
     let worker = std::thread::Builder::new()
@@ -1629,7 +1654,6 @@ fn k06_direct_activation_phase_precedes_clock_refusal_before_and_after_capture()
 
 async fn delayed_activation_settlement_fixture(direct_phase: bool) {
     use crate::cluster::migration::{select_daemon_store_observing, StartupClockObserver};
-    use crate::config::Config;
 
     struct SingletonObserver;
     impl StartupClockObserver for SingletonObserver {
@@ -1687,22 +1711,7 @@ async fn delayed_activation_settlement_fixture(direct_phase: bool) {
     }
 
     let root = tempfile::tempdir().expect("owned activation directory");
-    let held: Vec<_> = (0..3)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("owned fixture port"))
-        .collect();
-    let addresses: Vec<_> = held
-        .iter()
-        .map(|listener| listener.local_addr().expect("address"))
-        .collect();
-    let mut config = Config::default();
-    config.storage.data_dir = root.path().into();
-    config.server.bind = addresses[0];
-    config.cluster.raft_bind = addresses[1];
-    config.cluster.api_bind = addresses[2];
-    config.cluster.advertise_host = "localhost".into();
-    config.cluster.join_url = format!("http://{}", addresses[0]);
-    config.cluster.artwork_url = config.cluster.join_url.clone();
-    drop(held);
+    let (config, _http_origin) = owned_singleton_config(root.path());
     drop(crate::store::SqliteStore::open(&root.path().join("plurx.db")).expect("source schema"));
     let selected = Box::pin(select_daemon_store_observing(
         &config,
@@ -1995,22 +2004,10 @@ async fn actual_precommit_activation_fixture(
                 .expect("actual precommit fixture");
         connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='cluster_node_removal_insert_guard'", [], |row| row.get(0)).expect("actual precommit fixture")
     }
-    let held: Vec<_> = (0..3)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("actual precommit fixture"))
-        .collect();
-    let addresses: Vec<_> = held
-        .iter()
-        .map(|listener| listener.local_addr().expect("actual precommit fixture"))
-        .collect();
-    let mut config = crate::config::Config::default();
-    config.storage.data_dir = root.into();
-    config.server.bind = addresses[0];
-    config.cluster.raft_bind = addresses[1];
-    config.cluster.api_bind = addresses[2];
-    config.cluster.advertise_host = "localhost".into();
-    config.cluster.join_url = format!("http://{}", addresses[0]);
-    config.cluster.artwork_url = config.cluster.join_url.clone();
-    drop(held);
+    let (config, _http_origin) = owned_singleton_config(root);
+    // The selection task owns the config, so its sockets close when the task
+    // ends; the rebinds below then prove the voter released its duplicates.
+    let (raft_bind, api_bind) = (config.cluster.raft_bind, config.cluster.api_bind);
     drop(
         crate::store::SqliteStore::open(&root.join("plurx.db")).expect("actual precommit fixture"),
     );
@@ -2109,8 +2106,8 @@ async fn actual_precommit_activation_fixture(
         }
     }
     lock.unlock().expect("actual precommit fixture");
-    assert!(std::net::TcpListener::bind(addresses[1]).is_ok());
-    assert!(std::net::TcpListener::bind(addresses[2]).is_ok());
+    assert!(std::net::TcpListener::bind(raft_bind).is_ok());
+    assert!(std::net::TcpListener::bind(api_bind).is_ok());
 }
 
 #[test]
@@ -2315,7 +2312,6 @@ fn k06_aged_committed_learner_clock_response_keeps_other_routes_live_only() {
 
 async fn aged_committed_learner_clock_response_fixture() {
     use crate::cluster::migration::{select_daemon_store_observing, StartupClockObserver};
-    use crate::config::Config;
     use std::borrow::Cow;
 
     struct SingletonObserver;
@@ -2346,26 +2342,8 @@ async fn aged_committed_learner_clock_response_fixture() {
             })
         }
     }
-    fn addresses() -> Vec<std::net::SocketAddr> {
-        let held: Vec<_> = (0..3)
-            .map(|_| {
-                std::net::TcpListener::bind("127.0.0.1:0").expect("reserve owned fixture port")
-            })
-            .collect();
-        held.iter()
-            .map(|listener| listener.local_addr().expect("owned port"))
-            .collect()
-    }
     let root = tempfile::tempdir().expect("leader root");
-    let ports = addresses();
-    let mut config = Config::default();
-    config.storage.data_dir = root.path().into();
-    config.server.bind = ports[0];
-    config.cluster.raft_bind = ports[1];
-    config.cluster.api_bind = ports[2];
-    config.cluster.advertise_host = "localhost".into();
-    config.cluster.join_url = format!("http://{}", ports[0]);
-    config.cluster.artwork_url = config.cluster.join_url.clone();
+    let (config, _http_origin) = owned_singleton_config(root.path());
     drop(crate::store::SqliteStore::open(&root.path().join("plurx.db")).expect("source schema"));
     let selected = Box::pin(select_daemon_store_observing(
         &config,
@@ -2379,7 +2357,16 @@ async fn aged_committed_learner_clock_response_fixture() {
         .await
         .expect("owned join token");
     let learner_root = tempfile::tempdir().expect("learner root");
-    let learner_ports = addresses();
+    // The learner starts directly on sockets this test already holds, so no
+    // other socket can take its ports before it serves.
+    let learner_http = std::net::TcpListener::bind("127.0.0.1:0").expect("learner HTTP origin");
+    let learner_raft = std::net::TcpListener::bind("127.0.0.1:0").expect("learner Raft port");
+    let learner_api = std::net::TcpListener::bind("127.0.0.1:0").expect("learner API port");
+    let learner_ports = [
+        learner_http.local_addr().expect("learner HTTP address"),
+        learner_raft.local_addr().expect("learner Raft address"),
+        learner_api.local_addr().expect("learner API address"),
+    ];
     let learner_id = uuid::Uuid::new_v4().to_string();
     let (protocol_min, protocol_max) = manager.active_protocol_range().await.expect("actual range");
     manager
@@ -2415,6 +2402,10 @@ async fn aged_committed_learner_clock_response_fixture() {
                 nodes: vec![Node::from(&leader.local), Node::from(&local)],
                 listen_addr_api: Cow::Borrowed("127.0.0.1"),
                 listen_addr_raft: Cow::Borrowed("127.0.0.1"),
+                listeners: Some(hiqlite::NodeListeners {
+                    raft: learner_raft,
+                    api: learner_api,
+                }),
                 data_dir: Cow::Owned(learner_root.path().to_string_lossy().into_owned()),
                 filename_db: Cow::Borrowed("clock-test.db"),
                 secret_raft: leader.secrets.raft.clone(),
@@ -3826,7 +3817,7 @@ fn server_commit_response_loss_and_crash_expire_cache_admin_exclusion_conservati
 fn cache_admin_exclusion_is_separate_rolling_safe_and_capability_v4() {
     assert_eq!(
         CACHE_ADMIN_REVOCATION_CAPABILITY,
-        "cache_admin_revocation_v4"
+        "cache_admin_revocation_v5"
     );
     assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
         statement.contains("CREATE TABLE IF NOT EXISTS cluster_operation_leases")
@@ -10791,4 +10782,229 @@ mod floor_advisory {
             SharingMemberFloor::COUNT
         );
     }
+}
+
+#[test]
+fn token_policy_guards_refuse_legacy_insert_update_delete_and_key_renaming() {
+    let mut connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+    connection.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER);        CREATE TABLE cluster_credential_guard_activation(singleton INTEGER PRIMARY KEY);        CREATE TABLE cluster_credential_mutation_intents(singleton INTEGER PRIMARY KEY);        INSERT INTO settings VALUES('auth.token_idle_days','30',1),('ordinary','x',1);        INSERT INTO cluster_credential_guard_activation VALUES(1);").expect("install activated policy guard fixture");
+    for trigger in [
+        REQUIRE_CURRENT_AUTH_POLICY_INSERT_SQL,
+        REQUIRE_CURRENT_AUTH_POLICY_UPDATE_SQL,
+        REQUIRE_CURRENT_AUTH_POLICY_DELETE_SQL,
+    ] {
+        connection
+            .execute_batch(trigger)
+            .expect("install actual policy trigger");
+    }
+    for sql in [
+        "INSERT INTO settings VALUES('auth.token_expiry_enabled','0',2)",
+        "UPDATE settings SET value='1' WHERE key='auth.token_idle_days'",
+        "DELETE FROM settings WHERE key='auth.token_idle_days'",
+        "UPDATE settings SET key='ordinary-two' WHERE key='auth.token_idle_days'",
+        "UPDATE settings SET key='auth.token_expiry_since' WHERE key='ordinary'",
+    ] {
+        assert!(
+            connection
+                .execute(sql, [])
+                .expect_err("legacy policy mutation must be rejected")
+                .to_string()
+                .contains("requires current binary"),
+            "{sql}"
+        );
+    }
+    connection
+        .execute("UPDATE settings SET value='y' WHERE key='ordinary'", [])
+        .expect("ordinary setting remains writable");
+    let transaction = connection
+        .transaction()
+        .expect("begin current policy mutation transaction");
+    transaction
+        .execute(
+            "INSERT INTO cluster_credential_mutation_intents VALUES(1)",
+            [],
+        )
+        .expect("install transaction-local credential intent");
+    transaction
+        .execute(
+            "UPDATE settings SET value='1' WHERE key='auth.token_idle_days'",
+            [],
+        )
+        .expect("write policy with current transaction intent");
+    transaction
+        .execute("DELETE FROM cluster_credential_mutation_intents", [])
+        .expect("clear transaction-local credential intent");
+    transaction
+        .commit()
+        .expect("commit current policy mutation");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT value FROM settings WHERE key='auth.token_idle_days'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .expect("read committed policy value"),
+        "1"
+    );
+}
+
+#[test]
+fn general_token_cache_protocol_refuses_a_fresh_v4_member_among_v5_members() {
+    let connection =
+        rusqlite::Connection::open_in_memory().expect("open mixed-version protocol fixture");
+    connection.execute_batch("CREATE TABLE cluster_nodes(node_id TEXT PRIMARY KEY,raft_id INTEGER,last_seen_at INTEGER,removed_at INTEGER);        CREATE TABLE cluster_node_capabilities(node_id TEXT,capability TEXT,last_seen_at INTEGER);        CREATE TABLE cluster_credential_guard_activation(singleton INTEGER PRIMARY KEY);        CREATE TABLE cluster_cache_admin_revocation_leases(claim_id TEXT);        INSERT INTO cluster_nodes VALUES('voter',1,100,NULL),('learner',2,100,NULL);        INSERT INTO cluster_node_capabilities VALUES('voter','cache_admin_revocation_v5',100),('learner','cache_admin_revocation_v4',100);        INSERT INTO cluster_credential_guard_activation VALUES(1);").expect("install voter and learner capability fixture");
+    let blocked = || {
+        connection
+            .query_row(
+                &committed_cache_admin_revocation_ready_sql(),
+                rusqlite::params!["[1,2]"],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read exact committed revocation readiness")
+    };
+    assert_eq!(
+        blocked(),
+        1,
+        "a current v4 heartbeat cannot activate general authentication reuse"
+    );
+    connection.execute("UPDATE cluster_node_capabilities SET capability='cache_admin_revocation_v5' WHERE node_id='learner'", []).expect("advance learner to current v5 capability");
+    assert_eq!(blocked(), 0);
+    connection
+        .execute(
+            "UPDATE cluster_nodes SET last_seen_at=101 WHERE node_id='learner'",
+            [],
+        )
+        .expect("advance learner heartbeat without its matching capability");
+    assert_eq!(
+        blocked(),
+        1,
+        "a rollback without a matching v5 heartbeat closes the cache"
+    );
+}
+
+fn peer_auth_stamp_fixture() -> PeerAuthorityStamp {
+    PeerAuthorityStamp {
+        membership: hiqlite::LocalDbMembershipSnapshot {
+            running: true,
+            node_id: 1,
+            membership_log: Some((1, 1, 10)),
+            members: BTreeSet::from([1, 2]),
+            voters: BTreeSet::from([1]),
+            committed: true,
+        },
+        image_generation: 2,
+        revisions: [3, 4, 5],
+    }
+}
+
+#[test]
+fn peer_proof_leases_never_cross_member_and_voter_roles() {
+    let stamp = peer_auth_stamp_fixture();
+    let now = Instant::now();
+    let mut authority = InternalReadAuthority {
+        member: None,
+        voter: None,
+        refresh: Arc::new(tokio::sync::Mutex::new(())),
+    };
+    authority.publish(
+        PeerAuthorityRole::CommittedMember,
+        PeerAuthorityLease {
+            stamp: stamp.clone(),
+            expires_at: now + Duration::from_secs(1),
+            reachable_through_ms: 10_000,
+        },
+    );
+    assert!(authority
+        .lease(PeerAuthorityRole::CommittedMember)
+        .expect("published member lease exists")
+        .admits(&stamp, now, 10_000));
+    assert!(authority.lease(PeerAuthorityRole::CommittedVoter).is_none());
+    authority.publish(
+        PeerAuthorityRole::CommittedVoter,
+        PeerAuthorityLease {
+            stamp: stamp.clone(),
+            expires_at: now,
+            reachable_through_ms: 10_000,
+        },
+    );
+    assert!(!authority
+        .lease(PeerAuthorityRole::CommittedVoter)
+        .expect("published expired voter lease exists")
+        .admits(&stamp, now, 10_000));
+    assert!(authority
+        .lease(PeerAuthorityRole::CommittedMember)
+        .expect("member lease survives independent voter publication")
+        .admits(&stamp, now, 10_000));
+}
+
+#[test]
+fn peer_proof_leases_expire_on_heartbeat_source_aba_or_image_movement() {
+    let stamp = peer_auth_stamp_fixture();
+    let now = Instant::now();
+    let lease = PeerAuthorityLease {
+        stamp: stamp.clone(),
+        expires_at: now + Duration::from_secs(1),
+        reachable_through_ms: 10_000,
+    };
+    assert!(lease.admits(&stamp, now, 10_000));
+    assert!(
+        !lease.admits(&stamp, now, 10_001),
+        "heartbeat freshness cannot be extended by a cache lease"
+    );
+    assert!(!lease.admits(&stamp, now + Duration::from_secs(1), 10_000));
+    let mut changed = stamp.clone();
+    changed.membership.membership_log = Some((2, 2, 11));
+    assert!(
+        !lease.admits(&changed, now, 10_000),
+        "the same member set in a later log is a different source"
+    );
+    for slot in 0..3 {
+        let mut changed = stamp.clone();
+        changed.revisions[slot] += 1;
+        assert!(!lease.admits(&changed, now, 10_000));
+    }
+    let mut changed = stamp.clone();
+    changed.image_generation += 2;
+    assert!(!lease.admits(&changed, now, 10_000));
+    let mut changed = stamp.clone();
+    changed.membership.running = false;
+    assert!(!lease.admits(&changed, now, 10_000));
+    let mut changed = stamp;
+    changed.membership.committed = false;
+    assert!(!lease.admits(&changed, now, 10_000));
+}
+
+#[test]
+fn peer_replay_capacity_is_distinct_from_an_actual_replay() {
+    assert_eq!(
+        MembershipError::PeerAuthenticationAdmission(PeerAuthAdmissionRefusal::RateLimited).code(),
+        "cluster_peer_auth_rate_limited"
+    );
+    assert_eq!(
+        MembershipError::PeerAuthenticationAdmission(PeerAuthAdmissionRefusal::ReplayCapacity)
+            .code(),
+        "cluster_peer_auth_replay_capacity"
+    );
+    let now = Instant::now();
+    let mut mutation = InternalAuthReplayWindow::default();
+    assert_eq!(mutation.admit_proof("same", now), Ok(true));
+    assert_eq!(mutation.admit_proof("same", now), Ok(false));
+    for n in 1..MAX_INTERNAL_REPLAYS_PER_PEER {
+        assert_eq!(mutation.admit_proof(&format!("nonce-{n}"), now), Ok(true));
+    }
+    assert_eq!(
+        mutation.admit_proof("new", now),
+        Err(PeerAuthAdmissionRefusal::ReplayCapacity)
+    );
+    assert_eq!(mutation.admit_proof("same", now), Ok(false));
+    let mut read = InternalReadReplayWindow::default();
+    for n in 0..MAX_INTERNAL_READ_REPLAYS_PER_PEER {
+        assert_eq!(read.admit_proof(&format!("nonce-{n}"), now), Ok(true));
+    }
+    assert_eq!(
+        read.admit_proof("new", now),
+        Err(PeerAuthAdmissionRefusal::ReplayCapacity)
+    );
+    assert_eq!(read.admit_proof("nonce-0", now), Ok(false));
 }

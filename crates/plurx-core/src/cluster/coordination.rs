@@ -14,8 +14,8 @@ use crate::store::Store;
 // expansion without each crate taking a duplicate direct macro dependency.
 pub use async_trait::async_trait as cluster_job_async_trait;
 
-pub const MIN_LEASE_TTL: Duration = Duration::from_secs(1);
-pub const MAX_LEASE_TTL: Duration = Duration::from_secs(5 * 60);
+pub const MIN_LEASE_TTL: Duration = crate::cluster::timing::jobs::MIN_LEASE_TTL;
+pub const MAX_LEASE_TTL: Duration = crate::cluster::timing::jobs::MAX_LEASE_TTL;
 pub(crate) const MAX_LEASE_RESOURCE_BYTES: usize = 256;
 pub(crate) const MAX_LEASE_OWNER_BYTES: usize = 128;
 const REMOVED_JOB_OWNER_PREFIX: &str = "internal.cluster_job_owner_removed.";

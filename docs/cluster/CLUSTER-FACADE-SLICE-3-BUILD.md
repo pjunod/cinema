@@ -1,8 +1,13 @@
 # Cluster facade slice 3 — role, admission and artwork answers
 
-**Status:** open — slice 3 implemented and independently reviewed; main promotion waits for the remaining facade effort. Track effort qualification in the task PR checks.
+**Status:** built — implemented and independently reviewed.
 **Owner:** Codex. **Prepared:** 2026-11-16.
 **Task PR:** [#1747](http://forge.lan:3000/noirr/plurx/pulls/1747) into `effort/cluster-facade`.
+
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811). Earlier branch
+names and checkpoint receipts below are historical. Fleet acceptance remains
+after Paul’s deployment.
 
 Companion to [the facade contract](CLUSTER-FACADE-BUILD.md),
 [the cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md) and

@@ -85,7 +85,7 @@ timeout_seconds = 30
 
 [[checks]]
 id = "mobile-version"
-title = "Changed mobile apps advance their store build numbers"
+title = "Mobile marketing versions track the workspace; build numbers are derived, never stored"
 command = "python3 -m validation.mobile_versions"
 profiles = ["commit", "ci", "full", "nightly"]
 requires = ["git", "python3"]
@@ -131,7 +131,9 @@ command = "make ci-rust-gate"
 profiles = ["ci"]
 requires = ["cargo", "make"]
 missing = "fail"
-timeout_seconds = 1800
+# The same suite as ci.yml:check, which needs its 180-minute budget on the
+# four-CPU nonvoter (run 7243 measured ~175 minutes).
+timeout_seconds = 10800
 
 [[checks]]
 id = "unit-core"
@@ -159,7 +161,10 @@ command = "make web-check"
 profiles = ["commit", "ci", "full", "nightly"]
 requires = ["node", "npm", "python3"]
 missing = "fail"
-timeout_seconds = 120
+# make web-check now runs the Node web suite, two browser checks and tsc: 94 s
+# on a fast workstation (2026-11-24), past 120 s in the release gate's
+# 3-CPU container. Five times the measured run.
+timeout_seconds = 480
 
 [[checks]]
 id = "web-layout"
@@ -447,6 +452,7 @@ paths = [
   "crates/plurx-core/src/store/analysis_coordination.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v5.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v6.sql",
+  "crates/plurx-core/src/store/subtitle_managed_resources_v7.sql",
   "tests/support/rust_source_inventory.rs",
   "crates/plurx-core/src/store/background_jobs/principal_tests.rs",
   "crates/plurx-core/src/store/background_jobs/subtitle_admission_tests.rs",
@@ -468,6 +474,7 @@ paths = [
   "crates/plurx-core/src/store/subtitle_managed_resources_v4.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v5.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v6.sql",
+  "crates/plurx-core/src/store/subtitle_managed_resources_v7.sql",
   "Cargo.lock",
   "Cargo.toml",
   "crates/plurx-core/Cargo.toml",
@@ -483,7 +490,7 @@ paths = [
   # hot catalogue reads, captures the statements they trace, and records
   # each plan and its cold and warm timings on both backends' schemas.
   "crates/plurx-core/examples/query_plans/{main,calls,bench}.rs",
-  "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,fs_secure_windows,lib,testfixtures}.rs",
+  "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,fs_secure_windows,lib,media_io,testfixtures}.rs",
   "crates/plurx-core/src/config/**",
   "crates/plurx-core/src/content_analysis.rs",
   "crates/plurx-core/src/store/mod.rs",
@@ -507,6 +514,8 @@ paths = [
   "crates/plurx-core/src/store/scan_request_v2.sql",
   "crates/plurx-core/src/store/custody_retention.rs",
   "crates/plurx-core/src/store/background_jobs_custody_retention.sql",
+  "crates/plurx-core/src/store/analysis_source_scope.rs",
+  "crates/plurx-core/src/store/analysis_source_scope.sql",
   "crates/plurx-core/src/store/background_jobs_source_interest.sql",
   "crates/plurx-core/src/store/background_jobs_source_service.sql",
   "crates/plurx-core/src/store/source_checkpoints.sql",
@@ -544,6 +553,7 @@ paths = [
   "crates/plurx-core/src/store/candidate_recovery.rs",
   "crates/plurx-core/src/store/fragindex.rs",
   "crates/plurx-core/src/store/fragment_index_cluster.rs",
+  "crates/plurx-core/src/store/fragment_publication.rs",
   "crates/plurx-core/src/store/analysis_reconcile.sql",
   "crates/plurx-core/src/store/hiqlite_fragment_index_cluster.rs",
   "crates/plurx-core/src/store/hiqlite_timeline_annotations.rs",
@@ -608,6 +618,7 @@ paths = [
   "crates/plurx-core/src/store/subtitle_managed_resources_v4.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v5.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v6.sql",
+  "crates/plurx-core/src/store/subtitle_managed_resources_v7.sql",
   "crates/plurxd/tests/cluster_activation.rs",
 ]
 checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth"]
@@ -652,17 +663,21 @@ paths = [
   "crates/plurx-core/src/scan/**",
   "crates/plurx-core/src/store/hiqlite.rs",
   "crates/plurx-core/src/store/counted_client.rs",
+  "crates/plurx-core/tests/store_contract/token_proofs.rs",
   "crates/plurx-core/src/store/mod.rs",
   "crates/plurx-core/src/store/file_grants.rs",
   "crates/plurx-core/src/store/playback_handoffs.rs",
   "crates/plurx-core/src/store/applied_view.rs",
   "crates/plurx-core/src/store/playback_input_keys.rs",
   "crates/plurx-core/src/store/playback_input_keys.sql",
+  "crates/plurx-core/src/store/playback_device_caps.rs",
+  "crates/plurx-core/src/store/playback_device_caps.sql",
   "crates/plurx-core/src/store/playback_handoffs.sql",
   "crates/plurx-core/src/store/hiqlite_playback_handoffs.rs",
   "crates/plurx-core/src/store/sqlite/playback_handoffs.rs",
   "crates/plurx-core/tests/store_contract/library_schedule.rs",
   "crates/plurx-core/tests/store_contract/playback_handoffs.rs",
+  "crates/plurx-core/tests/store_contract/playback_device_caps.rs",
   "crates/plurx-core/tests/store_contract/applied_view.rs",
   "crates/plurxd/src/http/applied_settings_inventory.rs",
   "crates/plurxd/src/http/applied_route_inventory.rs",
@@ -781,6 +796,7 @@ paths = [
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "vendor/hiqlite/**",
   "vendor/hiqlite-wal/**",
+  "vendor/openraft/**",
   "vendor/rust_decimal/**",
   "vendor/s3-simple/**",
 ]
@@ -806,6 +822,7 @@ paths = [
   "crates/plurxd/src/http/tests.rs",
   "crates/plurxd/src/http/tests/activity_routes.rs",
   "crates/plurx-core/src/cluster/membership.rs",
+  "crates/plurx-core/src/cluster/timing.rs",
   "crates/plurx-core/src/cluster/membership/**",
   "crates/plurxd/src/cluster.rs",
   "crates/plurxd/src/cluster/**",
@@ -853,6 +870,9 @@ id = "cluster.operations"
 title = "Cluster operations status, guarded restart, and offline WAL evidence"
 contract = "The admin status surface starts from committed membership and directly authenticates one bounded local observation from every committed member under a shared deadline — learners answer that read and originate it, and only membership mutation is voter-scoped — distinguishes a node that answered and refused the proof or returned another error status from one that could not be reached at all, rejects identity mismatches and stale or incomplete evidence, reports live serving, Raft, WAL, snapshot, media, protocol, and build facts, and authorizes at most one drained non-leader restart candidate only when every conservative quorum and durability invariant holds. Restart preparation is bound to the exact responding backend, linearizes new mutable-media admission against one expiring process-local drain, leaves existing work serving, never changes membership or invokes a supervisor, and emits commands only after owned sessions and in-flight admissions reach zero. Support bundles are size-bounded, create-only, credential/path redacted, and checksummed. Offline WAL status and verification prove the real advisory lock and bounded physical invariants without opening the store; backup is additive, private, checksummed, size/space bounded, and outside the source; recovery plans bind a named action to stable node/Raft identity and source fingerprints, while no CLI, API, or web route applies a plan, deletes a lock, truncates a WAL, restores a peer, or forces membership. Portable cluster backup is the admin-only POST route and the scheduled publisher beside it on a running voter: it refuses a node that has no activated replicated store or is behind its observed Raft log, holds the cluster-wide `backup:cluster` job lease so exactly one voter and never a learner publishes a UTC day's artefact, triggers a database snapshot and waits for that applied index to publish, reads a size-bounded single-component snapshot pointer and opens that generation before any other work, builds the archive off the runtime on a blocking thread, and advances its UTC-day fence only on publication, so a failed attempt stays retriable within its own minute while retention pruning and its setting read are post-publication maintenance that may warn but can never retry a published artefact. Backup metrics are fixed-label outcome totals plus last-success time and last artefact size. The archive format itself, its verification, and the stopped-daemon restore that consumes it are persistence.upgrades; no surface here restores anything. The replicated-write capture tooling is read-only: its sampler only issues unauthenticated GET /metrics to the voters and its evaluator only reads a samples file or a copied WAL, applying the sampler's own idle-window rules at the 12-hour gate."
 paths = [
+  "scripts/collect-voter-timing.py",
+  "scripts/collect-voter-timing.example.json",
+  "tests/operations/test_voter_timing_collector.py",
   "crates/plurxd/src/http/cluster_operations/tests.rs",
   "crates/plurxd/src/backup.rs",
   "crates/plurxd/src/http/cluster_operations.rs",
@@ -877,6 +897,7 @@ paths = [
   "crates/plurxd/src/state/analysis_rate_tests.rs",
   "crates/plurxd/src/state/tests.rs",
   "crates/plurxd/src/admission.rs",
+  "crates/plurxd/src/node_memory.rs",
   "crates/plurxd/src/http/internal_activity.rs",
   "crates/plurxd/src/http/internal_media.rs",
   "crates/plurxd/src/http/transcode_copies.rs",
@@ -1171,6 +1192,8 @@ paths = [
   "crates/plurx-core/src/fmp4/dvh1.rs",
   "crates/plurx-core/src/fmp4/dvh1_tests.rs",
   "crates/plurx-core/src/fmp4/track_projection.rs",
+  "crates/plurx-core/src/fmp4/trim.rs",
+  "crates/plurx-core/src/fmp4/trim_tests.rs",
   "crates/plurx-core/src/fmp4/video_splice.rs",
   "crates/plurx-core/src/fmp4/video_splice_format.rs",
   "crates/plurx-core/src/hevc_configuration.rs",
@@ -1217,6 +1240,7 @@ paths = [
   "crates/plurxd/src/source_custody.rs",
   "crates/plurxd/src/source_custody/**",
   "crates/plurxd/src/source_input.rs",
+  "crates/plurxd/src/media_io_guard_tests.rs",
   "crates/plurxd/src/source_input/tests.rs",
   "crates/plurxd/src/fragment_index_cluster/source_digest.rs",
   "crates/plurxd/src/vod/**",
@@ -1228,7 +1252,9 @@ paths = [
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/media_sessions/**",
   "crates/plurxd/src/http/internal_media_sessions.rs",
-  "crates/plurxd/src/http/{hls,network,pgs_overlay,stream}.rs",
+  "crates/plurxd/src/http/{hls,hls_request_metrics,network,pgs_overlay,stream}.rs",
+  "crates/plurxd/src/http/playback_devices.rs",
+  "crates/plurxd/src/http/tests/playback_devices.rs",
   "crates/plurxd/src/http/hls/**",
   "crates/plurxd/src/http/tests/public_copy_wire.rs",
   "crates/plurxd/src/web/playback-policy.js",
@@ -1533,9 +1559,10 @@ depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichm
 [[points]]
 id = "mobile.versioning"
 title = "Mobile release versioning"
-contract = "Shipped Apple and Android changes advance their store build counters, both marketing versions track the workspace release, and every copy of the Apple build number is generated from project.yml rather than written by hand."
+contract = "Both apps take one store build number derived at build time from main's first-parent history by scripts/build-number, none is stored in source or mirrored in documents, and both marketing versions track the workspace release."
 paths = [
   "Cargo.toml",
+  "scripts/build-number",
   "clients/apple/README.md",
   "clients/apple/Sources/**",
   "clients/apple/Resources/**",
@@ -1696,6 +1723,7 @@ paths = [
   "scripts/voter-isolation-check",
   "scripts/docker-https-ports.py",
   "scripts/registry-push",
+  "scripts/fleet-image",
   "scripts/release-cut",
   "scripts/release-readiness",
   "scripts/nightly-mutation",
@@ -1724,6 +1752,7 @@ paths = [
   "scripts/pre-commit",
   "scripts/pre-push",
   "scripts/paperwork",
+  "scripts/fold",
   "scripts/paperwork-fix",
   "validation/pr_event.py",
   "scripts/outline",
@@ -1754,6 +1783,7 @@ paths = [
   "scripts/split-identity",
   "scripts/validate",
   "tests/client-fixes.toml",
+  "tests/client-fixes.d/**",
   "tests/validation/**",
   "validation/**",
 ]

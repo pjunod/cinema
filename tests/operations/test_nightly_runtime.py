@@ -1,4 +1,5 @@
 """Nightly tests keep shipping media and advisory mutation outcomes distinct."""
+from validation import mirror_guard
 import os
 import re
 from pathlib import Path
@@ -11,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class NightlyRuntimeCase(unittest.TestCase):
     def test_both_nightly_jobs_use_shipping_media_on_the_non_voter_pool(self):
-        source = (ROOT / '.github/workflows/validation-nightly.yml').read_text()
+        source = mirror_guard.read_file(ROOT / '.github/workflows/validation-nightly.yml')
         for name, command in (
             ('deep-validation', 'python3 scripts/release-readiness --memory-gb 8 --host-network make validate-nightly'),
             ('mutation', 'python3 scripts/release-readiness --memory-gb 8 bash scripts/nightly-mutation'),

@@ -283,15 +283,23 @@ async fn adopt_local_art(
 ) -> Option<String> {
     let stem = media.file_stem()?.to_string_lossy().into_owned();
     let dir = media.parent()?;
-    for suffix in ["-thumb", "-poster"] {
-        for ext in ["jpg", "jpeg", "png"] {
-            let candidate = dir.join(format!("{stem}{suffix}.{ext}"));
-            if candidate.is_file() {
-                return copy_into_cache(store, artwork_dir, item_id, &candidate, expected).await;
-            }
-        }
-    }
-    None
+    let candidates = ["-thumb", "-poster"]
+        .into_iter()
+        .flat_map(|suffix| {
+            ["jpg", "jpeg", "png"].map(|ext| dir.join(format!("{stem}{suffix}.{ext}")))
+        })
+        .collect();
+    let candidate = first_existing_file(candidates).await?;
+    copy_into_cache(store, artwork_dir, item_id, &candidate, expected).await
+}
+
+/// The first of `candidates` that is a regular file. The candidates sit
+/// beside the media, so the checks run on the media-I/O pool.
+async fn first_existing_file(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    crate::media_io::blocking(move || candidates.into_iter().find(|candidate| candidate.is_file()))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Local art for a folder: `poster.jpg`/`folder.jpg` inside the directory.
@@ -302,15 +310,12 @@ async fn adopt_folder_art(
     dir: &Path,
     expected: Option<&[String]>,
 ) -> Option<String> {
-    for name in ["poster", "folder"] {
-        for ext in ["jpg", "jpeg", "png"] {
-            let candidate = dir.join(format!("{name}.{ext}"));
-            if candidate.is_file() {
-                return copy_into_cache(store, artwork_dir, item_id, &candidate, expected).await;
-            }
-        }
-    }
-    None
+    let candidates = ["poster", "folder"]
+        .into_iter()
+        .flat_map(|name| ["jpg", "jpeg", "png"].map(|ext| dir.join(format!("{name}.{ext}"))))
+        .collect();
+    let candidate = first_existing_file(candidates).await?;
+    copy_into_cache(store, artwork_dir, item_id, &candidate, expected).await
 }
 
 async fn copy_into_cache(

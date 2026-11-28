@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 fn probe() -> ProbeResult {
     ProbeResult {
+        container: Some("mkv".into()),
         video_codec: Some("hevc".into()),
         dolby_vision: DolbyVisionFacts {
             profile: Some(7),
@@ -312,6 +313,65 @@ async fn title_manual_cancel_wins_publication_and_does_not_become_scheduler_yiel
             demand.probe_revision < demand_for(&store, file.id, &scanner).await,
             "{backend}: explicit reprobe changes generation"
         );
+    })
+    .await;
+}
+
+/// A scanner verdict (`title_scan_refused`) fails the title job once, with
+/// attempts to spare, and closes only that probe revision under that
+/// scanner: a new scanner or a changed file demands the title again.
+#[tokio::test]
+async fn title_scan_refusal_settles_the_demand_until_the_source_or_scanner_changes() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let file = seed(&store, "title-refused").await;
+        let (demand, job) = active(&store, file.id, &scanner, 1_000).await;
+        assert!(
+            store
+                .settle_job(SettleJob {
+                    token: job.token.clone().expect("token"),
+                    settlement: JobSettlement::Fail {
+                        error_code: "title_scan_refused".into(),
+                    },
+                    now_ms: 1_001,
+                })
+                .await
+                .expect("verdict"),
+            "{backend}"
+        );
+        let failed = store
+            .background_job(&job.id)
+            .await
+            .expect("job")
+            .expect("job");
+        assert_eq!(failed.state, JobState::Failed, "{backend}");
+        assert!(failed.failed_attempts < failed.attempt_limit, "{backend}");
+        assert_eq!(
+            failed.last_error_code.as_deref(),
+            Some("title_scan_refused")
+        );
+        let open = |scanner: String| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .dv_title_demands(&scanner, 0, 2_000)
+                    .await
+                    .expect("demands")
+                    .into_iter()
+                    .find(|d| d.file_id == file.id)
+            }
+        };
+        assert!(
+            open(scanner.clone()).await.is_none(),
+            "{backend}: the refused revision is not scanned again by the same scanner"
+        );
+        assert!(
+            open("b".repeat(64)).await.is_some(),
+            "{backend}: a new scanner demands the title again"
+        );
+        reprobe(&store, &file).await;
+        let reopened = open(scanner.clone()).await.expect("a changed file reopens");
+        assert!(reopened.probe_revision > demand.probe_revision, "{backend}");
     })
     .await;
 }
@@ -1612,6 +1672,18 @@ async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker
             matches!(contend, ClaimOutcome::Contended),
             "{backend}: {contend:?}"
         );
+        // The expired-lease sweep honours the same charged reader.
+        store
+            .requeue_expired_running_jobs(expiry)
+            .await
+            .expect("sweep while the reader is charged");
+        let waiting = store
+            .background_job(&old.id)
+            .await
+            .expect("job")
+            .expect("job");
+        assert_eq!(waiting.state, JobState::Running, "{backend}");
+        assert_eq!(waiting.revision, old.revision, "{backend}");
         assert!(store
             .resolve_background_source_custody(custody.clone())
             .await
@@ -3121,6 +3193,362 @@ async fn m7_candidate_slots_survive_reprobe_duplicate_catalogue_ids_and_owner_ch
                 .await
                 .unwrap(),
             M7CandidateAnchor::DifferentProtocol,
+        );
+    })
+    .await;
+}
+
+/// A per-file reader reserves only the library root holding its file, so one
+/// disk's maintenance reader does not hold back work on another disk of the
+/// same library. A file under no root still reserves every root.
+#[tokio::test]
+async fn a_per_file_reader_reserves_only_the_disk_that_holds_its_file() {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+    use plurx_core::store::background_jobs_resources::StorageDomainMapping;
+    use plurx_core::store::NewAnalysisRequest;
+
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let mut domains = Vec::new();
+        let mut libraries = Vec::new();
+        for (name, roots) in [("Two disks", ["/scope-a", "/scope-b"])] {
+            let library = store
+                .create_library(&NewLibrary {
+                    name: name.into(),
+                    kind: LibraryKind::Movies,
+                    paths: roots.iter().map(Into::into).collect(),
+                    anime: false,
+                })
+                .await
+                .expect("two-root library");
+            for root in roots {
+                domains.push(StorageDomainMapping {
+                    library_id: library.id,
+                    root_path: root.into(),
+                    domain_id: format!("disk-{}", &root[7..]),
+                });
+            }
+            libraries.push(library.id);
+        }
+        assert!(super::set_storage_domains(store.as_ref(), domains, 1_000)
+            .await
+            .expect("install domains"));
+        let mut files = std::collections::HashMap::new();
+        for (library, path) in [
+            (libraries[0], "/scope-a/a.mkv"),
+            (libraries[0], "/scope-b/b.mkv"),
+            (libraries[0], "/scope-b/c.mkv"),
+            (libraries[0], "/scope-x/z.mkv"),
+            (libraries[0], "/scope-a/e.mkv"),
+        ] {
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: path.into(),
+                    year: Some(2024),
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            let file = store
+                .upsert_file(item, path, 10_000, 1, &probe())
+                .await
+                .expect("file");
+            files.insert(path, file);
+        }
+        let held = |holders: &[plurx_core::store::background_jobs::SourceIoHolder], work: &str| {
+            let mut keys = holders
+                .iter()
+                .filter(|holder| holder.work_id == work)
+                .map(|holder| holder.resource_key.clone())
+                .collect::<Vec<_>>();
+            keys.sort();
+            keys
+        };
+
+        // Analysis hashes only its own file, on disk-a of the same library.
+        let analysis = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: format!("scope-analysis-{backend}"),
+                file_id: files["/scope-a/e.mkv"],
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".to_owned(),
+                pipeline_version: "b".repeat(64),
+                video_identity: String::new(),
+                requested_generation: "scope-generation".to_owned(),
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                force_rebuild: false,
+                target_node_id: "scope-node".to_owned(),
+                not_before_ms: 1_000,
+                created_at_ms: 1_000,
+            })
+            .await
+            .expect("enqueue analysis");
+        let claimed = store
+            .claim_analysis_request("scope-node", 1_001, 31_001)
+            .await
+            .expect("claim analysis")
+            .expect("analysis claims its disk");
+        assert_eq!(claimed.request_id, analysis.request_id, "{backend}");
+        let holders = store.source_io_holders(1_001).await.expect("holders");
+        assert_eq!(
+            held(&holders, &analysis.request_id),
+            ["source_io:disk-a"],
+            "{backend}: analysis reserves only the disk holding its file"
+        );
+
+        let admission = |job_id: String, now: i64| {
+            let store = Arc::clone(&store);
+            async move {
+                let job = store
+                    .background_job(&job_id)
+                    .await
+                    .expect("read")
+                    .expect("job");
+                store
+                    .explain_job_claim(ClaimJob {
+                        job_id,
+                        expected_revision: job.revision,
+                        node_id: "title-node".into(),
+                        boot_id: uuid::Uuid::new_v4().to_string(),
+                        claim_id: uuid::Uuid::new_v4().to_string(),
+                        kind: JobKind::DvTitleScan,
+                        payload_version: 1,
+                        now_ms: now,
+                        dispatched_at_ms: now,
+                    })
+                    .await
+                    .expect("read admission")
+                    .expect("known title")
+                    .block
+            }
+        };
+        let queued = |path: &'static str, now: i64| {
+            let store = Arc::clone(&store);
+            let scanner = scanner.clone();
+            let file = files[path];
+            async move {
+                let demand = bound(&store, file, &scanner).await;
+                let EnqueueOutcome::Accepted { job_id, .. } =
+                    enqueue(&store, &demand, &scanner, now).await
+                else {
+                    panic!("new title demand must enqueue: {path}");
+                };
+                job_id
+            }
+        };
+
+        // The production starvation: with disk-a's analysis running, a title
+        // scan on disk-b of the same library still claims (v6 refused it).
+        let (_, busy) = active(&store, files["/scope-b/b.mkv"], &scanner, 1_002).await;
+        let holders = store.source_io_holders(1_002).await.expect("holders");
+        assert_eq!(
+            held(&holders, &busy.id),
+            ["source_io:disk-b"],
+            "{backend}: a title scan reserves only the disk holding its file"
+        );
+        // A file under no root still needs every root, so disk-b blocks it.
+        let nowhere = queued("/scope-x/z.mkv", 1_003).await;
+        assert_eq!(
+            admission(nowhere, 1_003).await,
+            Some(ClaimBlock::MaintenanceReader),
+            "{backend}: a file under no root keeps every root"
+        );
+        // Disk-a's analysis is its one maintenance reader, so a title scan
+        // there waits.
+        let analysis_disk = queued("/scope-a/a.mkv", 1_004).await;
+        assert_eq!(
+            admission(analysis_disk, 1_004).await,
+            Some(ClaimBlock::MaintenanceReader),
+            "{backend}: disk-a keeps one maintenance reader"
+        );
+        // A second reader on disk-b is still refused.
+        let same_disk = queued("/scope-b/c.mkv", 1_005).await;
+        assert_eq!(
+            admission(same_disk, 1_005).await,
+            Some(ClaimBlock::MaintenanceReader),
+            "{backend}: disk-b keeps one maintenance reader"
+        );
+    })
+    .await;
+}
+
+/// A Dolby Vision title stored as MP4, on an item of its own.
+async fn seed_mp4(store: &Arc<dyn Store>, name: &str) -> MediaFile {
+    let (item, _) = seed_file(store, name).await;
+    let id = store
+        .upsert_file(
+            item,
+            &format!("/{name}/title.mp4"),
+            20_000,
+            30,
+            &ProbeResult {
+                container: Some("mp4".into()),
+                ..probe()
+            },
+        )
+        .await
+        .expect("MP4 title");
+    store.get_file(id).await.expect("file").expect("file")
+}
+async fn refuse(store: &Arc<dyn Store>, job: BackgroundJob, now: i64) {
+    assert!(store
+        .settle_job(SettleJob {
+            token: job.token.expect("token"),
+            settlement: JobSettlement::Fail {
+                error_code: "title_scan_refused".into(),
+            },
+            now_ms: now,
+        })
+        .await
+        .expect("refusal verdict"));
+}
+
+/// A successor scanner keeps what it would only reproduce: a predecessor's
+/// complete aggregate, settled or on still-open demand. Refusals (whatever
+/// the container), open work, and another scanner's aggregate are left for
+/// the ordinary rotation, which reads them again. Nothing is written when
+/// there is nothing to carry.
+#[tokio::test]
+async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them() {
+    for_each_backend(|store, backend| async move {
+        let predecessor = "a".repeat(64);
+        let successor = "b".repeat(64);
+        let stranger = "c".repeat(64);
+        let predecessors = vec![predecessor.clone()];
+
+        let published = seed(&store, "carry-published").await;
+        assert_eq!(published.container.as_deref(), Some("mkv"), "{backend}");
+        let (demand, job) = active(&store, published.id, &predecessor, 1_000).await;
+        let carried = demand.probe_revision;
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&demand, &job, &predecessor, 1_001))
+                .await
+                .expect("publish"),
+            JobPublishOutcome::Published { .. }
+        ));
+        let refused_mkv = seed(&store, "carry-refused-mkv").await;
+        let (_, job) = active(&store, refused_mkv.id, &predecessor, 1_000).await;
+        refuse(&store, job, 1_001).await;
+        let refused_mp4 = seed_mp4(&store, "carry-refused-mp4").await;
+        assert_eq!(refused_mp4.container.as_deref(), Some("mp4"), "{backend}");
+        let (_, job) = active(&store, refused_mp4.id, &predecessor, 1_000).await;
+        refuse(&store, job, 1_001).await;
+        let open = seed(&store, "carry-open").await;
+        let open_demand = bound(&store, open.id, &predecessor).await;
+        assert!(matches!(
+            enqueue(&store, &open_demand, &predecessor, 1_000).await,
+            EnqueueOutcome::Accepted { .. }
+        ));
+        let open_aggregate = seed(&store, "carry-open-aggregate").await;
+        assert!(matches!(
+            store
+                .publish_dv_title_from_analysis(analysis(&open_aggregate, &predecessor))
+                .await
+                .expect("index pass aggregate"),
+            AnalysisTitleOutcome::Published
+        ));
+        let foreign = seed(&store, "carry-foreign").await;
+        let (demand, job) = active(&store, foreign.id, &stranger, 1_000).await;
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&demand, &job, &stranger, 1_001))
+                .await
+                .expect("publish under another scanner"),
+            JobPublishOutcome::Published { .. }
+        ));
+
+        assert_eq!(
+            store
+                .carry_forward_dv_title_verdicts(&successor, &predecessors)
+                .await
+                .expect("carry"),
+            2,
+            "{backend}: the settled and the open aggregate"
+        );
+        assert_eq!(
+            store
+                .carry_forward_dv_title_verdicts(&successor, &predecessors)
+                .await
+                .expect("carry again"),
+            0,
+            "{backend}: nothing left to carry"
+        );
+        let mut reread: Vec<i64> = store
+            .dv_title_demands(&successor, 0, 2_000)
+            .await
+            .expect("successor demands")
+            .into_iter()
+            .map(|d| d.file_id)
+            .collect();
+        reread.sort_unstable();
+        let mut expected = vec![
+            refused_mkv.id,
+            refused_mp4.id,
+            open.id,
+            open_aggregate.id,
+            foreign.id,
+        ];
+        expected.sort_unstable();
+        assert_eq!(
+            reread, expected,
+            "{backend}: what the successor reads again"
+        );
+        assert_eq!(
+            stored_aggregate(&store, published.id).await,
+            Some(stats()),
+            "{backend}: the carried aggregate stays published"
+        );
+        let reopened = store
+            .dv_title_demands(&successor, 0, 2_000)
+            .await
+            .expect("successor demands")
+            .into_iter()
+            .find(|d| d.file_id == open_aggregate.id)
+            .expect("open demand stays open");
+        assert_eq!(
+            DvTitleStats::from_probe_json(&reopened.probe_json),
+            Some(stats()),
+            "{backend}: the open title settles from its carried aggregate, without a read"
+        );
+        // The carried generation is the successor's own: binding it is a no-op,
+        // and it still reopens when the source changes.
+        assert_eq!(
+            store
+                .bind_dv_title_demand(carried, &successor)
+                .await
+                .expect("bind carried"),
+            Some(carried),
+            "{backend}"
+        );
+        assert_eq!(stored_aggregate(&store, published.id).await, Some(stats()));
+        reprobe(&store, &published).await;
+        assert!(
+            demand_for(&store, published.id, &successor).await > carried,
+            "{backend}: a changed source is read again"
+        );
+
+        for invalid in [vec!["not a digest".to_owned()], vec![successor.clone()]] {
+            assert!(
+                store
+                    .carry_forward_dv_title_verdicts(&successor, &invalid)
+                    .await
+                    .is_err(),
+                "{backend}: {invalid:?}"
+            );
+        }
+        assert_eq!(
+            store
+                .carry_forward_dv_title_verdicts(&successor, &[])
+                .await
+                .expect("no predecessors"),
+            0
         );
     })
     .await;

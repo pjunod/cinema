@@ -74,6 +74,15 @@ async fn source_producer_preparation_requires_fresh_unsealed_ingress_permission(
     Box::pin(source_copy_preadmission_fixture(52)).await;
 }
 
+/// The first range's bootstrap spawns after the probe and census, which take
+/// longer than a member observation lives on a loaded host. Its authority
+/// carries the ingress permission refreshed for that spawn, not the one the
+/// actor retained when it was created, so a slow preparation still spawns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_preparing_bootstrap_outlives_the_retained_ingress_observation() {
+    Box::pin(source_copy_preadmission_fixture(64)).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_retained_permission_survives_zero_open_connections_and_reconnect() {
     Box::pin(source_copy_preadmission_fixture(54)).await;
@@ -85,42 +94,6 @@ async fn source_retired_predecessor_cannot_invalidate_surviving_owner_generation
 
 fn source_fixture_state() -> Arc<crate::state::AppState> {
     Arc::new(crate::http::source_actor_test_state())
-}
-
-fn source_fixture_addresses() -> (std::net::SocketAddr, std::net::SocketAddr) {
-    static USED: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeSet<std::net::SocketAddr>>,
-    > = std::sync::OnceLock::new();
-
-    // The voter binds after asynchronous store initialization. Keep every
-    // probed address claimed by this fixture family even after its listener
-    // is dropped, so another fixture cannot reuse a pending boot's address.
-    let mut used = USED
-        .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
-        .lock()
-        .expect("Source fixture address registry");
-    let mut reserve = || loop {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Source fixture listener");
-        let address = listener.local_addr().expect("Source fixture address");
-        if used.insert(address) {
-            break (listener, address);
-        }
-    };
-    let (raft, raft_address) = reserve();
-    let (api, api_address) = reserve();
-    drop((raft, api));
-    (raft_address, api_address)
-}
-
-#[test]
-fn source_fixture_boots_do_not_reuse_probe_addresses() {
-    let mut addresses = std::collections::BTreeSet::new();
-    for _ in 0..64 {
-        let (raft, api) = source_fixture_addresses();
-        assert!(addresses.insert(raft));
-        assert!(addresses.insert(api));
-    }
-    assert_eq!(addresses.len(), 128);
 }
 
 fn source_fixture_store(
@@ -327,7 +300,13 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     eprintln!("Source fixture: actual standalone selection");
     let mut config = Config::default();
     config.storage.data_dir = directory.path().join("database");
-    (config.cluster.raft_bind, config.cluster.api_bind) = source_fixture_addresses();
+    // The voter binds after asynchronous store initialization; owning the
+    // sockets until it serves on them keeps another fixture off its ports.
+    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("Source fixture Raft listener");
+    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("Source fixture API listener");
+    config.cluster.raft_bind = raft.local_addr().expect("Source fixture Raft address");
+    config.cluster.api_bind = api.local_addr().expect("Source fixture API address");
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
     config.cluster.advertise_host = "localhost".into();
     let result = source_fixture_store(&config).await;
     let mut selected =
@@ -1090,13 +1069,13 @@ async fn source_actual_copy_attachment(
         assignment,
     ))
     .await;
-    let gate = Arc::new(SourceProducerAuthority {
-        store: Arc::clone(store),
-        source_members: state.cluster.source_members(),
-        master: Arc::clone(master),
-        registry_boot_id: state.sharing.accepted_drivers.boot_id(),
-        ingress: ingress_fixture.permission().await,
-    });
+    let gate = Arc::new(SourceProducerAuthority::new(
+        Arc::clone(store),
+        state.cluster.source_members(),
+        Arc::clone(master),
+        state.sharing.accepted_drivers.boot_id(),
+        ingress_fixture.permission().await,
+    ));
     authority
         .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
         .expect("original postcommit clock");
@@ -1185,6 +1164,7 @@ async fn source_start_budget_uses_actual_vod_settings_and_admission_policy() {
         audio_claim: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         control_sequence: None,
         file_id: 1,
         playback_id: "source-start-budget".into(),
@@ -1326,14 +1306,58 @@ async fn source_actual_actor(
     ))
     .await;
     let ingress_permission = ingress_fixture.permission().await;
+    if mode == 64 {
+        let gate = SourceProducerAuthority::new(
+            Arc::clone(&state.store),
+            state.cluster.source_members(),
+            Arc::clone(&state.sharing.key),
+            state.sharing.accepted_drivers.boot_id(),
+            ingress_permission.clone(),
+        );
+        // Let the retained observation age out, as it does while a loaded
+        // host probes and censuses the first range.
+        let aged = tokio::time::timeout(Duration::from_secs(30), async {
+            while ingress_permission
+                .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+                .is_ok()
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        assert!(aged.is_ok(), "the retained observation ages out");
+        let retained = gate
+            .retained_ingress(&assignment)
+            .expect("the actual retained ingress");
+        let authority = gate
+            .authorize_preparing_generation(&[retained])
+            .await
+            .expect("a current preparing owner spawns past its retained observation");
+        authority
+            .validate_before_spawn()
+            .expect("the spawn checks a current observation");
+        drop(authority);
+        ingress_fixture.close().await;
+        assert_eq!(
+            state
+                .store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("actual closure and sealed assignment cleanup"),
+            SourceReleaseOutcome::Released
+        );
+        assert_eq!(manager.admissions.software_in_use(), 0);
+        assert!(manager.lookup_source_worker(&assignment).is_none());
+        return;
+    }
     if mode == 52 {
-        let gate = SourceProducerAuthority {
-            store: Arc::clone(&state.store),
-            source_members: state.cluster.source_members(),
-            master: Arc::clone(&state.sharing.key),
-            registry_boot_id: state.sharing.accepted_drivers.boot_id(),
-            ingress: ingress_permission.clone(),
-        };
+        let gate = SourceProducerAuthority::new(
+            Arc::clone(&state.store),
+            state.cluster.source_members(),
+            Arc::clone(&state.sharing.key),
+            state.sharing.accepted_drivers.boot_id(),
+            ingress_permission.clone(),
+        );
         assert!(gate.current_preparation(&assignment).await.is_ok());
         ingress_fixture.close().await;
         assert!(gate.current_preparation(&assignment).await.is_err());
@@ -1940,7 +1964,13 @@ async fn source_actual_actor(
             )
             .await;
         assert!(
-            matches!(busy, Err(SourceWorkerError::Capacity)),
+            matches!(
+                busy,
+                Err(crate::transcode::source_actor::LiveRefusal {
+                    error: SourceWorkerError::Capacity,
+                    ..
+                })
+            ),
             "caption capacity remains typed"
         );
         assert_eq!(manager.source_workers.native_hooks.spawned_pid(), 0);
@@ -2167,7 +2197,10 @@ async fn source_actual_actor(
                     actor
                         .open_resource(&caption, Instant::now() + Duration::from_secs(5))
                         .await,
-                    Err(SourceWorkerError::Capacity)
+                    Err(crate::transcode::source_actor::LiveRefusal {
+                        error: SourceWorkerError::Capacity,
+                        ..
+                    })
                 ),
                 "managed zero cache ceiling is caption capacity"
             );
@@ -2204,7 +2237,10 @@ async fn source_actual_actor(
                 actor
                     .open_resource(&resource, Instant::now() + Duration::from_secs(5))
                     .await,
-                Err(SourceWorkerError::Capacity)
+                Err(crate::transcode::source_actor::LiveRefusal {
+                    error: SourceWorkerError::Capacity,
+                    ..
+                })
             ));
             drop(eviction);
         }
@@ -2291,7 +2327,10 @@ async fn source_actual_actor(
                     actor
                         .open_resource(&resource, Instant::now() + Duration::from_secs(5))
                         .await,
-                    Err(SourceWorkerError::Unsupported)
+                    Err(crate::transcode::source_actor::LiveRefusal {
+                        error: SourceWorkerError::Unsupported,
+                        ..
+                    })
                 ),
                 "caption data bounds are not transient capacity"
             );
@@ -2499,7 +2538,13 @@ async fn source_actual_actor(
         assert_descriptor(pause, true, "parked job owns its descriptor");
         if mode == 44 {
             let called = call.await.expect("actual timed resource waiter");
-            assert!(matches!(called, Err(SourceWorkerError::Deadline)));
+            assert!(matches!(
+                called,
+                Err(crate::transcode::source_actor::LiveRefusal {
+                    error: SourceWorkerError::Deadline,
+                    ..
+                })
+            ));
             assert!(
                 actor.0.state.lock().expect("actual Source state").bodies > 0,
                 "timed waiter cannot release actual unfinished filesystem job"
@@ -3059,7 +3104,10 @@ async fn source_actual_actor(
                     Instant::now() + Duration::from_secs(5)
                 )
                 .await,
-            Err(SourceWorkerError::Unsupported)
+            Err(crate::transcode::source_actor::LiveRefusal {
+                error: SourceWorkerError::Unsupported,
+                ..
+            })
         ));
         let legacy = actor
             .open_resource(
@@ -3109,7 +3157,10 @@ async fn source_actual_actor(
                     Instant::now() + Duration::from_secs(5)
                 )
                 .await,
-            Err(SourceWorkerError::Unsupported)
+            Err(crate::transcode::source_actor::LiveRefusal {
+                error: SourceWorkerError::Unsupported,
+                ..
+            })
         ));
         let opened = actor
             .open_resource(
@@ -3276,7 +3327,7 @@ async fn source_actual_actor(
         actor.0.gate.current_owned(&assignment).await.is_ok(),
         "stored authority can lag the physical object"
     );
-    assert!(matches!(actor.open_resource(&SharingHlsResource::parse("index.m3u8").expect("typed actual cached playlist"), Instant::now() + Duration::from_secs(5)).await, Err(SourceWorkerError::Unavailable)), "Source physical boundary must refuse a changed or linked path despite stored authorization");
+    assert!(matches!(actor.open_resource(&SharingHlsResource::parse("index.m3u8").expect("typed actual cached playlist"), Instant::now() + Duration::from_secs(5)).await, Err(crate::transcode::source_actor::LiveRefusal { error: SourceWorkerError::Unavailable, .. })), "Source physical boundary must refuse a changed or linked path despite stored authorization");
     tokio::time::timeout(Duration::from_secs(1), init_guard.cancelled())
         .await
         .expect("actual retained Body fence refuses physical Source drift");
@@ -3303,7 +3354,10 @@ async fn source_actual_actor(
                 Instant::now() + Duration::from_secs(1)
             )
             .await,
-        Err(SourceWorkerError::Unavailable)
+        Err(crate::transcode::source_actor::LiveRefusal {
+            error: SourceWorkerError::Unavailable,
+            ..
+        })
     ));
     drop(bytes);
     drop(body_guard);
@@ -4408,6 +4462,7 @@ fn delivery_policy_request(kind: SessionKind, subtitle_burn: Option<i64>) -> Ses
         audio_claim: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         control_sequence: None,
         file_id: 1,
         playback_id: "source-delivery-policy".into(),
@@ -4736,21 +4791,19 @@ fn source_compatible_base_encode_never_renders_a_processed_window_in_the_start()
     // What `vod_dv_processing_from_snapshot` answers for a compatible-base
     // Dolby Vision encode on a node with DV processing on.
     let awaiting = DvSelection::KeepExisting(DvFallbackReason::AwaitingFirstWindow);
-    // A Source Start carries no candidate context and is no processed trial.
+    // A Source Start never renders one, trial or not.
     assert!(!TranscodeManager::start_renders_a_processed_window(
-        &awaiting, false, false, true
+        &awaiting, false, true
     ));
     assert!(!TranscodeManager::start_renders_a_processed_window(
-        &awaiting, false, true, true
+        &awaiting, true, true
     ));
-    // Local keeps its legacy first-window arm and its trial.
+    // Locally only the upgrade's own trial renders one. An ordinary start,
+    // Auto or not, waits for the post-first-frame upgrade (plan ruling 3).
     assert!(TranscodeManager::start_renders_a_processed_window(
-        &awaiting, false, false, false
-    ));
-    assert!(TranscodeManager::start_renders_a_processed_window(
-        &awaiting, true, true, false
+        &awaiting, true, false
     ));
     assert!(!TranscodeManager::start_renders_a_processed_window(
-        &awaiting, true, false, false
+        &awaiting, false, false
     ));
 }

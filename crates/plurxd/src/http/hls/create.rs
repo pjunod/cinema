@@ -196,7 +196,7 @@ pub(super) fn explicit_hls_hevc_claim(caps: &plurx_core::playback::DeviceCaps) -
 /// is a trap: GET is idempotent by definition, so anything entitled to replay
 /// one — a retry, a prefetch, an intermediary — could spawn a second encoder
 /// and orphan the first.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct CreateSession {
     /// Receiver-affirmed shared upgrade: false is ordinary support, true requests the prepared successor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,7 +269,11 @@ pub struct CreateSession {
     /// With `copy`: this client selects soundtracks itself (hls.js alternate
     /// audio). The server may answer with one shared video-only rendition and
     /// every soundtrack as an alternate audio rendition; the session response
-    /// says which presentation it chose. Absent keeps the muxed copy.
+    /// says which presentation it chose.
+    ///
+    /// The legacy spelling of the caps token `hls-split-av-v1`. Absent defers
+    /// to the token; `false` is the explicit muxed request (a client retrying
+    /// without alternates), and it wins over the token.
     pub split_audio: Option<bool>,
     /// With `copy`: retain Dolby Vision signaling and dynamic metadata because
     /// the decision established that this client supports the source profile.
@@ -715,8 +719,13 @@ impl CreateSession {
         let transport = self
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
+        let split_requested = self.split_audio.unwrap_or_else(|| {
+            self.caps
+                .as_ref()
+                .is_some_and(plurx_core::playback::DeviceCaps::plays_split_av)
+        });
         crate::transcode::SessionRequest {
-            split_audio: self.copy == Some(true) && self.split_audio == Some(true),
+            split_audio: self.copy == Some(true) && split_requested,
             dv_processing_destination: None,
             // The player's per-playback choice; `SessionRequest` never
             // serializes it.
@@ -725,6 +734,7 @@ impl CreateSession {
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -1559,6 +1569,39 @@ pub(super) async fn burn_would_discard_this_session_hdr(
     .await
 }
 
+/// The grade an ordinary start delivers, by the same rule its Start reports
+/// as `delivered_dynamic_range`: HDR10 only when that is what it sends.
+fn ordinary_delivered_grade(
+    source: Option<&MediaFile>,
+    request: &crate::transcode::SessionRequest,
+) -> plurx_core::transcode::OutputGrade {
+    use plurx_core::transcode::OutputGrade;
+    let requested = if request.hdr10 {
+        OutputGrade::Hdr10
+    } else {
+        OutputGrade::Sdr
+    };
+    if session_delivered_dynamic_range(source, &request.kind, requested) == Some("hdr10") {
+        OutputGrade::Hdr10
+    } else {
+        OutputGrade::Sdr
+    }
+}
+
+/// The height of the rendition an ordinary start runs. A copy runs the
+/// source raster, whatever fallback rung planning resolved for it; a
+/// transcode runs its rung.
+fn ordinary_rendition_height(
+    source: Option<&MediaFile>,
+    request: &crate::transcode::SessionRequest,
+) -> Option<u32> {
+    let height = match request.kind {
+        crate::transcode::SessionKind::Copy { .. } => source?.height?,
+        crate::transcode::SessionKind::Transcode { height } => height,
+    };
+    u32::try_from(height).ok().filter(|height| *height > 0)
+}
+
 /// The dynamic range this session puts on the wire, read off the session it
 /// actually built rather than the decision that suggested it — a burn or a
 /// forced rung produces a transcode `/decision` never promised, and the
@@ -1620,6 +1663,7 @@ pub(super) fn session_delivered_processing_shape(
     clippy::too_many_arguments,
     reason = "each is an independent fact of the session being described"
 )]
+#[cfg(test)]
 pub(super) fn session_enhancement(
     source: Option<&MediaFile>,
     kind: &crate::transcode::SessionKind,
@@ -1629,6 +1673,52 @@ pub(super) fn session_enhancement(
     effective: Option<&plurx_core::transcode::dv_processing::DvEffectiveProcessingReport>,
     snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
     decline: Option<&str>,
+) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
+    session_enhancement_with_title(
+        source,
+        kind,
+        grade,
+        processed_dv_profile,
+        processed_fel,
+        effective,
+        snapshot,
+        decline,
+        None,
+    )
+}
+
+/// The title scans' recorded facts — display-metadata levels for the
+/// Playback info `Dolby Vision metadata` row, and whether the enhancement
+/// layer is full or minimal. A read of the stored probe document; `None` for
+/// a non-DV source.
+pub(crate) async fn session_title_scan(
+    state: &AppState,
+    source: Option<&MediaFile>,
+) -> Option<plurx_core::playback::enhancement::TitleScanFacts> {
+    let file = source.filter(|file| file.dolby_vision.profile.is_some())?;
+    let probe = state
+        .store
+        .get_file_probe_json(file.id)
+        .await
+        .ok()
+        .flatten();
+    Some(plurx_core::playback::enhancement::TitleScanFacts::from_probe(probe.as_deref()))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each is an independent fact of the session being described"
+)]
+pub(crate) fn session_enhancement_with_title(
+    source: Option<&MediaFile>,
+    kind: &crate::transcode::SessionKind,
+    grade: plurx_core::transcode::OutputGrade,
+    processed_dv_profile: Option<u8>,
+    processed_fel: Option<bool>,
+    effective: Option<&plurx_core::transcode::dv_processing::DvEffectiveProcessingReport>,
+    snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
+    decline: Option<&str>,
+    title: Option<&plurx_core::playback::enhancement::TitleScanFacts>,
 ) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
     use plurx_core::playback::enhancement::{EnhancementFacts, EnhancementRoute};
     let file = source?;
@@ -1687,10 +1777,12 @@ pub(super) fn session_enhancement(
     plurx_core::playback::enhancement::playback_enhancement(&EnhancementFacts {
         source_profile: profile,
         source_el_present: file.dolby_vision.el_present,
+        el_kind: title.and_then(|title| title.el_kind),
         route,
         hdr_processing_enabled: setting(plurx_core::store::keys::DV_HDR_PROCESSING),
         fel_reencode_enabled: setting(plurx_core::store::keys::DV_FEL_REENCODE),
         decline_reason: decline,
+        levels: title.and_then(|title| title.levels.as_ref()),
     })
 }
 
@@ -1970,6 +2062,7 @@ struct PlanScope<'a> {
     // The passive compatibility facade offers its own fixed media contract
     // and applies the client's finite bitrate ceiling to that native recipe.
     passive_compatibility: bool,
+    stored_catalogue_only: bool,
 }
 
 /// Internal preparation policy, never a create-body override. Ordinary creates
@@ -2081,7 +2174,11 @@ async fn resolve_plan_for_principal_with_local_evidence(
         auto_bootstrap_ceiling,
         processed_selectable,
         passive_compatibility,
+        stored_catalogue_only,
     } = scope;
+    // A detail preview owns no incumbent. In particular, a replayed link
+    // receipt must not take this stored-only plan into measured qualification.
+    let incumbent_receipt = incumbent_receipt.filter(|_| !stored_catalogue_only);
     if auto_bootstrap_ceiling.is_some_and(|ceiling| ceiling <= 0)
         || (auto_bootstrap_ceiling.is_some()
             && (body.quality_auto != Some(true)
@@ -2224,10 +2321,17 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     .await
             };
             let catalog_request = body.selection_catalog_request(source, caps, original_copy_scope);
-            let catalogue_result = state
-                .media_pool
-                .quality_catalog(state, catalog_request.clone())
-                .await;
+            let catalogue_result = if stored_catalogue_only {
+                state
+                    .media_pool
+                    .stored_quality_catalog(state, &catalog_request)
+                    .await
+            } else {
+                state
+                    .media_pool
+                    .quality_catalog(state, catalog_request.clone())
+                    .await
+            };
             tracing::info!(target: "plurxd::http::hls", file_id, purpose = "selection", complete = catalogue_result.complete,
                 causes = ?catalogue_result.causes, "create catalog accounting");
             if let Some(crate::media_pool::CatalogCause::RequestInvalid(error)) =
@@ -2587,6 +2691,20 @@ async fn resolve_plan_for_principal_with_local_evidence(
         .as_ref()
         .map(plurx_core::playback::DeviceProfile::from_caps_v2);
     let candidate_auto_policy = !passive_compatibility && body.candidate_auto_policy();
+    // A start without an Auto candidate (Original, or a manual rung) still
+    // reaches the post-first-frame processed upgrade. Its ask is what it was
+    // accepted with: these capabilities and the catalog query a candidate
+    // would have carried, frozen before the body is consumed.
+    let accepted_processed = if candidate_context.is_none() {
+        source.zip(body.caps.as_ref()).map(|(file, caps)| {
+            (
+                caps.clone(),
+                body.selection_catalog_request(file, caps, original_copy_scope),
+            )
+        })
+    } else {
+        None
+    };
     let mut request = body.into_request(file_id, height);
     request.audio_claim = audio_claim;
     request.candidate_context = candidate_context;
@@ -2626,13 +2744,38 @@ async fn resolve_plan_for_principal_with_local_evidence(
     // answers it. Only after it is taken does the server's reconciliation
     // apply to the request that will actually be built.
     let fingerprint = request.durable_intent_fingerprint(principal);
-    let plan_notes = match review {
+    let mut plan_notes = match review {
         Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
     };
     normalize_catalog_selection(&mut request, height, candidate_copy)?;
     reconcile_request_audio(source, &mut request);
     reconcile_claimless_copy_audio(source, caps_profile.as_ref(), &mut request);
+    // Described after plan review, so the grade and route are the ones this
+    // start will actually run.
+    if accepted_processed.is_some()
+        && request.reopen_reason == Some(crate::transcode::ReopenReason::Stall)
+        && request.automatic
+    {
+        // The manager steps this recovery down a rung after create
+        // (`normalize_claimed_request`), so no ask frozen here can describe
+        // the rendition it will run; an upgrade from it would restore the
+        // rung that stalled. Its processing waits for the next start.
+        plan_notes.push(processing_declined_note(
+            "a stall recovery may step this start down a rung; its processed upgrade waits for the next start",
+        ));
+    } else if let Some((caps, query)) = accepted_processed {
+        request.accepted_processed_ask =
+            ordinary_rendition_height(source, &request).map(|target_height| {
+                Box::new(crate::transcode::ProcessedUpgradeAsk::accepted(
+                    caps,
+                    target_height,
+                    ordinary_delivered_grade(source, &request),
+                    matches!(request.kind, crate::transcode::SessionKind::Copy { .. }),
+                    query,
+                ))
+            });
+    }
     if let Some(file) = source {
         let platform = match request.previous_session_id.as_deref() {
             Some(previous) => state.transcode.refit_platform_for_session(previous).await,
@@ -2792,6 +2935,23 @@ pub async fn create(
     headers: HeaderMap,
     super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
     Json(req): Json<CreateSession>,
+) -> Result<Json<StartResponse>, ApiError> {
+    let user_id = user.id;
+    let transcode = Arc::clone(&state.transcode);
+    let created = create_native(user, state, id, headers, remote, req).await?;
+    if created.vod {
+        transcode.remember_resume_candidate(user_id, id, &created.session_id);
+    }
+    Ok(created)
+}
+
+pub(in crate::http) async fn create_native(
+    user: plurx_core::domain::User,
+    state: AppState,
+    id: i64,
+    headers: HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    req: CreateSession,
 ) -> Result<Json<StartResponse>, ApiError> {
     let (user_id, start_attempts) = (user.id, Arc::clone(&state.start_attempts));
     let created = create_with_purpose(
@@ -2970,8 +3130,167 @@ pub(crate) fn bind_compatibility_vod_policy(
         "plurx/jellyfin/vod-only/passive/v1:{fingerprint}"
     )))
 }
-/// Resolve compatibility negotiation through the same native plan and prerequisites as create.
-/// This does not claim a session, attach a reader, or reserve a producer.
+/// Warm the ordinary native recipe without creating or admitting a viewer session.
+pub async fn prepare_startup(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    AxPath(file_id): AxPath<i64>,
+    headers: HeaderMap,
+    super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
+    Json(body): Json<CreateSession>,
+) -> Result<StatusCode, ApiError> {
+    let Some(caps) = body.caps.as_ref() else {
+        return Err(ApiError::BadRequest(
+            "startup preparation requires capabilities".into(),
+        ));
+    };
+    super::super::stream::validate_device_caps(caps)?;
+    let caps = caps.clone();
+    if !valid_playback_id(&body.playback_id)
+        || body.previous_session_id.is_some()
+        || body.reopen_reason.is_some()
+        || body.control_sequence.is_some()
+        || body
+            .presentation
+            .as_deref()
+            .is_some_and(|value| value != "vod")
+    {
+        return Err(ApiError::BadRequest(
+            "startup preparation requires a fresh VOD request".into(),
+        ));
+    }
+    if let Some(intent) = body.intent.as_ref() {
+        intent
+            .validate()
+            .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
+    }
+    let position_ms = body.start.unwrap_or_default() * 1_000.0;
+    if !position_ms.is_finite() || position_ms < 0.0 || position_ms >= i64::MAX as f64 {
+        return Err(ApiError::BadRequest("invalid startup position".into()));
+    }
+    let position_ms = position_ms.round() as i64;
+    let Some(slot) = state
+        .subtitle_models
+        .translation
+        .try_borrow_read_preparation_slot()
+    else {
+        return Ok(StatusCode::ACCEPTED);
+    };
+    tokio::spawn(async move {
+        let budget = crate::media_pool::CreateStartupBudget::new(2_000);
+        let plan = budget.scope(async {
+            let authority = state.cluster.authority();
+            let serving_generation = authority.admit()?;
+            let start_plan = super::start_plan::ingress_plan(&state.applied, file_id)
+                .await
+                .ok()??;
+            let _captured_plan = crate::media_pool::capture_create_plan(&start_plan);
+            let snapshot = &start_plan.snapshot;
+            let file = &snapshot.file;
+            let client_build = client_build_label(body.caps.as_ref(), &headers);
+            let review =
+                native_create_review(&state, &body, file, Some(snapshot), user.id, &client_build)
+                    .await;
+            let identity = native_create_network_identity(&user, &headers, remote);
+            let network_prior =
+                super::super::network::stored_prior(state.store.as_ref(), identity.as_ref())
+                    .await
+                    .ok()?;
+            let resolved = resolve_plan_with_scope(
+                PlanInputs {
+                    snapshot: Some(snapshot),
+                    state: &state,
+                    user_id: user.id,
+                    file_id,
+                    source: Some(file),
+                    network_prior: network_prior.as_ref(),
+                    network_identity: identity.as_ref(),
+                    incumbent_receipt: link_receipts::requested_receipt(&headers),
+                },
+                review,
+                body,
+                PlanScope {
+                    stored_catalogue_only: true,
+                    ..PlanScope::default()
+                },
+            )
+            .await
+            .ok()?;
+            validate_hevc_copy_transport_from_probe(
+                file,
+                &caps,
+                &resolved.request,
+                snapshot.probe_json.as_deref(),
+            )
+            .ok()?;
+            authority
+                .is_current(serving_generation)
+                .then(|| (resolved.request, file.clone()))
+        });
+        let Some((request, file)) = (tokio::select! {
+            _ = state.shutdown.cancelled() => None,
+            result = tokio::time::timeout(std::time::Duration::from_secs(2), plan) => result.ok().flatten(),
+        }) else {
+            return;
+        };
+        state
+            .transcode
+            .prepare_selected_copy(
+                &request,
+                file,
+                user.id,
+                position_ms,
+                state.shutdown.clone(),
+                slot,
+            )
+            .await;
+    });
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn native_create_review(
+    state: &AppState,
+    body: &CreateSession,
+    file: &MediaFile,
+    snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
+    user_id: i64,
+    client_build: &str,
+) -> Option<PlanReview> {
+    let render_caps = match snapshot {
+        Some(snapshot) => super::super::stream::render_caps_from_snapshot(state, snapshot),
+        None => super::super::stream::render_caps(state).await,
+    };
+    plan_review_for(
+        body.caps.as_ref(),
+        body.overrides.as_ref(),
+        file,
+        &render_caps,
+        body.preserve_dolby_vision == Some(true),
+        body.hdr10 == Some(true),
+        unix_ms(),
+        &ReviewContext {
+            file_id: file.id,
+            user_id,
+            client_build,
+        },
+    )
+}
+
+fn native_create_network_identity(
+    user: &plurx_core::domain::User,
+    headers: &HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+) -> Option<crate::telemetry::NetworkIdentity> {
+    let mut identity = super::super::network::identity(headers, remote)?;
+    identity.user_id = Some(user.id);
+    identity.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
+        user.id,
+        user.created_at,
+        &user.password_hash,
+    ));
+    Some(identity)
+}
+
 pub(crate) async fn preview_for_compatibility(
     state: &AppState,
     user_id: i64,
@@ -3546,23 +3865,17 @@ async fn create_with_purpose_attempt(
         // This is the one arm that stays here, because it is the only one that
         // must not ask the node what it can render.
         None => None,
-        Some(file) => plan_review_for(
-            req.caps.as_ref(),
-            req.overrides.as_ref(),
-            file,
-            &match planning_snapshot {
-                Some(snapshot) => super::super::stream::render_caps_from_snapshot(&state, snapshot),
-                None => super::super::stream::render_caps(&state).await,
-            },
-            req.preserve_dolby_vision == Some(true),
-            req.hdr10 == Some(true),
-            unix_ms(),
-            &ReviewContext {
-                file_id: id,
-                user_id: user.id,
-                client_build: &client_build,
-            },
-        ),
+        Some(file) => {
+            native_create_review(
+                &state,
+                &req,
+                file,
+                planning_snapshot,
+                user.id,
+                &client_build,
+            )
+            .await
+        }
     };
     let hdr10_requested = review
         .as_ref()
@@ -3589,15 +3902,7 @@ async fn create_with_purpose_attempt(
                 .await
         }
     };
-    let mut identity = super::super::network::identity(&headers, remote);
-    if let Some(ref mut id) = identity {
-        id.user_id = Some(user.id);
-        id.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
-            user.id,
-            user.created_at,
-            &user.password_hash,
-        ));
-    }
+    let identity = native_create_network_identity(&user, &headers, remote);
     let network_prior =
         super::super::network::stored_prior(state.store.as_ref(), identity.as_ref())
             .await
@@ -4354,13 +4659,15 @@ async fn create_with_purpose_attempt(
     {
         vec![state.node_id.clone()]
     } else {
+        let offer_source = source.as_ref().ok_or(ApiError::NotFound("file"))?;
         match MediaOfferRequest::new(
-            source.as_ref().ok_or(ApiError::NotFound("file"))?,
+            offer_source,
             height,
             (request.start_seconds * 1_000.0).round().max(0.0) as i64,
             request.audio_index,
             request.subtitle_burn,
             request.hdr10,
+            crate::transcode::split_copy_eligible(&request, offer_source),
         ) {
             Ok(offer_request) => state
                 .media_pool
@@ -4448,8 +4755,7 @@ async fn create_with_purpose_attempt(
                     replacement,
                     created,
                 } = started;
-                let degraded_processing =
-                    (info.degraded_processing.take(), info.processing_note.take());
+                let degraded_processing = info.degraded_processing.take();
                 let session_id = info.session_id.clone();
                 let response = RemoteStartResponse::from(info);
                 let guard = Some(if created {
@@ -4573,7 +4879,7 @@ async fn create_with_purpose_attempt(
                             "media worker {candidate} did not return an activation generation"
                         )));
                     };
-                    Ok((started.info, guard, Some(target_generation), (None, None)))
+                    Ok((started.info, guard, Some(target_generation), None))
                 }
                 // The worker cannot take this start now. Every 503 its start
                 // route answers is one a retry can outlive, so it is the
@@ -4639,13 +4945,7 @@ async fn create_with_purpose_attempt(
         }
     }
     crate::media_pool::mark_create_phase("dispatch");
-    let Some((
-        owner_node_id,
-        info,
-        guard,
-        local_serving_generation,
-        (degraded_processing, processing_note),
-    )) = started
+    let Some((owner_node_id, info, guard, local_serving_generation, degraded_processing)) = started
     else {
         return Err(last_error
             .unwrap_or_else(|| create_owner_transition("no eligible media worker was available")));
@@ -4689,13 +4989,6 @@ async fn create_with_purpose_attempt(
         let mut worker_request = request.clone();
         worker_request.request_id = Some(incarnation_id.clone());
         remote_request.request = worker_request;
-    }
-    if let Some(reason) = processing_note {
-        // This start's own processing was declined inside the worker (its
-        // FEL verdict, a busy reconstruction slot, a refused window): the
-        // enhancement detail names that reason, not a generic fallback.
-        processing_decline.get_or_insert_with(|| reason.clone());
-        plan_notes.push(processing_declined_note(&reason));
     }
     if !ingress_serving_authority.is_current(ingress_serving_generation) {
         return Err(ApiError::ServiceUnavailable(
@@ -4851,11 +5144,10 @@ async fn create_with_purpose_attempt(
     } else {
         None
     };
-    let effective_processing = state
-        .transcode
-        .dv_effective_report(&info.session_id, &incarnation_id)
-        .await;
-    let enhancement = session_enhancement(
+    let effective_processing =
+        super::control::current_dv_report(&state, &info.session_id, &incarnation_id).await;
+    let title_scan = session_title_scan(&state, source.as_ref()).await;
+    let enhancement = session_enhancement_with_title(
         source.as_ref(),
         &info.kind,
         info.grade,
@@ -4864,6 +5156,7 @@ async fn create_with_purpose_attempt(
         effective_processing.as_ref(),
         planning_snapshot,
         processing_decline.as_deref(),
+        title_scan.as_ref(),
     );
     let response = StartResponse {
         processed_upgrade: None,
@@ -4898,6 +5191,14 @@ async fn create_with_purpose_attempt(
         height: info.target_height,
         encoder: info.encoder.clone(),
         vod: info.vod,
+        startup_seek_ready_ms: if owner_node_id == state.node_id && info.vod {
+            state.transcode.vod_startup_seek_ready_ms(
+                &info.session_id,
+                (request.start_seconds * 1_000.0).round() as i64,
+            )
+        } else {
+            None
+        },
         // Capped at what this node can actually serve for this file, not just
         // at the source height: an advertised rung is a promise, and the web
         // ABR controller upgrades into any rung the ladder lists. See
@@ -5011,6 +5312,7 @@ async fn create_with_purpose_attempt(
     // read-budget line) even though the task is detached so it can outlive a
     // cancelled caller.
     let activation_counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
+    let activation_deadline = activation_lease_deadline(&publication_activation);
     let mut activation_task = if owner_node_id == state.node_id {
         let activation_state = state.clone();
         let activation_authority = ingress_serving_authority.clone();
@@ -5021,10 +5323,10 @@ async fn create_with_purpose_attempt(
                     activation_state,
                     activation,
                     activation_predecessor,
-                    expected_predecessor_incarnation_id,
                     activation_authority,
                     owner_activation_generation,
                     guard,
+                    activation_deadline,
                 )
                 .await
                 .map(|_| ())
@@ -5045,8 +5347,6 @@ async fn create_with_purpose_attempt(
                     target_generation: owner_activation_generation,
                     activation,
                 };
-                let activation_deadline = tokio::time::Instant::now()
-                    + Duration::from_millis(u64::try_from(LEASE_TTL_MS).unwrap_or_default());
                 activation_state
                     .media_sessions
                     .activate_remote(&activation_owner, &request, activation_deadline)
@@ -5095,7 +5395,6 @@ async fn create_with_purpose_attempt(
             },
         ))
     };
-    let activation_deadline = activation_lease_deadline(&publication_activation);
     match tokio::time::timeout_at(activation_deadline, &mut activation_task).await {
         Ok(Ok(Ok(_))) => crate::media_pool::mark_create_phase("activation"),
         Ok(Ok(Err(error))) => {
@@ -5372,13 +5671,26 @@ fn activation_confirmation_deadline(lease_deadline: tokio::time::Instant) -> tok
     lease_deadline - ACTIVATION_CONFIRMATION_RECOVERY_MARGIN.min(remaining / 2)
 }
 
-fn activation_lease_deadline(activation: &MediaSessionActivation) -> tokio::time::Instant {
-    let remaining_ms = activation
-        .lease_expires_at_ms
-        .saturating_sub(activation.now_ms)
+/// Translate the validated absolute route expiry on the same local clock
+/// basis as `route_matches_activation`, once per owner. Pass the resulting
+/// monotonic deadline through every await; the foreign request timestamp is
+/// not the current time and must not mint another full lease on late entry.
+pub(in crate::http) fn activation_lease_deadline(
+    activation: &MediaSessionActivation,
+) -> tokio::time::Instant {
+    let monotonic_sample = tokio::time::Instant::now();
+    activation_lease_deadline_at(activation.lease_expires_at_ms, unix_ms(), monotonic_sample)
+}
+
+pub(super) fn activation_lease_deadline_at(
+    lease_expires_at_ms: i64,
+    now_ms: i64,
+    monotonic_sample: tokio::time::Instant,
+) -> tokio::time::Instant {
+    let remaining_ms = lease_expires_at_ms
+        .saturating_sub(now_ms)
         .clamp(0, LEASE_TTL_MS);
-    tokio::time::Instant::now()
-        + Duration::from_millis(u64::try_from(remaining_ms).unwrap_or_default())
+    monotonic_sample + Duration::from_millis(u64::try_from(remaining_ms).unwrap_or_default())
 }
 
 fn spawn_activation_abandonment(state: AppState, activation: MediaSessionActivation) {
@@ -5479,12 +5791,15 @@ pub(in crate::http) async fn activate_session_under_authority(
     state: AppState,
     activation: MediaSessionActivation,
     reconciled_predecessor: Option<MediaSessionRoute>,
-    predecessor_incarnation: Option<String>,
     authority: crate::serving_fence::ServingAuthority,
     admitted_generation: u64,
     guard: Option<StartedSessionGuard>,
+    lease_deadline: tokio::time::Instant,
 ) -> Result<MediaSessionActivationOutcome, ApiError> {
-    let lease_deadline = activation_lease_deadline(&activation);
+    // Both ingress paths already carry this exact identity in the validated
+    // activation. Derive it here so settlement cannot receive a second,
+    // potentially divergent predecessor while retaining the captured deadline.
+    let predecessor_incarnation = activation.expected_predecessor_incarnation_id.clone();
     let serving_transition = authority
         .commit_guard_before(admitted_generation, lease_deadline.into_std())
         .await
@@ -6728,6 +7043,11 @@ impl PreparedSourcePlayback {
             self.resolved.native_subtitle,
             delivered_dynamic_range,
         );
+        let title_scan = if self.relays_enhancement {
+            session_title_scan(state, Some(&self.file)).await
+        } else {
+            None
+        };
         Ok(StartResponse {
             processed_upgrade: self.processed_upgrade_offered.then(|| "offered".to_owned()),
             // The FEL / RPU / DYN rows local playback shows. A receiver that
@@ -6737,7 +7057,7 @@ impl PreparedSourcePlayback {
             enhancement: self
                 .relays_enhancement
                 .then(|| {
-                    session_enhancement(
+                    session_enhancement_with_title(
                         Some(&self.file),
                         &info.kind,
                         info.grade,
@@ -6746,6 +7066,7 @@ impl PreparedSourcePlayback {
                         None,
                         None,
                         None,
+                        title_scan.as_ref(),
                     )
                 })
                 .flatten(),
@@ -6783,6 +7104,7 @@ impl PreparedSourcePlayback {
             height: info.target_height,
             encoder: info.encoder.to_owned(),
             vod: info.vod,
+            startup_seek_ready_ms: None,
             ladder: crate::transcode::advertised_ladder(self.file.height, ladder_ceiling),
             prior_kbps: None,
             delivered_dynamic_range: delivered_dynamic_range.map(str::to_owned),
@@ -6976,51 +7298,23 @@ pub(crate) async fn prepare_source_playback<
         body,
     )
     .await?;
-    let processed_upgrade_ask = crate::transcode::ProcessedUpgradeAsk {
-        canonical_caps: Some(caps.clone()),
-        target_height: u32::try_from(resolved.height).map_err(|_| refused("processed_height"))?,
-        // The grade of the ordinary output this Source will actually run —
-        // the resolved request's own shape, the same rule its Start reports
-        // as `delivered_dynamic_range` — not the separate planning decision,
-        // which may plan a transcode the resolved copy never performs.
-        grade: if session_delivered_dynamic_range(
-            Some(&file),
-            &resolved.request.kind,
-            if resolved.request.hdr10 {
-                plurx_core::transcode::OutputGrade::Hdr10
-            } else {
-                plurx_core::transcode::OutputGrade::Sdr
-            },
-        ) == Some("hdr10")
-        {
-            plurx_core::transcode::OutputGrade::Hdr10
-        } else {
-            plurx_core::transcode::OutputGrade::Sdr
-        },
-        names_processed: false,
-        route: resolved
-            .request
-            .candidate_context
-            .as_ref()
-            .map(|context| context.selected_candidate.route)
-            .unwrap_or(
-                if matches!(
-                    resolved.request.kind,
-                    crate::transcode::SessionKind::Copy { .. }
-                ) {
-                    plurx_core::playback::candidate::CandidateRoute::Remux
-                } else {
-                    plurx_core::playback::candidate::CandidateRoute::Encode
-                },
-            ),
-        average_bps: None,
-        peak_bps: None,
-        recipe_digest: [0; 32],
-        required_fel_qualification: None,
-        catalog_query: Some(processed_query),
-        display_target: None,
-        display_target_note: None,
-    };
+    // A shared copy has no Auto candidate context, so its ask is the one any
+    // start without a candidate derives — except that a Source's local Auto
+    // candidate, when it has one, still names the route it runs.
+    let mut processed_upgrade_ask = crate::transcode::ProcessedUpgradeAsk::accepted(
+        caps.clone(),
+        ordinary_rendition_height(Some(&file), &resolved.request)
+            .ok_or_else(|| refused("processed_height"))?,
+        ordinary_delivered_grade(Some(&file), &resolved.request),
+        matches!(
+            resolved.request.kind,
+            crate::transcode::SessionKind::Copy { .. }
+        ),
+        processed_query,
+    );
+    if let Some(context) = resolved.request.candidate_context.as_ref() {
+        processed_upgrade_ask.route = context.selected_candidate.route;
+    }
     let destination = if processed_upgrade.is_some() {
         match crate::transcode::TranscodeManager::processed_upgrade_gates_with_ask(
             &resolved.request,

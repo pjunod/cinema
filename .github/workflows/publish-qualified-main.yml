@@ -18,7 +18,7 @@ on:
 jobs:
   publish_main:
     name: publish merged image (Forgejo registry)
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: github.server_url != 'https://github.com' && (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 90
     concurrency:

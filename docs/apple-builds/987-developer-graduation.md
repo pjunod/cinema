@@ -1,6 +1,5 @@
 # Move Live TV enable, pause/resume and prepared handoff out of Developer
 
-Build: 228
 Issue: #987
 
 Settings → Live TV now opens with the Enable Live TV switch and its advisory

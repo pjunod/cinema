@@ -12,7 +12,7 @@ jobs:
   # cleared before any dependency moves into this audited workspace.
   workspace:
     name: RustSec workspace advisory scan
-    if: github.event_name != 'schedule'
+    if: github.server_url != 'https://github.com' && (github.event_name != 'schedule')
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 10
     steps:
@@ -49,7 +49,7 @@ jobs:
 
   fuzz:
     name: RustSec fuzz advisory scan
-    if: github.event_name != 'schedule'
+    if: github.server_url != 'https://github.com' && (github.event_name != 'schedule')
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 10
     steps:
@@ -69,7 +69,7 @@ jobs:
 
   scheduled:
     name: RustSec scheduled advisory report
-    if: github.event_name == 'schedule'
+    if: github.server_url != 'https://github.com' && (github.event_name == 'schedule')
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 10
     steps:

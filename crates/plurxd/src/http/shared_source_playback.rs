@@ -309,6 +309,19 @@ struct SourceStartIdentity {
 /// The typed refusal an older Source answers a Dolby Vision delivery it did
 /// not build with. This Source never sends it (every shape local delivers is
 /// planned and built); B keeps decoding it for older peers.
+/// Every typed 422 a Source Start answers, as [`SourceStartFailure::response`]
+/// writes it: what a refusal of the title itself (not of this attempt) is
+/// called. A receiver relays any of these to its viewer as it is, rather
+/// than as its own "unresolved".
+pub(crate) const SOURCE_START_REFUSAL_CODES: &[&str] = &[
+    "copy_target_exceeded",
+    "copy_clock_unknown",
+    "copy_sync_unverified",
+    "copy_range_input_limit",
+    "copy_observation_skew",
+    "hevc_configuration_unsupported",
+    "sharing_start_unsupported",
+];
 pub(crate) const SHARING_START_DOLBY_VISION_UNSUPPORTED: &str =
     "sharing_start_dolby_vision_unsupported";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -320,6 +333,9 @@ enum SourceStartFailure {
     CopyInitContractChanged,
     CopyClockUnknown,
     CopySyncUnverified,
+    CopyInputLimit,
+    CopyOutputSkew,
+    HevcConfigurationUnsupported,
     Capacity,
     Conflict,
     Unresolved,
@@ -1085,7 +1101,9 @@ async fn status(
         .store
         .source_ingress_custody(&owned.assignment)
         .await
-        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "store", "Source status refused"); unavailable() })?
+        // A Store that cannot answer passes only for an owner still live: an
+        // ending one cannot be kept by a retry, whatever the Store says later.
+        .map_err(|_| { let retiring = owned.actor.is_retiring(); tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "store", retiring, "Source status refused"); if retiring { unavailable() } else { live_refusal_retry() } })?
         .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_status.ledger_read", error_class = "absent", "Source status refused"); unavailable() })?;
     let cleanup_only = headers.cleanup_only()
         || current.is_err()
@@ -1105,7 +1123,7 @@ async fn status(
     if let (Ok((_, current_grant)), true) =
         (current.as_ref(), owned.actor.is_direct() && !cleanup_only)
     {
-        if let Ok(response) = direct::published_reply(
+        match direct::published_reply(
             &state,
             &headers,
             &entry,
@@ -1114,18 +1132,40 @@ async fn status(
             *current_grant,
             deadline,
         )
-        .await.inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_published", error_class = "operation_refused", "Source status refused"); })
+        .await
         {
-            return Ok(super::shared_library::guard_source_response(
-                state,
-                connection.map(|c| c.0),
-                response,
-            )
-            .await);
+            Ok(response) => {
+                return Ok(super::shared_library::guard_source_response(
+                    state,
+                    connection.map(|c| c.0),
+                    response,
+                )
+                .await)
+            }
+            // A direct owner has no HLS Start response to open: a refusal
+            // that passes is answered as a retry. Any other has already
+            // retired the owner and is answered with the terminal
+            // projection below.
+            Err(refusal) => {
+                tracing::warn!(target: "plurx::sharing", stage = "source_status.direct_published", transient = refusal.transient, "Source status refused");
+                if refusal.transient {
+                    return Err(refusal.answer);
+                }
+            }
         }
     }
-    if current.is_ok() && !cleanup_only {
-        if let Ok((response, guard)) = owned.actor.open_start_response(deadline).await.inspect_err(|error| { tracing::warn!(target: "plurx::sharing", stage = "source_status.vod_published", error_class = ?error, "Source status refused"); }) {
+    if current.is_ok() && !cleanup_only && !owned.actor.is_direct() {
+        let opened = owned.actor.open_start_response(deadline).await;
+        if let Err(refusal) = &opened {
+            tracing::warn!(target: "plurx::sharing", stage = "source_status.vod_published", error_class = ?refusal.error, transient = refusal.is_transient(), "Source status refused");
+            // A refusal that passes on its own is answered as one: a typed
+            // retry the receiver keeps its live session through. Only a
+            // terminal one falls through to the terminal projection below.
+            if refusal.is_transient() {
+                return Err(live_refusal_retry());
+            }
+        }
+        if let Ok((response, guard)) = opened {
             ingress::publication_allowed(&state, &owned.assignment).await.inspect_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_status.publication_allowed", error_class = "operation_refused", "Source status refused"); })?;
             entry
                 .observe_published(&owned, &response)
@@ -1236,6 +1276,9 @@ impl From<crate::transcode::source_actor::SourceWorkerError> for SourceStartFail
             E::CopyInitContractChanged => Self::CopyInitContractChanged,
             E::CopyClockUnknown => Self::CopyClockUnknown,
             E::CopySyncUnverified => Self::CopySyncUnverified,
+            E::CopyInputLimit => Self::CopyInputLimit,
+            E::CopyOutputSkew => Self::CopyOutputSkew,
+            E::HevcConfigurationUnsupported => Self::HevcConfigurationUnsupported,
             E::Capacity => Self::Capacity,
             E::Conflict => Self::Conflict,
             E::Deadline => Self::Deadline,
@@ -1253,6 +1296,12 @@ impl SourceStartFailure {
             Self::CopyInitContractChanged => (StatusCode::CONFLICT, "copy_init_contract_changed"),
             Self::CopyClockUnknown => (StatusCode::UNPROCESSABLE_ENTITY, "copy_clock_unknown"),
             Self::CopySyncUnverified => (StatusCode::UNPROCESSABLE_ENTITY, "copy_sync_unverified"),
+            Self::CopyInputLimit => (StatusCode::UNPROCESSABLE_ENTITY, "copy_range_input_limit"),
+            Self::CopyOutputSkew => (StatusCode::UNPROCESSABLE_ENTITY, "copy_observation_skew"),
+            Self::HevcConfigurationUnsupported => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "hevc_configuration_unsupported",
+            ),
             Self::RetargetUnassigned => (StatusCode::CONFLICT, "sharing_start_relocate_unassigned"),
             Self::Capacity => (StatusCode::TOO_MANY_REQUESTS, "sharing_start_capacity"),
             Self::Unsupported => (
@@ -1672,8 +1721,9 @@ async fn resources(
     if current_grant != grant {
         return Err(unavailable());
     }
-    let opened = opened.map_err(|error| {
+    let opened = opened.map_err(|refusal| {
         use crate::transcode::source_actor::SourceWorkerError;
+        let error = refusal.error;
         let native_caption = input.resource.cached_subtitle_revision().is_none()
             && matches!(
                 input.resource.kind(),
@@ -1689,6 +1739,9 @@ async fn resources(
                 message: "The shared playback resource is still preparing".into(),
                 retry_after_seconds: 1,
             }
+        } else if refusal.is_transient() {
+            // The receiver relays this as unavailable and keeps the session.
+            live_refusal_retry()
         } else {
             SourceStartFailure::from(error).response()
         }
@@ -1853,7 +1906,8 @@ async fn start(
         .map_err(SourceStartFailure::response)?;
     if owned.actor.is_direct() {
         return direct::published_reply(&state, &headers, &entry, &owned, &target, grant, deadline)
-            .await;
+            .await
+            .map_err(|refusal| refusal.answer);
     }
     // Wait for the first publication on the viewer's clock alone, then open
     // the response under the owner's: opening reserves a body and is not
@@ -1861,12 +1915,22 @@ async fn start(
     clock
         .answer(owned.actor.wait_ready(deadline))
         .await?
-        .map_err(|e| SourceStartFailure::from(e).response())?;
+        .map_err(|e| {
+            tracing::warn!(target: "plurx::sharing", stage = "source_start.wait_ready", error_class = ?e, "Source start refused");
+            SourceStartFailure::from(e).response()
+        })?;
     let (response, guard) = owned
         .actor
         .open_start_response(deadline)
         .await
-        .map_err(|e| SourceStartFailure::from(e).response())?;
+        .map_err(|refusal| {
+            tracing::warn!(target: "plurx::sharing", stage = "source_start.open_response", error_class = ?refusal.error, transient = refusal.is_transient(), "Source start refused");
+            if refusal.is_transient() {
+                live_refusal_retry()
+            } else {
+                SourceStartFailure::from(refusal.error).response()
+            }
+        })?;
     let (_, current_grant) = current_reference(&state, &headers, &target).await?;
     if current_grant != grant {
         return Err(unavailable());
@@ -2243,6 +2307,8 @@ async fn own_start(
         Err(receipt) => {
             let reason = receipt.reason();
             entry.retain_stage(SourceStartTaskStage::FactoryRefused(receipt));
+            #[cfg(test)]
+            eprintln!("Source Start diagnostic stage=owner_factory reason={reason:?}");
             return Err(SourceStartFailure::from(reason));
         }
     };
@@ -2299,6 +2365,21 @@ async fn current_reference<H: AuthenticationHeaders + Send + Sync + ?Sized>(
     }
     Ok((hash, grant))
 }
+/// A live session's refusal that passes on its own ([`LiveRefusal`]). The
+/// receiver reads a 503 with `Retry-After` as the Source being unavailable
+/// for now (`PeerError::Unavailable`), so it keeps the session and asks again;
+/// a plain 503 would read as the Source refusing it for good.
+///
+/// [`LiveRefusal`]: crate::transcode::source_actor::LiveRefusal
+fn live_refusal_retry() -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: crate::sharing_client::SOURCE_LIVE_RETRY_CODE,
+        message: "Shared playback is briefly unavailable".to_owned(),
+        retry_after_seconds: 1,
+    }
+}
+
 fn unavailable() -> ApiError {
     ApiError::typed(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -2851,6 +2932,12 @@ async fn build_real_source_start_fixture(
     advertised_http: Option<tokio::net::TcpListener>,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> RealSourceStartFixture {
+    // Every refusal names its step in a warning; a fixture test that fails
+    // must show them, or a refusal under load is a code with no cause.
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter("warn,hiqlite=error")
+        .try_init();
     use plurx_core::{
         cluster::migration::select_daemon_store_observing,
         config::Config,
@@ -2875,7 +2962,9 @@ async fn build_real_source_start_fixture(
     config.cluster.raft_bind = raft.local_addr().expect("Raft address");
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = "localhost".into();
-    drop((raft, api));
+    // Keep the bound sockets: the voter serves on them, so no other socket
+    // can take either port before it starts.
+    config.cluster.listeners = plurx_core::config::ClusterListeners::owned(raft, api);
     let startup_clock = advertised_http.map(|listener| {
         Arc::new(
             crate::StartupObservationHttp::from_listener(listener)

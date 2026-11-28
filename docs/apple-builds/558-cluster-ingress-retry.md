@@ -1,6 +1,5 @@
 # Retry media through another cluster ingress
 
-Build: 82
 Issue: #558
 
 A stalled stream may retry the unchanged media path through another cluster

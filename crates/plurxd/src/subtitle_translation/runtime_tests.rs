@@ -395,12 +395,12 @@ fn synthetic_engine(f: &Fixture, script: &str) -> (Engine, ManagedModel) {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
         .expect("executable fixture");
     let handle = std::fs::File::open(&path).expect("held executable");
-    let identity = std_file_identity(&handle).expect("executable identity");
+    let identity = local_file_identity(&handle).expect("executable identity");
     let fixture_path = directory.join("self-test.wav");
     let fixture_bytes = include_bytes!("../subtitle_models/self-test.wav");
     std::fs::write(&fixture_path, fixture_bytes).expect("owned companion");
     let self_test_handle = std::fs::File::open(fixture_path).expect("held companion");
-    let self_test_identity = std_file_identity(&self_test_handle).expect("companion identity");
+    let self_test_identity = local_file_identity(&self_test_handle).expect("companion identity");
     let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => "macos-arm64",
         ("macos", "x86_64") => "macos-x86_64",
@@ -423,7 +423,7 @@ fn synthetic_engine(f: &Fixture, script: &str) -> (Engine, ManagedModel) {
     std::fs::write(&path, MODEL).expect("owned model bytes");
     let handle = std::fs::File::open(&path).expect("held model");
     let model = ManagedModel {
-        identity: std_file_identity(&handle).expect("model identity"),
+        identity: local_file_identity(&handle).expect("model identity"),
         handle,
         path,
         sha256: hex::encode(Sha256::digest(MODEL)),
@@ -447,7 +447,7 @@ fn decoded(signal: bool) -> DecodedPcm {
             .expect("PCM sample");
     }
     DecodedPcm {
-        identity: std_file_identity(&file).expect("PCM identity"),
+        identity: local_file_identity(&file).expect("PCM identity"),
         file,
         clock: ClockObservation {
             raw_first_sample: 0,
@@ -553,7 +553,7 @@ async fn full_source_verification_hashes_every_chunk_and_rechecks_catalogue_and_
         ))
     );
     assert_eq!(source.revision(), &f.revision);
-    assert!(source.unchanged());
+    assert!(source.unchanged().await);
     source
         .recheck(&f.state, &f.file, &CancellationToken::new())
         .await

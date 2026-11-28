@@ -1,6 +1,5 @@
 # Commit the Apple TV timeline preview with Select
 
-Build: 272
 Issue: #1264
 
 Apple TV playback controls now commit the position previewed with Left or

@@ -2225,16 +2225,50 @@ fn native_hls_master_advertises_selection_language_names_and_forced_metadata() {
 }
 
 #[test]
-fn continuous_master_keeps_verified_variants_and_one_common_subtitle_group() {
+fn split_master_renders_verified_variants_with_one_common_subtitle_group() {
+    use plurx_core::transcode::split_master::{
+        SplitAudio, SplitBandwidth, SplitBudget, SplitPresentation, SplitVideo, VideoRange,
+    };
     let file = hls_file(vec![
         sub("subrip", "eng", "Regular", false, false),
         sub("webvtt", "eng", "SDH", false, false),
         sub("hdmv_pgs_subtitle", "eng", "Bitmap", false, false),
     ]);
-    let original = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",URI=\"audio/exact/index.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,CODECS=\"avc1.640032,mp4a.40.2\",AUDIO=\"audio\"\nvideo/low/index.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,CODECS=\"avc1.640032,mp4a.40.2\",AUDIO=\"audio\"\nvideo/high/index.m3u8\n";
+    let budget = |peak_bps| {
+        Some(SplitBudget {
+            peak_bps,
+            average_bps: None,
+        })
+    };
+    let video = |c: char, height: u32, peak| SplitVideo {
+        rendition_id: c.to_string().repeat(64),
+        codec: "avc1.640032".into(),
+        supplemental_codecs: None,
+        width: Some(height * 16 / 9),
+        height: Some(height),
+        frame_rate: None,
+        video_range: VideoRange::Sdr,
+        budget: budget(peak),
+    };
+    let presentation = SplitPresentation {
+        variants: vec![video('b', 1080, 2_000_000), video('a', 720, 1_000_000)],
+        audio: vec![SplitAudio {
+            rendition_id: "c".repeat(64),
+            source_index: 0,
+            title: None,
+            language: Some("eng".into()),
+            default: true,
+            channels: Some(2),
+            codec: "mp4a.40.2".into(),
+            budget: budget(128_000),
+        }],
+        bandwidth: SplitBandwidth::PerRole,
+        subtitles: String::new(),
+        independent_segments: false,
+    };
+    let bare = presentation.master_text().expect("bare master");
     let master = String::from_utf8(
-        continuous_master_with_subtitles(original.as_bytes().to_vec(), &file, Some(1))
-            .expect("caption family"),
+        split_master_with_subtitles(presentation.clone(), &file, Some(1)).expect("caption family"),
     )
     .expect("UTF-8");
     assert_eq!(master.matches("TYPE=AUDIO").count(), 1);
@@ -2243,7 +2277,11 @@ fn continuous_master_keeps_verified_variants_and_one_common_subtitle_group() {
     assert!(master.contains("DEFAULT=YES"));
     assert!(!master.contains("subs/2/"));
     assert!(!master.contains("40000000") && !master.contains("3840x2160"));
-    for line in original
+    assert!(
+        master.find("TYPE=SUBTITLES").expect("subtitles")
+            < master.find("#EXT-X-STREAM-INF").expect("variant")
+    );
+    for line in bare
         .lines()
         .filter(|line| !line.starts_with("#EXT-X-STREAM-INF:"))
     {
@@ -2251,10 +2289,73 @@ fn continuous_master_keeps_verified_variants_and_one_common_subtitle_group() {
     }
     let none = hls_file(vec![]);
     assert_eq!(
-        continuous_master_with_subtitles(original.as_bytes().to_vec(), &none, None)
-            .expect("no native captions"),
-        original.as_bytes()
+        split_master_with_subtitles(presentation, &none, None).expect("no native captions"),
+        bare.as_bytes()
     );
+}
+
+/// The native Safari split, pinned: Safari's in-band sample entries, the
+/// converted Dolby Vision range, the projected init's audio facts and the
+/// source stream's labels, under the copy's combined budget.
+#[test]
+fn native_split_master_is_written_from_proved_facts() {
+    let mut file = hls_file(vec![]);
+    file.audio_streams = vec![
+        plurx_core::domain::AudioStream {
+            index: 0,
+            language: Some("fre".into()),
+            ..Default::default()
+        },
+        plurx_core::domain::AudioStream {
+            index: 1,
+            language: Some("eng".into()),
+            title: Some("Main \"Mix\"".into()),
+            ..Default::default()
+        },
+    ];
+    let mut context = hls_context("hvc1.2.4.L153.B0,mp4a.40.2", Some("dvh1.08.06/db1p"));
+    context.bandwidth = Some(plurx_core::transcode::OutputBandwidth {
+        peak_bps: 50_000_000,
+        average_bps: 30_000_000,
+    });
+    let ids = crate::copyseg::NativeSplitInitIds {
+        video: "a".repeat(64),
+        audio: "b".repeat(64),
+        audio_codec: "mp4a.40.2",
+        audio_channels: 6,
+    };
+    let master = native_split_presentation(&file, &context, &ids, Some(1))
+        .master_text()
+        .expect("native master");
+    assert_eq!(
+        master,
+        format!(
+            "#EXTM3U\n#EXT-X-VERSION:10\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Main 'Mix'\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"6\",STABLE-RENDITION-ID=\"a1\",URI=\"audio/{b}/index.m3u8\"\n\
+#EXT-X-STREAM-INF:BANDWIDTH=50000000,AVERAGE-BANDWIDTH=30000000,RESOLUTION=3840x2160,FRAME-RATE=23.976,CODECS=\"hev1.2.4.L153.B0,mp4a.40.2\",SUPPLEMENTAL-CODECS=\"dvhe.08.06/db1p\",VIDEO-RANGE=PQ,AUDIO=\"audio\"\n\
+video/{a}/index.m3u8\n",
+            a = "a".repeat(64),
+            b = "b".repeat(64),
+        )
+    );
+    // No bound budget: the source bitrate stands in, as before.
+    context.bandwidth = None;
+    let master = native_split_presentation(&file, &context, &ids, None)
+        .master_text()
+        .expect("fallback master");
+    assert!(master.contains("BANDWIDTH=40000000,AVERAGE-BANDWIDTH=40000000,"));
+    assert!(master.contains("NAME=\"fre\",LANGUAGE=\"fr\""));
+    assert!(master.contains("STABLE-RENDITION-ID=\"a0\""));
+    // A half-known raster is no RESOLUTION, never a refused master.
+    file.height = None;
+    let master = native_split_presentation(&file, &context, &ids, Some(1))
+        .master_text()
+        .expect("raster-free master");
+    assert!(!master.contains("RESOLUTION="));
+    file.height = Some(0);
+    assert!(native_split_presentation(&file, &context, &ids, Some(1))
+        .master_text()
+        .is_ok());
 }
 
 #[tokio::test]
@@ -4197,6 +4298,7 @@ async fn shipped_shape_primes_an_admitted_candidate() {
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
+        accepted_processed_ask: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -4807,6 +4909,7 @@ async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
         catalog_query: None,
         display_target: None,
         display_target_note: None,
+        dv_row_facts: None,
         ordinary_request: None,
         planning_snapshot: None,
         retained_output: None,
@@ -5244,6 +5347,7 @@ async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_a
         catalog_query: None,
         display_target: None,
         display_target_note: None,
+        dv_row_facts: None,
         ordinary_request: None,
         planning_snapshot: None,
         retained_output: None,
@@ -5867,6 +5971,109 @@ fn planning_binding_detects_same_timestamp_probe_and_generation_changes() {
         crate::media_pool::PlanningBinding::from_snapshot(&snapshot)
     );
     assert_eq!(snapshot.file.mtime, staged_source_file().mtime);
+}
+
+/// A viewer on Original has no Auto candidate. Its converted Profile 7 copy
+/// must still reach the post-first-frame reconstruction, through the ask it
+/// was accepted with: without one the upgrade gates answered "no upgrade" in
+/// silence and only Auto plays were ever offered FEL (E-5C355069F5).
+#[tokio::test]
+async fn an_original_copy_without_a_candidate_is_offered_fel_reconstruction() {
+    use crate::transcode::{SessionKind, TranscodeManager};
+    use plurx_core::store::keys;
+    use plurx_core::transcode::dv_processing::DvDestination;
+    let mut file = dolby_vision_p7_file();
+    file.dolby_vision.el_present = Some(true);
+    file.dolby_vision.rpu_present = Some(true);
+    file.audio_streams = vec![plurx_core::domain::AudioStream {
+        index: 1, codec: "eac3".into(), channels: Some(6), sample_rate: Some(48_000),
+        channel_layout: Some("5.1".into()), language: None, title: None, default: true,
+    }];
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["sdr","pq"],"max_height":2160}],
+        "containers":["mkv","mp4"],"transports":["hls"],"dv_transport":"hls","audio":["aac","eac3"],
+        "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
+            {"codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}]}"#);
+    let mut snapshot = plurx_core::store::PlaybackPlanningSnapshot {
+        file: file.clone(), probe_json: None, settings: Default::default(),
+        generation: 1, item_title: None,
+    };
+    snapshot.settings.insert(keys::DV_FEL_REENCODE.into(), "1".into());
+    snapshot.settings.insert(keys::DV_CONVERT.into(), "1".into());
+    // What the Android app sends on Original: a copy, not Auto, no rung.
+    let body = || CreateSession {
+        processed_upgrade: None, playback_id: "original-p81".into(), copy: Some(true),
+        quality_auto: Some(false), preserve_dolby_vision: Some(true),
+        caps: Some(caps.clone()), ..bare_create()
+    };
+    assert!(!body().candidate_auto_policy(), "Original is not Auto");
+    let review = || review_client_plan(&caps, None, &file, &capable_node(), true, false, NOW_MS);
+    assert!(review().convert_dolby_vision, "P7 converts to 8.1 for this client");
+    // The create path itself, not a hand-built request.
+    let state = resolver_state();
+    let resolved = resolve_plan(
+        PlanInputs {
+            snapshot: None, state: &state, user_id: 7, file_id: file.id, source: Some(&file),
+            network_prior: None, network_identity: None, incumbent_receipt: None,
+        },
+        Some(review()),
+        body(),
+    )
+    .await
+    .expect("Original copy plan");
+    assert!(!resolved.candidate_auto_policy, "Original stays out of Auto policy");
+    let request = resolved.request;
+    assert!(matches!(request.kind, SessionKind::Copy { convert_dolby_vision: true, .. }));
+    assert!(request.candidate_context.is_none(), "Original binds no candidate");
+    let ask = request.accepted_processed_ask.as_deref().expect("create derives the accepted ask");
+    assert_eq!(ask.route, plurx_core::playback::candidate::CandidateRoute::Remux);
+    // A copy runs the source raster, not the Auto fallback rung planning
+    // resolved; the FEL qualification continuation compares this same height.
+    let source_height = u32::try_from(file.height.expect("source height")).expect("height");
+    assert_eq!(ask.target_height, source_height);
+    assert_eq!(request.processed_ask_target_height(), Some(source_height));
+    assert_eq!(
+        ask.catalog_query.as_ref().and_then(|query| query.copy_contract).map(|contract| contract.2),
+        Some(true),
+        "the reviewed conversion scope, frozen before the body is consumed"
+    );
+    // Without the ask (the start as it was before) the gates skipped it in silence.
+    let mut bare = request.clone();
+    bare.accepted_processed_ask = None;
+    #[cfg(target_os = "linux")]
+    assert_eq!(TranscodeManager::processed_upgrade_gates(&bare, &snapshot, false), Ok(None));
+    let height = i64::from(source_height) & !1;
+    let (trial, _) = TranscodeManager::processed_qualification_input(&snapshot, &request, height)
+        .expect("an accepted Original copy reaches FEL qualification");
+    assert_eq!(trial.kind, SessionKind::Transcode { height });
+    assert_eq!(trial.dv_processing_destination, Some(DvDestination::Profile81));
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        TranscodeManager::processed_upgrade_gates(&request, &snapshot, false),
+        Ok(Some(DvDestination::Profile81)),
+        "the create registers the upgrade instead of skipping it"
+    );
+    // A legacy-Auto stall reopen (no intent, no quality answer) is stepped
+    // down a rung by the manager after create, so no ask can describe it: it
+    // carries none, and its plan says why.
+    let stalled = resolve_plan(
+        PlanInputs {
+            snapshot: None, state: &state, user_id: 7, file_id: file.id, source: Some(&file),
+            network_prior: None, network_identity: None, incumbent_receipt: None,
+        },
+        Some(review()),
+        CreateSession {
+            quality_auto: None,
+            previous_session_id: Some("4f6b2c1e-8d3a-4b7f-9c2e-1a5d6e7f8091".into()),
+            reopen_reason: Some(crate::transcode::ReopenReason::Stall),
+            ..body()
+        },
+    )
+    .await
+    .expect("stall reopen plan");
+    assert!(stalled.request.automatic);
+    assert!(stalled.request.accepted_processed_ask.is_none());
+    assert!(stalled.plan_notes.iter().any(|note| note.contains("stall recovery")),
+        "{:?}", stalled.plan_notes);
 }
 
 /// Exercise the very helpers resolve_plan uses, then the real qualification

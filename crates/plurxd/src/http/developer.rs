@@ -3220,7 +3220,7 @@ async fn dvr(
     let owner = live_tv.owner_node_id == state.node_id;
     let mut requirements = vec![
         root_writable(state, dvr, owner).await,
-        free_space(dvr, owner),
+        free_space(dvr, owner).await,
     ];
     requirements.push(guide_horizon(state, live_tv).await);
     requirements.push(tuner_reserve(live_tv, dvr));
@@ -3273,7 +3273,7 @@ async fn root_writable(
         // a hung NFS server would otherwise park a runtime worker for as long
         // as the mount stayed hung — on a *diagnostic* page.
         let root = dvr.root.clone();
-        match tokio::task::spawn_blocking(move || probe_root(&root)).await {
+        match plurx_core::media_io::blocking(move || probe_root(&root)).await {
             Ok(Ok(())) => (
                 RequirementStatus::Met,
                 format!("Created and removed a probe file under `{}`.", dvr.root),
@@ -3317,9 +3317,9 @@ fn probe_root(root: &str) -> std::io::Result<()> {
     std::fs::remove_file(&probe)
 }
 
-fn free_space(dvr: &crate::live_tv::DvrConfig, owner: bool) -> DeveloperRequirement {
+async fn free_space(dvr: &crate::live_tv::DvrConfig, owner: bool) -> DeveloperRequirement {
     let floor = dvr.free_floor_gb.max(0) as u64 * 1_000_000_000;
-    let (status, evidence) = match crate::live_tv::free_space_bytes(&dvr.root) {
+    let (status, evidence) = match crate::live_tv::free_space_bytes(&dvr.root).await {
         Some(free) if free >= floor => (
             RequirementStatus::Met,
             format!(

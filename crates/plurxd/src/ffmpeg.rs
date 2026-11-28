@@ -38,11 +38,11 @@ pub(crate) fn verify_windows_source_path(
     source: &std::fs::File,
     path: &std::path::Path,
 ) -> Result<(), String> {
-    let held = plurx_core::fs_secure::std_file_identity(source)
+    let held = plurx_core::media_io::identity_in_place(source)
         .map_err(|error| format!("stating held Windows source: {error}"))?;
     let reopened = plurx_core::fs_secure::open_read_nofollow_blocking(path)
         .map_err(|error| format!("reopening Windows source without reparse traversal: {error}"))?;
-    let current = plurx_core::fs_secure::std_file_identity(&reopened)
+    let current = plurx_core::media_io::identity_in_place(&reopened)
         .map_err(|error| format!("stating reopened Windows source: {error}"))?;
     if held != current {
         return Err("Windows source changed before ffmpeg spawn".to_owned());
@@ -848,7 +848,7 @@ pub(crate) async fn held_source_index_probe_json(
     source: &std::fs::File,
     budget: Duration,
     cancel: Option<&tokio_util::sync::CancellationToken>,
-) -> Result<String, String> {
+) -> Result<String, HeldProbeError> {
     let document = held_source_probe_json_with_limits(
         source,
         Duration::from_secs(30).min(budget),
@@ -884,12 +884,36 @@ pub(crate) struct HeldPacketProbeRequest {
     pub packet_limit: Option<u32>,
 }
 
+/// Whether a probe child that exited with `status` was killed by a SIGKILL
+/// its runner did not send — the kernel's OOM killer, or an operator's stop
+/// from Activity (`http::system::stop_process`).
+///
+/// Every held-source probe runner here settles its own deadline and
+/// cancellation as an error before it has an exit status, so a SIGKILL
+/// status is never the runner's own. Either way it says nothing about the
+/// media: the same read may succeed later, and its retries stay bounded by
+/// the index retry window and attempt limit, as the index pipe's do.
+pub(crate) fn killed_externally(status: std::process::ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal() == Some(libc::SIGKILL)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        false
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum HeldPacketProbeError {
     Timeout,
     OutputLimit,
     Source(String),
     Process(String),
+    /// [`killed_externally`]: the probe was killed, not refused.
+    Interrupted(String),
 }
 
 impl HeldPacketProbeError {
@@ -897,7 +921,53 @@ impl HeldPacketProbeError {
         match self {
             Self::Timeout => "packet probe timed out".to_owned(),
             Self::OutputLimit => "packet probe exceeded its output bound".to_owned(),
-            Self::Source(reason) | Self::Process(reason) => reason.clone(),
+            Self::Source(reason) | Self::Process(reason) | Self::Interrupted(reason) => {
+                reason.clone()
+            }
+        }
+    }
+
+    fn exited(status: std::process::ExitStatus, stderr: &[u8]) -> Self {
+        let reason = format!(
+            "packet probe exited {status}: {}",
+            String::from_utf8_lossy(stderr).trim()
+        );
+        if killed_externally(status) {
+            Self::Interrupted(reason)
+        } else {
+            Self::Process(reason)
+        }
+    }
+}
+
+/// Why a bounded held-source probe child (the metadata probe, the F+
+/// first-packet identity) returned no output.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HeldProbeError {
+    /// Its own deadline stopped it.
+    Timeout(String),
+    /// [`killed_externally`]: the probe was killed, not refused.
+    Interrupted(String),
+    Failed(String),
+}
+
+impl HeldProbeError {
+    pub(crate) fn reason(&self) -> &str {
+        match self {
+            Self::Timeout(reason) | Self::Interrupted(reason) | Self::Failed(reason) => reason,
+        }
+    }
+}
+
+impl From<String> for HeldProbeError {
+    /// The bounded runner reports its own deadline in words
+    /// (`bounded_command_capture_cancellable`); every other text error is a
+    /// failure. An external kill never arrives as text: it is an exit status.
+    fn from(reason: String) -> Self {
+        if reason.contains("timed out after") {
+            Self::Timeout(reason)
+        } else {
+            Self::Failed(reason)
         }
     }
 }
@@ -915,7 +985,7 @@ pub(crate) async fn held_source_packet_probe_json(
 ) -> Result<Vec<u8>, HeldPacketProbeError> {
     #[cfg(windows)]
     let (source_path, held_identity) = {
-        let held_identity = plurx_core::fs_secure::std_file_identity(source).map_err(|error| {
+        let held_identity = plurx_core::media_io::identity_in_place(source).map_err(|error| {
             HeldPacketProbeError::Source(format!("reading held source identity: {error}"))
         })?;
         let source_path = plurx_core::fs_secure::std_file_path(source).map_err(|error| {
@@ -925,7 +995,7 @@ pub(crate) async fn held_source_packet_probe_json(
             plurx_core::fs_secure::open_read_nofollow_blocking(&source_path).map_err(|error| {
                 HeldPacketProbeError::Source(format!("reopening held source path: {error}"))
             })?;
-        if plurx_core::fs_secure::std_file_identity(&reopened).map_err(|error| {
+        if plurx_core::media_io::identity_in_place(&reopened).map_err(|error| {
             HeldPacketProbeError::Source(format!("reading reopened source identity: {error}"))
         })? != held_identity
         {
@@ -1018,11 +1088,7 @@ pub(crate) async fn held_source_packet_probe_json(
             return Err(HeldPacketProbeError::OutputLimit);
         }
         if !output.status.success() {
-            return Err(HeldPacketProbeError::Process(format!(
-                "packet probe exited {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
+            return Err(HeldPacketProbeError::exited(output.status, &output.stderr));
         }
         return Ok(output.stdout);
     }
@@ -1051,10 +1117,7 @@ pub(crate) async fn held_source_packet_probe_json(
     let collected = tokio::time::timeout(timeout, collect).await;
     let result = match collected {
         Ok(Ok((stdout, _stderr, status))) if status.success() => Ok(stdout),
-        Ok(Ok((_stdout, stderr, status))) => Err(HeldPacketProbeError::Process(format!(
-            "packet probe exited {status}: {}",
-            String::from_utf8_lossy(&stderr).trim()
-        ))),
+        Ok(Ok((_stdout, stderr, status))) => Err(HeldPacketProbeError::exited(status, &stderr)),
         Ok(Err(error)) => Err(error),
         Err(_) => Err(HeldPacketProbeError::Timeout),
     };
@@ -1064,7 +1127,7 @@ pub(crate) async fn held_source_packet_probe_json(
     }
     #[cfg(windows)]
     {
-        if plurx_core::fs_secure::std_file_identity(source).map_err(|error| {
+        if plurx_core::media_io::identity_in_place(source).map_err(|error| {
             HeldPacketProbeError::Source(format!("re-reading held source identity: {error}"))
         })? != held_identity
         {
@@ -1078,7 +1141,7 @@ pub(crate) async fn held_source_packet_probe_json(
                     "reopening packet-probed source path: {error}"
                 ))
             })?;
-        if plurx_core::fs_secure::std_file_identity(&current).map_err(|error| {
+        if plurx_core::media_io::identity_in_place(&current).map_err(|error| {
             HeldPacketProbeError::Source(format!("reading packet-probed source identity: {error}"))
         })? != held_identity
         {
@@ -1199,7 +1262,7 @@ async fn held_source_probe_json_with_limits(
     label: &'static str,
     work: crate::process_control::ChildWork,
     cancel: Option<&tokio_util::sync::CancellationToken>,
-) -> Result<String, String> {
+) -> Result<String, HeldProbeError> {
     if let Some(budget) = crate::background_jobs::source_budget() {
         let input = crate::source_input::SourceInput::open_background_held(
             crate::fragment_index_cluster::SourceFence::clone_current_held(source)?,
@@ -1218,30 +1281,30 @@ async fn held_source_probe_json_with_limits(
             "-show_chapters",
             input.url(),
         ]);
-        let output =
-            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel, work)
-                .await;
+        let output = metadata_probe_output(command, timeout, max_bytes, label, cancel, work).await;
         input
             .close_and_wait()
             .await
             .map_err(|error| format!("joining held probe source input: {error}"))?;
         return String::from_utf8(output?.stdout)
-            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"));
+            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}").into());
     }
 
     #[cfg(windows)]
     {
-        let held_identity = plurx_core::fs_secure::std_file_identity(source)
+        let held_identity = plurx_core::media_io::identity_in_place(source)
             .map_err(|error| format!("reading held source identity: {error}"))?;
         let source_path = plurx_core::fs_secure::std_file_path(source)
             .map_err(|error| format!("resolving held source path: {error}"))?;
         let reopened = plurx_core::fs_secure::open_read_nofollow_blocking(&source_path)
             .map_err(|error| format!("reopening held source path: {error}"))?;
-        if plurx_core::fs_secure::std_file_identity(&reopened)
+        if plurx_core::media_io::identity_in_place(&reopened)
             .map_err(|error| format!("reading reopened source identity: {error}"))?
             != held_identity
         {
-            return Err("held source path changed before FFprobe launch".to_owned());
+            return Err("held source path changed before FFprobe launch"
+                .to_owned()
+                .into());
         }
         let mut command = tokio::process::Command::new(ffprobe_bin());
         command.args([
@@ -1255,24 +1318,23 @@ async fn held_source_probe_json_with_limits(
         ]);
         command.arg(&source_path);
         let output =
-            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel, work)
-                .await?;
-        if plurx_core::fs_secure::std_file_identity(source)
+            metadata_probe_output(command, timeout, max_bytes, label, cancel, work).await?;
+        if plurx_core::media_io::identity_in_place(source)
             .map_err(|error| format!("re-reading held source identity: {error}"))?
             != held_identity
         {
-            return Err("held source changed during FFprobe".to_owned());
+            return Err("held source changed during FFprobe".to_owned().into());
         }
         let current = plurx_core::fs_secure::open_read_nofollow_blocking(&source_path)
             .map_err(|error| format!("reopening probed source path: {error}"))?;
-        if plurx_core::fs_secure::std_file_identity(&current)
+        if plurx_core::media_io::identity_in_place(&current)
             .map_err(|error| format!("reading probed source identity: {error}"))?
             != held_identity
         {
-            return Err("held source path changed during FFprobe".to_owned());
+            return Err("held source path changed during FFprobe".to_owned().into());
         }
         return String::from_utf8(output.stdout)
-            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"));
+            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}").into());
     }
     #[cfg(unix)]
     {
@@ -1289,11 +1351,69 @@ async fn held_source_probe_json_with_limits(
             "/dev/fd/3",
         ]);
         let output =
-            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel, work)
-                .await?;
+            metadata_probe_output(command, timeout, max_bytes, label, cancel, work).await?;
         String::from_utf8(output.stdout)
-            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"))
+            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}").into())
     }
+}
+
+/// [`bounded_command_output_cancellable`] for the metadata probe, keeping
+/// the exit status long enough to tell a refusal from an external kill.
+async fn metadata_probe_output(
+    command: tokio::process::Command,
+    timeout: Duration,
+    max_bytes: u64,
+    label: &'static str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    work: crate::process_control::ChildWork,
+) -> Result<BoundedOutput, HeldProbeError> {
+    let outcome =
+        bounded_command_capture_cancellable(command, timeout, max_bytes, label, cancel, work)
+            .await?;
+    held_probe_outcome(label, outcome)
+}
+
+/// [`metadata_probe_output`] for an FFmpeg child that reads its source through
+/// inherited descriptors, as [`bounded_ffmpeg_output_descriptors_cancellable`]
+/// runs it.
+pub(crate) async fn held_ffmpeg_probe_output(
+    command: tokio::process::Command,
+    timeout: Duration,
+    max_bytes: u64,
+    label: &'static str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    work: crate::process_control::ChildWork,
+    descriptors: crate::producer_spawn::Descriptors,
+) -> Result<BoundedOutput, HeldProbeError> {
+    let outcome = bounded_command_capture_descriptors_cancellable(
+        command,
+        timeout,
+        max_bytes,
+        label,
+        cancel,
+        work,
+        Some((
+            descriptors,
+            crate::producer_spawn::ArgumentProfile::Ffmpeg { drm_device: None },
+        )),
+    )
+    .await?;
+    held_probe_outcome(label, outcome)
+}
+
+fn held_probe_outcome(
+    label: &'static str,
+    outcome: BoundedCommandOutcome,
+) -> Result<BoundedOutput, HeldProbeError> {
+    if !outcome.status.success() {
+        let reason = format!("{label} exited {}", outcome.status);
+        return Err(if killed_externally(outcome.status) {
+            HeldProbeError::Interrupted(reason)
+        } else {
+            HeldProbeError::Failed(reason)
+        });
+    }
+    Ok(outcome.output?)
 }
 
 fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
@@ -3871,7 +3991,7 @@ fn engine_object_version(metadata: &std::fs::Metadata) -> Result<String, String>
 #[cfg(windows)]
 fn windows_engine_object_version(file: &std::fs::File) -> Result<String, String> {
     let identity =
-        plurx_core::fs_secure::std_file_identity(file).map_err(|error| error.to_string())?;
+        plurx_core::fs_secure::local_file_identity(file).map_err(|error| error.to_string())?;
     Ok(format!(
         "{}:{}:{}:{}:{}:{}",
         identity.device,

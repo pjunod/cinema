@@ -109,6 +109,7 @@ operations! {
     CancelUnpublishedShareInvitation => "cancel_unpublished_share_invitation",
     RetryCopyAnalysisAfterAttempt => "retry_copy_analysis_after_attempt",
     SettleUnpublishedCopyJob => "settle_unpublished_copy_job",
+    MergeProbeHevcScan => "merge_probe_hevc_scan",
 }
 
 const OUTCOMES: [&str; 2] = ["ok", "error"];
@@ -430,8 +431,9 @@ mod tests {
         // Jellyfin unbound media-link revocation, and the acknowledged Link
         // negative's measured-Link prior fold (D6), orphan grant revocation,
         // and cancellation after a failed or undelivered sharing invitation,
-        // and the copy index's attempt retry and unpublished-job settlement.
-        assert_eq!(Operation::ALL.len(), 54, "one fixed label per audited site");
+        // and the copy index's attempt retry and unpublished-job settlement,
+        // and the persisted HEVC scan verdict (#1827).
+        assert_eq!(Operation::ALL.len(), 55, "one fixed label per audited site");
         let metrics = Metrics::default();
         for operation in Operation::ALL {
             for severity in Discard::ALL {

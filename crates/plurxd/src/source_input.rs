@@ -261,15 +261,30 @@ struct InputState {
     /// consumer saw truncated input, so what it concluded is not a verdict
     /// on the file.
     read_failed: std::sync::atomic::AtomicBool,
+    /// The failure was the storage itself: `read_at` returned an error (EIO)
+    /// or the object ended early. Unlike a revoked budget, an exhausted pause
+    /// or a closed service, retrying the same bytes may fail the same way.
+    physical_read_failed: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     read_gate: Option<Arc<tests::ReadGate>>,
 }
+impl InputState {
+    /// Record a storage-side failure. `input_body` still sets `read_failed`
+    /// when the error reaches the consumer; this only classifies it.
+    fn mark_physical_read_failure(&self) {
+        self.physical_read_failed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[derive(Default)]
 struct ByteBudget {
     /// Conservative issued bytes; never reset or refunded across seeks.
     operation_used: u64,
     grant: Option<SourceServiceGrant>,
     used: u64,
+    /// Bytes issued from the observer's startup burst; never refunded.
+    startup_used: u64,
     window: ReadWindow,
 }
 #[derive(Default)]
@@ -323,9 +338,7 @@ impl SourceInput {
     ) -> Result<Self, String> {
         let source =
             crate::fragment_index_cluster::open_source_playback_fence(request.file(), None).await?;
-        let len = source
-            .handle
-            .metadata()
+        let len = plurx_core::media_io::fstat(&source.handle)
             .map_err(|error| error.to_string())?
             .len();
         let mime = crate::http::stream::file_content_type(&request.file().path);
@@ -391,6 +404,7 @@ impl SourceInput {
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             read_failed: std::sync::atomic::AtomicBool::new(false),
+            physical_read_failed: std::sync::atomic::AtomicBool::new(false),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             read_gate: None,
@@ -431,9 +445,7 @@ impl SourceInput {
         request: SourceRequest,
         attempt: impl ToString,
     ) -> Result<Self, String> {
-        let len = source
-            .handle
-            .metadata()
+        let len = plurx_core::media_io::fstat(&source.handle)
             .map_err(|error| error.to_string())?
             .len();
         let custody = request
@@ -461,6 +473,7 @@ impl SourceInput {
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             read_failed: std::sync::atomic::AtomicBool::new(false),
+            physical_read_failed: std::sync::atomic::AtomicBool::new(false),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             read_gate: None,
@@ -516,6 +529,7 @@ impl SourceInput {
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             read_failed: std::sync::atomic::AtomicBool::new(false),
+            physical_read_failed: std::sync::atomic::AtomicBool::new(false),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
             read_gate: Some(Arc::clone(&gate)),
             read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
@@ -533,12 +547,10 @@ impl SourceInput {
         budget: Arc<crate::background_jobs::SourceReadBudget>,
     ) -> Result<Self, String> {
         let holder = budget.source_holder()?;
-        if !source.unchanged() {
+        if !source.unchanged().await {
             return Err("held source changed before input bridge".into());
         }
-        let len = source
-            .handle
-            .metadata()
+        let len = plurx_core::media_io::fstat(&source.handle)
             .map_err(|error| error.to_string())?
             .len();
         let state = Arc::new(InputState {
@@ -560,6 +572,7 @@ impl SourceInput {
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             read_failed: std::sync::atomic::AtomicBool::new(false),
+            physical_read_failed: std::sync::atomic::AtomicBool::new(false),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             read_gate: None,
@@ -741,14 +754,29 @@ impl SourceInput {
     }
     #[cfg(target_os = "linux")]
     pub(crate) fn source_object_version(&self) -> Option<String> {
-        let state = self.state.source.lock().expect("source input fence");
-        let source = state.as_ref().filter(|source| source.unchanged())?;
-        Some(source.object_version().to_owned())
+        // The fence's lock is held across each positioned read of the source
+        // (`read_source`), so on a hung mount it is held for as long as the
+        // mount is hung. Wait for it off the scheduler, like the fstat after.
+        plurx_core::media_io::in_place(|| {
+            let state = self.state.source.lock().expect("source input fence");
+            let source = state
+                .as_ref()
+                .filter(|source| source.unchanged_in_place())?;
+            Some(source.object_version().to_owned())
+        })
     }
     /// Whether any read this input served to its consumer failed.
     pub(crate) fn source_read_failed(&self) -> bool {
         self.state
             .read_failed
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// Whether a failed read was the storage itself (see `physical_read_failed`).
+    // Only the Linux complete-title scan classifies its reads.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn source_physical_read_failed(&self) -> bool {
+        self.state
+            .physical_read_failed
             .load(std::sync::atomic::Ordering::SeqCst)
     }
     /// Publish only for this physical input's lifetime. A cached rendition may
@@ -821,7 +849,7 @@ impl SourceInput {
             .await
             .map_err(std::io::Error::other)?;
         let state = Arc::clone(&self.state);
-        tokio::task::spawn_blocking(move || {
+        plurx_core::media_io::blocking(move || {
             let _permit = permit;
             drop(state.source.lock().expect("source input").take());
             drop(state.custody.lock().expect("source custody").take());
@@ -931,10 +959,12 @@ async fn read_source(
     offset: u64,
     remaining: u64,
 ) -> std::io::Result<Vec<u8>> {
+    let requested_at = std::time::Instant::now();
     let mut budget = tokio::select! {biased;
         ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
         budget=state.budget.lock()=>budget,
     };
+    let budget_locked_at = std::time::Instant::now();
     if state
         .observer
         .as_ref()
@@ -948,14 +978,14 @@ async fn read_source(
             .acquire_owned()
             .await
             .map_err(std::io::Error::other)?;
-        let valid = tokio::task::spawn_blocking(move || {
+        let valid = plurx_core::media_io::blocking(move || {
             let _permit = permit;
             source
                 .source
                 .lock()
                 .expect("source input")
                 .as_ref()
-                .is_some_and(|source| source.unchanged())
+                .is_some_and(|source| source.unchanged_in_place())
         })
         .await
         .map_err(std::io::Error::other)?;
@@ -1004,6 +1034,21 @@ async fn read_source(
     if observer.is_some_and(|observer| !observer.has_authority()) {
         return Err(std::io::Error::other("source authority lost"));
     }
+    let mut paced_to_grant_expiry = false;
+    // A new transfer input reads its startup burst at source speed before the
+    // epoch grant paces it, the same burst-then-hold shape as rolling input.
+    // An unverified seek landing keeps its small control windows: a burst
+    // window is discarded by the seek and would spend the bounded bootstrap
+    // allowance before the landing is proven.
+    let startup_burst_left = observer
+        .filter(|_| seek_ceiling == u64::MAX)
+        .filter(|observer| !observer.rolling_policy())
+        .map_or(0, |observer| {
+            observer
+                .startup_burst_bytes()
+                .saturating_sub(budget.startup_used)
+        });
+    let allowance_started_at = std::time::Instant::now();
     let allowance = if let Some(allocator) = state.purpose_budget.as_ref() {
         tokio::select! {biased;
             ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
@@ -1018,10 +1063,11 @@ async fn read_source(
                     .map_err(std::io::Error::other)?,
             );
         }
-        if !observer.rolling_policy() {
+        if !observer.rolling_policy() && startup_burst_left == 0 {
             if let Some(grant) = &budget.grant {
                 let now = crate::fragment_index_cluster::unix_ms();
                 if budget.used >= grant.foreground_bytes && now < grant.expires_at_ms {
+                    paced_to_grant_expiry = true;
                     observer.idle().await.map_err(std::io::Error::other)?;
                     tokio::select! {biased;
                         ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
@@ -1046,6 +1092,8 @@ async fn read_source(
         }
         if observer.rolling_policy() {
             wanted
+        } else if startup_burst_left > 0 {
+            startup_burst_left
         } else {
             budget
                 .grant
@@ -1064,6 +1112,7 @@ async fn read_source(
             allowance=allocator.allowance(wanted as usize)=>allowance? as u64,
         }
     };
+    let allowance_ready_at = std::time::Instant::now();
     let size = wanted.min(allowance) as usize;
     if size == 0 {
         return Err(std::io::Error::other(
@@ -1073,7 +1122,11 @@ async fn read_source(
     // Reserve the entire issued window before handing it to a blocking
     // worker. Cancelled/short reads receive no refund and cannot reset an
     // epoch by abandoning their HTTP waiter.
-    budget.used = budget.used.saturating_add(size as u64);
+    if startup_burst_left > 0 {
+        budget.startup_used = budget.startup_used.saturating_add(size as u64);
+    } else {
+        budget.used = budget.used.saturating_add(size as u64);
+    }
     budget.operation_used = budget
         .operation_used
         .checked_add(size as u64)
@@ -1084,10 +1137,12 @@ async fn read_source(
             allowed=observer.reads_allowed()=>allowed.map_err(std::io::Error::other)?,
         }
     }
+    let slot_requested_at = std::time::Instant::now();
     let read_permit = tokio::select! {biased;
         ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
         permit=Arc::clone(&state.read_slot).acquire_owned()=>permit.map_err(std::io::Error::other)?,
     };
+    let slot_acquired_at = std::time::Instant::now();
     // Recheck closure after acquiring the actual read slot. No new work may
     // start after close_and_wait has joined and closed the held descriptor.
     if state.close.is_cancelled() {
@@ -1102,11 +1157,13 @@ async fn read_source(
             allowed=observer.reads_allowed()=>allowed.map_err(std::io::Error::other)?,
         }
     }
+    let pause_requested_at = std::time::Instant::now();
     let pause_guard = match &state.pause {
         Some(pause) => Some(pause.enlist(&state.close).await?),
         None => None,
     };
     let read_state = Arc::clone(state);
+    let pause_enlisted_at = std::time::Instant::now();
     let activity = if let Some(observer) = observer {
         loop {
             if let Some(activity) = observer.try_active_read() {
@@ -1120,6 +1177,7 @@ async fn read_source(
     } else {
         None
     };
+    let admitted_at = std::time::Instant::now();
     let job = tokio::task::spawn_blocking(move || {
         let activity = activity;
         let _pause_guard = pause_guard;
@@ -1137,14 +1195,19 @@ async fn read_source(
         if size == 0 || read_state.close.is_cancelled() {
             return Err(std::io::Error::other("source purpose or input closed"));
         }
+        // The media slot covers the source lock, fence checks and reads only.
+        // The revalidation above waits on grants and the store; holding a
+        // slot through it would let healthy waits pin every media slot.
+        let _media = tokio::runtime::Handle::current().block_on(plurx_core::media_io::slot());
         let mut source = read_state.source.lock().expect("source input");
         let source = source
             .as_mut()
             .ok_or_else(|| std::io::Error::other("source input closed"))?;
-        if !source.unchanged() {
+        if !source.unchanged_in_place() {
             return Err(std::io::Error::other("source input changed"));
         }
         window.resize(size, 0);
+        let read_started_at = std::time::Instant::now();
         let mut count = 0;
         while count < size {
             #[cfg(unix)]
@@ -1152,24 +1215,27 @@ async fn read_source(
                 use std::os::unix::fs::FileExt;
                 source
                     .handle
-                    .read_at(&mut window[count..], offset + count as u64)?
+                    .read_at(&mut window[count..], offset + count as u64)
+                    .inspect_err(|_| read_state.mark_physical_read_failure())?
             };
             #[cfg(windows)]
             let read = {
                 use std::os::windows::fs::FileExt;
                 source
                     .handle
-                    .seek_read(&mut window[count..], offset + count as u64)?
+                    .seek_read(&mut window[count..], offset + count as u64)
+                    .inspect_err(|_| read_state.mark_physical_read_failure())?
             };
             if read == 0 {
                 break;
             }
             count += read;
         }
+        let read_elapsed = read_started_at.elapsed();
         read_state
             .source_bytes
             .fetch_add(count as u64, std::sync::atomic::Ordering::SeqCst);
-        if !source.unchanged() {
+        if !source.unchanged_in_place() {
             return Err(std::io::Error::other("source input changed"));
         }
         if count > 0 {
@@ -1178,18 +1244,39 @@ async fn read_source(
             }
         }
         window.truncate(count);
-        Ok::<_, std::io::Error>((window, read_permit))
+        Ok::<_, std::io::Error>((window, read_permit, read_elapsed))
     });
-    let (bytes, _read_permit) = tokio::select! {biased;
+    let (bytes, _read_permit, read_elapsed) = tokio::select! {biased;
         ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
         result=job=>result.map_err(std::io::Error::other)??,
     };
     if bytes.is_empty() {
+        state.mark_physical_read_failure();
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             "source input truncated",
         ));
     }
+    // One event per issued source window separates the source's own read
+    // time from the budget, grant and admission waits ahead of it.
+    tracing::debug!(
+        target: "plurxd::source_input",
+        offset,
+        bytes = bytes.len(),
+        budget_lock_ms = budget_locked_at.duration_since(requested_at).as_millis() as u64,
+        allowance_ms = allowance_ready_at.duration_since(allowance_started_at).as_millis() as u64,
+        paced_to_grant_expiry,
+        startup_burst = startup_burst_left > 0,
+        admission_ms = admitted_at.duration_since(allowance_ready_at).as_millis() as u64,
+        allowed_ms = slot_requested_at.duration_since(allowance_ready_at).as_millis() as u64,
+        read_slot_ms = slot_acquired_at.duration_since(slot_requested_at).as_millis() as u64,
+        reallowed_ms = pause_requested_at.duration_since(slot_acquired_at).as_millis() as u64,
+        pause_ms = pause_enlisted_at.duration_since(pause_requested_at).as_millis() as u64,
+        active_ms = admitted_at.duration_since(pause_enlisted_at).as_millis() as u64,
+        read_ms = read_elapsed.as_millis() as u64,
+        total_ms = requested_at.elapsed().as_millis() as u64,
+        "source window read"
+    );
     if let Some(observer) = observer {
         if !observer.rolling_policy() && budget.grant.is_none() {
             budget.grant = Some(

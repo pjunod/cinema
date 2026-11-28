@@ -9,7 +9,7 @@ use super::{
     packet_clock::SourceFragmentClock,
     IndexRow, PlanEntry, TrackDurations,
 };
-use crate::fmp4::{self, CutPolicy, Fragment, Init, Segment};
+use crate::fmp4::{self, CutPolicy, Fragment, Init, Segment, VideoOnlyFragment};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifiedCopyError {
@@ -123,9 +123,9 @@ impl VerifiedCopyKernel {
 
     /// A cut returns only preceding verified media, excluding this trigger pair.
     /// Failures latch without retracting an already returned prefix.
-    pub fn push(
+    pub fn push<'a>(
         &mut self,
-        canonical: &Fragment,
+        canonical: impl Into<VideoOnlyFragment<'a>>,
         clock: SourceFragmentClock,
         av: Fragment,
         expected: Option<&IndexRow>,
@@ -133,7 +133,7 @@ impl VerifiedCopyKernel {
         if self.failed {
             return Err(VerifiedCopyError::Failed);
         }
-        let result = self.push_inner(canonical, clock, av, expected);
+        let result = self.push_inner(canonical.into(), clock, av, expected);
         if result.is_err() {
             self.failed = true;
         }
@@ -142,7 +142,7 @@ impl VerifiedCopyKernel {
 
     fn push_inner(
         &mut self,
-        canonical: &Fragment,
+        canonical: VideoOnlyFragment<'_>,
         clock: SourceFragmentClock,
         av: Fragment,
         expected: Option<&IndexRow>,
@@ -296,6 +296,12 @@ impl VerifiedCopyKernel {
 
     /// Accept only terminal audio-only AV flushes after verified video. Any
     /// later video pair is refused; this is not an interleaved-audio API.
+    /// AV bytes pending before the next cut. A cut clones them once more
+    /// while it merges the segment.
+    pub fn pending_bytes(&self) -> usize {
+        self.pending_bytes
+    }
+
     pub fn push_audio_only(&mut self, av: Fragment) -> Result<(), VerifiedCopyError> {
         if self.failed {
             return Err(VerifiedCopyError::Failed);

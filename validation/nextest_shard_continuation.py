@@ -101,16 +101,28 @@ RUNTIME_INPUTS = {'clients/android/app/build.gradle.kts',
 
 # Reviewed recipes, not a source-commit or pull-request exception. Different
 # workflow, selector, feature, image or nextest contracts need a new review.
+# main-fast-lane.yml re-reviewed for #1811's preflight `runs-on` high-cpu
+# label (67af36308): scheduling only; the compile/test recipe is unchanged.
+# main-fast-lane.yml, rust-units.yml and rust_units.py re-reviewed for the
+# requested lane (docs/ci/REQUESTED-LANE.md): job conditions now key on
+# `lane_requested` and the merge train's named-test path is gone; every
+# compile and test command, image and resource bound is unchanged.
+# main-fast-lane.yml re-reviewed for the TV navigation evidence retention
+# (90 -> 14 days on its upload step); no compile or test step changes.
+# main-fast-lane.yml re-reviewed for worker_control_proof moving into the
+# pinned plurx-ci image (gcc for Kani's goto-cc): only that job's container,
+# prerequisite checks and ownership restore change; every compile and test
+# command, image and resource bound of the pinned recipes is unchanged.
 HARNESS = {'.config/nextest.toml': 'b68e6d071b1e441727237de221cb60ac32e78f0ddff3d9636d9004f1e8d38c81',
- '.github/workflows/main-fast-lane.yml': '3ce991087d99bc508988d674d37ca48eb99cec34ce0d18af4fc36ec7c0878e22',
- '.github/workflows/rust-units.yml': 'e9ea37562c132dcf815336a46fa954fe7e0db841527dcff16f5e98d0b0ef93c2',
+ '.github/workflows/main-fast-lane.yml': '1d145bca0a46ba2d1173ccb4f274fdb7cfcf6e55fa322ecbb4c0251e84020b3f',
+ '.github/workflows/rust-units.yml': '9bac3e8aebfe7fc16025588bef9283799f3c396a68c318f4efcf559422488548',
  'rust-toolchain.toml': '03cbfb27fcdc8253524b3e4c71c832457a504f7e9b1da5e6220178404b77f4e4',
  'validation/rust-unit-inputs.toml': '009d3107a038f79ed3986d87c96d247717bb6328a89ec179a5a2cbf0255a2372',
- 'validation/rust_units.py': 'c97c1469068209b7b9b2eb0413d8984dd338051a9e4c996843d063683bb3d683'}
+ 'validation/rust_units.py': 'ddab14543f580d1f5ed5005c438d705f78fba156d62d1fd5b71bed9792422294'}
 
 
-MAIN_SCOPE_ENV = '        env:\n          VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}\n          MERGE_TRAIN_BOT: ${{ vars.MERGE_TRAIN_BOT }}\n          MERGE_TRAIN: ${{ vars.MERGE_TRAIN }}\n'
-MANUAL_SCOPE_ENV = '        env:\n          GITHUB_TOKEN: ${{ github.token }}\n          VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}\n          MERGE_TRAIN_BOT: ${{ vars.MERGE_TRAIN_BOT }}\n          MERGE_TRAIN: ${{ vars.MERGE_TRAIN }}\n'
+MAIN_SCOPE_ENV = '        env:\n          VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}\n'
+MANUAL_SCOPE_ENV = '        env:\n          GITHUB_TOKEN: ${{ github.token }}\n          VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}\n'
 
 
 def projected_main_workflow(raw):

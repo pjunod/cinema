@@ -232,6 +232,16 @@ impl FragmentIndexOutcome {
     /// rows were waiting for. Only while the row still says so: an untyped
     /// record (`record_outcome`) replaces the typed disposition, and its legacy
     /// refusal is checked too.
+    /// Revision 3 also reopens process failures caused by an external kill.
+    /// Older workers recorded those interruptions as terminal media failures.
+    /// Revision 4 reopens the probe kills revision 3 still recorded that way.
+    /// Their only trace is the probe's own words, since a probe failure
+    /// carries no exit category, and they may carry a retry deadline kept from
+    /// an earlier transient failure. Budget failures are not reopened again:
+    /// revision 2's budget is the one they still run under.
+    /// Revision 5 reopens the F+ first-packet identity's own deadline and
+    /// outside kills, which every earlier revision recorded as a terminal
+    /// `index_completion_unverified`. They too are known only by their words.
     ///
     /// The retry deadline alone never makes a row terminal. A retryable row
     /// past it is due: the window closes when an attempt after the deadline
@@ -239,9 +249,36 @@ impl FragmentIndexOutcome {
     /// so an indexer starved past the deadline still makes the attempt the
     /// window promised instead of declaring the title unindexable unread.
     pub fn state(&self, now_ms: i64) -> IndexOutcomeState {
-        if self.typed_code == Some(crate::content_analysis::IndexFailureCode::IndexBudgetExceeded)
-            && matches!(self.refusal, IndexRefusal::Truncated { .. })
-            && self.policy_revision < crate::content_analysis::INDEX_FAILURE_POLICY_REVISION
+        use crate::content_analysis::IndexFailureCode;
+        // The words the metadata and packet probes record for a SIGKILL
+        // status (`ffmpeg::metadata_probe_output`, `HeldPacketProbeError`).
+        let probe_killed = self.reason == "index metadata probe exited signal: 9 (SIGKILL)"
+            || self
+                .reason
+                .starts_with("packet probe exited signal: 9 (SIGKILL):");
+        let terminal_process_failure = self.typed_code
+            == Some(IndexFailureCode::IndexProcessFailed)
+            && self.typed_retryable == Some(false);
+        // The words the F+ first-packet identity recorded for its own deadline
+        // and for a SIGKILL status before revision 5 (`fragindex`).
+        let packet_identity_interrupted = self.typed_code
+            == Some(IndexFailureCode::IndexCompletionUnverified)
+            && self.typed_retryable == Some(false)
+            && (self.reason
+                == "F+ source packet identity: F+ first packet identity exited signal: 9 (SIGKILL)"
+                || self.reason.starts_with(
+                    "F+ source packet identity: F+ first packet identity timed out after ",
+                ));
+        if matches!(self.refusal, IndexRefusal::Truncated { .. })
+            && ((self.policy_revision < 3
+                && (self.typed_code == Some(IndexFailureCode::IndexBudgetExceeded)
+                    || (terminal_process_failure
+                        && self.retry_deadline_ms == 0
+                        && self.diagnostic.as_ref().is_some_and(|diagnostic| {
+                            diagnostic.exit_category.as_deref() == Some("signal: 9 (SIGKILL)")
+                        }))))
+                || (self.policy_revision < 4 && terminal_process_failure && probe_killed)
+                || (self.policy_revision < 5 && packet_identity_interrupted))
         {
             return IndexOutcomeState::Due;
         }
@@ -615,21 +652,37 @@ impl IndexRow {
     /// the entire fragment's wire length, while `video_bytes` counts only the
     /// video payload. A multiplexed fragment's wire length cannot substitute
     /// for the canonical video-only measurement.
-    pub fn from_fragment(
-        fragment: &crate::fmp4::Fragment,
+    ///
+    /// A fragment kept without its slice data
+    /// ([`crate::fmp4::TrimmedFragment`]) gives the row of the whole fragment
+    /// it was: both byte counts add back what was dropped, and nothing else
+    /// in a row reads slice data.
+    pub fn from_fragment<'a>(
+        fragment: impl Into<crate::fmp4::VideoOnlyFragment<'a>>,
         init: &crate::fmp4::Init,
     ) -> Result<Self, &'static str> {
+        Self::from_video_only(fragment.into(), init)
+    }
+
+    fn from_video_only(
+        canonical: crate::fmp4::VideoOnlyFragment<'_>,
+        init: &crate::fmp4::Init,
+    ) -> Result<Self, &'static str> {
+        let fragment = canonical.fragment();
         let video = init.video().ok_or("the moov lost its video track")?;
         let track = fragment
             .track(video.id)
             .ok_or("a fragment carried no video track")?;
         // A row is an exact planning observation. Saturation would make
         // distinct fragments indistinguishable and publish a false byte budget.
-        let bytes = u32::try_from(fragment.len())
+        let bytes = u32::try_from(canonical.wire_len())
             .map_err(|_| "fragment wire bytes exceed the index row limit")?;
         let video_bytes = track
             .samples()
-            .try_fold(0u32, |total, sample| total.checked_add(sample.size))
+            .enumerate()
+            .try_fold(0u32, |total, (index, sample)| {
+                total.checked_add(u32::try_from(canonical.sample_size(index, sample.size)).ok()?)
+            })
             .ok_or("video payload bytes exceed the index row limit")?;
         let duration = track
             .samples()
@@ -1603,10 +1656,107 @@ mod tests {
     fn a_budget_failure_under_the_old_policy_is_due_once() {
         let mut old = outcome(Some(false), i64::MAX, 1_000);
         old.typed_code = Some(IndexFailureCode::IndexBudgetExceeded);
-        old.policy_revision = INDEX_FAILURE_POLICY_REVISION - 1;
+        old.policy_revision = 2;
         assert_eq!(old.state(i64::MAX - 1), IndexOutcomeState::Due);
+        // Revision 3 already budgets from the measurement; a later revision
+        // about process kills does not spend another whole-file read on it.
+        for revision in [3, INDEX_FAILURE_POLICY_REVISION] {
+            old.policy_revision = revision;
+            assert_eq!(old.state(i64::MAX - 1), IndexOutcomeState::Terminal);
+        }
+    }
+
+    /// lab5, 2026-11-25: a host OOM killed a title's metadata probe, and
+    /// revision 3 recorded the kill as a terminal process failure -- a
+    /// permanent `vod_index_unavailable` for that delivery route. A probe
+    /// failure carries no exit category; its words are the only trace.
+    #[test]
+    fn a_revision_three_probe_kill_is_due_once() {
+        for reason in [
+            "index metadata probe exited signal: 9 (SIGKILL)",
+            "packet probe exited signal: 9 (SIGKILL): ",
+        ] {
+            let mut killed = outcome(Some(false), i64::MAX, 0);
+            killed.typed_code = Some(IndexFailureCode::IndexProcessFailed);
+            killed.policy_revision = 3;
+            killed.reason = reason.to_owned();
+            killed.diagnostic = Some(crate::content_analysis::IndexDiagnostic::default());
+            assert_eq!(killed.state(1_000), IndexOutcomeState::Due, "{reason}");
+            killed.policy_revision = INDEX_FAILURE_POLICY_REVISION;
+            assert_eq!(killed.state(1_000), IndexOutcomeState::Terminal, "{reason}");
+        }
+        // A timeout earlier in the window left its deadline on the row; the
+        // kill recorded after it kept that deadline.
+        let mut after_timeout = outcome(Some(false), i64::MAX, 500);
+        after_timeout.typed_code = Some(IndexFailureCode::IndexProcessFailed);
+        after_timeout.policy_revision = 3;
+        after_timeout.reason = "index metadata probe exited signal: 9 (SIGKILL)".to_owned();
+        assert_eq!(after_timeout.state(1_000), IndexOutcomeState::Due);
+
+        let mut refused = outcome(Some(false), i64::MAX, 0);
+        refused.typed_code = Some(IndexFailureCode::IndexProcessFailed);
+        refused.policy_revision = 3;
+        refused.reason = "index metadata probe exited exit status: 1".to_owned();
+        assert_eq!(refused.state(1_000), IndexOutcomeState::Terminal);
+        // A probe's stderr quoting a kill is not the probe being killed.
+        refused.reason = "packet probe exited exit status: 1: signal: 9 (SIGKILL)".to_owned();
+        assert_eq!(refused.state(1_000), IndexOutcomeState::Terminal);
+    }
+
+    #[test]
+    fn a_revision_four_packet_identity_interruption_is_due_once() {
+        for reason in [
+            "F+ source packet identity: F+ first packet identity exited signal: 9 (SIGKILL)",
+            "F+ source packet identity: F+ first packet identity timed out after 30 seconds",
+        ] {
+            let mut row = outcome(Some(false), i64::MAX, 0);
+            row.typed_code = Some(IndexFailureCode::IndexCompletionUnverified);
+            row.policy_revision = 4;
+            row.reason = reason.to_owned();
+            assert_eq!(row.state(1_000), IndexOutcomeState::Due, "{reason}");
+            row.policy_revision = INDEX_FAILURE_POLICY_REVISION;
+            assert_eq!(row.state(1_000), IndexOutcomeState::Terminal, "{reason}");
+        }
+        // The media's own answers stay terminal.
+        for reason in [
+            "F+ source packet identity: F+ first packet identity exited exit status: 1",
+            "F+ source packet identity: F+ packet hash has no time base",
+            "F+ source packet identity: F+ packet hash does not identify the probed first source PTS",
+        ] {
+            let mut row = outcome(Some(false), i64::MAX, 0);
+            row.typed_code = Some(IndexFailureCode::IndexCompletionUnverified);
+            row.policy_revision = 4;
+            row.reason = reason.to_owned();
+            assert_eq!(row.state(1_000), IndexOutcomeState::Terminal, "{reason}");
+        }
+        // The words alone are not enough: the row must be the F+ refusal.
+        let mut other = outcome(Some(false), i64::MAX, 0);
+        other.typed_code = Some(IndexFailureCode::IndexProcessFailed);
+        other.policy_revision = 4;
+        other.reason =
+            "F+ source packet identity: F+ first packet identity timed out after 30 seconds".into();
+        assert_eq!(other.state(1_000), IndexOutcomeState::Terminal);
+    }
+
+    #[test]
+    fn an_old_external_kill_is_due_once_without_reopening_content_failures() {
+        let mut old = outcome(Some(false), i64::MAX, 0);
+        old.typed_code = Some(IndexFailureCode::IndexProcessFailed);
+        // Recorded before revision 3 made a pipe kill transient.
+        old.policy_revision = 2;
+        old.diagnostic = Some(crate::content_analysis::IndexDiagnostic {
+            exit_category: Some("signal: 9 (SIGKILL)".into()),
+            ..Default::default()
+        });
+        assert_eq!(old.state(1_000), IndexOutcomeState::Due);
+
+        let mut other = old.clone();
+        if let Some(diagnostic) = &mut other.diagnostic {
+            diagnostic.exit_category = Some("exit status: 1".into());
+        }
+        assert_eq!(other.state(1_000), IndexOutcomeState::Terminal);
         old.policy_revision = INDEX_FAILURE_POLICY_REVISION;
-        assert_eq!(old.state(i64::MAX - 1), IndexOutcomeState::Terminal);
+        assert_eq!(old.state(1_000), IndexOutcomeState::Terminal);
     }
 
     /// Review of #1299: a retried old-policy budget row that ended

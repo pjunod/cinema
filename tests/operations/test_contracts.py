@@ -11,6 +11,8 @@ import tempfile
 import textwrap
 import tomllib
 import unittest
+
+from validation import mirror_guard
 from unittest import mock
 
 from validation import runner_fleet as runner_fleet_module
@@ -38,8 +40,15 @@ GITHUB_HOSTED_RUNNERS = frozenset(
 )
 
 
-def read(path: str) -> str:
+def read_raw(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def read(path: str) -> str:
+    # A CI workflow is read without its public-mirror gate: every contract here
+    # is about the recipe, and the gate is held by its own test below.
+    text = read_raw(path)
+    return mirror_guard.strip(text) if mirror_guard.is_ci_workflow(path) else text
 
 
 def make_dry_run_commands(target: str, *variables: str) -> list[str]:
@@ -67,8 +76,12 @@ def make_dry_run_commands(target: str, *variables: str) -> list[str]:
     return commands
 
 
-def workflow_job_blocks(path: str) -> dict[str, str]:
-    jobs = read(path).split("\njobs:\n", 1)[1]
+def raw_job_blocks(path: str) -> dict[str, str]:
+    return workflow_job_blocks(path, raw=True)
+
+
+def workflow_job_blocks(path: str, raw: bool = False) -> dict[str, str]:
+    jobs = (read_raw(path) if raw else read(path)).split("\njobs:\n", 1)[1]
     starts = list(re.finditer(r"(?m)^  ([a-zA-Z0-9_-]+):\n", jobs))
     return {
         match.group(1): jobs[match.start() : starts[index + 1].start()]
@@ -398,6 +411,24 @@ class OperationsContractCase(unittest.TestCase):
                     "api": lambda *args, **kwargs: {}}):
                 with self.assertRaises(harness["Fail"]):
                     wait(fixture, len(old))
+
+    def test_ui_baseline_hostname_wrap_fixture_overflows_its_cell_on_any_face(self):
+        # The nodes-table stress fixture asserts that an unbreakable hostname
+        # wraps inside its cell. That is only a test of the CSS when the token
+        # is wider than the cell on whatever face the runner resolves for
+        # `system-ui`; a token about as wide as the meridian 1280 stacked cell
+        # wrapped on wide faces and fitted on narrow ones (CI run 9084). Pin
+        # the premise: at 4px per character, below any real face at the
+        # hostname's 14px, the token still exceeds the card's maximum width.
+        script = read("scripts/ui-baseline")
+        body = script.split("def stress_cluster_strip_containment(", 1)[1]
+        body = body.split("\ndef ", 1)[0]
+        unit = re.search(r'const unit = "([^"]+)";', body).group(1)
+        repeat = int(re.search(r"const host = unit\.repeat\((\d+)\);", body).group(1))
+        card_max = int(re.search(r'card\.style\.maxWidth = "(\d+)px";', body).group(1))
+        self.assertRegex(unit, r"^[A-Za-z0-9]+$", "the token must offer no break opportunity")
+        self.assertGreater(len(unit) * repeat * 4, card_max)
+        self.assertIn("overflow-wrap:anywhere", read("crates/plurxd/src/web/app.css").split(".clhost{", 1)[1].split("}", 1)[0])
 
     def test_ui_baseline_starts_poll_observation_after_route_settles(self):
         script = read("scripts/ui-baseline")
@@ -779,6 +810,7 @@ assert.equal(context.ACT_TIMER, null);
         checkout_revision: str = "a" * 40,
         tracked_dirty: bool = False,
         discovery_image: str | None = None,
+        shared_image: str = "",
     ) -> tuple[int, Path, Path, Path, Path, Path]:
         """Run a real rollout recipe with the checker and Docker stubbed."""
 
@@ -798,6 +830,8 @@ assert.equal(context.ACT_TIMER, null);
         (stubs / "python3").write_text(
             "#!/bin/sh\n"
             'case "$*" in\n'
+            '  *"fleet-image pull"*) printf "%s" "${STUB_SHARED_IMAGE:-}" ;;\n'
+            f'  *"fleet-image push"*) printf "%s" "$PLURX_IMAGE" > "{directory / "fleet-image-push-ran"}" ;;\n'
             f'  *docker-hardware*) printf "%s" "$3" > "{directory / 'hardware-output-path'}"; '
             f'echo docker-compose.yml; exit {hardware_exit} ;;\n'
             f'  *--emit-start-period*) printf derived > "{derive_marker}"; echo 2535s ;;\n'
@@ -841,6 +875,8 @@ assert.equal(context.ACT_TIMER, null);
         environment["STUB_IMAGE_REVISION"] = image_revision
         environment["STUB_CHECKOUT_REVISION"] = checkout_revision
         environment["STUB_TRACKED_DIRTY"] = "1" if tracked_dirty else "0"
+        environment["STUB_SHARED_IMAGE"] = shared_image
+        environment.pop("PLURX_IMAGE", None)
         if discovery_image is not None:
             environment["STUB_DISCOVERY_IMAGE"] = discovery_image
         result = subprocess.run(
@@ -921,6 +957,67 @@ assert.equal(context.ACT_TIMER, null);
         self.assertTrue(up_marker.exists())
         # The period that was proved is the period that gets applied.
         self.assertEqual(up_marker.read_text(encoding="utf-8"), "2535s")
+        # Nothing to share (no registry, dirty tree or pinned image): no push.
+        self.assertFalse((up_marker.parent / "fleet-image-push-ran").exists())
+
+        # No node had shared this clean commit: build, then share it.
+        code, _, _, _, up_marker, _ = self._run_rollout_recipe(
+            "docker-up",
+            "docker compose up -d --build",
+            proof_exit=0,
+            shared_image="share " + "a" * 40,
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(up_marker.exists())
+        self.assertTrue((up_marker.parent / "fleet-image-push-ran").exists())
+
+    def test_docker_up_starts_a_shared_commit_image_without_building(self):
+        # Another node already built this commit: the source deploy must not
+        # compile it again. The shared image ID is what gets proved and run.
+        shared = "sha256:" + "2" * 64
+        rollout = [
+            line
+            for line in make_dry_run_commands("docker-up")
+            if "docker compose up -d --build" in line
+        ][0]
+        pull = rollout.index("fleet-image pull")
+        # After the hardware overlay, so a Pi or override image is seen; before
+        # the proof, so the shared image is what gets proved.
+        self.assertGreater(pull, rollout.index("docker-hardware"))
+        self.assertLess(pull, rollout.rindex("python3 ../scripts/validate-docker-startup-budget"))
+        self.assertLess(
+            rollout.index("docker compose up -d --no-build --pull never"),
+            rollout.index("docker compose up -d --build"),
+        )
+        self.assertLess(
+            rollout.index("docker compose up -d --build"),
+            rollout.index("fleet-image push"),
+        )
+
+        code, _, derive_marker, proof_marker, up_marker, image_marker = (
+            self._run_rollout_recipe(
+                "docker-up",
+                "docker compose up -d --build",
+                proof_exit=0,
+                shared_image="use " + shared,
+            )
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(derive_marker.exists())
+        self.assertEqual(proof_marker.read_text(encoding="utf-8"), "2535s")
+        self.assertEqual(up_marker.read_text(encoding="utf-8"), "2535s")
+        self.assertEqual(image_marker.read_text(encoding="utf-8"), shared)
+        self.assertFalse((up_marker.parent / "fleet-image-push-ran").exists())
+
+        # A refused proof still leaves the running container alone.
+        code, _, _, _, up_marker, _ = self._run_rollout_recipe(
+            "docker-up",
+            "docker compose up -d --build",
+            proof_exit=2,
+            shared_image="use " + shared,
+        )
+        self.assertNotEqual(code, 0)
+        self.assertFalse(up_marker.exists())
 
     def test_prebuilt_image_rollout_matching_revision_proves_then_replaces(self):
         commands = make_dry_run_commands("docker-image-up")
@@ -1190,24 +1287,16 @@ assert.equal(context.ACT_TIMER, null);
             r"(?m)^pub const MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = ([\d_]+);$",
             config_source,
         )
-        migration_source = read("crates/plurx-core/src/cluster/migration.rs")
-        phase_names = (
+        phases = dict(checker["load_source_limits"]().phase_seconds)
+        self.assertEqual(set(phases), {
             "HIQLITE_HEALTH_TIMEOUT",
             "MEMBERSHIP_ADMISSION_TIMEOUT",
             "SNAPSHOT_CATCHUP_GRACE",
-        )
-        phases = {
-            name: re.search(
-                rf"(?m)^const {name}: Duration = Duration::from_secs\((\d+)\);$",
-                migration_source,
-            )
-            for name in phase_names
-        }
+        })
         self.assertIsNotNone(default_transfer)
         self.assertIsNotNone(default_install)
         self.assertIsNotNone(source_max_transfer)
         self.assertIsNotNone(source_max_install)
-        self.assertTrue(all(value is not None for value in phases.values()))
         assert default_transfer is not None and default_install is not None
         assert source_max_transfer is not None and source_max_install is not None
 
@@ -1217,7 +1306,7 @@ assert.equal(context.ACT_TIMER, null);
             default_transfer.group(1).replace("_", "")
         ) + int(
             default_install.group(1).replace("_", "")
-        ) + sum(int(value.group(1)) for value in phases.values() if value)
+        ) + sum(phases.values())
         self.assertGreaterEqual(
             start_period_seconds, supported_default_startup_seconds
         )
@@ -1250,7 +1339,7 @@ assert.equal(context.ACT_TIMER, null);
         supported_rollout_startup_seconds = (
             rollout_transfer_seconds
             + rollout_install_seconds
-            + sum(int(value.group(1)) for value in phases.values() if value)
+            + sum(phases.values())
         )
         self.assertGreaterEqual(
             rollout_health_seconds, supported_rollout_startup_seconds
@@ -1258,9 +1347,7 @@ assert.equal(context.ACT_TIMER, null);
 
         supported_max_startup_seconds = int(
             source_max_transfer.group(1).replace("_", "")
-        ) + int(source_max_install.group(1).replace("_", "")) + sum(
-            int(value.group(1)) for value in phases.values() if value
-        )
+        ) + int(source_max_install.group(1).replace("_", "")) + sum(phases.values())
         self.assertEqual(supported_max_startup_seconds, 18135)
         self.assertIn("`5h3m`", read("docs/OPERATIONS.md"))
 
@@ -1454,6 +1541,53 @@ assert.equal(context.ACT_TIMER, null);
             dockerfile,
         )
 
+    def test_release_build_stage_installs_its_pinned_toolchain_before_the_source(self):
+        # The `build` stage starts from a floating-version rust image, so the
+        # first cargo that sees rust-toolchain.toml makes rustup download the
+        # pinned compiler and components from static.rust-lang.org. When that
+        # happened inside the compile RUN it recurred on every source change,
+        # and one network blip failed `package and smoke (arm64)` (run 9051).
+        # The download must live in a layer keyed only on rust-toolchain.toml,
+        # and nothing after it may fetch silently.
+        dockerfile = read("Dockerfile")
+        build = dockerfile.split(" AS build\n", 1)[1].split("\nFROM ", 1)[0]
+        copy_toolchain = build.index("COPY rust-toolchain.toml ./")
+        install = build.index("RUN rustup toolchain install --profile minimal")
+        no_auto = build.index("ENV RUSTUP_AUTO_INSTALL=0")
+        copy_source = build.index("\nCOPY . .\n")
+        self.assertLess(copy_toolchain, install)
+        self.assertLess(install, no_auto)
+        self.assertLess(no_auto, copy_source)
+        # Every ARG and ENV of the stage carries per-commit values (the build
+        # SHA, ref and SOURCE_DATE_EPOCH CI passes), and BuildKit invalidates
+        # every instruction after a changed one. The toolchain layer has to
+        # come before all of them, or each commit downloads it again.
+        first_arg_or_env = min(
+            build.index(marker) for marker in ("\nARG ", "\nENV ") if marker in build
+        )
+        self.assertLess(install, first_arg_or_env)
+        self.assertLess(build.index("ENV PLURX_BUILD_SHA"), copy_source)
+        # The layer verifies the installed compiler against the channel the
+        # file names, so the version is stated once.
+        self.assertIn("rust-toolchain.toml)", build[install:no_auto])
+        self.assertRegex(
+            (ROOT / "rust-toolchain.toml").read_text(),
+            r'(?m)^channel = "\d+\.\d+\.\d+"$',
+        )
+        with tempfile.TemporaryDirectory() as scratch:
+            output = Path(scratch) / "Dockerfile.binaries"
+            subprocess.run(
+                [
+                    sys.executable, "-m", "validation.release_dockerfile",
+                    "--binary-export", "Dockerfile", str(output),
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+            derived = output.read_text()
+        self.assertIn("RUSTUP_AUTO_INSTALL=0", derived)
+        self.assertIn("COPY rust-toolchain.toml ./", derived)
+
     def test_base_image_pin_drift_is_reported_weekly_and_gates_nothing(self):
         # A pin nobody looks at is a stale pin. The weekly dependency audit is
         # the job that already exists to say "upstream moved", so the report
@@ -1637,6 +1771,11 @@ assert.equal(context.ACT_TIMER, null);
         # exact source tree; every reachable Apple device gets the archive.
         self.assertIn('devicectl device install app --device "$ident" "$app"', script)
         self.assertNotIn('already on build $APPLE_BUILD', script)
+
+        # The build number is derived from the release worktree's history,
+        # refusing a shallow or truncated one, never read from a stored counter.
+        self.assertIn('BUILD_NUMBER="$("$WORKTREE/scripts/build-number" --release)"', script)
+        self.assertNotIn("CURRENT_PROJECT_VERSION", script)
 
         # Neither artifact reaches a device unverified.
         self.assertIn("codesign --verify --deep --strict", script)
@@ -2033,22 +2172,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("needs: scope", mobile)
         self.assertNotIn("needs: [scope, preflight]", mobile)
 
-        # The recorded base sha is the target tip at event time. Comparing build
-        # counters against it keeps a branch green after an unrelated release
-        # bump lands the same counter on the target, because identical literals
-        # auto-merge with no conflict. The counter baseline must be re-fetched
-        # at job time; the recorded base stays, but only to scope the diff.
-        self.assertIn("+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF", mobile)
-        self.assertIn('MERGE_TARGET=origin/$BASE_REF" >> "$GITHUB_ENV"', mobile)
-        self.assertIn('PLURX_VALIDATION_MERGE_TARGET="$MERGE_TARGET"', mobile)
-        self.assertIn(
-            "BASE_REF: ${{ github.event.pull_request.base.ref }}",
-            mobile,
-        )
-        self.assertLess(
-            mobile.index("Resolve the current merge target"),
-            mobile.index("Check mobile release hygiene"),
-        )
+        # Build numbers are derived at build time, so the job compares no
+        # counter against a merge target and fetches none.
+        self.assertIn("run: python3 -m validation.mobile_versions", mobile)
+        self.assertNotIn("MERGE_TARGET", mobile)
         apple = workflow.split("\n  apple:\n", 1)[1].split(
             "\n  android_device:\n", 1
         )[0]
@@ -2405,11 +2532,12 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_native_macos_tray_is_independent_of_retained_mobile_evidence(self):
         def enabled(expression, *, apple, desktop, retained, tv_adopted=False, native_adopted=False,
-                    preflight="success", train=False, scope_success=True, cancelled=False):
-            values = {"apple": apple, "desktop_macos": desktop, "retain_apple": retained, "train_selected": train}
+                    preflight="success", requested=True, scope_success=True, cancelled=False):
+            values = {"apple": apple, "desktop_macos": desktop, "retain_apple": retained,
+                      "lane_requested": requested}
             expression = re.sub(
                 r"(steps\.native_receipts\.outputs\.tv_navigation != 'true')|"
-                r"needs\.scope\.outputs\.(apple|desktop_macos|retain_apple|train_selected) (==|!=) 'true'",
+                r"needs\.scope\.outputs\.(apple|desktop_macos|retain_apple|lane_requested) (==|!=) 'true'",
                 lambda match: str(not tv_adopted) if match[1] else
                 str(values[match[2]] if match[3] == "==" else not values[match[2]]),
                 expression)
@@ -2457,8 +2585,12 @@ assert.equal(context.ACT_TIMER, null);
                                              preflight="failure"))
                     self.assertFalse(enabled(condition, apple=False, desktop=True, retained=True,
                                              preflight="skipped"))
-                    self.assertTrue(enabled(condition, apple=False, desktop=True, retained=True,
-                                            preflight="skipped", train=True))
+                    # Apple is a requested-lane job (docs/ci/REQUESTED-LANE.md):
+                    # a cheap push run never allocates the macOS runner.
+                    self.assertFalse(enabled(condition, apple=True, desktop=True, retained=False,
+                                             requested=False))
+                    self.assertFalse(enabled(condition, apple=False, desktop=True, retained=True,
+                                             preflight="skipped", requested=False))
                     self.assertFalse(enabled(condition, apple=False, desktop=True, retained=True,
                                              cancelled=True))
                     receipts = steps["Authenticate compatible original native test receipts"]
@@ -3005,6 +3137,14 @@ assert.equal(context.ACT_TIMER, null);
             "raft_transport_debug_logging_exposes_only_bounded_metadata",
             "production_api_reader_reports_malformed_frames",
             "silent_peer_cannot_hold_the_server_handshake_open",
+            "pre_vote_variants_follow_every_deployed_raft_stream_ordinal",
+            "only_the_exact_header_value_advertises_pre_vote",
+            "an_older_server_never_receives_a_pre_vote_and_keeps_its_stream",
+            "an_advertising_server_answers_the_pre_vote_itself",
+            "both_raft_stream_handlers_advertise_and_answer_pre_vote",
+            "a_local_only_answer_read_from_a_socket_is_refused",
+            "an_unreachable_peer_gives_no_pre_vote_answer",
+            "a_reconnect_renegotiates_pre_vote",
             "executor_runs_one_queues_one_and_drops_abandoned_queued_work",
             "shutdown_reports_running_work_without_cancelling_it",
             "cancelled_shutdown_wait_retains_the_executor_handle",
@@ -3244,22 +3384,26 @@ assert.equal(context.ACT_TIMER, null);
         matching = [command for command in wal_commands if openraft_test in command]
         self.assertEqual(len(matching), 1)
         openraft_command = matching[0]
+        # OpenRaft is vendored (C4 pre-vote), so its regressions run from the tree.
         self.assertIn(
-            "cargo metadata --locked --manifest-path vendor/hiqlite/Cargo.toml",
-            openraft_command,
+            "cargo test --locked --manifest-path vendor/openraft/Cargo.toml", openraft_command
         )
-        self.assertIn('p["version"] == "0.9.25"', openraft_command)
-        self.assertIn("cargo test --locked", openraft_command)
-        self.assertIn('--manifest-path "$OPENRAFT_MANIFEST"', openraft_command)
         self.assertIn("--features generic-snapshot-data", openraft_command)
         self.assertIn("--lib -- --exact", openraft_command)
+        pre_vote = [command for command in wal_commands if "engine::tests::pre_vote_test::" in command]
+        self.assertEqual(len(pre_vote), 1)
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=14", pre_vote[0])
+        self.assertIn("--manifest-path vendor/openraft/Cargo.toml", pre_vote[0])
         snapshot_metrics = [
             command
             for command in wal_commands
             if " snapshot_metrics --lib -- --test-threads=1" in command
         ]
         self.assertEqual(len(snapshot_metrics), 1)
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=13", snapshot_metrics[0])
+        # 13 snapshot-metrics regressions, plus the two snapshot-builder cleanup
+        # contracts from the dead-Raft-core exit (10af9426b) and the two
+        # generation-odd restore/install contracts from patch 27 (88b29a2fc).
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=17", snapshot_metrics[0])
         self.assertIn("run: make cluster-daemon-check", workflow)
 
     def test_split_cluster_lanes_execute_and_propagate_the_exact_inventory(self):
@@ -3402,6 +3546,19 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertIn("--memory 20g --memory-swap 20g --cpus 4", options)
         self.assertIn("--cpuset-cpus 0-3 --pids-limit 4096", options)
+
+    def test_release_package_smoke_binds_the_host_identity_its_unit_binds(self):
+        # v0.9.1's Linux packages failed their install smoke because plurxd,
+        # started there without systemd, had no host identity to read.
+        job = workflow_job_blocks(".github/workflows/github-release.yml")["linux"]
+        run_in = job.split("          run_in() {\n", 1)[1].split("          }\n", 1)[0]
+        unit = (ROOT / "deploy/plurxd.service").read_text()
+        for source, target in (
+            ("/etc/machine-id", "/run/plurx-host-machine-id"),
+            ("/proc/sys/kernel/random/boot_id", "/run/plurx-host-boot-id"),
+        ):
+            self.assertIn(f"BindReadOnlyPaths={source}:{target}", unit)
+            self.assertIn(f"--mount type=bind,src={source},dst={target},readonly", run_in)
 
     def test_full_unit_suite_has_dedicated_bounded_resident_capacity(self):
         job = workflow_job_blocks(".github/workflows/ci.yml")["check"]
@@ -4148,7 +4305,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(contract_commands), 7)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=76", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=79", contract_commands[1])
         self.assertIn("PLURX_EXPECT_TEST_NAMES=", contract_commands[1])
         self.assertIn("scripts/require-test-count", contract_commands[1])
         self.assertIn("transport_recovery --lib", contract_commands[1])
@@ -4579,7 +4736,8 @@ assert.equal(context.ACT_TIMER, null);
         unraid = read("deploy/unraid-plurx.xml")
         readiness = read(".github/workflows/release-readiness.yml")
 
-        self.assertIn("uses: ./.github/workflows/publish-release.yml", ci)
+        self.assertNotIn("publish-release.yml", ci)
+        self.assertIn("uses: ./.github/workflows/publish-release.yml", read(".github/workflows/release-tag.yml"))
         self.assertIn("REGISTRY_IMAGE: " + FLEET_REGISTRY_EXPR + "/noirr/plurxd", publisher)
         self.assertEqual(publisher.count("secrets.LOCAL_REGISTRY_TOKEN"), 4)
         self.assertEqual(
@@ -4599,7 +4757,7 @@ assert.equal(context.ACT_TIMER, null);
         # job itself is pinned in tests/operations/test_release_cut.py.
         self.assertIn('  schedule:\n    - cron: "0 6 * * 1"\n', readiness)
         self.assertIn("workflow_dispatch:", readiness)
-        self.assertIn('run: python3 "$RUNNER_TEMP/release-readiness" make release-check', readiness)
+        self.assertIn('run: python3 -m validation.release_evidence --sha "$RELEASE_SHA"', readiness)
         self.assertIn("fetch-depth: 0", readiness)
 
     def test_effort_web_lints_source_without_provisioning_behavior_browser(self):
@@ -4794,15 +4952,18 @@ assert.equal(context.ACT_TIMER, null);
                     self.assertIn("\n    uses:", block, f"{path}:{name} has no runner")
                     continue
                 expected = general
-                if (
+                if path in {
+                    ".github/workflows/ci.yml",
+                    ".github/workflows/effort-ci.yml",
+                } and name == "preflight":
+                    expected = high_cpu
+                elif (
                     path == ".github/workflows/ci.yml" and name == "apple"
                 ) or (
                     path == ".github/workflows/effort-ci.yml"
                     and name == "apple_compile"
                 ):
                     expected = apple
-                elif path == ".github/workflows/release-readiness.yml" and name == "release-check":
-                    expected = local("Linux", "X64", "lab", "unit-memory-16g")
                 elif path == ".github/workflows/ci.yml" and name == "check":
                     expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":
@@ -5025,15 +5186,24 @@ assert.equal(context.ACT_TIMER, null);
                     self.assertEqual(re.findall(r"(?m)^ +runs-on: (.+)$", block),
                                      [declaration])
                     ephemeral_declarations.append(declaration)
-                    self.assertRegex(workflow, r"(?m)^on:\n  workflow_dispatch:\n\njobs:\n")
-                    # A job is either pinned to one commit or routed by an
-                    # explicit switch while CI Fleet checks its reviewed content.
-                    self.assertEqual(len({"commit_variable", "switch_variable"} & set(profile)), 1)
-                    route = (f"github.sha == vars.{profile['commit_variable']}" if "commit_variable" in profile
-                             else f"vars.{profile['switch_variable']} == '{profile['switch_value']}'")
-                    expected = ("github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main'"
-                                f" && {route}")
-                    self.assertEqual(re.findall(r"(?m)^    if: (.+)$", block), [f"${{{{ {expected} }}}}"])
+                    main_only = "github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main'"
+                    if profile.get("trust") == "same_repository":
+                        # Trusted as this repository's own branches are: a dispatch on
+                        # main that takes inputs, with no content pin or switch.
+                        self.assertFalse({"commit_variable", "switch_variable"} & set(profile))
+                        self.assertRegex(workflow, r"(?m)^on:\n  workflow_dispatch:\n    inputs:\n")
+                        self.assertNotRegex(workflow, r"(?m)^  (push|pull_request|pull_request_target|schedule|workflow_call):")
+                        self.assertEqual(re.findall(r"(?m)^    if: (.+)$", block), [f"${{{{ {main_only} }}}}"])
+                    else:
+                        self.assertNotIn("trust", profile)
+                        self.assertRegex(workflow, r"(?m)^on:\n  workflow_dispatch:\n\njobs:\n")
+                        # A job is either pinned to one commit or routed by an
+                        # explicit switch while CI Fleet checks its reviewed content.
+                        self.assertEqual(len({"commit_variable", "switch_variable"} & set(profile)), 1)
+                        route = (f"github.sha == vars.{profile['commit_variable']}" if "commit_variable" in profile
+                                 else f"vars.{profile['switch_variable']} == '{profile['switch_value']}'")
+                        expected = f"{main_only} && {route}"
+                        self.assertEqual(re.findall(r"(?m)^    if: (.+)$", block), [f"${{{{ {expected} }}}}"])
                 for labels in self_hosted_label_sets(block):
                     parsed.append(labels)
                     selections += 1
@@ -5153,6 +5323,9 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_root_job_containers_restore_persistent_workspace_ownership(self):
         workflow_root = ROOT / ".github/workflows"
+        # A CI Fleet job's VM is fresh, but its Cargo cache disk is not.
+        ephemeral = {(profile["workflow"], profile["job"]): f"    runs-on: [{profile['label']}]"
+                     for profile in runner_fleet().get("ephemeral_jobs", [])}
         for path in sorted(workflow_root.glob("*.y*ml")):
             relative = path.relative_to(ROOT).as_posix()
             for name, block in workflow_job_blocks(relative).items():
@@ -5160,7 +5333,8 @@ assert.equal(context.ACT_TIMER, null);
                     continue
                 runs_on = re.search(r"(?m)^    runs-on: .+$", block)
                 self.assertIsNotNone(runs_on, f"{relative}:{name} has no runner")
-                self.assertTrue(self_hosted_label_sets(runs_on.group(0) + "\n"))
+                self.assertTrue(self_hosted_label_sets(runs_on.group(0) + "\n")
+                                or ephemeral.get((relative, name)) == runs_on.group(0))
                 self.assertIn(
                     "Restore persistent runner workspace ownership",
                     block,
@@ -5168,9 +5342,9 @@ assert.equal(context.ACT_TIMER, null);
                 )
 
     def test_every_general_lane_job_runs_in_the_pinned_ci_image(self):
-        # A job that selects the plain `general` label set can land on any
-        # host in the fleet. On the host it inherited that host's compiler,
-        # Python, Node and FFmpeg, so the same commit passed on one runner and
+        # The general lane and its bounded formal preflights can land on
+        # multiple hosts in the fleet. On the host it inherited that host's
+        # compiler, Python, Node and FFmpeg, so the same commit passed on one runner and
         # failed on the next (a C fixture under -Werror on one host's gcc;
         # Ubuntu 24.04 guests retired because host jobs behaved differently
         # there). Every such job runs in the one image the Rust unit shards
@@ -5178,6 +5352,10 @@ assert.equal(context.ACT_TIMER, null);
         # container's default is `sh`). The reference is read from the shard
         # job, so the digest is written in the workflows only.
         general = ("self-hosted", "Linux", "X64", "lab", "general")
+        bounded_preflights = {
+            (f".github/workflows/{workflow}.yml", "preflight")
+            for workflow in ("ci", "effort-ci", "main-fast-lane")
+        }
         shard = workflow_job_blocks(".github/workflows/rust-units.yml")["shard"]
         expected = re.search(
             r"(?m)^    container:\n      image: (.+)\n      options: (.+)\n"
@@ -5249,13 +5427,17 @@ assert.equal(context.ACT_TIMER, null);
             for name, block in workflow_job_blocks(relative).items():
                 where = f"{relative}:{name}"
                 selected = label_sets(where, block)
-                if not any(set(labels) == set(general) for labels in selected):
+                expected_labels = (
+                    (*general, "high-cpu")
+                    if (relative, name) in bounded_preflights else general
+                )
+                if not any(set(labels) == set(expected_labels) for labels in selected):
                     continue
                 header = block.split("    steps:\n", 1)[0]
                 with self.subTest(job=where):
                     # A matrix or reordered selector would hide the job from
                     # the rest of this test's reader.
-                    self.assertIn("    runs-on: [" + ", ".join(general) + "]\n", header)
+                    self.assertIn("    runs-on: [" + ", ".join(expected_labels) + "]\n", header)
                     if (relative, name) in outside:
                         seen.add((relative, name))
                         self.assertNotIn(image, header, "this job entered the image; drop its row")
@@ -5276,6 +5458,9 @@ assert.equal(context.ACT_TIMER, null);
                         )
                     )
                     inside.add((relative, name))
+        self.assertLessEqual(
+            bounded_preflights, inside, "a bounded formal preflight escaped image checks"
+        )
         self.assertEqual(outside, seen, "a row names a job that is no longer on the general lane")
         self.assertEqual(1, len(digests), "the workflows pin more than one plurx-ci digest")
         for job in ("paperwork", "scope", "preflight", "web_compile", "promotion_gate"):
@@ -5420,6 +5605,54 @@ assert.equal(context.ACT_TIMER, null);
             if path.relative_to(ROOT).as_posix() in GITHUB_ONLY_WORKFLOWS:
                 continue  # GitHub-hosted by design; see the GitHub-only contract
             self.assertNotRegex(workflow, r"(?m)^ +runs-on: (?:ubuntu|macos)-")
+
+    def test_every_forgejo_job_is_skipped_on_the_public_github_mirror(self):
+        # The mirror is a verbatim push of every ref, so each file here also
+        # exists on github.com, where a workflow file can be edited by anyone
+        # whose pull request a maintainer approves. A guard inside a file is
+        # therefore only defence in depth: the boundary is that no self-hosted
+        # runner is registered to the mirror, which no test here can see. What
+        # this does hold is that a newly added or renamed Forgejo workflow does
+        # not arrive on GitHub already willing to start a job. Every job of
+        # every workflow that is not GitHub-only carries the exact negative
+        # gate in its own job-level `if`, and none can start from
+        # pull_request_target.
+        gate = "github.server_url != 'https://github.com'"
+        checked = 0
+        repository_gated = {".github/workflows/compile.yml", ".github/workflows/validation-marker-units.yml"}
+        for path in sorted(
+            p for pattern in ("*.yml", "*.yaml") for p in (ROOT / ".github/workflows").glob(pattern)
+        ):
+            relative = path.relative_to(ROOT).as_posix()
+            if relative in GITHUB_ONLY_WORKFLOWS or relative == ".github/workflows/media-runtime-public.yml":
+                continue
+            text = read_raw(relative)
+            self.assertNotIn("pull_request_target", text, relative)
+            for name, block in raw_job_blocks(relative).items():
+                with self.subTest(job=f"{relative}:{name}"):
+                    code = "\n".join(l for l in block.splitlines() if not l.lstrip().startswith("#"))
+                    header = re.split(r"(?m)^    steps:", code, maxsplit=1)[0]
+                    condition = re.search(r"(?ms)^    if:(.*?)(?=^    [a-z_-]+:|\Z)", header)
+                    self.assertIsNotNone(condition, f"{relative}:{name} has no job-level if")
+                    # The gate leads the condition and everything else is its
+                    # right operand: `gate`, `gate && (...)` or the same inside
+                    # `${{ }}`. `x || gate`, `!(gate)` and `gate || x` all start
+                    # the job on the mirror and are refused.
+                    flat = " ".join(condition.group(1).split())
+                    flat = re.sub(r"^>-? ", "", flat)
+                    if relative in repository_gated:
+                        self.assertTrue(
+                            flat.startswith("${{ github.repository == 'noirr/plurx' && "), relative)
+                    elif flat == gate + " && github.ref == 'refs/heads/main'":
+                        pass  # landing-check and mobile-channels: the original exact form
+                    else:
+                        self.assertRegex(
+                            flat,
+                            r"^(?:\$\{\{ )?" + re.escape(gate) + r"(?: && \(.*\))?(?: \}\})?$",
+                            f"{relative}:{name} is not gated off on the mirror",
+                        )
+                    checked += 1
+        self.assertGreater(checked, 80)
 
     def test_github_only_workflows_never_reach_the_fleet(self):
         # Forgejo runs every file in .github/workflows, and the GitHub mirror

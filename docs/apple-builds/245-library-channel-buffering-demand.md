@@ -1,6 +1,5 @@
 # Keep Library channel production active while buffering
 
-Build: 141
 Issue: #245
 
 Library channels now report pause intent from the viewer's Pause action only.

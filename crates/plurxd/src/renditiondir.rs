@@ -228,17 +228,34 @@ impl RenditionDir {
     }
 
     /// Write a file so that it is absent or complete and never partial.
-    async fn publish_file(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+    async fn publish_file(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        allow_init_eviction: bool,
+    ) -> io::Result<()> {
         // Segments reserve at the sink before its manifest lock. Init writes
         // also enter here, and need their own exact physical reservation.
-        let reservation = if name == INIT_NAME {
-            crate::playback_cache::reserve(self.path(), bytes.len() as u64).await?
-        } else {
-            None
+        let reservation = match (name == INIT_NAME, allow_init_eviction) {
+            (true, true) => crate::playback_cache::reserve(self.path(), bytes.len() as u64).await?,
+            (true, false) => {
+                crate::playback_cache::reserve_without_eviction(self.path(), bytes.len() as u64)
+                    .await?
+            }
+            (false, _) => None,
         };
         let tmp = self.dir.join(format!("{name}.tmp"));
-        tokio::fs::write(&tmp, bytes).await?;
-        tokio::fs::rename(&tmp, self.dir.join(name)).await?;
+        let published = async {
+            tokio::fs::write(&tmp, bytes).await?;
+            tokio::fs::rename(&tmp, self.dir.join(name)).await
+        }
+        .await;
+        if let Err(error) = published {
+            // A write that ran out of space mid-file, or a refused rename,
+            // must not leave a temporary holding the very space that ran out.
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(error);
+        }
         if let Some(reservation) = reservation {
             reservation.commit(bytes.len() as u64);
         }
@@ -246,7 +263,11 @@ impl RenditionDir {
     }
 
     pub async fn write_init(&self, bytes: &[u8]) -> io::Result<()> {
-        self.publish_file(INIT_NAME, bytes).await
+        self.publish_file(INIT_NAME, bytes, true).await
+    }
+
+    pub async fn write_init_without_eviction(&self, bytes: &[u8]) -> io::Result<()> {
+        self.publish_file(INIT_NAME, bytes, false).await
     }
 
     pub async fn has_init(&self) -> bool {
@@ -279,7 +300,7 @@ impl RenditionDir {
                 ),
             ));
         }
-        self.publish_file(&segment_name(u64::from(index)), bytes)
+        self.publish_file(&segment_name(u64::from(index)), bytes, true)
             .await?;
         manifest.materialize(index, bytes.len() as u64, at_ms);
         Ok(())
@@ -675,6 +696,17 @@ mod tests {
             let name = entry.file_name().to_string_lossy().into_owned();
             assert!(!name.ends_with(".tmp"), "{name} survived");
         }
+    }
+
+    #[tokio::test]
+    async fn a_failed_publish_leaves_no_temporary_bytes() {
+        // Disk-full and a refused rename take the same path: the error is
+        // returned and the complete or partial `.tmp` is gone with it.
+        let (_temp, rendition) = dir().await;
+        std::fs::create_dir_all(rendition.path().join(INIT_NAME).join("occupied"))
+            .expect("occupy the init name");
+        assert!(rendition.write_init(b"moov").await.is_err());
+        assert!(!rendition.path().join(format!("{INIT_NAME}.tmp")).exists());
     }
 
     #[tokio::test]

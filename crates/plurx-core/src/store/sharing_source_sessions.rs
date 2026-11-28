@@ -834,9 +834,11 @@ async fn prepare_owned_route<T: Backend>(
             {
                 SourceOwnedRouteAuthorityRead::Ready(Box::new(authority.owned))
             }
-            SourcePublicationAuthorityRead::Ready(_)
-            | SourcePublicationAuthorityRead::Unavailable => {
-                SourceOwnedRouteAuthorityRead::Unavailable
+            SourcePublicationAuthorityRead::Ready(_) => {
+                SourceOwnedRouteAuthorityRead::Unavailable(SourceRouteUnavailable::NotPublished)
+            }
+            SourcePublicationAuthorityRead::Unavailable(reason) => {
+                SourceOwnedRouteAuthorityRead::Unavailable(reason)
             }
             SourcePublicationAuthorityRead::Capacity => SourceOwnedRouteAuthorityRead::Capacity,
         },
@@ -850,15 +852,20 @@ async fn prepare_publication_route<T: Backend>(
     members: &SourceAdmissionMembers,
 ) -> Result<SourcePublicationAuthorityRead, StoreError> {
     let now = now_ms()?;
+    let refused = SourcePublicationAuthorityRead::Unavailable(SourceRouteUnavailable::Refused);
     if assignment.binding.released
         || assignment.dispatch_generation != 1
         || !present(backend).await?
-        || members.write_guard(now, 1, 2, 3).is_err()
     {
-        return Ok(SourcePublicationAuthorityRead::Unavailable);
+        return Ok(refused);
+    }
+    if members.write_guard(now, 1, 2, 3).is_err() {
+        return Ok(SourcePublicationAuthorityRead::Unavailable(
+            SourceRouteUnavailable::MembershipStale,
+        ));
     }
     let Ok(raft) = i64::try_from(members.actual_local_raft_id()) else {
-        return Ok(SourcePublicationAuthorityRead::Unavailable);
+        return Ok(refused);
     };
     let binding = &assignment.binding;
     #[derive(Deserialize)]
@@ -878,12 +885,13 @@ async fn prepare_publication_route<T: Backend>(
     let mut attempts = 0;
     loop {
         let rows=backend.sharing_read("SELECT json_object('hash',e.token_hash,'expires',r.claim_expires_at_ms,'session',s.session_id,'lease',s.lease_expires_at_ms,'revision',j.revision,'pending',CASE WHEN r.state='starting' AND b.start_resolved_at_ms IS NULL AND s.publication_ready_at_ms=9223372036854775807 THEN 1 WHEN r.state='resolved' AND b.start_resolved_at_ms IS NOT NULL AND s.publication_ready_at_ms=0 THEN 0 ELSE -1 END) AS payload FROM sharing_source_session_bindings b JOIN media_session_requests r ON r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.incarnation_id=b.incarnation_id JOIN media_sessions s ON s.incarnation_id=b.incarnation_id JOIN job_leases j ON j.resource='session:'||s.incarnation_id AND j.owner_node_id=s.owner_node_id AND j.fence=s.owner_epoch AND j.expires_at_ms=s.lease_expires_at_ms JOIN sharing_exports e ON e.id=b.share_grant_id JOIN cluster_nodes n ON n.raft_id=$1 AND n.node_id=s.owner_node_id AND n.removed_at IS NULL WHERE b.incarnation_id=$2 AND b.owner_key=$3 AND s.owner_node_id=$4 AND b.reservation_state='held' AND b.dispatch_generation=1 AND s.state='active' AND s.owner_epoch=1 AND s.lease_expires_at_ms>$5 AND length(s.session_id) BETWEEN 1 AND 256 AND length(e.token_hash)=64 AND j.revision>0 AND j.revision<9223372036854775807",vec![raft.into(),binding.incarnation_id.into(),binding.principal.owner_key().into(),assignment.owner_node_id.clone().into(),now.into()]).await?;
+        // No active, owned, unexpired route for this binding.
         let [row] = rows.as_slice() else {
-            return Ok(SourcePublicationAuthorityRead::Unavailable);
+            return Ok(refused);
         };
         let current: Current = serde_json::from_str(row).map_err(|_| invalid())?;
         if !matches!(current.pending, 0 | 1) || !is_hash(&current.hash) {
-            return Ok(SourcePublicationAuthorityRead::Unavailable);
+            return Ok(refused);
         }
         let Some(routing) = super::sharing_source_ingress_custody::routing(
             backend,
@@ -892,7 +900,7 @@ async fn prepare_publication_route<T: Backend>(
         )
         .await?
         else {
-            return Ok(SourcePublicationAuthorityRead::Unavailable);
+            return Ok(refused);
         };
         let request = SourceSessionRequest {
             principal: binding.principal.clone(),
@@ -910,13 +918,11 @@ async fn prepare_publication_route<T: Backend>(
         };
         let intent = match prepare_intent(backend, request, credential, true).await? {
             SourceIntentRead::Ready(i) => i,
-            SourceIntentRead::Unavailable => {
-                return Ok(SourcePublicationAuthorityRead::Unavailable)
-            }
+            SourceIntentRead::Unavailable => return Ok(refused),
             SourceIntentRead::Capacity => return Ok(SourcePublicationAuthorityRead::Capacity),
         };
         if !agrees(binding, &intent) {
-            return Ok(SourcePublicationAuthorityRead::Unavailable);
+            return Ok(refused);
         }
         // Bare Core has an uninhabited observation; this construction cannot
         // complete there, even though the shared source body remains type-checked.
@@ -938,8 +944,13 @@ async fn prepare_publication_route<T: Backend>(
         } else {
             SourcePublicationPhase::Published
         };
+        // No guard can be formed from this membership observation: its write
+        // guard is stale or its local member is not one this Store names.
+        // A fresher observation can form one.
         let Some((condition, values)) = route_condition(&authority, phase, now_ms()?)? else {
-            return Ok(SourcePublicationAuthorityRead::Unavailable);
+            return Ok(SourcePublicationAuthorityRead::Unavailable(
+                SourceRouteUnavailable::MembershipStale,
+            ));
         };
         let rows = backend
             .sharing_read(
@@ -949,13 +960,27 @@ async fn prepare_publication_route<T: Backend>(
             .await?;
         if rows.first().map(String::as_str) != Some("1") {
             attempts += 1;
-            if attempts < 4
-                && lease_revision_moved(backend, binding.incarnation_id, authority.lease_revision)
-                    .await?
-            {
+            let moved =
+                lease_revision_moved(backend, binding.incarnation_id, authority.lease_revision)
+                    .await?;
+            if moved && attempts < 4 {
                 continue;
             }
-            return Ok(SourcePublicationAuthorityRead::Unavailable);
+            // The guard failed with the lease revision still moving: every
+            // attempt lost to this owner's own renewals. An unmoved revision
+            // is a real refusal.
+            //
+            // A moved revision is read as this owner's own renewal, but the
+            // revision alone cannot say whose it was. A foreign takeover that
+            // committed between the guard and this read is labelled
+            // RaceExhausted once; the caller's next read observes the new
+            // owner's route and refuses it as Refused, so the mislabel costs
+            // one retry and never keeps a lost session alive.
+            return Ok(SourcePublicationAuthorityRead::Unavailable(if moved {
+                SourceRouteUnavailable::RaceExhausted
+            } else {
+                SourceRouteUnavailable::Refused
+            }));
         }
         return Ok(SourcePublicationAuthorityRead::Ready(Box::new(
             SourcePublicationAuthority {

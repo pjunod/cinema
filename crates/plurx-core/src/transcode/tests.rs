@@ -246,6 +246,50 @@ fn vulkan_playback_returns_frames_to_the_vaapi_encoder() {
     );
 }
 
+/// The QSV pairing: one filter device (Vulkan), QSV and Vulkan derived from
+/// one VA-API parent, and the encoder upload recovering QSV from that chain,
+/// including after a subtitle composite.
+#[test]
+fn vulkan_playback_returns_frames_to_the_qsv_encoder() {
+    let source = file(Some("hdr10"));
+    let upload = "hwupload=derive_device=qsv:extra_hw_frames=64,format=qsv";
+    for burn in [None, Some(true)] {
+        let options = TranscodeOptions {
+            pipeline: Pipeline::Libplacebo,
+            target_height: 1080,
+            subtitle_burn: burn.map(|bitmap| SubtitleBurn {
+                subtitle_index: 0,
+                bitmap,
+            }),
+            ..Default::default()
+        };
+        let args = hls_args(&source, Encoder::Qsv, &options, Pacing::unpaced(), "/tmp/s");
+        let joined = args.join(" ");
+        assert_eq!(
+            args.iter().filter(|a| *a == "-filter_hw_device").count(),
+            1,
+            "{joined}"
+        );
+        assert!(joined.contains("-init_hw_device vaapi=va:"), "{joined}");
+        assert!(joined.contains("-init_hw_device qsv=hw@va"), "{joined}");
+        assert!(joined.contains("-init_hw_device vulkan=vk@va"), "{joined}");
+        assert!(joined.contains("-filter_hw_device vk"), "{joined}");
+        assert!(joined.contains("h264_qsv"), "{joined}");
+        let flag = if burn.is_some() {
+            "-filter_complex"
+        } else {
+            "-vf"
+        };
+        let graph = &args[args.iter().position(|a| a == flag).expect("video graph") + 1];
+        assert!(graph.contains("hwupload,libplacebo="), "{graph}");
+        if burn.is_some() {
+            assert!(graph.ends_with(&format!("{upload}[vout]")), "{graph}");
+        } else {
+            assert!(graph.ends_with(upload), "{graph}");
+        }
+    }
+}
+
 #[test]
 fn vulkan_vaapi_playback_transfers_only_for_subtitle_burns() {
     let source = file(Some("hdr10"));
@@ -2599,6 +2643,47 @@ fn a_copy_session_begins_at_the_keyframe_before_the_requested_start() {
         "this fixture must actually exercise the lead, got {}s",
         requested - origin
     );
+}
+
+/// A scan verdict persisted after one decode probe must give later stored
+/// planning the exact facts the probe produced: the same progressive scan type
+/// and the same facts digest. A verdict for another stream proves nothing.
+#[test]
+fn stored_hevc_scan_verdict_matches_the_probed_refinement() {
+    let probe = serde_json::json!({"streams":[{
+        "index":0,"codec_type":"video","codec_name":"hevc","profile":"Main 10",
+        "pix_fmt":"yuv420p10le","width":3840,"height":2160,
+        "avg_frame_rate":"24000/1001","r_frame_rate":"24000/1001"
+    }]});
+    let unscanned = DecodeFacts::from_ffprobe_json(
+        &probe,
+        DecodeSourceIdentity::from_sha256("a".repeat(64)).expect("source identity"),
+    )
+    .expect("bound decode facts");
+    assert_eq!(unscanned.scan_type(), crate::domain::ScanType::Unknown);
+    let refinement: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/hevc-progressive-configuration.json"
+    ))
+    .expect("captured HEVC document");
+    let probed = unscanned.clone().with_hevc_scan_metadata(&refinement);
+    assert_eq!(probed.scan_type(), crate::domain::ScanType::Progressive);
+    let evidence = probed
+        .hevc_scan_evidence()
+        .expect("progressive verdict to persist");
+
+    let mut stored_probe = probe.clone();
+    stored_probe[HEVC_SCAN_PROBE_KEY] = evidence;
+    let stored = unscanned.clone().with_stored_hevc_scan(&stored_probe);
+    assert_eq!(stored.scan_type(), crate::domain::ScanType::Progressive);
+    assert_eq!(stored.facts_digest(), probed.facts_digest());
+    assert!(unscanned.hevc_scan_evidence().is_none());
+
+    let mut other_stream = probe;
+    other_stream[HEVC_SCAN_PROBE_KEY] =
+        serde_json::json!({"stream_index": 1, "progressive_frame_only": true});
+    let ignored = unscanned.clone().with_stored_hevc_scan(&other_stream);
+    assert_eq!(ignored.scan_type(), crate::domain::ScanType::Unknown);
+    assert_eq!(ignored.facts_digest(), unscanned.facts_digest());
 }
 
 #[test]

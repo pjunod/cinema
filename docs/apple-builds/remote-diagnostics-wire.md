@@ -2,7 +2,6 @@
 
 **Status:** built — strict wire validation implemented.
 
-Build: 234
 Issue: #1037
 
 Adds the v1 diagnostic manifest decoder and shared malformed/privacy fixtures

@@ -137,15 +137,16 @@ const HIQLITE_READDRESS_BACKUP_DIRNAME: &str = "hiqlite.before-readdress";
 #[cfg(feature = "hiqlite-store")]
 const HIQLITE_READDRESS_MARKER_FILENAME: &str = "hiqlite-readdress.json";
 #[cfg(feature = "hiqlite-store")]
-const HIQLITE_HEALTH_TIMEOUT: Duration = Duration::from_secs(45);
+const HIQLITE_HEALTH_TIMEOUT: Duration = crate::cluster::timing::startup::HIQLITE_HEALTH_TIMEOUT;
 #[cfg(feature = "hiqlite-store")]
-const MEMBERSHIP_ADMISSION_TIMEOUT: Duration = Duration::from_secs(45);
+const MEMBERSHIP_ADMISSION_TIMEOUT: Duration =
+    crate::cluster::timing::startup::MEMBERSHIP_ADMISSION_TIMEOUT;
 #[cfg(feature = "hiqlite-store")]
-const SNAPSHOT_CATCHUP_GRACE: Duration = Duration::from_secs(45);
+const SNAPSHOT_CATCHUP_GRACE: Duration = crate::cluster::timing::startup::SNAPSHOT_CATCHUP_GRACE;
 #[cfg(feature = "hiqlite-store")]
-const JOIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const JOIN_CONNECT_TIMEOUT: Duration = crate::cluster::timing::startup::JOIN_CONNECT_TIMEOUT;
 #[cfg(feature = "hiqlite-store")]
-const JOIN_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+const JOIN_TOTAL_TIMEOUT: Duration = crate::cluster::timing::startup::JOIN_TOTAL_TIMEOUT;
 #[cfg(feature = "hiqlite-store")]
 const JOIN_ERROR_MAX_BYTES: u64 = 4 * 1024 * 1024;
 // OpenRaft gives an AppendEntries RPC one heartbeat interval. Once a leader is
@@ -157,14 +158,18 @@ const JOIN_ERROR_MAX_BYTES: u64 = 4 * 1024 * 1024;
 // crash-recovering majority needs a coordinated update: an old leader still
 // owns the old 375 ms sender deadline and cannot be fixed by its new follower.
 #[cfg(feature = "hiqlite-store")]
-const HIQLITE_HEARTBEAT_INTERVAL_MS: u64 = 800;
+const HIQLITE_HEARTBEAT_INTERVAL_MS: u64 =
+    crate::cluster::timing::raft::HIQLITE_HEARTBEAT_INTERVAL_MS;
 #[cfg(feature = "hiqlite-store")]
-const HIQLITE_ELECTION_TIMEOUT_MIN_MS: u64 = 2_400;
+const HIQLITE_ELECTION_TIMEOUT_MIN_MS: u64 =
+    crate::cluster::timing::raft::HIQLITE_ELECTION_TIMEOUT_MIN_MS;
 #[cfg(feature = "hiqlite-store")]
-const HIQLITE_ELECTION_TIMEOUT_MAX_MS: u64 = 4_000;
+const HIQLITE_ELECTION_TIMEOUT_MAX_MS: u64 =
+    crate::cluster::timing::raft::HIQLITE_ELECTION_TIMEOUT_MAX_MS;
 /// Accepted end-to-end window for an exact-state write to survive leader loss.
 #[cfg(feature = "hiqlite-store")]
-pub(crate) const REPLICATED_LEADER_RECOVERY_BUDGET: Duration = Duration::from_secs(16);
+pub(crate) const REPLICATED_LEADER_RECOVERY_BUDGET: Duration =
+    crate::cluster::timing::raft::REPLICATED_LEADER_RECOVERY_BUDGET;
 /// Hiqlite Raft WAL segment size used by every plurx voter.
 ///
 /// Hiqlite 0.14 accepts one serialized Raft entry up to `wal_size - 34` bytes:
@@ -3799,25 +3804,61 @@ async fn start_voter(
         &local,
     )?;
 
+    // A caller that owns its cluster sockets for the config's lifetime (test
+    // fixtures) lends them here, so no other socket can take either port
+    // before Hiqlite serves on it, nor between voter generations on one
+    // config. They are lent only for the exact addresses Hiqlite would bind:
+    // the bind IP with this node's roster port. A start on any other address
+    // (fresh activation's loopback staging voter of a fixture bound elsewhere)
+    // binds as usual.
+    let lent = if config.cluster.listeners.is_owned() {
+        let raft_listen = std::net::SocketAddr::new(
+            raft_bind.ip(),
+            stored_peer_port("Raft", &local.raft_address)?,
+        );
+        let api_listen = std::net::SocketAddr::new(
+            api_bind.ip(),
+            stored_peer_port("cluster API", &local.api_address)?,
+        );
+        config
+            .cluster
+            .listeners
+            .lend(raft_listen, api_listen)
+            .map_err(|error| {
+                StoreError::Migration(format!("lending the owned cluster listeners: {error}"))
+            })?
+    } else {
+        None
+    };
     // The daemon lock guards one data directory, but these ports are host-wide
     // and default to fixed values, so two data directories on one host collide.
     // Without this check the node does not report a bind conflict: it reaches a
     // foreign voter's listener, retries the handshake for the full start
     // timeout, and then blames the migration. Check first and say which port.
-    for (role, address) in [("raft", raft_bind), ("cluster API", api_bind)] {
-        if let Err(error) = std::net::TcpListener::bind(address) {
-            return Err(StoreError::Migration(format!(
-                "the {role} port {address} is not available: {error}. Another plurxd on \
-                 this host is using it — cluster ports are host-wide, so a second data \
-                 directory needs its own raft_bind and api_bind"
-            )));
+    // The probe socket is dropped rather than handed over: a listening socket
+    // would queue peers' connections through the whole Raft start instead of
+    // refusing them.
+    if lent.is_none() {
+        for (role, address) in [("raft", raft_bind), ("cluster API", api_bind)] {
+            if let Err(error) = std::net::TcpListener::bind(address) {
+                return Err(StoreError::Migration(format!(
+                    "the {role} port {address} is not available: {error}. Another plurxd on \
+                     this host is using it — cluster ports are host-wide, so a second data \
+                     directory needs its own raft_bind and api_bind"
+                )));
+            }
         }
     }
+    let listeners = lent.map(|owned| hiqlite::NodeListeners {
+        raft: owned.raft,
+        api: owned.api,
+    });
     let node_config = NodeConfig {
         node_id: identity.raft_id,
         nodes,
         listen_addr_api: Cow::Owned(api_bind.ip().to_string()),
         listen_addr_raft: Cow::Owned(raft_bind.ip().to_string()),
+        listeners,
         data_dir: Cow::Owned(target.to_string_lossy().into_owned()),
         filename_db: Cow::Borrowed(HIQLITE_DATABASE_FILENAME),
         secret_raft: secrets.raft.clone(),
@@ -5619,7 +5660,7 @@ pub mod status {
     //! M3; this module only turns the backend and Raft metrics the daemon already
     //! has into an honest answer about watch-state convergence.
 
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::future::Future;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -5648,17 +5689,23 @@ pub mod status {
     pub use hiqlite::Client as HiqliteClient;
     use std::sync::{Arc, Mutex};
 
-    const PASSIVE_METRICS_REFRESH: Duration = Duration::from_secs(5);
-    const PASSIVE_METRICS_FRESHNESS_SECS: u64 = 15;
-    const QUORUM_WATERMARK_REFRESH: Duration = Duration::from_millis(500);
-    const QUORUM_WATERMARK_TIMEOUT: Duration = Duration::from_millis(750);
+    const PASSIVE_METRICS_REFRESH: Duration =
+        crate::cluster::timing::serving::PASSIVE_METRICS_REFRESH;
+    const PASSIVE_METRICS_FRESHNESS_SECS: u64 =
+        crate::cluster::timing::serving::PASSIVE_METRICS_FRESHNESS_SECS;
+    const QUORUM_WATERMARK_REFRESH: Duration =
+        crate::cluster::timing::serving::QUORUM_WATERMARK_REFRESH;
+    const QUORUM_WATERMARK_TIMEOUT: Duration =
+        crate::cluster::timing::serving::QUORUM_WATERMARK_TIMEOUT;
+    const REPLICATION_SETTLE: Duration = crate::cluster::timing::serving::REPLICATION_SETTLE;
     /// How long one quorum confirmation proves this node's authority to serve
     /// from its replica. The route cache of playback-start E1c holds a fact it
     /// observed directly (a row it committed, or a quorum read) for the same
     /// lease and no longer, so a node without a serving proof costs one quorum
     /// read per session per lease (`docs/streaming/PLAYBACK-START-E1-BUILD.md`
     /// §4.4): one time bound, the proof's own.
-    pub const QUORUM_WATERMARK_LEASE: Duration = Duration::from_secs(1);
+    pub const QUORUM_WATERMARK_LEASE: Duration =
+        crate::cluster::timing::serving::QUORUM_WATERMARK_LEASE;
     /// How many quorum confirmations of the current generation a node keeps,
     /// so a confirmation it catches up to after a newer one has landed still
     /// proves authority until its own lease ends (C1 of
@@ -5730,6 +5777,8 @@ pub mod status {
         pub running: bool,
         pub leader_known: bool,
         pub voter_count: usize,
+        /// The last entry this observation covers. A settled read covers the
+        /// log it began with, which may be older than what has applied since.
         pub last_log_index: Option<u64>,
         pub last_applied_term: Option<u64>,
         pub last_applied_index: Option<u64>,
@@ -7259,7 +7308,11 @@ pub mod status {
         wal_status: Option<hiqlite::WalStatusHandle>,
         passive_metrics: PassiveRaftMetrics,
         local_transport: Option<LocalSnapshotTransportStatus>,
-        previous: Arc<Mutex<Option<ReplicationStatus>>>,
+        /// The newest remembered status and the read sequence that produced it.
+        previous: Arc<Mutex<Option<(u64, ReplicationStatus)>>>,
+        /// What the latest read on a leader saw of each other voter.
+        peers: PeerMemorySlot,
+        reads: Arc<AtomicU64>,
     }
 
     impl ReplicationMonitor {
@@ -7274,6 +7327,8 @@ pub mod status {
                 passive_metrics: PassiveRaftMetrics::new(false),
                 local_transport: None,
                 previous: Arc::new(Mutex::new(None)),
+                peers: PeerMemorySlot::default(),
+                reads: Arc::new(AtomicU64::new(0)),
             }
         }
 
@@ -7299,6 +7354,8 @@ pub mod status {
                 passive_metrics,
                 local_transport,
                 previous: Arc::new(Mutex::new(None)),
+                peers: PeerMemorySlot::default(),
+                reads: Arc::new(AtomicU64::new(0)),
             }
         }
 
@@ -7317,6 +7374,8 @@ pub mod status {
                 passive_metrics: PassiveRaftMetrics::remote_authority(),
                 local_transport: None,
                 previous: Arc::new(Mutex::new(None)),
+                peers: PeerMemorySlot::default(),
+                reads: Arc::new(AtomicU64::new(0)),
             }
         }
 
@@ -7435,6 +7494,7 @@ pub mod status {
                 };
             }
 
+            let read = self.reads.fetch_add(1, Ordering::Relaxed);
             let previous = self.previous();
             let client = self
                 .client
@@ -7442,6 +7502,9 @@ pub mod status {
                 .expect("replicated monitor must carry a client");
             let status = match client.metrics_db().await {
                 Ok(metrics) => {
+                    let metrics = settle_own_writes(client, metrics, &self.peers, read).await;
+                    // Date the observation after the settle it describes.
+                    let checked_at = unix_seconds();
                     let voter_ids = metrics
                         .membership_config
                         .voter_ids()
@@ -7478,7 +7541,7 @@ pub mod status {
                     unavailable(previous.as_ref(), checked_at)
                 }
             };
-            self.remember(status.clone());
+            self.remember(read, status.clone());
             status
         }
 
@@ -7486,14 +7549,265 @@ pub mod status {
             self.previous
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .map(|(_, status)| status.clone())
+        }
+
+        /// Concurrent reads can finish out of order now that a read may wait
+        /// to settle; a read that started earlier never replaces a later one.
+        fn remember(&self, read: u64, status: ReplicationStatus) {
+            let mut previous = self
+                .previous
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if previous.as_ref().is_none_or(|(newer, _)| *newer < read) {
+                *previous = Some((read, status));
+            }
+        }
+    }
+
+    /// What one read saw of the other voters, in the term it read.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct PeerMemory {
+        read: u64,
+        term: u64,
+        /// The last entry that read covered.
+        covered: Option<u64>,
+        /// Each other voter, and whether it held every entry the read covered.
+        caught_up: BTreeMap<u64, bool>,
+    }
+
+    impl PeerMemory {
+        fn observe(read: u64, metrics: &hiqlite::DbRaftMetrics) -> Self {
+            let covered = covered_index(
+                metrics.last_log_index,
+                metrics.last_applied.as_ref().map(|log| log.index),
+            );
+            Self {
+                read,
+                term: metrics.current_term,
+                covered,
+                caught_up: voter_peers(metrics)
+                    .map(|(node_id, matched)| (node_id, matched >= covered))
+                    .collect(),
+            }
+        }
+
+        /// A voter keeps up when the previous read in this term saw it hold
+        /// everything that read covered, or it has since caught up to that.
+        /// A voter far behind, down or stalled does not, so it is reported at
+        /// once instead of costing every read the settle wait. Nothing known
+        /// of it in this term counts as keeping up.
+        fn keeps_up(prior: Option<&Self>, term: u64, node_id: u64, matched: Option<u64>) -> bool {
+            let Some(prior) = prior.filter(|prior| prior.term == term) else {
+                return true;
+            };
+            prior
+                .caught_up
+                .get(&node_id)
+                .is_none_or(|caught_up| *caught_up || matched >= prior.covered)
+        }
+    }
+
+    /// Reads finish out of order; a read that began earlier never replaces a
+    /// later one.
+    #[derive(Clone, Default)]
+    struct PeerMemorySlot(Arc<Mutex<Option<PeerMemory>>>);
+
+    impl PeerMemorySlot {
+        fn get(&self) -> Option<PeerMemory> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
         }
 
-        fn remember(&self, status: ReplicationStatus) {
-            *self
-                .previous
+        fn store(&self, memory: PeerMemory) {
+            let mut slot = self
+                .0
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status);
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slot.as_ref().is_none_or(|newer| newer.read < memory.read) {
+                *slot = Some(memory);
+            }
+        }
+    }
+
+    /// Callers bound a status read (a roster preflight gives it
+    /// `PEER_DIRECTORY_TIMEOUT`). A read dropped while it waits for voters
+    /// still records them as not caught up, so the next read does not wait
+    /// on a stalled voter again and time out the same way.
+    struct PendingPeers<'a> {
+        slot: &'a PeerMemorySlot,
+        pending: Option<PeerMemory>,
+    }
+
+    impl Drop for PendingPeers<'_> {
+        fn drop(&mut self) {
+            if let Some(memory) = self.pending.take() {
+                self.slot.store(memory);
+            }
+        }
+    }
+
+    /// The voters other than this leader, with the index each has matched.
+    fn voter_peers(
+        metrics: &hiqlite::DbRaftMetrics,
+    ) -> impl Iterator<Item = (u64, Option<u64>)> + '_ {
+        let voters = metrics
+            .membership_config
+            .voter_ids()
+            .collect::<BTreeSet<_>>();
+        metrics
+            .replication
+            .iter()
+            .flatten()
+            .filter(move |(node_id, _)| **node_id != metrics.id && voters.contains(*node_id))
+            .map(|(node_id, matched)| (*node_id, matched.as_ref().map(|log| log.index)))
+    }
+
+    /// The last entry an observation covers: its log, but never past what
+    /// this node has applied (see `settle_own_writes`).
+    fn covered_index(last_log_index: Option<u64>, last_applied_index: Option<u64>) -> Option<u64> {
+        match (last_log_index, last_applied_index) {
+            (Some(log), Some(applied)) => Some(log.min(applied)),
+            (_, applied) => applied,
+        }
+    }
+
+    /// openraft answers a local write before it republishes `last_applied`,
+    /// so a snapshot read during or just after a local write can hold entries
+    /// the state machine is applying in that same Raft-core turn. On a leader
+    /// the write also commits on a quorum while the remaining voters are still
+    /// being sent the entry, and openraft publishes their match indexes after
+    /// answering too.
+    ///
+    /// In sync therefore means: every entry the log held when the read began
+    /// was applied here, and reached every voter that has been keeping up,
+    /// within `REPLICATION_SETTLE`. Entries appended while waiting are not
+    /// part of this observation: they neither extend the wait nor count as
+    /// lag, and the next read settles them the same way. The settled
+    /// snapshot's `last_log_index` is the entry it covers.
+    ///
+    /// Which voters keep up is decided by `PeerMemory::keeps_up`. A remote
+    /// client, a stopped Raft, or lag that outlasts the bound keeps what was
+    /// last observed, so real lag is still reported.
+    async fn settle_own_writes(
+        client: &Client,
+        metrics: hiqlite::DbRaftMetrics,
+        peers: &PeerMemorySlot,
+        read: u64,
+    ) -> hiqlite::DbRaftMetrics {
+        let mut pending = PendingPeers {
+            slot: peers,
+            pending: None,
+        };
+        let settled =
+            settle_through_snapshot(client, metrics, peers.get(), read, &mut pending).await;
+        pending.pending = None;
+        peers.store(PeerMemory::observe(read, &settled));
+        settled
+    }
+
+    async fn settle_through_snapshot(
+        client: &Client,
+        metrics: hiqlite::DbRaftMetrics,
+        prior: Option<PeerMemory>,
+        read: u64,
+        pending: &mut PendingPeers<'_>,
+    ) -> hiqlite::DbRaftMetrics {
+        let Some(target) = metrics.last_log_index else {
+            return metrics;
+        };
+        if metrics.running_state.is_err() {
+            return metrics;
+        }
+        let applied = move |metrics: &hiqlite::DbRaftMetrics| {
+            metrics.last_applied.as_ref().map(|log| log.index) >= Some(target)
+        };
+        let in_flight = voter_peers(&metrics)
+            .filter(|(node_id, matched)| {
+                *matched < Some(target)
+                    && PeerMemory::keeps_up(
+                        prior.as_ref(),
+                        metrics.current_term,
+                        *node_id,
+                        *matched,
+                    )
+            })
+            .map(|(node_id, _)| node_id)
+            .collect::<BTreeSet<_>>();
+        // Should this read be dropped while it waits, every voter is measured
+        // against the entry it was waiting for.
+        let unsettled = PeerMemory {
+            read,
+            term: metrics.current_term,
+            covered: Some(target),
+            caught_up: voter_peers(&metrics)
+                .map(|(node_id, matched)| (node_id, matched >= Some(target)))
+                .collect(),
+        };
+        let reached = move |metrics: &hiqlite::DbRaftMetrics| {
+            // A node that stopped leading has no peers of its own to wait on,
+            // and a voter removed meanwhile is no longer this read's concern.
+            metrics.replication.as_ref().is_none_or(|replication| {
+                let voters = metrics
+                    .membership_config
+                    .voter_ids()
+                    .collect::<BTreeSet<_>>();
+                in_flight.iter().all(|node_id| {
+                    !voters.contains(node_id)
+                        || replication.get(node_id).is_some_and(|matched| {
+                            matched.as_ref().map(|log| log.index) >= Some(target)
+                        })
+                })
+            })
+        };
+        let cover = move |mut settled: hiqlite::DbRaftMetrics| {
+            if settled.running_state.is_ok() {
+                settled.last_log_index = Some(target);
+            }
+            settled
+        };
+        let deadline = tokio::time::Instant::now() + REPLICATION_SETTLE;
+        let local = if applied(&metrics) {
+            metrics
+        } else {
+            match client
+                .wait_local_db_metrics(deadline, move |current| {
+                    current.running_state.is_err() || applied(current)
+                })
+                .await
+            {
+                Ok(settled) => settled,
+                Err(_) => return metrics,
+            }
+        };
+        if local.running_state.is_err() {
+            return local;
+        }
+        if reached(&local) {
+            return cover(local);
+        }
+        pending.pending = Some(unsettled);
+        match client
+            .wait_local_db_metrics(deadline, |current| {
+                current.running_state.is_err() || reached(current)
+            })
+            .await
+        {
+            Ok(settled) if settled.running_state.is_ok() => cover(settled),
+            Ok(stopped) => stopped,
+            // This node applied what the read covered. Report what the voters
+            // hold now, so only those that missed the bound read as behind.
+            // The re-read is a local watch clone, never a remote request.
+            Err(hiqlite::Error::Timeout(_)) => match client.metrics_db().await {
+                Ok(current) if current.running_state.is_ok() => cover(current),
+                Ok(stopped) => stopped,
+                Err(_) => cover(local),
+            },
+            // A remote client cannot wait: keep what it observed, unclamped.
+            Err(_) => local,
         }
     }
 
@@ -7515,7 +7829,9 @@ pub mod status {
         let mut peer_lag = 0_u64;
         if let Some(peers) = &observation.peer_matched_indexes {
             unknown_peer = peers.len() < expected_peers;
-            if let Some(target) = observation.last_applied_index {
+            if let Some(target) =
+                covered_index(observation.last_log_index, observation.last_applied_index)
+            {
                 for applied in peers {
                     match applied {
                         Some(index) => peer_lag = peer_lag.max(target.saturating_sub(*index)),
@@ -7555,7 +7871,8 @@ pub mod status {
         let last_converged_index = if degraded {
             previous.and_then(|status| status.last_converged_index)
         } else {
-            observation.last_applied_index
+            // Peers were checked through the covered entry, not past it.
+            covered_index(observation.last_log_index, observation.last_applied_index)
         };
         let explanation = if two_voter_reconfiguration {
             "Two voters are a degraded reconfiguration state, not supported HA. Keep both voters online and add a third before treating the cluster as redundant."
@@ -9357,6 +9674,281 @@ pub mod status {
             assert!(!status.clustered);
             assert_eq!(status.last_converged_at, None);
             assert!(status.explanation.contains("stored only on this server"));
+        }
+
+        #[test]
+        fn a_voter_keeps_up_only_if_it_held_or_reached_what_the_last_read_covered() {
+            let prior = PeerMemory {
+                read: 4,
+                term: 7,
+                covered: Some(100),
+                caught_up: [(2, true), (3, false)].into_iter().collect(),
+            };
+            let keeps_up =
+                |term, node_id, matched| PeerMemory::keeps_up(Some(&prior), term, node_id, matched);
+            assert!(
+                keeps_up(7, 2, Some(90)),
+                "caught up last read: in flight now"
+            );
+            assert!(
+                keeps_up(7, 3, Some(100)),
+                "has caught up to the last read since"
+            );
+            assert!(
+                !keeps_up(7, 3, Some(99)),
+                "behind what the last read covered"
+            );
+            assert!(!keeps_up(7, 3, None), "never matched in this term");
+            assert!(keeps_up(8, 3, Some(1)), "a new term resets what is known");
+            assert!(keeps_up(7, 4, Some(1)), "a voter the last read did not see");
+            assert!(PeerMemory::keeps_up(None, 7, 3, None), "no read yet");
+        }
+
+        #[test]
+        fn a_read_dropped_while_waiting_still_records_the_voters_it_waited_on() {
+            let slot = PeerMemorySlot::default();
+            let unsettled = PeerMemory {
+                read: 2,
+                term: 7,
+                covered: Some(100),
+                caught_up: [(2, true), (3, false)].into_iter().collect(),
+            };
+            drop(PendingPeers {
+                slot: &slot,
+                pending: Some(unsettled.clone()),
+            });
+            assert_eq!(slot.get(), Some(unsettled.clone()));
+            slot.store(PeerMemory {
+                read: 1,
+                ..unsettled.clone()
+            });
+            assert_eq!(
+                slot.get().map(|memory| memory.read),
+                Some(2),
+                "an older read never wins"
+            );
+            drop(PendingPeers {
+                slot: &slot,
+                pending: None,
+            });
+            assert_eq!(
+                slot.get(),
+                Some(unsettled),
+                "a finished read leaves nothing pending"
+            );
+        }
+
+        /// Three real in-process voters on loopback sockets this test holds.
+        struct ThreeVoters {
+            _root: tempfile::TempDir,
+            clients: Vec<Client>,
+        }
+
+        impl ThreeVoters {
+            async fn start() -> Self {
+                let _ = rustls::crypto::ring::default_provider().install_default();
+                let root = tempfile::tempdir().expect("three-voter root");
+                let listeners = (0..3)
+                    .map(|_| {
+                        (
+                            std::net::TcpListener::bind("127.0.0.1:0").expect("Raft port"),
+                            std::net::TcpListener::bind("127.0.0.1:0").expect("API port"),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let nodes = listeners
+                    .iter()
+                    .zip(1_u64..)
+                    .map(|((raft, api), id)| hiqlite::Node {
+                        id,
+                        addr_raft: raft.local_addr().expect("Raft address").to_string(),
+                        addr_api: api.local_addr().expect("API address").to_string(),
+                    })
+                    .collect::<Vec<_>>();
+                let starts = listeners.into_iter().zip(1_u64..).map(|((raft, api), id)| {
+                    let config = hiqlite::NodeConfig {
+                        node_id: id,
+                        nodes: nodes.clone(),
+                        listeners: Some(hiqlite::NodeListeners { raft, api }),
+                        listen_addr_api: std::borrow::Cow::Borrowed("127.0.0.1"),
+                        listen_addr_raft: std::borrow::Cow::Borrowed("127.0.0.1"),
+                        data_dir: std::borrow::Cow::Owned(
+                            root.path()
+                                .join(format!("node-{id}"))
+                                .to_string_lossy()
+                                .into_owned(),
+                        ),
+                        filename_db: std::borrow::Cow::Borrowed("peer-lag.db"),
+                        secret_api: "peer-lag-api-secret".to_owned(),
+                        secret_raft: "peer-lag-raft-secret".to_owned(),
+                        tls_api: None,
+                        tls_raft: None,
+                        health_check_delay_secs: 0,
+                        ..crate::cluster::migration::production_hiqlite_defaults_with_read_pool(1)
+                    };
+                    Box::pin(hiqlite::start_node(config))
+                });
+                let clients = futures_util::future::try_join_all(starts)
+                    .await
+                    .expect("three in-process voters");
+                Self {
+                    _root: root,
+                    clients,
+                }
+            }
+
+            /// The voter that leads once every peer has matched the log.
+            async fn converged_leader(&self) -> Client {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                let leads = self.clients.iter().map(|client| {
+                    Box::pin(async move {
+                        client
+                            .wait_local_db_metrics(deadline, |metrics| {
+                                metrics.current_leader == Some(metrics.id)
+                                    && metrics.membership_config.voter_ids().count() == 3
+                                    && metrics.replication.as_ref().is_some_and(|replication| {
+                                        replication.len() == 3
+                                            && replication.values().all(|matched| {
+                                                matched.as_ref().map(|log| log.index)
+                                                    == metrics.last_log_index
+                                            })
+                                    })
+                            })
+                            .await
+                            .map(|_| client.clone())
+                    })
+                });
+                futures_util::future::select_ok(leads)
+                    .await
+                    .expect("one voter leads a converged three-voter cluster")
+                    .0
+            }
+
+            /// Stop one voter that is not `leader`, leaving the quorum of two.
+            async fn stop_follower(&mut self, leader: &Client) {
+                let leader_id = leader.metrics_db().await.expect("leader metrics").id;
+                let mut index = 0;
+                while index < self.clients.len() {
+                    let id = self.clients[index]
+                        .metrics_db()
+                        .await
+                        .expect("voter metrics")
+                        .id;
+                    if id != leader_id {
+                        break;
+                    }
+                    index += 1;
+                }
+                self.clients
+                    .remove(index)
+                    .shutdown()
+                    .await
+                    .expect("follower shutdown");
+            }
+
+            async fn shutdown(self) {
+                // A clustered member waits before it stops; stop them together.
+                futures_util::future::try_join_all(self.clients.iter().map(Client::shutdown))
+                    .await
+                    .expect("voter shutdown");
+            }
+        }
+
+        /// A leader's own write commits on a quorum of two while the third
+        /// voter is still being sent the entry, and openraft publishes the
+        /// match index after answering. Neither in-flight gap is lag.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn three_voter_leader_stays_in_sync_through_its_own_replicated_writes() {
+            let voters = Box::pin(ThreeVoters::start()).await;
+            let leader = voters.converged_leader().await;
+            let monitor = ReplicationMonitor::replicated(leader.clone(), "unused", "peer-lag.db");
+            leader
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS peer_lag (k INTEGER PRIMARY KEY, v INTEGER NOT NULL)",
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("regression table");
+            assert_eq!(
+                monitor.status().await.health,
+                ReplicationHealth::InSync,
+                "a converged leader starts in sync"
+            );
+            let stop = tokio_util::sync::CancellationToken::new();
+            let writes = async {
+                let _stop = stop.clone().drop_guard();
+                for write in 0_i64..200 {
+                    leader
+                        .execute(
+                            "INSERT INTO peer_lag (k, v) VALUES ($1, $1)",
+                            hiqlite::params!(write),
+                        )
+                        .await
+                        .expect("replicated write");
+                    let status = monitor.status().await;
+                    assert_eq!(
+                        status.health,
+                        ReplicationHealth::InSync,
+                        "after write {write}: {}",
+                        status.explanation
+                    );
+                }
+            };
+            let reads = async {
+                let mut sampled = 0_u32;
+                while !stop.is_cancelled() {
+                    let status = monitor.status().await;
+                    assert_eq!(
+                        status.health,
+                        ReplicationHealth::InSync,
+                        "read during writes: {}",
+                        status.explanation
+                    );
+                    sampled += 1;
+                    tokio::task::yield_now().await;
+                }
+                sampled
+            };
+            let ((), sampled) = tokio::join!(writes, reads);
+            assert!(
+                sampled > 0,
+                "the concurrent reader must sample during the writes"
+            );
+
+            // A stopped voter is real lag. It is reported, and once a read has
+            // seen it stall, later reads report it without waiting to settle.
+            let mut voters = voters;
+            voters.stop_follower(&leader).await;
+            leader
+                .execute(
+                    "INSERT INTO peer_lag (k, v) VALUES (1000, 1000)",
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("write on the remaining quorum");
+            let first = monitor.status().await;
+            assert_eq!(
+                first.health,
+                ReplicationHealth::Degraded,
+                "{}",
+                first.explanation
+            );
+            assert!(
+                first.explanation.contains("one or more nodes"),
+                "{}",
+                first.explanation
+            );
+            for _ in 0..3 {
+                let started = tokio::time::Instant::now();
+                let status = monitor.status().await;
+                assert_eq!(status.health, ReplicationHealth::Degraded);
+                assert!(
+                    started.elapsed() < REPLICATION_SETTLE / 2,
+                    "a stalled voter must not cost every read the settle wait: {:?}",
+                    started.elapsed()
+                );
+            }
+            voters.shutdown().await;
         }
 
         #[tokio::test]

@@ -120,8 +120,8 @@ pub(in crate::source_probe) async fn prepare_authored(
         || context.admission.is_probe_only()
         || planes.layout.role != CaptureRole::SourceFel
         || planes.frames.len() != FRAMES as usize
-        || !planes.composed.unchanged()
-        || !title.source.unchanged()
+        || !planes.composed.unchanged().await
+        || !title.source.unchanged().await
         || planes.source_object_version != title.source.object_version()
         || planes.source_sha256 != title.content_sha256
         || planes.probe_sha256 != title.probe_sha256
@@ -501,9 +501,9 @@ pub(in crate::source_probe) async fn prepare_authored(
         receipt.update(frame.rpu_sha256);
     }
     check_cancel(cancel)?;
-    if !source.unchanged()
-        || !title.source.unchanged()
-        || !planes.composed.unchanged()
+    if !source.unchanged().await
+        || !title.source.unchanged().await
+        || !planes.composed.unchanged().await
         || !ffmpeg.is_current().await
         || !context.tools.is_current().await
         || !context.tools.muxer_is_current().await
@@ -663,7 +663,7 @@ impl EncoderRun<'_, '_> {
                 "trace uses a different encoder closure",
             ));
         }
-        if !plan_file.unchanged() || !self.planes.composed.unchanged() {
+        if !plan_file.unchanged().await || !self.planes.composed.unchanged().await {
             return Err(PrepareError::Authority("held encoder inputs changed"));
         }
         let mut bound = Sha256::new();
@@ -865,7 +865,7 @@ async fn check_publish(
     {
         return Err(PrepareError::Cancelled);
     }
-    if !title.source.unchanged() {
+    if !title.source.unchanged().await {
         return Err(PrepareError::Authority(
             "held source changed during candidate custody",
         ));
@@ -1227,7 +1227,7 @@ async fn baseline(
     .await?;
     let (trace_configuration, trace_closure) =
         trace_clip(context, ffmpeg, &file, &trace_path, false, scratch).await?;
-    if closure != trace_closure || !source.unchanged() {
+    if closure != trace_closure || !source.unchanged().await {
         return Err(PrepareError::Authority(
             "independent CLI closure or held input changed",
         ));
@@ -1363,7 +1363,7 @@ async fn loaded_closure(tools: &ToolSet, stderr: &[u8]) -> Result<Hash> {
                 count += next as u64;
                 digest.update(&bytes[..next]);
             }
-            if count == 0 || count > MAX_LIB_BYTES || !held.unchanged() {
+            if count == 0 || count > MAX_LIB_BYTES || !held.unchanged_in_place() {
                 return Err(PrepareError::Authority("loaded encoder library moved"));
             }
             Ok((canonical, <Hash>::from(digest.finalize())))

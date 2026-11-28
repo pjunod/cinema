@@ -2,6 +2,120 @@ use super::*;
 use plurx_core::segplan::{self, SEGPLAN_VERSION};
 use plurx_core::testfixtures;
 
+/// lab5, 2026-11-25: a host OOM killed file 206's metadata probe and the
+/// kill was recorded as a terminal refusal of that delivery route. A probe
+/// killed from outside is transient, as the index pipe already was; a probe
+/// that refuses the source is not.
+#[test]
+fn an_externally_killed_probe_is_a_transient_failure() {
+    use crate::ffmpeg::{HeldPacketProbeError, HeldProbeError};
+
+    let killed = metadata_probe_failure(HeldProbeError::Interrupted(
+        "index metadata probe exited signal: 9 (SIGKILL)".into(),
+    ));
+    assert_eq!(killed.code, IndexFailureCode::IndexProcessFailed);
+    assert!(killed.transient_allowlisted);
+    assert_eq!(
+        killed.reason,
+        "index metadata probe exited signal: 9 (SIGKILL)"
+    );
+    let refused = metadata_probe_failure(HeldProbeError::Failed(
+        "index metadata probe exited exit status: 1".into(),
+    ));
+    assert_eq!(refused.code, IndexFailureCode::IndexProcessFailed);
+    assert!(!refused.transient_allowlisted);
+    let timeout = metadata_probe_failure(HeldProbeError::Timeout(
+        "index metadata probe timed out after 30 seconds".into(),
+    ));
+    assert_eq!(timeout.code, IndexFailureCode::IndexProbeTimeout);
+    assert!(timeout.transient_allowlisted);
+
+    let packet = packet_probe_failure(HeldPacketProbeError::Interrupted("killed".into()), 0, 0);
+    assert_eq!(packet.code, IndexFailureCode::IndexProcessFailed);
+    assert!(packet.transient_allowlisted);
+    let packet = packet_probe_failure(HeldPacketProbeError::Process("refused".into()), 0, 0);
+    assert!(!packet.transient_allowlisted);
+}
+
+/// The F+ first-packet identity recorded every failure, its own deadline and
+/// an outside kill included, as a terminal `index_completion_unverified`.
+/// Only the media's answer is terminal now.
+#[test]
+fn an_interrupted_packet_identity_is_a_transient_failure() {
+    use crate::ffmpeg::HeldProbeError;
+
+    let killed = packet_identity_failure(PacketIdentityError::Probe(HeldProbeError::Interrupted(
+        "F+ first packet identity exited signal: 9 (SIGKILL)".into(),
+    )));
+    assert_eq!(killed.code, IndexFailureCode::IndexProcessFailed);
+    assert!(killed.transient_allowlisted);
+    assert_eq!(
+        killed.reason,
+        "F+ source packet identity: F+ first packet identity exited signal: 9 (SIGKILL)"
+    );
+    let timeout = packet_identity_failure(PacketIdentityError::Probe(HeldProbeError::Timeout(
+        "F+ first packet identity timed out after 30 seconds".into(),
+    )));
+    assert_eq!(timeout.code, IndexFailureCode::IndexProbeTimeout);
+    assert!(timeout.transient_allowlisted);
+    let source = packet_identity_failure(PacketIdentityError::Source("Input/output error".into()));
+    assert_eq!(source.code, IndexFailureCode::IndexSourceIo);
+    assert!(source.transient_allowlisted);
+
+    let refused = packet_identity_failure(PacketIdentityError::Probe(HeldProbeError::Failed(
+        "F+ first packet identity exited exit status: 1".into(),
+    )));
+    assert_eq!(refused.code, IndexFailureCode::IndexCompletionUnverified);
+    assert!(!refused.transient_allowlisted);
+    let unverified = packet_identity_failure(PacketIdentityError::from(
+        filtered_packet_hash(b"", 0, (1, 1000)).expect_err("no hash"),
+    ));
+    assert_eq!(unverified.code, IndexFailureCode::IndexCompletionUnverified);
+    assert!(!unverified.transient_allowlisted);
+    assert_eq!(
+        unverified.reason,
+        "F+ source packet identity: F+ packet hash has no time base"
+    );
+
+    // After a failed bridge read, the child's refusal is the read's failure.
+    for error in [
+        PacketIdentityError::Probe(HeldProbeError::Failed("exited exit status: 1".into())),
+        PacketIdentityError::Unverified("did not identify exactly one source packet".into()),
+    ] {
+        let failure = packet_identity_failure(read_failure_is_the_source(error, true));
+        assert_eq!(failure.code, IndexFailureCode::IndexSourceIo);
+        assert!(failure.transient_allowlisted);
+    }
+    let clean = read_failure_is_the_source(
+        PacketIdentityError::Unverified("did not identify exactly one source packet".into()),
+        false,
+    );
+    assert!(matches!(clean, PacketIdentityError::Unverified(_)));
+    let timeout = read_failure_is_the_source(
+        PacketIdentityError::Probe(HeldProbeError::Timeout("timed out".into())),
+        true,
+    );
+    assert!(matches!(
+        timeout,
+        PacketIdentityError::Probe(HeldProbeError::Timeout(_))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_external_index_process_kill_is_a_bounded_transient_failure() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    let killed = index_process_exit_failure(ExitStatus::from_raw(libc::SIGKILL), 1089);
+    assert_eq!(killed.code, IndexFailureCode::IndexProcessFailed);
+    assert!(killed.transient_allowlisted);
+    assert!(!index_process_exit_failure(ExitStatus::from_raw(256), 0).transient_allowlisted);
+    assert!(
+        !index_process_exit_failure(ExitStatus::from_raw(libc::SIGSEGV), 0).transient_allowlisted
+    );
+}
+
 /// A source with a nonzero start and reordered pictures exercises both parts
 /// of the fitted clock: the source DTS origin removed by the copy muxer and
 /// each sample's signed composition offset. This compares the real ffprobe

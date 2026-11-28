@@ -567,12 +567,19 @@ pub(super) fn take_active_preparation(
 }
 
 fn take_active_preparations_for_playback(playback_id: &str) -> Vec<ActivePreparedSuccessor> {
+    take_active_preparations_where(|successor| successor.preparation.playback_id == playback_id)
+}
+
+/// Remove, under one registry lock, every staged successor `matches` names.
+fn take_active_preparations_where(
+    matches: impl Fn(&ActivePreparedSuccessor) -> bool,
+) -> Vec<ActivePreparedSuccessor> {
     let mut active = active_prepared_successors()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let incarnation_ids = active
         .iter()
-        .filter(|(_, preparation)| preparation.preparation.playback_id == playback_id)
+        .filter(|(_, successor)| matches(successor))
         .map(|(incarnation_id, _)| incarnation_id.clone())
         .collect::<Vec<_>>();
     incarnation_ids
@@ -645,6 +652,25 @@ pub(super) async fn settle_cancelled_preparation(
                     .await,
             );
         }
+    }
+}
+
+/// The incumbent a staged successor was prepared to replace has ended. That
+/// successor can never commit, so free its worker, reconstruction slot and
+/// durable row now rather than at its deadline. A committed successor already
+/// left the registry when it committed, so it is never found here; the same
+/// registry transfer keeps an in-flight commit or abort the owner of its entry.
+pub(super) fn cancel_preparations_for_released_incumbent(incumbent_incarnation_id: &str) {
+    let orphaned = take_active_preparations_where(|successor| {
+        successor.preparation.expected_predecessor_incarnation_id == incumbent_incarnation_id
+    });
+    for successor in orphaned {
+        tracing::info!(
+            target: "plurxd::http::hls",
+            successor = %crate::transcode::session_log_id(&successor.preparation.session_id),
+            "prepared successor retired: the session it was staged to replace was released"
+        );
+        spawn_cancelled_preparation(successor, "incumbent released before commit");
     }
 }
 
@@ -1529,10 +1555,9 @@ pub(super) async fn replan_qualified_upgrade(
     }) {
         return Err("fresh FEL qualification planning no longer binds the incumbent copy".into());
     }
-    let target = fresh
-        .candidate_context
-        .as_ref()
-        .map(|context| context.selected_candidate.target_height);
+    // The rendition the fresh plan's processed ask describes: its candidate's,
+    // or the accepted ask of an Original or manual start.
+    let target = fresh.processed_ask_target_height();
     if fresh.file_id != recipe.request.file_id
         || fresh.playback_id != recipe.request.playback_id
         || fresh.presentation != recipe.request.presentation
@@ -1881,7 +1906,10 @@ async fn plan_preparation_with_candidate(
     .then_some(selection.subtitle.track)
     .flatten();
     let body = CreateSession {
-        split_audio: None,
+        // A server-built successor never reads the per-start caps token from
+        // the retained caps: it is muxed here, and `preserve_prepared_audio`
+        // carries a split predecessor's alternates onto a successor copy.
+        split_audio: Some(false),
         processed_upgrade: None,
         source_telemetry: Some(crate::transcode::SourceTelemetry::FilmV1),
         playback_id: predecessor.request.playback_id.clone(),
@@ -2081,6 +2109,7 @@ async fn prepared_relocation_owner(
         candidate.audio_index,
         candidate.subtitle_burn,
         candidate.hdr10,
+        crate::transcode::split_copy_eligible(candidate, source),
     )
     .ok()?;
     state
@@ -3018,8 +3047,9 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             )
         })
         .unwrap_or((None, None));
+    let title_scan = super::create::session_title_scan(state, Some(source)).await;
     let mut enhancement = grade.and_then(|grade| {
-        super::create::session_enhancement(
+        super::create::session_enhancement_with_title(
             Some(source),
             &staged_request.kind,
             grade,
@@ -3028,6 +3058,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             None,
             None,
             None,
+            title_scan.as_ref(),
         )
     });
     // Ordinary prepared selections can attach a processed output without
@@ -3114,6 +3145,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
         }
         .to_owned(),
         vod: staged_request.presentation == crate::transcode::Presentation::Vod,
+        startup_seek_ready_ms: None,
         ladder: Vec::new(),
         prior_kbps: None,
         delivered_dynamic_range: delivered_dynamic_range.map(str::to_owned),

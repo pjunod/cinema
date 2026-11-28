@@ -192,6 +192,12 @@ pub struct ActivityWorkers {
     pub hardware_limit: usize,
     pub software_used: usize,
     pub software_limit: usize,
+    /// Bytes this node's verified copies hold; absent on peers predating it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_memory_used: Option<u64>,
+    /// This node's copy memory budget; absent on peers predating it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_memory_limit: Option<u64>,
     pub children: Vec<String>,
     pub child_count: usize,
 }
@@ -261,6 +267,8 @@ async fn local_workers_with_details(state: &AppState, detailed: bool) -> Activit
         hardware_limit: runtime.hardware_slots_max,
         software_used: runtime.software_threads_used,
         software_limit: runtime.software_threads_max,
+        copy_memory_used: Some(runtime.copy_memory_used),
+        copy_memory_limit: Some(runtime.copy_memory_max),
         child_count: children.len(),
         children: if detailed {
             children
@@ -302,6 +310,7 @@ pub enum PeerActivityOutcome {
     Unhealthy,
     Unsupported,
     Unreachable,
+    LocalUnavailable,
     TimedOut,
     Refused,
     HttpError,
@@ -364,7 +373,7 @@ struct PeerActivityReadGate {
 }
 
 static ACTIVITY_AGGREGATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
-static ACTIVITY_PEER_OUTCOMES: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+static ACTIVITY_PEER_OUTCOMES: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
 
 fn record_aggregation(path: usize) {
     ACTIVITY_AGGREGATIONS[path].fetch_add(1, Ordering::Relaxed);
@@ -380,6 +389,7 @@ fn record_peer_outcome(outcome: &PeerActivityOutcome) {
         PeerActivityOutcome::Refused => 5,
         PeerActivityOutcome::HttpError => 6,
         PeerActivityOutcome::InvalidResponse => 7,
+        PeerActivityOutcome::LocalUnavailable => 8,
     };
     ACTIVITY_PEER_OUTCOMES[slot].fetch_add(1, Ordering::Relaxed);
 }
@@ -413,6 +423,7 @@ pub fn prometheus_cluster_activity() -> String {
         "refused",
         "http_error",
         "invalid_response",
+        "local_unavailable",
     ]
     .iter()
     .enumerate()
@@ -558,6 +569,11 @@ impl PeerActivityClient {
             Err(PeerTransportError::TimedOut) => PeerActivityOutcome::TimedOut,
             Err(PeerTransportError::InvalidResponse) => PeerActivityOutcome::InvalidResponse,
             Err(PeerTransportError::Unreachable) => PeerActivityOutcome::Unreachable,
+            Err(PeerTransportError::LocalUnavailable) => PeerActivityOutcome::LocalUnavailable,
+            Err(PeerTransportError::AuthenticationRefused(_)) => PeerActivityOutcome::Refused,
+            Err(PeerTransportError::UnauthenticatedStatus(status)) => {
+                unauthenticated_status_outcome(status)
+            }
         }
     }
 
@@ -703,6 +719,21 @@ async fn read_snapshot_response(
         Err(PeerTransportError::TimedOut) => PeerActivityOutcome::TimedOut,
         Err(PeerTransportError::InvalidResponse) => PeerActivityOutcome::InvalidResponse,
         Err(PeerTransportError::Unreachable) => PeerActivityOutcome::Unreachable,
+        Err(PeerTransportError::LocalUnavailable) => PeerActivityOutcome::LocalUnavailable,
+        Err(PeerTransportError::AuthenticationRefused(_)) => PeerActivityOutcome::Refused,
+        Err(PeerTransportError::UnauthenticatedStatus(status)) => {
+            unauthenticated_status_outcome(status)
+        }
+    }
+}
+
+/// An unsigned error status is an HTTP error on the path to the peer: never a
+/// snapshot, and never the peer's own authentication refusal (an unsigned 403
+/// may come from any hop).
+fn unauthenticated_status_outcome(status: u16) -> PeerActivityOutcome {
+    match StatusCode::from_u16(status) {
+        Ok(status) if !status.is_success() => PeerActivityOutcome::HttpError,
+        _ => PeerActivityOutcome::InvalidResponse,
     }
 }
 
@@ -1920,6 +1951,8 @@ mod tests {
                 hardware_limit: 1,
                 software_used: 0,
                 software_limit: 1,
+                copy_memory_used: None,
+                copy_memory_limit: None,
                 children: vec!["\0".repeat(256); 32],
                 child_count: 32,
             },
@@ -2157,6 +2190,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unsigned_error_status_reports_the_answer_not_an_invalid_response() {
+        // A response-bound Activity read whose 503 came from a layer in front
+        // of the signing handler is a busy peer, not a protocol violation.
+        assert_eq!(
+            unauthenticated_status_outcome(503),
+            PeerActivityOutcome::HttpError
+        );
+        assert_eq!(
+            unauthenticated_status_outcome(403),
+            PeerActivityOutcome::HttpError
+        );
+        // An unsigned success never stands for a snapshot.
+        assert_eq!(
+            unauthenticated_status_outcome(200),
+            PeerActivityOutcome::InvalidResponse
+        );
+        assert_eq!(
+            unauthenticated_status_outcome(1_000),
+            PeerActivityOutcome::InvalidResponse
+        );
+    }
+
     #[tokio::test]
     async fn error_status_is_classified_without_buffering_its_body() {
         use std::convert::Infallible;
@@ -2383,6 +2439,7 @@ mod tests {
             "refused",
             "http_error",
             "invalid_response",
+            "local_unavailable",
         ] {
             assert!(metrics.contains(&format!("outcome=\"{outcome}\"")));
         }

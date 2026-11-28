@@ -5,6 +5,7 @@
 
 # Carry Plurx changes; each must be named by a PLURX-PATCH.md row bullet.
 patched = [
+    "src/append_timing.rs",
     "src/app_state.rs",
     "src/applied_mark.rs",
     "src/backup.rs",

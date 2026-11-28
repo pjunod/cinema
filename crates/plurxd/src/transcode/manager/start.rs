@@ -1743,7 +1743,6 @@ impl TranscodeManager {
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
-            processing_note: None,
             retained_output: None,
             audio_delivery: opts.audio.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -1816,12 +1815,12 @@ impl TranscodeManager {
         }
         let startup_bytes = rolling_startup_bytes(copy_bitrate(&planning.file), 1.0);
         let limits = self.ahead_limits_for_start(&planning.settings);
+        // Without a prepared head, the split stages beside the ordinary copy
+        // within the session's ceiling, which the writer measures as it goes;
+        // the 2S figure is only the reservation, clamped to that ceiling.
         let sizing = if head.is_some() {
             prepared_native_fel_sizing(startup_bytes, limits)?
         } else {
-            if native_split_startup_budget(startup_bytes, limits) == 0 {
-                return None;
-            }
             RollingScratchSizing::Startup(startup_bytes.saturating_mul(2))
         };
         let scratch = self.reserve_rolling_scratch_with(sizing, limits).ok()?;
@@ -2025,18 +2024,23 @@ impl TranscodeManager {
         let copy_bitrate = copy_bitrate(&file);
         let startup_bytes = rolling_startup_bytes(copy_bitrate, 1.0);
         // Keep the original mux and both role objects alive through their
-        // ordinary grace. Reserve startup for both copies before exposing the
-        // alternate layout so it cannot spend the incumbent's startup grant.
+        // ordinary grace. The reservation asks for startup for both copies,
+        // clamped to the session's ceiling; when the estimate alone reaches
+        // that ceiling nothing extra is reserved, and the writer measures
+        // whether both copies of the served window fit beside what the
+        // ordinary copy still needs.
         let ordinary_sizing = RollingScratchSizing::Startup(startup_bytes);
         let split_sizing = RollingScratchSizing::Startup(startup_bytes.saturating_mul(2));
-        let split_startup_budget = native_split_startup_budget(startup_bytes, limits);
-        let split_eligible = native_split_requested && segmenting && split_startup_budget > 0;
+        let split_eligible = native_split_requested && segmenting;
         #[cfg(target_os = "linux")]
         let split_reservation = prepared_scratch.filter(|_| split_eligible).or_else(|| {
-            warm_head.as_ref().filter(|_| split_eligible).and_then(|_| {
-                let sizing = RollingScratchSizing::Startup(startup_bytes.saturating_mul(3));
-                self.reserve_rolling_scratch_with(sizing, limits).ok()
-            })
+            // A warm head is staged whole beside both copies: it needs the
+            // full 3S grant, not one clamped to the ceiling.
+            warm_head
+                .as_ref()
+                .filter(|_| split_eligible)
+                .and_then(|_| prepared_native_fel_sizing(startup_bytes, limits))
+                .and_then(|sizing| self.reserve_rolling_scratch_with(sizing, limits).ok())
         });
         #[cfg(target_os = "linux")]
         let warm_head = warm_head.filter(|_| split_reservation.is_some());
@@ -2048,6 +2052,28 @@ impl TranscodeManager {
                 .and_then(Result::ok)
         });
         let native_split = split_reservation.is_some();
+        if options.convert_dolby_vision && !native_split {
+            let reason = if !allow_native_split {
+                "not_allowed_for_request"
+            } else if !can_split_at_requested_offset {
+                "offset_without_video_index"
+            } else if audio_offset_ms != 0 {
+                "audio_offset"
+            } else if takeover.is_some() {
+                "takeover"
+            } else if !segmenting {
+                "not_segmenting"
+            } else {
+                "split_scratch_reservation_refused"
+            };
+            tracing::info!(
+                target: "plurxd::transcode",
+                file_id,
+                start_seconds,
+                reason,
+                "native HLS split not reserved; the copy keeps the ordinary mux"
+            );
+        }
         // Only a split with a grant needs a fresh inventory. Keep ordinary
         // retained output eligible when its extra scratch reservation fails.
         let retained_budget = if native_split {
@@ -2056,10 +2082,12 @@ impl TranscodeManager {
             Self::rolling_retained_budget_from(&settings)
         };
         let pacing = Self::pacing_from_settings(&settings, true).await;
+        // Completed retained output is always produced at zero. Reconstruct
+        // that recipe for lookup even when the new viewer will seek into it.
         let canonical_args = if segmenting {
             transcode::copy_pipe_args_with_audio_delivery(
                 &file,
-                start_seconds,
+                0.0,
                 audio_index,
                 options.transcode_audio,
                 pacing,
@@ -2069,7 +2097,7 @@ impl TranscodeManager {
         } else {
             transcode::hls_copy_args_with_audio_delivery(
                 &file,
-                start_seconds,
+                0.0,
                 audio_index,
                 options.transcode_audio,
                 pacing,
@@ -2102,30 +2130,43 @@ impl TranscodeManager {
             logical["copyseg_dvh1_guard"] = serde_json::json!(1);
         }
         let logical = serde_json::to_vec(&logical).ok();
-        let rolling_provenance =
-            if start_seconds == 0.0 && takeover.is_none() && retained_budget.is_some() {
-                match logical {
-                    Some(logical) => {
-                        crate::rolling_provenance::RollingProduction::capture(
-                            &file,
-                            &logical,
-                            file.audio_offset_ms != 0
-                                && !file.audio_streams.is_empty()
-                                && audio_delivery
-                                    .map_or(!options.transcode_audio, |audio| !audio.transcodes()),
-                            &if segmenting {
-                                ffmpeg_bin()
-                            } else {
-                                producer_ffmpeg_bin()
-                            },
-                        )
-                        .await
-                    }
-                    None => None,
+        let retained_resume = start_seconds > 0.0
+            && file
+                .duration_ms
+                .is_some_and(|duration| start_seconds * 1_000.0 < duration as f64)
+            && replacement_deadline.is_none()
+            && self.vod.has_rolling_output_for_file(file_id);
+        let retained_provenance = if (start_seconds == 0.0 || retained_resume)
+            && takeover.is_none()
+            && retained_budget.is_some()
+        {
+            match logical {
+                Some(logical) => {
+                    crate::rolling_provenance::RollingProduction::capture(
+                        &file,
+                        &logical,
+                        file.audio_offset_ms != 0
+                            && !file.audio_streams.is_empty()
+                            && audio_delivery
+                                .map_or(!options.transcode_audio, |audio| !audio.transcodes()),
+                        &if segmenting {
+                            ffmpeg_bin()
+                        } else {
+                            producer_ffmpeg_bin()
+                        },
+                    )
+                    .await
                 }
-            } else {
-                None
-            };
+                None => None,
+            }
+        } else {
+            None
+        };
+        // A cold resume cannot collect a complete zero-origin artifact.
+        let rolling_provenance = retained_provenance
+            .as_ref()
+            .filter(|_| start_seconds == 0.0)
+            .cloned();
         let mut execution_file = file.clone();
         if let Some(provenance) = &rolling_provenance {
             execution_file.path = provenance.input_path();
@@ -2164,11 +2205,6 @@ impl TranscodeManager {
         // actor for the one frozen legacy retry; the reader never performs the
         // replacement itself.
 
-        // Freeze the achieved media origin before actor admission. The actor,
-        // retry recipe, and response contract must describe one immutable
-        // presentation even if the start future is later cancelled.
-        let media_origin_seconds = probe_media_origin(&file.path, start_seconds).await;
-
         // `served`, not `options`, from here on: the playlist must advertise
         // the HDR10 base this path serves and the session record must not
         // claim a conversion that did not happen.
@@ -2181,30 +2217,25 @@ impl TranscodeManager {
             convert_dolby_vision: served.convert_dolby_vision,
             dual_layer_as_copied: served.dual_layer_as_copied,
         };
-        let frozen_presentation = FrozenHlsPresentation::new(
-            file.clone(),
-            HlsContext {
-                codec_facts: Some(FrozenHlsCodecFacts::audio(
-                    audio_delivery,
-                    !file.audio_streams.is_empty(),
-                    served.transcode_audio,
-                )),
-                bandwidth: None,
-                file_id,
-                start_seconds,
-                media_origin_seconds,
-                codecs: hls_codecs.clone(),
-                supplemental_codecs: hls_supplemental_codecs.clone(),
-                frame_rate: frozen_video_frame_rate(probe_json.as_deref()),
-            },
-            &copy_kind,
-        );
-        let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
-        if let Some(production) = &rolling_provenance {
+        let mut context = HlsContext {
+            codec_facts: Some(FrozenHlsCodecFacts::audio(
+                audio_delivery,
+                !file.audio_streams.is_empty(),
+                served.transcode_audio,
+            )),
+            bandwidth: None,
+            file_id,
+            start_seconds,
+            media_origin_seconds: 0.0,
+            codecs: hls_codecs.clone(),
+            supplemental_codecs: hls_supplemental_codecs.clone(),
+            frame_rate: frozen_video_frame_rate(probe_json.as_deref()),
+        };
+        if let Some(production) = &retained_provenance {
             if let Some(attached) = self
                 .attach_rolling_retained(
                     production,
-                    frozen_presentation.clone(),
+                    FrozenHlsPresentation::new(file.clone(), context.clone(), &copy_kind),
                     copy_kind,
                     None,
                     audio_delivery.cloned(),
@@ -2221,6 +2252,14 @@ impl TranscodeManager {
                 return Ok(attached);
             }
         }
+        drop(retained_provenance);
+        // Freeze the achieved media origin before actor admission. The actor,
+        // retry recipe, and response contract must describe one immutable
+        // presentation even if the start future is later cancelled.
+        let media_origin_seconds = probe_media_origin(&file.path, start_seconds).await;
+        context.media_origin_seconds = media_origin_seconds;
+        let frozen_presentation = FrozenHlsPresentation::new(file.clone(), context, &copy_kind);
+        let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
         let scratch_reservation = match split_reservation {
             Some(reservation) => reservation,
             None => self.reserve_rolling_scratch_with(ordinary_sizing, limits)?,
@@ -2391,9 +2430,12 @@ impl TranscodeManager {
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
             native_split: native_split.then(|| {
-                let split = crate::copyseg::NativeSplitInventory::with_startup_budget(
-                    split_startup_budget as u64,
-                );
+                let split = crate::copyseg::NativeSplitInventory::with_budget(
+                    u64::try_from(ordinary_sizing.grant_bytes(limits)).unwrap_or(0),
+                    u64::try_from(RollingScratchSizing::session_ceiling(limits)).unwrap_or(0),
+                )
+                .with_startup_secs(rolling_startup_media_ms(1.0) as f64 / 1_000.0)
+                .with_audio_index(audio_index);
                 #[cfg(target_os = "linux")]
                 let split = if warm_head.is_some() { split.compare_prepared_head() } else { split };
                 #[cfg(target_os = "linux")]
@@ -2724,7 +2766,6 @@ impl TranscodeManager {
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
-            processing_note: None,
             retained_output: None,
             audio_delivery: audio_delivery.cloned(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -2756,32 +2797,31 @@ impl TranscodeManager {
     }
 }
 
-// The rolling FFmpeg command maps v:0. Use the catalogue's selected
-// absolute index only if that stream is the single video in the held plan.
+// The rolling FFmpeg command maps `0:v:0`, which counts attached pictures as
+// video. Answer that stream's absolute index only when it is the one picture
+// stream in the held plan. An MKV poster attachment *after* the picture (an
+// MJPEG `attached_pic`) does not change what `0:v:0` selects, so it must not
+// refuse the resume. A cover placed before the picture would make `0:v:0` the
+// cover, and a second real video track is ambiguous, so both are still refused.
 #[cfg(target_os = "linux")]
 pub(super) fn native_copy_video_index(probe: &str) -> Option<u32> {
     let document: serde_json::Value = serde_json::from_str(probe).ok()?;
-    let mut videos = document
+    let mapped = crate::decode_facts::absolute_video_ordinal(&document, 0)?;
+    let mut pictures = document
         .get("streams")?
         .as_array()?
         .iter()
         .filter(|stream| {
             stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+                && stream
+                    .get("disposition")
+                    .and_then(|value| value.get("attached_pic"))
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0)
+                    == 0
         });
-    let video = videos.next()?;
-    if videos.next().is_some() {
-        return None;
-    }
-    if video
-        .get("disposition")
-        .and_then(|value| value.get("attached_pic"))
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(0)
-        != 0
-    {
-        return None;
-    }
-    u32::try_from(video.get("index")?.as_u64()?).ok()
+    let picture = u32::try_from(pictures.next()?.get("index")?.as_u64()?).ok()?;
+    (pictures.next().is_none() && picture == mapped).then_some(picture)
 }
 
 fn copy_bitrate(file: &plurx_core::domain::MediaFile) -> Option<f64> {
@@ -2790,6 +2830,7 @@ fn copy_bitrate(file: &plurx_core::domain::MediaFile) -> Option<f64> {
         .map(|rate| rate as f64)
 }
 
+#[cfg(target_os = "linux")]
 fn native_split_startup_budget(startup_bytes: i64, limits: AheadLimits) -> i64 {
     RollingScratchSizing::Startup(startup_bytes.saturating_mul(2))
         .grant_bytes(limits)

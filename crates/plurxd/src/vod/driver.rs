@@ -46,7 +46,12 @@ pub(super) fn spawn_driver(
                     false,
                 )
                 .holds_permit;
-            if encoded_waiting || stopped_permit_owner {
+            if let Some(dispatch) = rendition.resume_preparation() {
+                tokio::select! {
+                    _ = rendition.wake.notified() => {},
+                    _ = dispatch.work.wait_for_stop() => {},
+                }
+            } else if encoded_waiting || stopped_permit_owner {
                 // One owned driver, not one retry task per GET. Pool releases
                 // outside VOD cannot notify this registry. A queued rendition
                 // retries admission quickly; a stopped permit owner polls slowly
@@ -68,6 +73,9 @@ pub(super) fn spawn_driver(
                 rendition.wake.notified().await;
             }
             if rendition.closed.load(Relaxed) {
+                if drive_resume_preparation(&shared, &rendition).await {
+                    continue;
+                }
                 if let Some(encoding) = &rendition.recipe.encoding {
                     encoding.cancel_wait();
                 }
@@ -866,7 +874,80 @@ fn arm_handoff_expiry(rendition: &Arc<Rendition>) {
 }
 
 /// One pass: demand → decide → step → carry it out.
+/// Run at most one background generation before yielding control back to
+/// ordinary demand. A matching live reader can consume the bounded output;
+/// every other arrival yields through the same driver and exact reaper.
+async fn drive_resume_preparation(shared: &Arc<Shared>, rendition: &Arc<Rendition>) -> bool {
+    let Some(dispatch) = rendition.resume_preparation() else {
+        return false;
+    };
+    let accepts_consumers = dispatch
+        .work
+        .accepts_consumers(rendition, &shared.pool)
+        .await;
+    let manifest = rendition.manifest.lock().await;
+    let must_yield = rendition.closed.load(Acquire)
+        || rendition.failure().is_some()
+        || rendition.preparation().is_some()
+        || !accepts_consumers
+        || shared.working_set.load(Relaxed) >= rendition.working_set_budget;
+    let next = (!must_yield)
+        .then(|| dispatch.work.next_gap(&manifest))
+        .flatten();
+    if let Some(epoch) = dispatch.epoch {
+        if next.is_some() {
+            return true;
+        }
+        dispatch.work.cancel();
+        // Fence a staged sink write before releasing the manifest to its reaper.
+        let _ =
+            rendition
+                .gen_epoch
+                .compare_exchange(epoch, epoch.saturating_add(1), AcqRel, Acquire);
+        drop(manifest);
+        if let Err(error) = rendition.slot.retire_storage().await {
+            tracing::warn!(target: "plurxd::vodserve", %error, rendition = %rendition.key, "resume preparation still owns its producer");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            return true;
+        }
+        if rendition.settle_resume_preparation(&dispatch.work) {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        return true;
+    }
+    let Some(at) =
+        next.filter(|_| matches!(rendition.slot.try_belief(), Some(Producer::Absent { .. })))
+    else {
+        rendition.settle_resume_preparation(&dispatch.work);
+        return false;
+    };
+    let epoch = rendition.gen_epoch.fetch_add(1, AcqRel).saturating_add(1);
+    rendition.dispatch_resume_preparation(&dispatch.work, epoch);
+    drop(manifest);
+    match perform_driver_step(shared, rendition, Step::Start { at }).await {
+        Ok(Performed::NeedsSpawn { at }) => {
+            spawn_generation(shared, rendition, at, None).await;
+            // Early failures can precede the owned registration. The same slot
+            // verifies settlement rather than treating an absent belief as a
+            // physical reap receipt.
+            if matches!(rendition.slot.try_belief(), Some(Producer::Absent { .. })) {
+                dispatch.work.cancel();
+                rendition.kick();
+            }
+        }
+        Ok(Performed::Done) | Err(_) => {
+            dispatch.work.cancel();
+            rendition.kick();
+        }
+    }
+    true
+}
+
 pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
+    if drive_resume_preparation(shared, rendition).await {
+        return;
+    }
     project_source_sharing(shared, rendition).await;
     let mut prepared_permit = None;
     loop {

@@ -1,6 +1,8 @@
 # Local copy on the one engine — build plan for the rest of item 6
 
-**Status:** open — step 1 built on `item6b`, steps 2–10 not started ·
+**Status:** open. Step 1 built on `item6b`. Step 2's publication guard is in
+qualification. Trigger attribution and steps 3–10 remain open.
+
 **Executes:** item 6 of [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md)
 under the [A1/B1 build contract](PLAYBACK-START-A1-B1-BUILD.md) ·
 **Written:** 2026-11-12 against `item6` @ `92c0e28`
@@ -96,6 +98,11 @@ A demand survives a restart.
   source is idle and not made twice.
 
 ### Step 2 — `local_playback` trigger and the legacy head guard (independent of 3–10)
+
+The publication guard can qualify independently of the new trigger value.
+Both stores replace the existing publication trigger atomically and keep
+their schema versions, so the old writer can still submit the same command.
+The new trigger value still needs the mixed-version rollout described below.
 
 - **Owner surfaces:** `plurx-core/src/store/fragment_index_cluster.rs`
   (schema and both `valid_request`s), `store/sqlite/fragment_index_cluster.rs`,
@@ -341,6 +348,30 @@ Record the counts and the titles behind each refusal in the status ledger.
   runs the engine.
 - Processed Dolby Vision identity, Live TV and the encoded paths are not
   touched.
+
+## The two-second startup acceptance
+
+For starts from the beginning and saved resume positions, prepare the verified
+init and playable media ahead of Play. Join that prepared range to the same
+VOD rendition, timeline and session used for continued playback. Key reuse to
+the source version, resolved video and audio recipe, and verified video
+coverage at the requested cursor. Charge preparation to the existing cache
+and source budgets. Keep native HLS admission for every fallback.
+
+A published index describes where to read. Qualification for two seconds
+requires ready media or a measured on-demand path that fits the remaining
+budget. Local range ownership and serving in steps 4–9 still matter for
+unprepared positions. Those steps do not themselves shorten native HLS
+admission, so measure index-only and completely unprepared starts separately.
+
+Measure Play to the first displayed frame at the requested position through
+Cinema on physical Apple TV. Use the saved positions from the *Two Towers*
+and *Axel F* incident, and run long enough to cross the prepared range and
+seek again. Check selected audio, forced and selected captions, HDR/Dolby
+Vision and recovery across ingress changes. Retain the Gran Turismo short
+window Safari regression and verify the affected Android and web routes.
+Count fallback, timeout and wrong-position attempts against the two-second
+result.
 
 ## Execution log
 

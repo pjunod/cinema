@@ -71,7 +71,19 @@ PREDECESSOR = {
     'base': '214e4fb7821d494d84bdf368a355075e3ebed86c',
 }
 WORKFLOW = 'ci.yml'
-WORKFLOW_SHA256 = '2d07ac2f4b4501cc1647cacfe26e69bcb7e0470de6f860bef2a235b973246e16'
+# Re-reviewed for #1811's preflight `runs-on` high-cpu label (67af36308): a
+# scheduling label and comment only; image, options and every step unchanged.
+# Re-reviewed for #1881 (derived build numbers): only the `mobile_version` job
+# changes -- it drops the merge-target fetch and the stored-counter comparison
+# and runs `python3 -m validation.mobile_versions` on the checked-out tree.
+# preflight, check and every other job are byte-identical.
+# Re-reviewed for #1934 (release tags publish from their gate): the `push:
+# tags` trigger and the tag-only `publish` job are removed, the badge drops its
+# `publish` need and result, and header/concurrency comments change.
+# preflight, check and every other job are byte-identical.
+# Re-reviewed for the TV navigation evidence retention: only that upload
+# step's `retention-days` (90 -> 14) and its comment change.
+WORKFLOW_SHA256 = 'd672f908f7a7ebd55570cd617c0c3f21ac619c83b2eba639c5430c13226b2af5'
 
 
 def prior_run(api, value, binding, repository, *, current_run=None):

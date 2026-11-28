@@ -167,9 +167,7 @@ impl TranscodeManager {
         held_video_bps: Option<u64>,
     ) -> Result<transcode::EnhancementRateEnvelope, String> {
         let ask = request
-            .candidate_context
-            .as_deref()
-            .map(ProcessedUpgradeAsk::from_candidate)
+            .processed_upgrade_ask()
             .ok_or("processed rate requires its current candidate context")?;
         Self::processed_enhancement_envelope_with_ask(
             snapshot,
@@ -401,9 +399,7 @@ impl TranscodeManager {
         height: i64,
     ) -> Result<(SessionRequest, crate::media_pool::QualityCatalogRequest), String> {
         let ask = request
-            .candidate_context
-            .as_deref()
-            .map(ProcessedUpgradeAsk::from_candidate)
+            .processed_upgrade_ask()
             .ok_or("processed trial context missing")?;
         Self::processed_qualification_input_with_ask(snapshot, request, height, &ask)
     }
@@ -842,6 +838,14 @@ impl TranscodeManager {
         held_source: Option<&crate::fragment_index_cluster::SourceFence>,
     ) -> Option<crate::vodserve::retained::MeasuredCandidateCostProof> {
         let mut resolved = request.clone();
+        // A proof needs the actual audio delivery. Without a resolved one it
+        // is derived from the client's audio claim, and with neither no proof
+        // can exist, so answer before reading the source row: a caps-v2
+        // client that sends no audio sinks would otherwise pay one Authority
+        // `get_file` per catalog rung for an answer that is always `None`.
+        if resolved.audio_delivery.is_none() && request.audio_claim.is_none() {
+            return None;
+        }
         let file = if held_source.is_none() || resolved.audio_delivery.is_none() {
             Some(self.store.get_file(request.file_id).await.ok()??)
         } else {
@@ -984,6 +988,39 @@ impl TranscodeManager {
         retained_claim: Option<&plurx_core::playback::audio::AudioClaim>,
         progress: Option<&std::sync::Mutex<Vec<QualityCandidate>>>,
         selected: Option<&QualityCandidate>,
+    ) -> ResolvedQualityCatalog {
+        self.quality_catalog_from_snapshot_with_probe_policy(
+            snapshot,
+            caps,
+            audio,
+            audio_offset_ms,
+            subtitle,
+            presentation,
+            retained_copy,
+            retained_audio,
+            retained_claim,
+            progress,
+            selected,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn quality_catalog_from_snapshot_with_probe_policy(
+        &self,
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        caps: &plurx_core::playback::DeviceCaps,
+        audio: Option<i64>,
+        audio_offset_ms: i64,
+        subtitle: Option<i64>,
+        presentation: Presentation,
+        retained_copy: Option<(bool, bool, bool)>,
+        retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
+        retained_claim: Option<&plurx_core::playback::audio::AudioClaim>,
+        progress: Option<&std::sync::Mutex<Vec<QualityCandidate>>>,
+        selected: Option<&QualityCandidate>,
+        source_probes_allowed: bool,
     ) -> ResolvedQualityCatalog {
         let scan_deadline = crate::media_pool::create_stage_deadline(
             crate::media_pool::QUALITY_CATALOG_DEADLINE.min(DECODE_PLAN_PROBE_BUDGET),
@@ -1180,7 +1217,7 @@ impl TranscodeManager {
             }
         }
 
-        if !selected_copy {
+        if !selected_copy && source_probes_allowed {
             source_facts = self
                 .quality_catalog_source_facts(
                     file,
@@ -1465,6 +1502,7 @@ impl TranscodeManager {
                 // This request probes a row while its catalog is still being
                 // built; it is not the dispatch request retaining that catalog.
                 quality_catalog: None,
+                accepted_processed_ask: None,
                 candidate_context: Some(Box::new(Self::candidate_context(candidate))),
                 file_id: file.id,
                 playback_id: String::new(),
@@ -1648,7 +1686,27 @@ impl TranscodeManager {
             )
             .await
             .ok()?;
-        source.unchanged().then_some(collected)
+        if !source.unchanged().await {
+            return None;
+        }
+        // Persist the verdict for this source revision, so the next plan reads
+        // it from stored facts instead of probing the source again.
+        if let Some(evidence) = collected.hevc_scan_evidence() {
+            // Best effort: an unpersisted verdict is probed again next time.
+            crate::store_result::observe(
+                crate::store_result::Operation::MergeProbeHevcScan,
+                crate::store_result::Discard::BestEffort,
+                self.store
+                    .merge_file_probe_hevc_scan(
+                        file.id,
+                        file.size,
+                        file.mtime,
+                        &evidence.to_string(),
+                    )
+                    .await,
+            );
+        }
+        Some(collected)
     }
 
     pub(crate) async fn quality_source_facts(
@@ -1671,7 +1729,7 @@ impl TranscodeManager {
         Self::quality_facts_from_probe(&snapshot.file, &probe)
     }
 
-    pub(super) fn quality_facts_from_probe(
+    pub(crate) fn quality_facts_from_probe(
         file: &plurx_core::domain::MediaFile,
         probe: &serde_json::Value,
     ) -> Option<DecodeFacts> {
@@ -2097,6 +2155,7 @@ impl TranscodeManager {
             catalog_query: None,
             display_target: None,
             display_target_note: None,
+            dv_row_facts: None,
             ordinary_request: None,
             retained_output: None,
             canonical_caps: None,
@@ -3995,6 +4054,7 @@ mod snapshot_catalog_regression {
                 &probe_path,
                 r#"#!/bin/sh
 if test "$1" = "-version"; then printf '%s\n' 'ffprobe version hevc-catalog'; exit 0; fi
+touch "$PLURX_TEST_PROBE_PATH.invoked"
 test ! -e "$PLURX_TEST_PROBE_PATH.blocked" || exit 71
 test ! -e "$PLURX_TEST_PROBE_PATH.slow" || sleep 5
 case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuration.json";;
@@ -4046,6 +4106,27 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             if case == "slow_copy" {
                 let copy_caps = serde_json::from_value(serde_json::json!({"v":2,"containers":["mp4"],"transports":["hls"],"video":[{"codec":"hevc","present":["pq"]},{"codec":"h264","present":["sdr"]}]})).expect("HDR copy caps");
                 std::fs::write(probe_path.with_extension("slow"), b"").expect("slow collection");
+                let stored = manager
+                    .quality_catalog_from_snapshot_with_probe_policy(
+                        &snapshot,
+                        &copy_caps,
+                        None,
+                        0,
+                        None,
+                        Presentation::Vod,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                    )
+                    .await;
+                assert!(stored
+                    .candidates
+                    .iter()
+                    .any(|row| row.route == CandidateRoute::Remux));
+                assert!(!probe_path.with_extension("invoked").exists());
                 let progress = std::sync::Mutex::new(Vec::new());
                 let timed = tokio::time::timeout(
                     Duration::from_secs(2),
@@ -4962,6 +5043,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             finite_bitrate_limit_bps: None,
             quality_catalog: None,
             candidate_context: None,
+            accepted_processed_ask: None,
             file_id: id,
             playback_id: "reorder".into(),
             request_id: Some("00000000-0000-4000-8000-0000000000f3".into()),
@@ -5917,6 +5999,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
+            accepted_processed_ask: None,
             candidate_context: Some(Box::new(context)),
             vod_only: false,
             passive_vod: false,

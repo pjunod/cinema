@@ -1,6 +1,5 @@
 # Preserve Dolby Vision on shared playback
 
-Build: 309
 Issue: #1719
 
 Shared titles ask for Dolby Vision preservation using the same supported

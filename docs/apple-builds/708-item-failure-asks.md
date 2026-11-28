@@ -1,6 +1,5 @@
 # Ask before walking the compatibility ladder
 
-Build: 100
 Issue: #708
 
 An item failure walked three rungs — another node, then established HDR, then

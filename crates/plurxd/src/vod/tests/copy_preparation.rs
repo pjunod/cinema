@@ -855,6 +855,220 @@ impl crate::prodrun::ProducerReapHooks for PrivateWaitFailure {
 #[tokio::test]
 async fn preparation_real_wait_and_unlink_failure_retries_preserve_capacity_and_cleanup_fairness() { prepared_copy_consumer(15).await; }
 
+#[tokio::test]
+async fn indexed_resume_preparation_reaps_before_releasing_custody_and_play_uses_its_window() {
+    use plurx_core::cluster::coordination::{LeaseClaim, StoreCoordinator};
+    use plurx_core::store::background_jobs_resources::{
+        BackgroundSourceOwner, BackgroundSourceRegistration,
+    };
+
+    let base = crate::test_tempdir().expect("resume preparation fixture");
+    let original = fixture_file();
+    let path = base.path().join("resume-source.mkv");
+    testfixtures::run(
+        std::process::Command::new(testfixtures::ffmpeg())
+            .args(["-v", "error", "-y", "-stream_loop", "4", "-i"])
+            .arg(&original.path)
+            .args(["-map", "0:v:0", "-t", "48", "-c", "copy"])
+            .arg(&path),
+    );
+    let (serve, file) = serve_on_file(base.path(), media_file_at(path, 48_000)).await;
+    let store = Arc::clone(&serve.shared.store);
+    let library = store
+        .create_library(&plurx_core::domain::NewLibrary {
+            name: "resume preparation".into(),
+            kind: plurx_core::domain::LibraryKind::Movies,
+            paths: vec![base.path().to_path_buf()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&plurx_core::domain::NewItem {
+            library_id: library.id,
+            kind: plurx_core::domain::ItemKind::Movie,
+            parent_id: None,
+            title: "resume preparation".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    assert_eq!(
+        store
+            .upsert_file(
+                item,
+                &file.path.to_string_lossy(),
+                file.size,
+                file.mtime,
+                &plurx_core::domain::ProbeResult::default(),
+            )
+            .await
+            .expect("source row"),
+        file.id,
+    );
+    let settings = settings();
+    let initial = request("prepare-resume", 0.0);
+    let (attachment, _) = serve
+        .resolve_rendition(&mut (&initial).into(), &file, &settings, None, None)
+        .await
+        .expect("ordinary indexed recipe");
+    let rendition = Arc::clone(&attachment.rendition);
+    drop(attachment);
+    let start = rendition
+        .plan
+        .entry(1)
+        .expect("resume entry")
+        .start_ticks as f64
+        / f64::from(rendition.timescale);
+    let start_ms = (start * 1_000.0).round() as i64;
+    let window = super::vod_startup_prediction::startup_window(&rendition.plan, start_ms)
+        .expect("startup decode window");
+    let first = window.first;
+    let last = window.last;
+    let next = rendition
+        .plan
+        .entry(last + 1)
+        .expect("continuation entry")
+        .index;
+    let coordinator = StoreCoordinator::new(Arc::clone(&store), "test-local").expect("coordinator");
+    let LeaseClaim::Acquired(lease) = coordinator
+        .acquire("subtitle-read-attest:test-local:0", Duration::from_secs(60))
+        .await
+        .expect("lease")
+    else {
+        panic!("test resume source slot is free");
+    };
+    let owner = BackgroundSourceOwner::ReadAttestation {
+        lease,
+        file_id: file.id,
+        source_size: file.size,
+        source_mtime: file.mtime,
+    };
+    let BackgroundSourceRegistration::Registered(custody) = store
+        .register_background_source_custody(owner.clone(), crate::state::clock_ms())
+        .await
+        .expect("register source custody")
+    else {
+        panic!("test source custody must be admitted");
+    };
+    assert!(store
+        .activate_background_source_custody(custody.clone(), uuid::Uuid::new_v4().to_string())
+        .await
+        .expect("activate source custody"));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let budget = crate::background_jobs::SourceReadBudget::from_existing_custody(
+        Arc::clone(&store),
+        &custody,
+        cancel,
+    );
+    let reap_fault = Arc::new(PrivateWaitFailure {
+        fail: AtomicBool::new(true),
+        attempts: AtomicU64::new(0),
+    });
+    rendition.slot.set_reap_hooks(reap_fault.clone()).await;
+    let work = rendition
+        .queue_resume_preparation(
+            window,
+            8 << 20,
+            Instant::now() + Duration::from_secs(30),
+            budget,
+        )
+        .expect("queue an exact bounded preparation");
+    let reaper_started = tokio::time::timeout(Duration::from_secs(30), async {
+        while reap_fault.attempts.load(Acquire) == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let early_ack = tokio::time::timeout(Duration::from_millis(200), work.wait_settled()).await;
+    let still_charged = store
+        .resolve_background_source_custody(custody.clone())
+        .await;
+    reap_fault.fail.store(false, Release);
+    reaper_started.expect("the real prepared producer reached its reaper");
+    assert!(
+        early_ack.is_err(),
+        "the reaper's failed wait must not signal settlement"
+    );
+    assert!(still_charged.expect("exact custody observation").is_some());
+    tokio::time::timeout(Duration::from_secs(10), work.wait_settled())
+        .await
+        .expect("join child, writer and source input");
+    assert!(matches!(
+        rendition.slot.belief().await,
+        Producer::Absent { .. }
+    ));
+    crate::background_jobs::settle_read_lease(&store, &owner, Some(custody.clone()), true).await;
+    assert!(store
+        .resolve_background_source_custody(custody)
+        .await
+        .expect("read settlement")
+        .is_none());
+
+    let prepared_name = segment_name(u64::from(first));
+    let prepared = tokio::fs::read(rendition.dir.path().join(&prepared_name))
+        .await
+        .expect("bounded worker produced real media");
+    {
+        let manifest = rendition.manifest.lock().await;
+        assert_eq!(
+            manifest.materialized_count(),
+            usize::try_from(last - first + 1).expect("startup window is bounded"),
+            "only the requested range was produced"
+        );
+        assert!(manifest
+            .state(last)
+            .is_some_and(|entry| entry.is_materialized()));
+        assert!(manifest
+            .state(next)
+            .is_some_and(|entry| !entry.is_materialized()));
+    }
+    let resumed = request("resume-viewer", start);
+    serve
+        .try_create(
+            &resumed,
+            &file,
+            &settings,
+            VodAttribution {
+                user_name: "paul",
+                item_title: "Fixture",
+                supersession_user: "[\"user_id\",1]",
+            },
+            "resumed".into(),
+        )
+        .await
+        .expect("ordinary create attaches the indexed resume");
+    let session_rendition = serve.shared.sessions.lock().await["resumed"]
+        .live_rendition()
+        .cloned()
+        .expect("ordinary session rendition");
+    assert!(Arc::ptr_eq(&session_rendition, &rendition));
+    assert_eq!(serve.startup_seek_ready_ms("resumed", start_ms + 100), None);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while serve.startup_seek_ready_ms("resumed", start_ms) != Some(start_ms) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the ordinary attachment observes its exact initialized decode window");
+    let mut ready = fetch(&serve, "resumed", &prepared_name).await;
+    let mut body = Vec::new();
+    ready
+        .file
+        .read_to_end(&mut body)
+        .await
+        .expect("read prepared SEG");
+    assert_eq!(body, prepared);
+    let continued = fetch(&serve, "resumed", &segment_name(u64::from(next))).await;
+    assert!(
+        continued.len > 0,
+        "ordinary play continues past the prepared range"
+    );
+    serve.end("resumed", Terminal::Deleted).await;
+}
+
 /// The viewer's mid-playback opt-out cancels the preparation row its own start
 /// created while it is still queued, and never a row another session joined.
 #[tokio::test]

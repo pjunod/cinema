@@ -264,12 +264,10 @@ async fn execute_owned(
         .await
         .map_err(execution)?
     {
-        if input
-            .windows
-            .iter()
-            .any(|window| !window.authored.source.unchanged())
-        {
-            return Err(Error::Authority("authored clip"));
+        for window in &input.windows {
+            if !window.authored.source.unchanged().await {
+                return Err(Error::Authority("authored clip"));
+            }
         }
         revalidate_comparison(context, &input.title, &token, &table, &custody, cancel).await?;
         return Ok((ComparisonRun::Reused(receipt), input.title));
@@ -314,8 +312,10 @@ async fn execute_owned(
     })
     .await?;
 
-    if candidates.iter().any(|held| !held.unchanged()) {
-        return Err(Error::Authority("authored clip"));
+    for held in candidates {
+        if !held.unchanged_in_place().await {
+            return Err(Error::Authority("authored clip"));
+        }
     }
     revalidate_comparison(context, &input.title, &token, &table, &custody, cancel).await?;
     // Keep the exact source handle through durable completion. A later loss
@@ -405,8 +405,13 @@ pub(super) async fn verify_authority(
         || scanner_digest != scanner
         || M7SourceProbe::from_probe_json(&demand.probe_json)?.sha256() != title.probe_sha256
         || M7SourceProbe::from_probe_json(&probe)?.sha256() != title.probe_sha256
-        || !title.source.unchanged()
-        || title.source.reopen(context.file).await.is_err()
+        || !title.source.unchanged().await
+        || crate::fragment_index_cluster::open_source_playback_fence(
+            context.file,
+            Some(title.source.object_version()),
+        )
+        .await
+        .is_err()
         || !context.tools.is_current().await
     {
         return Err(Error::Authority("held source, probe or helper bundle"));
@@ -1093,7 +1098,7 @@ fn verify_candidate(
         offset += read as u64;
     }
     let actual: Sha256Digest = hash.finalize().into();
-    if offset != metadata.len() || actual != expected || !held.unchanged() {
+    if offset != metadata.len() || actual != expected || !held.unchanged_in_place() {
         return Err(Error::Authority("held authored clip bytes"));
     }
     Ok(())

@@ -134,6 +134,16 @@ impl WindowStageClock {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         marks[stage as usize].get_or_insert(elapsed);
     }
+    /// Record that `stage` ended at `at`, which may precede the window's own
+    /// start (a run's pre-started encoder): that marks it at the start.
+    pub(crate) fn mark_at(&self, stage: WindowStage, at: Instant) {
+        let elapsed = at.saturating_duration_since(self.started);
+        let mut marks = self
+            .marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        marks[stage as usize].get_or_insert(elapsed);
+    }
     /// Time from the window's start to the end of `stage`, if it was reached.
     pub(crate) fn at(&self, stage: WindowStage) -> Option<Duration> {
         self.marks

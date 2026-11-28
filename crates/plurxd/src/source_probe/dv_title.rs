@@ -5,6 +5,229 @@ use plurx_core::{
     scan::dv_title::{DvTitleStats, TitleEligibility},
 };
 
+/// Why a complete-title scan produced no aggregate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TitleScanError {
+    /// The source service withdrew a read the scanner was waiting on (an
+    /// exhausted pause, a revoked or unavailable budget grant). The storage
+    /// was not at fault, so this is contention, like a scheduler preemption.
+    SourceInterrupted(String),
+    /// The storage itself failed a read (an I/O error, or the object ended
+    /// early). The scanner saw truncated input, so its result is not a
+    /// verdict on the content, but rereading may fail the same way.
+    SourceReadFailed(String),
+    /// The scanner read the whole selected input cleanly and refused its
+    /// content for a reason in [`CONTENT_REFUSALS`], and the source and the
+    /// scanner were still current afterwards. Rereading the same bytes with
+    /// the same scanner reaches the same refusal, so this is a verdict for
+    /// that probe revision and scanner digest, not a transient failure.
+    Refused(String),
+    /// The scanner, its aggregate or its prerequisites failed for a reason
+    /// that is not a verdict on the content: a launch error, a signal or
+    /// deadline, an allocation or I/O setup refusal, or a changed source.
+    Failed(String),
+}
+
+impl std::fmt::Display for TitleScanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceInterrupted(reason)
+            | Self::SourceReadFailed(reason)
+            | Self::Refused(reason)
+            | Self::Failed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+/// The `scan_title` refusals that judge the selected video's bytes: its
+/// configuration, its bitstream, its demuxed packets, and whether its
+/// coverage and endpoint can be proven complete. Each is reached only after
+/// reads that succeeded, and depends on nothing but those bytes, so the same
+/// file and scanner refuse the same way on every attempt.
+///
+/// Refusals left out are about the environment, not the content: the source
+/// capability, I/O and demux setup, allocation, usage, the RPU timeline
+/// sidecar, `source open`, `complete demux EOF` (a direct read's I/O error
+/// surfaces there) and `aggregate output`. Two more classes are left out:
+/// `corrupt demux packet` is set by libavformat on a short sample read, which
+/// a scanner-side loopback failure causes without the bridge seeing one; and
+/// `selected stream exists` and `selected HEVC video` judge the stream index
+/// the daemon chose, which neither the probe revision nor the scanner digest
+/// covers. They, and any reason a newer scanner adds, keep the charged retry.
+pub(super) const CONTENT_REFUSALS: &[&str] = &[
+    "a PPS lets slices withhold pictures from output",
+    "bounded access-unit NAL count",
+    "complete NAL length",
+    "NAL inside its access unit",
+    "first slice in a picture missing",
+    "slice names an unknown PPS",
+    "two first slices in one picture",
+    "pictures discarded at a new sequence",
+    "title begins at a random access point",
+    "observed complete display-frame timing",
+    "bounded title display-frame count",
+    "length-prefixed HEVC with a version-1 configuration",
+    "complete configuration array",
+    "complete configuration NAL length",
+    "configuration NAL inside its record",
+    "bounded picture size",
+    "complete declared frame coverage",
+    "contiguous decoded title coverage",
+    "observed declared video origin",
+    "bounded declared video end",
+    "complete selected video duration",
+    "selected video duration tag",
+    "complete selected video duration tag",
+    "complete declared Matroska segment",
+    "declared Matroska segment duration",
+    "Matroska segment tail reached",
+    "independent complete selected-video endpoint unavailable",
+];
+
+// Planned-census refusals about the held video. Sidecar, allocation and
+// argument failures still retry, like their ordinary scanner counterparts.
+const M7_CONTENT_REFUSALS: &[&str] = &[
+    "supported M7 census raster",
+    "M7 census requires four-byte hvcC access units",
+    "declared M7 source Dolby Vision configuration",
+    "declared M7 Profile 7 dual-layer source",
+    "bounded positive M7 selected video packet size",
+    "one admitted display picture per M7 selected video packet",
+    "unique M7 title presentation time",
+    "fresh parsed FEL RPU for the M7 source census",
+    "bounded M7 census frame count",
+    "one fresh same-access-unit BL, EL and RPU in the M7 selected track",
+    "bounded M7 selected video packet extent",
+    "complete M7 census interval",
+    "exact M7 census interval start",
+    "M7 coded picture matches sorted title clock",
+    "complete M7 source presentation ordinal coverage",
+    "exact M7 census interval end",
+];
+
+/// `scan_title`'s `need()` prints this prefix, then its reason, and exits 1.
+const REFUSAL_PREFIX: &str = "DV title scan refused: ";
+
+/// The content refusal a scanner that exited 1 reported, if its last refusal
+/// line names one exactly.
+fn content_refusal(
+    output: &plurx_core::process::bounded::Output,
+    additional: &'static [&'static str],
+) -> Option<&'static str> {
+    if output.status.code() != Some(1) {
+        return None;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let line = stderr.lines().rev().find_map(|line| {
+        line.find(REFUSAL_PREFIX)
+            .map(|at| line[at + REFUSAL_PREFIX.len()..].trim())
+    })?;
+    CONTENT_REFUSALS
+        .iter()
+        .chain(additional)
+        .copied()
+        .find(|reason| *reason == line)
+}
+
+impl From<String> for TitleScanError {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+
+impl From<&str> for TitleScanError {
+    fn from(reason: &str) -> Self {
+        Self::Failed(reason.to_owned())
+    }
+}
+
+/// What the source bridge observed while the scanner read through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourceRead {
+    /// Every served read succeeded, or there was no bridge.
+    Clean,
+    /// A served read failed for a service reason: budget, grant or pause.
+    Interrupted,
+    /// A served read failed in the storage itself.
+    StorageFailed,
+}
+
+#[cfg(unix)]
+pub(super) fn source_read(input: Option<&SourceInput>) -> SourceRead {
+    match input {
+        Some(input) if input.source_physical_read_failed() => SourceRead::StorageFailed,
+        Some(input) if input.source_read_failed() => SourceRead::Interrupted,
+        _ => SourceRead::Clean,
+    }
+}
+
+/// Bounded stderr carried into a failure reason: the final bytes, where a
+/// scanner prints its fatal error, on one line, with the bridge's private
+/// capability URL redacted.
+const STDERR_TAIL_BYTES: usize = 512;
+
+pub(super) fn stderr_tail(stderr: &[u8]) -> String {
+    let start = stderr.len().saturating_sub(STDERR_TAIL_BYTES);
+    let line = String::from_utf8_lossy(&stderr[start..])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    crate::scratch_put::redact(&line)
+}
+
+/// Classify the scanner's exit before its aggregate is trusted. A failed
+/// source read outranks every scanner outcome, including an apparent
+/// success: an aggregate computed over truncated input is never published.
+/// Over clean reads, a refusal naming a [`CONTENT_REFUSALS`] reason is a
+/// verdict; every other non-zero exit, signal or launch error is not.
+pub(super) fn scanner_verdict(
+    output: std::io::Result<plurx_core::process::bounded::Output>,
+    read: SourceRead,
+) -> Result<Vec<u8>, TitleScanError> {
+    scanner_verdict_with_refusals(output, read, &[])
+}
+
+fn scanner_verdict_with_refusals(
+    output: std::io::Result<plurx_core::process::bounded::Output>,
+    read: SourceRead,
+    additional: &'static [&'static str],
+) -> Result<Vec<u8>, TitleScanError> {
+    let describe = |output: &std::io::Result<plurx_core::process::bounded::Output>| match output {
+        Ok(output) => {
+            let tail = stderr_tail(&output.stderr);
+            if tail.is_empty() {
+                output.status.to_string()
+            } else {
+                format!("{}; stderr: {tail}", output.status)
+            }
+        }
+        Err(error) => error.to_string(),
+    };
+    match read {
+        SourceRead::StorageFailed => Err(TitleScanError::SourceReadFailed(format!(
+            "source storage read failed during title scan ({})",
+            describe(&output)
+        ))),
+        SourceRead::Interrupted => Err(TitleScanError::SourceInterrupted(format!(
+            "source service interrupted the title scan ({})",
+            describe(&output)
+        ))),
+        SourceRead::Clean => match output {
+            Ok(output) if output.status.success() => Ok(output.stdout),
+            Ok(output) if content_refusal(&output, additional).is_some() => {
+                Err(TitleScanError::Refused(format!(
+                    "complete-title DV scan refused ({})",
+                    describe(&Ok(output))
+                )))
+            }
+            failed => Err(TitleScanError::Failed(format!(
+                "complete-title DV scan failed ({})",
+                describe(&failed)
+            ))),
+        },
+    }
+}
+
 use std::{path::Path, time::Duration};
 
 mod m7_census;
@@ -88,71 +311,24 @@ pub(super) async fn scan(
     document: &str,
     tools: &ToolSet,
     runtime_cache: &Path,
-) -> Result<DvTitleStats, String> {
+) -> Result<DvTitleStats, TitleScanError> {
     scan_owned(file, document, tools, runtime_cache, None)
         .await
         .map(|(stats, _)| stats)
-        .map_err(CensusScanError::into_message)
-}
-
-/// Why a complete-title scan ended without a verified aggregate.
-#[derive(Debug)]
-pub(super) enum CensusScanError {
-    /// Something a later attempt need not repeat: a busy or failed source
-    /// read, a signal or wall-time kill, a launch error, changed tools or a
-    /// changed source, or a census the daemon could not verify.
-    Transient(String),
-    /// The current scanner exited on its own after reading the whole held
-    /// source, which is still unchanged, and refused it. The same scanner
-    /// refuses the same source again, so retrying cannot settle it.
-    Refused(String),
-}
-
-impl CensusScanError {
-    pub(super) fn into_message(self) -> String {
-        match self {
-            Self::Transient(message) | Self::Refused(message) => message,
-        }
-    }
-}
-
-impl From<String> for CensusScanError {
-    fn from(message: String) -> Self {
-        Self::Transient(message)
-    }
-}
-
-impl From<&str> for CensusScanError {
-    fn from(message: &str) -> Self {
-        Self::Transient(message.into())
-    }
-}
-
-/// A failed scan is a refusal only when the scanner exited by itself (not by
-/// a signal, which a wall-time kill or crash leaves) over inputs that are
-/// still current.
-fn classify_scan_failure(
-    output: &plurx_core::process::bounded::Output,
-    inputs_current: bool,
-) -> CensusScanError {
-    let message = scan_failure(output);
-    if inputs_current && output.status.code().is_some() {
-        CensusScanError::Refused(message)
-    } else {
-        CensusScanError::Transient(message)
-    }
 }
 
 /// Select the planned windows before the whole scan. Their actual source
 /// ordinals and AU hashes are settled by that same scanner at complete EOF.
 pub(super) async fn scan_with_m7_census(
     file: &MediaFile,
+    source: &crate::fragment_index_cluster::SourceFence,
     document: &str,
     tools: &ToolSet,
     runtime_cache: &Path,
     ranges: &[M7WindowRange],
-) -> Result<(DvTitleStats, VerifiedSourceCensus), CensusScanError> {
-    let (stats, census) = scan_owned(file, document, tools, runtime_cache, Some(ranges)).await?;
+) -> Result<(DvTitleStats, VerifiedSourceCensus), TitleScanError> {
+    let (stats, census) =
+        scan_owned(file, document, tools, runtime_cache, Some((source, ranges))).await?;
     Ok((stats, census.ok_or("planned M7 census was not returned")?))
 }
 
@@ -161,14 +337,19 @@ async fn scan_owned(
     document: &str,
     tools: &ToolSet,
     runtime_cache: &Path,
-    ranges: Option<&[M7WindowRange]>,
-) -> Result<(DvTitleStats, Option<VerifiedSourceCensus>), CensusScanError> {
+    census: Option<(
+        &crate::fragment_index_cluster::SourceFence,
+        &[M7WindowRange],
+    )>,
+) -> Result<(DvTitleStats, Option<VerifiedSourceCensus>), TitleScanError> {
+    let ranges = census.map(|(_, ranges)| ranges);
     let args = ranges.map(m7_census::arguments).transpose()?;
     let census_dir = ranges
         .map(|_| tempfile::tempdir_in(runtime_cache))
         .transpose()
         .map_err(|error| error.to_string())?;
-    let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
+    let expected = census.map(|(source, _)| source.object_version());
+    let source = crate::fragment_index_cluster::open_source_playback_fence(file, expected).await?;
     let document: serde_json::Value = serde_json::from_str(document).map_err(|e| e.to_string())?;
     let index = selected_video_index(&document).ok_or("unknown selected video stream")?;
     if !tools.is_current().await {
@@ -219,32 +400,38 @@ async fn scan_owned(
         )
         .await
     };
-    let source_read_failed = input.as_ref().is_some_and(SourceInput::source_read_failed);
+    let read = source_read(input.as_ref());
     if let Some(input) = input {
         input
             .close_and_wait()
             .await
             .map_err(|error| format!("joining title source input: {error}"))?;
     }
-    if ranges.is_some() && source_read_failed {
-        return Err("planned M7 title source read failed".into());
+    let verdict = if ranges.is_some() {
+        scanner_verdict_with_refusals(output, read, M7_CONTENT_REFUSALS)
+    } else {
+        scanner_verdict(output, read)
+    };
+    // An aggregate and a content refusal are both judgements of these bytes
+    // by this scanner: trust either only while both are still current.
+    if matches!(verdict, Ok(_) | Err(TitleScanError::Refused(_))) {
+        if !tools.is_current().await {
+            return Err("DV scanner identity changed".into());
+        }
+        if !source.unchanged().await
+            || crate::fragment_index_cluster::open_source_playback_fence(
+                file,
+                Some(source.object_version()),
+            )
+            .await
+            .is_err()
+        {
+            return Err("source changed during title scan".into());
+        }
     }
-    let output = output.map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        let inputs_current = !source_read_failed
-            && tools.is_current().await
-            && source.unchanged()
-            && source.reopen(file).await.is_ok();
-        return Err(classify_scan_failure(&output, inputs_current));
-    }
-    if !tools.is_current().await {
-        return Err("DV scanner identity changed".into());
-    }
-    if !source.unchanged() || source.reopen(file).await.is_err() {
-        return Err("source changed during title scan".into());
-    }
+    let stdout = verdict?;
     let stats: DvTitleStats =
-        serde_json::from_slice(&output.stdout).map_err(|e| format!("invalid DV aggregate: {e}"))?;
+        serde_json::from_slice(&stdout).map_err(|e| format!("invalid DV aggregate: {e}"))?;
     if stats.eligibility() == TitleEligibility::InvalidAggregate || !stats.complete {
         return Err("incomplete or inconsistent DV aggregate".into());
     }
@@ -424,8 +611,12 @@ pub(crate) async fn publish_title_with_tools_for_control(
                 transcode.runtime_cache_dir(),
             ),
         )
-        .await?;
-        if !tools.is_current().await || !source.unchanged() || source.reopen(file).await.is_err() {
+        .await
+        .map_err(|error| error.to_string())?;
+        if !tools.is_current().await
+            || !source.unchanged().await
+            || source.reopen(file).await.is_err()
+        {
             return Err("title scanner or source changed before control publication".into());
         }
         if !fence
@@ -462,35 +653,6 @@ pub(crate) async fn publish_title_with_tools_for_control(
     result
 }
 
-/// Longest scanner refusal carried into a title job's error.
-const MAX_SCAN_FAILURE_BYTES: usize = 512;
-
-/// A failed scan names how the scanner ended and, when it said, why: its
-/// last `DV title scan refused:` line, else the last line it wrote. Without
-/// it a refusal is indistinguishable from any other failure.
-fn scan_failure(output: &plurx_core::process::bounded::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let lines = || {
-        stderr
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-    };
-    let reason = lines()
-        .rfind(|line| line.starts_with("DV title scan refused:"))
-        .or_else(|| lines().next_back());
-    let mut message = format!("complete-title DV scan failed ({})", output.status);
-    if let Some(reason) = reason {
-        let mut end = reason.len().min(MAX_SCAN_FAILURE_BYTES);
-        while !reason.is_char_boundary(end) {
-            end -= 1;
-        }
-        message.push_str(": ");
-        message.push_str(&reason[..end]);
-    }
-    message
-}
-
 #[cfg(any(unix, test))]
 pub(super) fn selected_video_index(document: &serde_json::Value) -> Option<u8> {
     let stream = document.get("streams")?.as_array()?.iter().find(|stream| {
@@ -523,59 +685,38 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_failed_scan_names_the_scanners_refusal() {
+    fn only_census_content_refusals_are_terminal_over_clean_reads() {
         use std::os::unix::process::ExitStatusExt;
-        let output = |status: i32, stderr: &str| plurx_core::process::bounded::Output {
-            status: std::process::ExitStatus::from_raw(status),
-            stdout: Vec::new(),
-            stderr: stderr.as_bytes().to_vec(),
+        let output = |status: i32, reason: &str| {
+            Ok(plurx_core::process::bounded::Output {
+                status: std::process::ExitStatus::from_raw(status),
+                stdout: Vec::new(),
+                stderr: format!("DV title scan refused: {reason}\n").into_bytes(),
+            })
         };
-        let refused = scan_failure(&output(
-            1 << 8,
-            "[hevc] noise\nDV title scan refused: complete demux EOF\n[mkv] after\n",
-        ));
-        assert!(refused.contains("exit status: 1"), "{refused}");
-        assert!(
-            refused.ends_with(": DV title scan refused: complete demux EOF"),
-            "{refused}"
-        );
-        let other = scan_failure(&output(1 << 8, "first\nlast words\n\n"));
-        assert!(other.ends_with(": last words"), "{other}");
-        let silent = scan_failure(&output(9, ""));
-        assert!(
-            silent.starts_with("complete-title DV scan failed ("),
-            "{silent}"
-        );
-        assert!(!silent.contains("): "), "{silent}");
-        let long = scan_failure(&output(1 << 8, &"é".repeat(2 * MAX_SCAN_FAILURE_BYTES)));
-        assert!(long.len() <= 64 + MAX_SCAN_FAILURE_BYTES, "{}", long.len());
-    }
-
-    /// Eclipse's census refusal retried every maintenance pass because every
-    /// scan failure was a retry. Only the scanner's own exit over current
-    /// inputs is a refusal; a kill or stale inputs still retry.
-    #[cfg(unix)]
-    #[test]
-    fn only_the_scanners_own_exit_over_current_inputs_is_a_refusal() {
-        use std::os::unix::process::ExitStatusExt;
-        let output = |status: i32| plurx_core::process::bounded::Output {
-            status: std::process::ExitStatus::from_raw(status),
-            stdout: Vec::new(),
-            stderr: b"DV title scan refused: exact M7 census interval end\n".to_vec(),
+        let interval = "exact M7 census interval end";
+        let classify = |status, reason, read| {
+            scanner_verdict_with_refusals(output(status, reason), read, M7_CONTENT_REFUSALS)
         };
-        let refused = classify_scan_failure(&output(1 << 8), true);
-        assert!(
-            matches!(&refused, CensusScanError::Refused(message)
-                if message.ends_with("exact M7 census interval end")),
-            "{refused:?}"
-        );
         assert!(matches!(
-            classify_scan_failure(&output(1 << 8), false),
-            CensusScanError::Transient(_)
+            classify(256, interval, SourceRead::Clean),
+            Err(TitleScanError::Refused(_))
         ));
         assert!(matches!(
-            classify_scan_failure(&output(9), true),
-            CensusScanError::Transient(_)
+            classify(256, interval, SourceRead::StorageFailed),
+            Err(TitleScanError::SourceReadFailed(_))
+        ));
+        assert!(matches!(
+            classify(9, interval, SourceRead::Clean),
+            Err(TitleScanError::Failed(_))
+        ));
+        assert!(matches!(
+            classify(256, "exclusive M7 census file", SourceRead::Clean),
+            Err(TitleScanError::Failed(_))
+        ));
+        assert!(matches!(
+            scanner_verdict(output(256, interval), SourceRead::Clean),
+            Err(TitleScanError::Failed(_))
         ));
     }
 }

@@ -75,6 +75,33 @@ pub(crate) const REFIT_MODE_VERSION: &str = "plurx-refit-mode-v3";
 pub(crate) const REFIT_MODE_SOURCES: &str =
     "f18bb061740d61d0c704eb102e70f63b0f7d84baaeb41de08a6ba88b9b40a449";
 
+/// Title scanner digests whose settled verdicts the scanner built from this
+/// tree reproduces exactly. Title demand holding a complete aggregate such a
+/// scanner published is carried forward to this scanner in place
+/// (`carry_forward_dv_title_verdicts`) instead of read again, which would
+/// cost the whole library and drop every published aggregate until its title
+/// was read. Everything else, refusals included, rotates and is read again.
+///
+/// An entry holds only while every title its scanner accepted is accepted
+/// here with the same aggregate.
+/// [`TITLE_SCANNER_SOURCES`] makes any change to the scanner's sources fail
+/// a test until this list is reviewed against it.
+pub(crate) const TITLE_SCANNER_PREDECESSORS: &[&str] = &[
+    // The scanner on main through d33e7975a (scan_title.c last changed in
+    // 247f43a90). Its successor adds the untagged-Matroska Segment endpoint,
+    // reached only where this one refused "independent complete
+    // selected-video endpoint unavailable"; with a declared endpoint it reads
+    // only the selected video, exactly as before.
+    "5e4c9012fec9fd3087d0cf62ac7819fda7b86f57cb4d21de9f3045c153306953",
+];
+/// sha256 of `scan_title.c`, `m7_title_census.h`, `movie_source_io.h`, `title_constants.h`,
+/// `build.sh` (its flags) and `build-dependencies.sh` (the FFmpeg and libdovi
+/// it links statically) concatenated, as [`TITLE_SCANNER_PREDECESSORS`] was
+/// last reviewed against.
+#[cfg(test)]
+pub(crate) const TITLE_SCANNER_SOURCES: &str =
+    "7fe0193a7129a7f21472fba31698e99d9d2384e5d9b93a6903ae761533bf8e26";
+
 #[cfg(test)]
 impl ToolSet {
     /// An explicitly controlled scanner result with the ordinary executable
@@ -154,6 +181,10 @@ fn renderer_source_identity() -> String {
         (
             "dm_cm29_gamut_tables.h",
             include_bytes!("../../../tools/dv_processing/dm_cm29_gamut_tables.h"),
+        ),
+        (
+            "dm_pq_tables.h",
+            include_bytes!("../../../tools/dv_processing/dm_pq_tables.h"),
         ),
         (
             "dv_dm.h",
@@ -790,6 +821,43 @@ mod title_scanner_identity_tests {
             REFIT_MODE_SOURCES,
             "the refit mode changed: bump REFIT_MODE_VERSION if what it prints changed, then re-pin"
         );
+    }
+
+    /// A carried-forward verdict is a claim about the scanner's sources, so
+    /// any change to them must review the predecessor list before re-pinning.
+    #[test]
+    fn title_scanner_predecessors_are_reviewed_against_the_scanner_sources() {
+        use sha2::{Digest, Sha256};
+        let mut sources = Sha256::new();
+        sources.update(include_bytes!("../../../tools/dv_processing/scan_title.c"));
+        sources.update(include_bytes!(
+            "../../../tools/dv_processing/m7_title_census.h"
+        ));
+        sources.update(include_bytes!(
+            "../../../tools/dv_processing/movie_source_io.h"
+        ));
+        sources.update(include_bytes!(
+            "../../../tools/dv_processing/title_constants.h"
+        ));
+        sources.update(include_bytes!("../../../tools/dv_processing/build.sh"));
+        sources.update(include_bytes!(
+            "../../../tools/dv_processing/build-dependencies.sh"
+        ));
+        assert_eq!(
+            hex::encode(sources.finalize()),
+            TITLE_SCANNER_SOURCES,
+            "the title scanner changed: drop every TITLE_SCANNER_PREDECESSORS entry whose \
+             accepted aggregates or non-Matroska verdicts it no longer reproduces, then re-pin"
+        );
+        for predecessor in TITLE_SCANNER_PREDECESSORS {
+            assert!(
+                predecessor.len() == 64
+                    && predecessor
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "{predecessor} is not a title scanner digest"
+            );
+        }
     }
 
     /// Every title-demand reader and writer uses the scanner key; FEL verdicts

@@ -57,6 +57,10 @@ final class HomeFeaturePresentation: ObservableObject {
     @Published var play: PlayContext?
     @Published var requestedItemID: Int?
     @Published var error: String?
+
+    /// Play has begun: its detail fetch is in flight or the player is up.
+    /// Home preparation keys on this, so it is cancelled before the HLS create.
+    var startsPlayback: Bool { play != nil || requestedItemID != nil }
 }
 
 @MainActor

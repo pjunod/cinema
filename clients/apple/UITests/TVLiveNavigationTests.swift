@@ -123,7 +123,8 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         // One press: Select on the row tunes it and opens full screen.
         remote.press(.select)
         let pause = app.buttons["live-player-play"]
-        XCTAssertTrue(pause.waitForExistence(timeout: 15), app.debugDescription)
+        let reveal = app.buttons["live-player-reveal"]
+        XCTAssertTrue(reveal.waitForExistence(timeout: 15), app.debugDescription)
         let hidden = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !pause.exists }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 10), .completed, app.debugDescription)
         assertFocus(app.buttons["live-player-reveal"], in: app, context: "Hidden Live TV owns remote focus")

@@ -34,6 +34,7 @@ pub mod manifest;
 mod pipeline;
 pub mod progress;
 mod recipe;
+pub mod split_master;
 mod vod;
 
 pub use avc_qualification::QualifiedSdrAvc;
@@ -48,8 +49,8 @@ pub use decode::{
     OutputMetadataPolicy, OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract,
     Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance,
     SubtitleRendering, ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest,
-    VideoSampleEnvelope, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
-    UNQUALIFIED_ARTIFACT_NAMESPACE,
+    VideoSampleEnvelope, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, HEVC_SCAN_PROBE_KEY,
+    RESOLVED_TRANSCODE_PLAN_VERSION, UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 pub use dolby::{
     LinuxDolbyContext, LinuxDolbyExecutionBinding, LinuxDolbyIdentity, LinuxDolbyObservation,

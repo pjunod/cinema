@@ -6,6 +6,7 @@ mod manager;
 pub(crate) mod profile;
 pub(crate) use manager::worker_pass;
 mod read_attestation;
+pub(crate) use read_attestation::ReadPreparationSlot;
 pub(crate) mod runtime;
 
 use crate::{http::error::ApiError, state::AppState, subtitle_models::artifacts};
@@ -36,6 +37,10 @@ pub(crate) struct Runtime {
     failures: RwLock<std::collections::BTreeMap<String, String>>,
 }
 impl Runtime {
+    pub(crate) fn try_borrow_read_preparation_slot(&self) -> Option<ReadPreparationSlot> {
+        self.reads.try_borrow_slot()
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             sources: RwLock::new(VecDeque::new()),
@@ -70,7 +75,7 @@ impl Runtime {
                     && v.revision().source_mtime == file.mtime
             })
             .cloned()?;
-        if !candidate.unchanged() {
+        if !candidate.unchanged().await {
             return None;
         }
         let current = tokio::time::timeout(
@@ -83,9 +88,8 @@ impl Runtime {
         .await
         .ok()?
         .ok()?;
-        (plurx_core::fs_secure::std_file_identity(&current.handle).ok()
-            == Some(candidate.identity()))
-        .then_some(candidate)
+        (plurx_core::media_io::identity(&current.handle).await.ok() == Some(candidate.identity()))
+            .then_some(candidate)
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -14,9 +14,12 @@ version = "0.3.0"
 ```
 
 Every crate inherits it with `version.workspace = true`. The native apps keep
-their store-facing marketing versions aligned with the workspace separately;
-their monotonically increasing build counters advance whenever their release
-paths change, and CI enforces that contract.
+their store-facing marketing versions aligned with the workspace separately,
+and CI enforces that. Their store build number is not stored at all: both apps
+take one number derived at build time by
+[`scripts/build-number`](../scripts/build-number) — the first-parent commit
+count of the `main` commit a build is based on — so it rises with every
+commit that lands on `main` and no pull request ever raises a counter.
 
 plurx follows [semantic versioning](https://semver.org/) under the 0.x rules,
 which are worth stating plainly because they are not what 1.x users expect:
@@ -69,30 +72,43 @@ CI passes the tag name automatically when it publishes an image.
 1. **Decide the number** using the table above.
 
 2. **Run `scripts/release-cut`** (`--part minor` for a minor bump, or
-   `--version X.Y.Z`). It refuses an empty `Unreleased` section, an existing
-   tag and an existing changelog section before it writes anything; then it
-   moves `CHANGELOG.md`'s `Unreleased` section under a dated
-   `## [X.Y.Z] — YYYY-MM-DD` heading, rewrites the two link definitions at the
+   `--version X.Y.Z`). It collects the `Changelog:` entries every landing
+   commit carried since the previous cut's `changelog-through` marker
+   (`validation/changelog_field.py`; `scripts/release-cut --preview` shows
+   them), refuses a release with no entries, an existing tag and an existing
+   changelog section before it writes anything, names any landing that came
+   in without the field, then writes the entries under a dated
+   `## [X.Y.Z] — YYYY-MM-DD` heading with a new marker, folds every fragment
+   folder (`scripts/fold --all`), rewrites the two link definitions at the
    bottom, sets the workspace version in `Cargo.toml`, sets both native apps'
-   marketing versions to it and advances both native build counters (the
-   mobile-version contract requires all of that of a version bump), rewrites
-   the status lines that quote the version or a build counter
+   marketing versions to it (the mobile-version contract requires that),
+   rewrites the status lines that quote the version
    (`clients/apple/README.md`, `clients/android/README.md`,
-   `docs/clients/APPLE-CLIENT-PARITY.md`, `docs/STATUS.html`, the Apple ones
-   through `validation/apple_build.py`'s generator) so the tree it leaves
-   passes `make operations-check`, and lets Cargo relock `Cargo.lock` and
-   `spikes/hiqlite-m0/Cargo.lock`. It never tags.
+   `docs/clients/APPLE-CLIENT-PARITY.md`) so the tree it leaves passes
+   `make operations-check`, and lets Cargo relock `Cargo.lock` and
+   `spikes/hiqlite-m0/Cargo.lock`. It never tags, and it touches no build
+   number: those are derived at build time by `scripts/build-number`.
 
-   Review the exact-file fingerprints before pushing. Apple project version
-   and build changes need a reviewed refresh of `BUILD_SPECS` in
-   `validation/native_receipts.py`. Cargo manifest and lockfile changes also
-   need reviewed fingerprints in the durable-jobs and operation-progress
-   formal mappings, even when only workspace versions changed. The release
-   script leaves these independent review records alone. Preserve their
-   exact-byte checks and record which source changes were reviewed. Run
+   Review the exact-file fingerprints before pushing. The cut re-pins
+   `clients/apple/project.yml`'s reviewed fingerprint and counter-normalized
+   shape in `validation/native_receipts.py`, and its `# release:` line, because
+   its MARKETING_VERSION bump is the only change it makes there; it refuses
+   the cut, writing nothing, if that file no longer matches its pin, so any
+   other project change still gets its own reviewed re-pin first. Cargo
+   manifest and lockfile changes also need reviewed fingerprints in the
+   durable-jobs and operation-progress formal mappings, even when only
+   workspace versions changed; the release script leaves those independent
+   review records alone. Preserve their exact-byte checks and record which
+   source changes were reviewed. Run
    `python3 -m unittest tests.validation.test_native_receipts` and
    `python3 scripts/check-formal check-mapping --package <package>` for
    `durable-jobs`, `operation-progress`, and `worker-refinement` before pushing.
+
+   The release pull request's description says `Changelog: none`: its
+   entries are already in the dated section, and repeating them as fields
+   would list them again in the next release. A pull request that lands
+   while the release pull request is open is listed under the next
+   release, since the cut read only what had landed when it ran.
 
 3. **Read the changelog it dated.** Entries are for people running the server,
    not for people reading the diff; edit them in the release pull request.
@@ -109,13 +125,14 @@ CI passes the tag name automatically when it publishes an image.
    required checks, and merge it. The commit that lands it on `main` is the
    **release commit**: the first commit on `main`'s first-parent line whose
    `CHANGELOG.md` carries the dated `## [X.Y.Z]` heading. The next scheduled
-   release-readiness run (below) checks that commit out, runs
-   `make release-check` there, and pushes the annotated tag onto it only if it
-   is green, however many pull requests have merged on top of it since.
-   Tagging by hand remains possible and is the same act the workflow performs:
+   release-readiness run (below) confirms that commit landed with a green
+   `Main promotion gate` and pushes the annotated tag onto it, however many
+   pull requests have merged on top of it since. Nothing is retested to tag
+   it. Tagging by hand remains possible and is the same act the workflow
+   performs:
 
    ```sh
-   make release-check
+   python3 -m validation.release_evidence --sha <release commit>
    git tag -a v0.3.1 -m "v0.3.1"
    git push origin v0.3.1
    ```
@@ -124,8 +141,10 @@ CI passes the tag name automatically when it publishes an image.
    with `Cargo.toml`, so a mismatch fails before anything reaches a registry
    rather than after.
 
-6. **CI does the rest.** A `v*` tag runs the full gate, then calls the same
-   publication workflow used for recovery. That workflow peels the annotated
+6. **CI does the rest.** A `v*` tag starts `release-tag.yml`, which retests
+   nothing: it requires the tagged commit's existing green promotion gate
+   (`validation.release_evidence`, as in the weekly run below) and then calls
+   the same publication workflow used for recovery. That workflow peels the annotated
    tag once, builds x86-64 and aarch64 binaries inside the pinned Bookworm
    toolchain, and stamps both with the validated tag. It packages and smoke
    tests each platform by digest before assigning the local Forgejo registry
@@ -135,7 +154,7 @@ CI passes the tag name automatically when it publishes an image.
 
 ### The weekly release tag
 
-Releases are cut **weekly, from a green scheduled run** — the cadence Paul
+Releases are cut **weekly, by a scheduled run** — the cadence Paul
 chose on 2026-09-23 ([LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
 §3.5 option (a)). `.github/workflows/release-readiness.yml` runs every Monday
 at 06:00 UTC and starts from `main`'s tip:
@@ -149,25 +168,19 @@ at 06:00 UTC and starts from `main`'s tip:
   fails, when that commit is not one the changelog describes: it does not
   declare the version, it still has entries under `[Unreleased]`, or `main`
   has since edited the release's section.
-- If a release is waiting, the run checks the release commit out and the gate
-  there is `make release-check`; if not, the gate on the tip is the same
-  `scripts/validate run --profile ci --all --strict` sweep, so every week
-  answers "is `main` releasable" whether or not anything is waiting.
-- Both checks build the checked-out commit's CI tooling on the media assets
-  selected by release publication, then run the resulting immutable image ID.
-  On amd64 this includes exporting and installing the audited Dolby media
-  package through `runtime-assets-dolby-amd64`; older sources without that
-  contract use `runtime-assets`:
-  `PLURX_FFMPEG`, `PLURX_FFPROBE` and bare shell commands all use the shipped
-  Jellyfin FFmpeg 8 executables. The host needs Docker and the Rust-suite
-  memory pool, with no host FFmpeg requirement. The source is mounted at its
-  host path so Android's sibling containers read the same checkout; checks
-  run as the runner user and reuse the bounded Cargo cache. The current
-  execution helper is retained before checking out a historical release.
-- Only when that gate is green, on a scheduled run, for a pending release,
-  does the `tag` job push the annotated tag, onto the release commit the gate
-  passed. The tag starts `ci.yml`'s full sweep and the image publication in
-  step 6.
+- If a release is waiting, the run reads the evidence the release commit
+  already carries instead of retesting it (Paul, 2026-11-25: tested code is
+  tested once, when it merges). `python3 -m validation.release_evidence`
+  accepts the release commit only when it is a two-parent `scripts/land`
+  landing with one `Reviewed-on:` pull request and no `Landed-Untested:`
+  trailer, the forge reports that pull request merged as this commit from the
+  commit's second parent, and that head carries a green
+  `main fast lane / Main promotion gate` status. Anything else refuses, and
+  nothing is tagged. It runs in seconds on a general runner. If no release is
+  waiting, the run says so and stops; `main` is tested where it merges.
+- Only when that evidence is found, on a scheduled run, for a pending release,
+  does the `tag` job push the annotated tag, onto the release commit whose gate
+  passed. The tag starts the image publication in step 6.
 
 The push uses the `RELEASE_TAG_TOKEN` repository secret, scoped to that one
 step: a tag pushed with a run's own token starts no workflow, and this tag has
@@ -331,10 +344,14 @@ newer moving aliases remain unchanged. Never delete or move the release tag to
 make recovery pass; a mismatch is an incident to investigate, not an alias to
 overwrite.
 
-The weekly release-readiness run is described above. A red run means the
-gate failed on `main`'s tip or, for a pending release, on the release commit
-(or that `--pending` refused the release commit, or that the tag push could
-not happen); it is never a reason to move or overwrite an existing tag.
+The weekly release-readiness run is described above. A red run means
+`--pending` refused the release commit, `validation.release_evidence` found no
+green gate for it (a missing, skipped or red gate; a landing admitted by a
+manual source gate, which posts no gate status; or a landing whose message
+carries a `Landed-Untested:` line or more than one `Reviewed-on:` line, which
+includes such text quoted in the release pull request's description), the
+forge could not be read, or the tag push could not happen. It is never a
+reason to move or overwrite an existing tag.
 
 ## Checking what a build reports
 
@@ -346,8 +363,9 @@ curl -s localhost:32400/api/v1/server | jq '{version, build}'
 
 From a node's `build` to the changelog entries it runs: a `build` of
 `v0.3.1` is exactly the `## [0.3.1]` section of `CHANGELOG.md`; a `build` of
-`v0.3.1-12-gabc1234` is that section **plus** whatever of `[Unreleased]` was
-merged by commit `abc1234` (`git log v0.3.1..abc1234`). Across the fleet the
+`v0.3.1-12-gabc1234` is that section **plus** the `Changelog:` entries of
+the landing commits up to `abc1234` (`git log --first-parent v0.3.1..abc1234`;
+`scripts/release-cut --preview` on that commit prints them). Across the fleet the
 same pair is the `plurx_build_info{version,build}` metric, and
 [OPERATIONS.md](OPERATIONS.md) "The fleet registry" says which image a node
 runs.

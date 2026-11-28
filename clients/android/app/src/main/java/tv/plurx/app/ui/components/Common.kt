@@ -333,6 +333,8 @@ fun <T> ChoicePicker(
     optionLabel: (T) -> String,
     onSelect: (T) -> Unit,
     modifier: Modifier = Modifier,
+    /** A second line under each option in the open list; null for none. */
+    optionDetail: (T) -> String? = { null },
 ) {
     var open by remember { mutableStateOf(false) }
     val television = currentFormFactor() == FormFactor.Television
@@ -357,7 +359,7 @@ fun <T> ChoicePicker(
             )
             if (open && television) {
                 RemoteChoiceDialog(label, options.mapIndexed { index, option ->
-                    RemoteChoice(index.toString(), optionLabel(option), option == value) { onSelect(option); RemoteOutcome.Applied }
+                    RemoteChoice(index.toString(), optionLabel(option), option == value, optionDetail(option)) { onSelect(option); RemoteOutcome.Applied }
                 }) { open = false }
             }
             if (!television) {
@@ -365,7 +367,12 @@ fun <T> ChoicePicker(
                 DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
                     options.forEach { option ->
                         DropdownMenuItem(modifier = Modifier.tvFocusRing(MaterialTheme.shapes.small, focusedScale = 1.02f),
-                            text = { Text(optionLabel(option), color = if (option == value) Accent else MaterialTheme.colorScheme.onSurface) },
+                            text = {
+                                Column {
+                                    Text(optionLabel(option), color = if (option == value) Accent else MaterialTheme.colorScheme.onSurface)
+                                    optionDetail(option)?.let { Text(it, color = Muted, style = MaterialTheme.typography.labelMedium) }
+                                }
+                            },
                             onClick = { onSelect(option); open = false })
                     }
                 }

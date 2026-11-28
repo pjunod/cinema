@@ -2,7 +2,6 @@
 
 **Status:** open · **Reconciled:** 2026-09-20
 
-Build: 162
 Issue: #328
 
 Apple playback now treats a stationary film clock as an unknown presentation

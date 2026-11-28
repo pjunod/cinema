@@ -1,0 +1,1 @@
+- **2026-10-26 · Subtitle completion:** [live status](docs/features/SUBTITLE-COMPLETION-STATUS.md). Owner Codex /root; [PR #1292](http://forge.lan:3000/noirr/plurx/pulls/1292) batches all caption operations and native delivery. Review and moving-runtime qualification pass; useful captions at 13.3/14.6s on two CPUs. Final gate and landing are tracked on the PR. Paul deploys.

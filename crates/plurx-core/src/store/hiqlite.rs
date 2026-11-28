@@ -29,8 +29,8 @@ use super::telemetry::NodeLocalTelemetry;
 use super::{
     bounded_device_label, keys, validate_generated_settings, ApiKeyStore, ArtworkRepairFence,
     CacheAdminMutationClaim, DeleteTokenByPrefixOutcome, MetricsStore, NetworkPriorStore,
-    PlaybackTelemetryStore, PrometheusStoreSnapshot, SettingsStore, TokenAuthentication,
-    TokenSummary, UserStore, MAX_DEVICE_LABEL_BYTES, TOKEN_SUMMARY_MAX,
+    PlaybackDeviceCaps, PlaybackTelemetryStore, PrometheusStoreSnapshot, SettingsStore,
+    TokenAuthentication, TokenSummary, UserStore, MAX_DEVICE_LABEL_BYTES, TOKEN_SUMMARY_MAX,
 };
 use crate::domain::{
     ApiKey, NetworkPrior, NetworkPriorObservation, OfflinePackageStats, PlaybackEvent,
@@ -295,17 +295,31 @@ pub const AUTH_PROTOCOL_VERSION: i64 = AUTH_PROTOCOL_MIN;
 /// learner admission" and must not.
 pub const AUTH_LEARNER_PROTOCOL: i64 = 5;
 
-const STORE_TIMEOUT: Duration = Duration::from_secs(3);
-const AUTHORITY_READ_TIMEOUT_RETRY_DELAY: Duration = Duration::from_millis(100);
-const AUTHORITY_READ_TIMEOUT_MAX_ATTEMPTS: usize = 2;
-const AUTHORITY_QUORUM_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(100);
-const AUTHORITY_QUORUM_RETRY_MAX_BACKOFF: Duration = Duration::from_millis(800);
-const AUTHORITY_QUORUM_RETRY_JITTER_RANGE_MILLIS: u8 = 100;
-const AUTHORITY_QUORUM_RETRY_MAX_DELAY: Duration = Duration::from_millis(899);
-const AUTHORITY_QUORUM_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
-const IDEMPOTENT_WRITE_RETRY_DELAY: Duration = Duration::from_millis(100);
-const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 5;
+const STORE_TIMEOUT: Duration = crate::cluster::timing::store::STORE_TIMEOUT;
+const AUTHORITY_READ_TIMEOUT_RETRY_DELAY: Duration =
+    crate::cluster::timing::store::AUTHORITY_READ_TIMEOUT_RETRY_DELAY;
+const AUTHORITY_READ_TIMEOUT_MAX_ATTEMPTS: usize =
+    crate::cluster::timing::store::AUTHORITY_READ_TIMEOUT_MAX_ATTEMPTS;
+const AUTHORITY_QUORUM_RETRY_INITIAL_DELAY: Duration =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RETRY_INITIAL_DELAY;
+const AUTHORITY_QUORUM_RETRY_MAX_BACKOFF: Duration =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RETRY_MAX_BACKOFF;
+const AUTHORITY_QUORUM_RETRY_JITTER_RANGE_MILLIS: u8 =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RETRY_JITTER_RANGE_MILLIS;
+const AUTHORITY_QUORUM_RETRY_MAX_DELAY: Duration =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RETRY_MAX_DELAY;
+const AUTHORITY_QUORUM_RECOVERY_BUDGET: Duration =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RECOVERY_BUDGET;
+const IDEMPOTENT_WRITE_RETRY_DELAY: Duration =
+    crate::cluster::timing::store::IDEMPOTENT_WRITE_RETRY_DELAY;
+const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize =
+    crate::cluster::timing::store::IDEMPOTENT_WRITE_MAX_ATTEMPTS;
 pub(super) const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
+const AUTH_TOKEN_POLICY_WRITE_SQL: &str = "INSERT INTO settings (key, value, updated_at) \
+     SELECT $1, $2, $3 WHERE EXISTS (\
+       SELECT 1 FROM cluster_cache_admin_revocation_leases WHERE claim_id = $4) \
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at";
+
 const CREDENTIAL_MUTATION_INTENT_BEGIN_SQL: &str =
     "INSERT INTO cluster_credential_mutation_intents (singleton) VALUES (1)";
 const CREDENTIAL_MUTATION_INTENT_END_SQL: &str =
@@ -1595,6 +1609,18 @@ impl TimedClient {
         }
     }
 
+    fn token_image_source(&self) -> Option<crate::store::TokenProofSource> {
+        match &self.inner {
+            TimedClientInner::Connected(client) => {
+                let mark = client.local_db_applied_mark().ok()?;
+                let local = client.local_db_raft_metrics().ok()?;
+                Some(crate::store::TokenProofSource::local(mark, local))
+            }
+            #[cfg(test)]
+            TimedClientInner::Disconnected | TimedClientInner::InjectedConsistentRead(_) => None,
+        }
+    }
+
     fn takeover_authority_read_metrics(&self) -> &TakeoverAuthorityReadMetrics {
         #[cfg(test)]
         if let TimedClientInner::InjectedConsistentRead(io) = &self.inner {
@@ -2381,6 +2407,7 @@ impl HiqliteAuthStore {
         store.install_source_arbitration_schema(None).await?;
         store.install_analysis_coordination_schema(None).await?;
         store.install_playback_input_keys_schema(None).await?;
+        store.install_playback_device_caps_schema(None).await?;
         store.install_subtitle_managed_schema(None).await?;
         store.install_subtitle_translation_schema(None).await?;
         store.install_subtitle_text_translation_schema(None).await?;
@@ -2393,9 +2420,11 @@ impl HiqliteAuthStore {
         store.install_dispatch_turns(None).await?;
         store.install_scan_request_v2_schema(None).await?;
         store.install_custody_retention_schema(None).await?;
+        store.install_fragment_publication_schema(None).await?;
         store.install_offloaded_schema(None).await?;
         store.install_storage_domain_pending_schema(None).await?;
         store.install_dv_refit_schema(None).await?;
+        store.install_analysis_source_scope_schema(None).await?;
         store.install_dv_m7_attempt_schema(None).await?;
         store.install_dv_m7_outcome_schema(None).await?;
         store.install_dv_m7_supersession_schema(None).await?;
@@ -2598,6 +2627,7 @@ impl HiqliteAuthStore {
                     self.install_source_arbitration_schema(admission).await?;
                     self.install_analysis_coordination_schema(admission).await?;
                     self.install_playback_input_keys_schema(admission).await?;
+                    self.install_playback_device_caps_schema(admission).await?;
                     self.install_subtitle_managed_schema(admission).await?;
                     self.install_subtitle_translation_schema(admission).await?;
                     self.install_subtitle_text_translation_schema(admission)
@@ -2611,10 +2641,12 @@ impl HiqliteAuthStore {
                     self.install_dispatch_turns(admission).await?;
                     self.install_scan_request_v2_schema(admission).await?;
                     self.install_custody_retention_schema(admission).await?;
+                    self.install_fragment_publication_schema(admission).await?;
                     self.install_offloaded_schema(admission).await?;
                     self.install_storage_domain_pending_schema(admission)
                         .await?;
                     self.install_dv_refit_schema(admission).await?;
+                    self.install_analysis_source_scope_schema(admission).await?;
                     self.install_dv_m7_attempt_schema(admission).await?;
                     self.install_dv_m7_outcome_schema(admission).await?;
                     return self.install_dv_m7_supersession_schema(admission).await;
@@ -4433,6 +4465,62 @@ impl HiqliteAuthStore {
         let marker=self.client().query_consistent_map::<CountRow,_>("playback_input_keys_shape", "SELECT count(*) AS count FROM playback_input_keys_schema WHERE singleton=1 AND version>=1",params!()).await?;
         Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
     }
+
+    /// The device-capability extension (Curator ADR 0031 §5): its table,
+    /// index and marker. `None` when none exist, `Some(true)` when all match
+    /// exactly and the marker is committed; a partial shape is refused.
+    async fn playback_device_caps_shape(&self) -> Result<Option<bool>, StoreError> {
+        let expected = super::playback_device_caps::schema_objects()?;
+        let names = super::playback_device_caps::object_name_list();
+        // authority: the device-capability objects must match the committed extension exactly before the shape is trusted.
+        let installed=self.client().query_consistent_map::<RemoteShapeRow,_>("playback_device_caps_shape", format!("SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name IN ({names}) ORDER BY name"),params!()).await?;
+        if installed.is_empty() {
+            return Ok(None);
+        }
+        if installed.len() != expected.len()
+            || installed
+                .iter()
+                .zip(&expected)
+                .any(|(row, (name, sql))| row.name != *name || row.sql != *sql)
+        {
+            return Err(StoreError::Migration(
+                "playback device caps extension has incompatible shape".into(),
+            ));
+        }
+        // authority: the committed marker closes the extension; shape alone is not admission.
+        let marker=self.client().query_consistent_map::<CountRow,_>("playback_device_caps_shape", "SELECT count(*) AS count FROM playback_device_caps_schema WHERE singleton=1 AND version>=1",params!()).await?;
+        Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
+    }
+
+    async fn install_playback_device_caps_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        match self.playback_device_caps_shape().await? {
+            Some(true) => return Ok(()),
+            Some(false) => {
+                return Err(StoreError::Migration(
+                    "playback device caps marker missing".into(),
+                ))
+            }
+            None => {}
+        }
+        let raced=format!("SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ({})) THEN 1 ELSE json('playback device caps extension raced') END",super::playback_device_caps::object_name_list());
+        let mut statements = vec![(raced, params!())];
+        statements.extend(
+            super::playback_device_caps::statements().map(|sql| (sql.to_owned(), params!())),
+        );
+        admit_schema_migration(admission)?;
+        let attempt = self.schema_migration_transaction(statements).await;
+        if self.playback_device_caps_shape().await? == Some(true) {
+            return Ok(());
+        }
+        attempt?;
+        Err(StoreError::Migration(
+            "playback device caps extension did not settle".into(),
+        ))
+    }
+
     async fn install_playback_input_keys_schema(
         &self,
         admission: SchemaMigrationAdmission<'_>,
@@ -4561,7 +4649,7 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let version = self.subtitle_managed_schema_version().await?;
-        if version == Some(6) {
+        if version == Some(7) {
             return Ok(());
         }
         if version.is_none() {
@@ -4628,7 +4716,7 @@ impl HiqliteAuthStore {
             );
             admit_schema_migration(admission)?;
             let result = self.schema_migration_transaction(statements).await;
-            if !matches!(self.subtitle_managed_schema_version().await?, Some(4..=6)) {
+            if !matches!(self.subtitle_managed_schema_version().await?, Some(4..=7)) {
                 result?;
                 return Err(StoreError::Migration(
                     "managed prepared-artifact schema upgrade did not settle".into(),
@@ -4647,7 +4735,7 @@ impl HiqliteAuthStore {
             );
             admit_schema_migration(admission)?;
             let result = self.schema_migration_transaction(statements).await;
-            if !matches!(self.subtitle_managed_schema_version().await?, Some(5 | 6)) {
+            if !matches!(self.subtitle_managed_schema_version().await?, Some(5..=7)) {
                 result?;
                 return Err(StoreError::Migration(
                     "managed targeted-probe schema upgrade did not settle".into(),
@@ -4666,7 +4754,7 @@ impl HiqliteAuthStore {
             );
             admit_schema_migration(admission)?;
             let result = self.schema_migration_transaction(statements).await;
-            if self.subtitle_managed_schema_version().await? != Some(6) {
+            if !matches!(self.subtitle_managed_schema_version().await?, Some(6 | 7)) {
                 result?;
                 return Err(StoreError::Migration(
                     "fragment publisher resource upgrade did not settle".into(),
@@ -4674,6 +4762,25 @@ impl HiqliteAuthStore {
             }
         }
         if self.subtitle_managed_schema_version().await? == Some(6) {
+            let mut statements = vec![(
+                super::subtitle_managed_schema::FILE_ROOT_GUARD.to_owned(),
+                params!(super::subtitle_managed_schema::file_root_predecessor_view()),
+            )];
+            statements.extend(
+                super::subtitle_managed_schema::file_root_statements()
+                    .into_iter()
+                    .map(|sql| (sql, params!())),
+            );
+            admit_schema_migration(admission)?;
+            let result = self.schema_migration_transaction(statements).await;
+            if self.subtitle_managed_schema_version().await? != Some(7) {
+                result?;
+                return Err(StoreError::Migration(
+                    "file-root resource upgrade did not settle".into(),
+                ));
+            }
+        }
+        if self.subtitle_managed_schema_version().await? == Some(7) {
             return Ok(());
         }
         Err(StoreError::Migration(
@@ -5132,6 +5239,71 @@ impl HiqliteAuthStore {
         ))
     }
 
+    async fn analysis_source_scope_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed view shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "analysis_source_scope_schema_version",
+                super::analysis_source_scope::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::analysis_source_scope::version(&shape)?;
+        if version == Some(1) {
+            let rows = self
+                .client()
+                // authority: admission must observe the committed marker paired with the shape.
+                .query_consistent_map::<CountRow, _>(
+                    "analysis_source_scope_schema_version",
+                    super::analysis_source_scope::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration(
+                    "analysis source scope schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+
+    /// Analysis reads only the library root that holds its file: the view
+    /// replaced under its own name. Older nodes neither read the marker nor
+    /// verify the view; they read the narrowed rows through the same triggers.
+    async fn install_analysis_source_scope_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.analysis_source_scope_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let mut statements = vec![(
+            super::analysis_source_scope::GUARD.to_owned(),
+            params!(super::analysis_source_scope::predecessor_view()),
+        )];
+        statements.extend(
+            super::analysis_source_scope::statements()
+                .into_iter()
+                .map(|sql| (sql, params!())),
+        );
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.analysis_source_scope_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "analysis source scope schema install did not settle".into(),
+        ))
+    }
+
     async fn has_dv_m7_attempt_schema(&self) -> Result<bool, StoreError> {
         let rows = self
             .client()
@@ -5304,6 +5476,47 @@ impl HiqliteAuthStore {
         result?;
         Err(StoreError::Migration(
             "custody retention schema install did not settle".into(),
+        ))
+    }
+
+    async fn fragment_publication_installed(&self) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed trigger shape fences fragment publication before node startup is admitted.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "fragment_publication_installed",
+                super::fragment_publication::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        match rows.as_slice() {
+            [row] => super::fragment_publication::installed(&row.sql),
+            _ => Err(StoreError::Migration(
+                "fragment publication trigger missing".into(),
+            )),
+        }
+    }
+
+    async fn install_fragment_publication_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.fragment_publication_installed().await? {
+            return Ok(());
+        }
+        let statements = super::fragment_publication::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.fragment_publication_installed().await? {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "fragment publication trigger replacement did not settle".into(),
         ))
     }
 
@@ -6364,10 +6577,16 @@ impl HiqliteAuthStore {
             ("DELETE FROM media_session_requests".to_owned(), params!()),
             ("DELETE FROM job_leases".to_owned(), params!()),
             ("DELETE FROM pretranscode_jobs".to_owned(), params!()),
-            ("DELETE FROM offline_source_probes".to_owned(), params!()),
+            (
+                "DELETE FROM offline_source_probes WHERE true".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM offline_lease_guards".to_owned(), params!()),
             ("DELETE FROM offline_package_leases".to_owned(), params!()),
-            ("DELETE FROM offline_packages".to_owned(), params!()),
+            (
+                "DELETE FROM offline_packages WHERE true".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM cache_consumer_pins".to_owned(), params!()),
             ("DELETE FROM cache_storage_members".to_owned(), params!()),
             (
@@ -7441,6 +7660,46 @@ impl SettingsStore for HiqliteAuthStore {
         Ok(())
     }
 
+    async fn put_auth_token_policy(
+        &self,
+        values: &[(&str, &str)],
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        if values.iter().any(|(key, _)| {
+            !matches!(
+                *key,
+                keys::AUTH_TOKEN_EXPIRY_ENABLED
+                    | keys::AUTH_TOKEN_IDLE_DAYS
+                    | keys::AUTH_TOKEN_EXPIRY_SINCE
+            )
+        }) {
+            return Err(StoreError::Database("invalid token policy key".to_owned()));
+        }
+        if values.is_empty() {
+            return Ok(true);
+        }
+        let Some(claim) = claim else {
+            // Before membership activation the raw Store has no lease table.
+            // After activation the persisted policy guards reject this legacy
+            // path; only the claim-checked transaction below can then write.
+            self.put_settings(values).await?;
+            return Ok(true);
+        };
+        let now = self.now()?;
+        let claim_id = claim.as_str();
+        let sql = AUTH_TOKEN_POLICY_WRITE_SQL;
+        let changed = self
+            .credential_mutation(
+                "put_auth_token_policy",
+                values
+                    .iter()
+                    .map(|(key, value)| (sql, params!(*key, *value, now, claim_id)))
+                    .collect(),
+            )
+            .await?;
+        Ok(changed.iter().all(|count| *count == 1))
+    }
+
     async fn put_settings_if_generation(
         &self,
         generation_key: &str,
@@ -7865,18 +8124,30 @@ impl UserStore for HiqliteAuthStore {
         token_hash: &str,
         audience: super::TokenAudience,
     ) -> Result<TokenAuthentication, StoreError> {
+        Ok(self
+            .authenticate_token_proof_for(token_hash, audience)
+            .await?
+            .authentication)
+    }
+
+    async fn authenticate_token_proof_for(
+        &self,
+        token_hash: &str,
+        audience: super::TokenAudience,
+    ) -> Result<crate::store::TokenAuthenticationProof, StoreError> {
         // A handoff token is never a row in `tokens`; its own table answers.
         if audience == super::TokenAudience::PlaybackHandoff {
-            return Ok(
-                match self
-                    .authenticate_playback_handoff("authenticate_token_for", token_hash)
-                    .await?
-                {
-                    Some(user) => TokenAuthentication::Authenticated(user),
-                    None => TokenAuthentication::Unknown,
-                },
-            );
+            return Ok(crate::store::TokenAuthenticationProof::uncached(match self
+                .authenticate_playback_handoff("authenticate_token_for", token_hash)
+                .await?
+            {
+                Some(user) => TokenAuthentication::Authenticated(user),
+                None => TokenAuthentication::Unknown,
+            }));
         }
+        // Capture before the authoritative read: an in-process snapshot may
+        // replace the SQLite image without replacing this Store's Arc.
+        let source_image = self.client().token_image_source();
         // The expiry policy rides the same consistent read as the token row:
         // no extra round trip per request, and every voter judges a token
         // against the committed policy rather than a node-local cache.
@@ -7909,7 +8180,9 @@ impl UserStore for HiqliteAuthStore {
             )
             .await?;
         let Some(row) = rows.pop() else {
-            return Ok(TokenAuthentication::Unknown);
+            return Ok(crate::store::TokenAuthenticationProof::uncached(
+                TokenAuthentication::Unknown,
+            ));
         };
         let now = self.now()?;
         if let Some(policy) = row
@@ -7917,13 +8190,31 @@ impl UserStore for HiqliteAuthStore {
             .filter(|policy| policy.is_expired(row.last_seen_at, now))
         {
             // No activity refresh: touching an expired token would revive it.
-            return Ok(TokenAuthentication::Expired {
-                idle_days: policy.idle_days,
-            });
+            return Ok(crate::store::TokenAuthenticationProof::uncached(
+                TokenAuthentication::Expired {
+                    idle_days: policy.idle_days,
+                },
+            ));
         }
         self.refresh_token_activity_if_due(token_hash, row.last_seen_at, now)
             .await?;
-        Ok(TokenAuthentication::Authenticated(row.user.into()))
+        let mut proof = crate::store::TokenAuthenticationProof::authenticated(
+            row.user.into(),
+            now,
+            row.last_seen_at,
+            row.expiry,
+        );
+        if source_image
+            .as_ref()
+            .is_none_or(|source| !source.still_valid())
+        {
+            // None does not distinguish an immutable remote client from an
+            // unknown local source. Preserve authentication, decline reuse.
+            proof.lease = None;
+        } else if let Some(lease) = proof.lease.as_mut() {
+            lease.source_image = source_image;
+        }
+        Ok(proof)
     }
 
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError> {
@@ -7999,6 +8290,82 @@ impl UserStore for HiqliteAuthStore {
             .into_iter()
             .map(Into::into)
             .collect())
+    }
+
+    async fn put_device_caps(
+        &self,
+        token_hash: &str,
+        caps: &str,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        // This replica's copy decides whether to write at all: an unchanged
+        // document is the common case, and it must not cost a Raft entry.
+        // The upsert's own predicate is what holds across replicas.
+        let current = self
+            .client()
+            .query_map::<DeviceCapsCurrentRow, _>(
+                "put_device_caps",
+                super::playback_device_caps::CURRENT,
+                params!(token_hash),
+            )
+            .await?;
+        if current.first().map(|row| row.caps.as_str()) == Some(caps) {
+            return Ok(false);
+        }
+        Ok(self
+            .execute_idempotent(
+                "put_device_caps",
+                super::playback_device_caps::UPSERT,
+                params!(caps, now, token_hash),
+            )
+            .await?
+            > 0)
+    }
+
+    async fn device_caps_for_user(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<PlaybackDeviceCaps>, StoreError> {
+        let rows = self
+            .client()
+            .query_map::<DeviceCapsListRow, _>(
+                "device_caps_for_user",
+                super::playback_device_caps::list_for_user_sql(),
+                params!(
+                    MAX_DEVICE_LABEL_BYTES as i64,
+                    keys::AUTH_TOKEN_EXPIRY_ENABLED,
+                    keys::AUTH_TOKEN_IDLE_DAYS,
+                    keys::AUTH_TOKEN_EXPIRY_SINCE,
+                    user_id,
+                    TOKEN_SUMMARY_MAX as i64
+                ),
+            )
+            .await?;
+        Ok(super::playback_device_caps::live(
+            rows.into_iter().map(|row| row.0).collect(),
+            self.now()?,
+        ))
+    }
+
+    async fn device_caps_for_all_users(&self) -> Result<Vec<PlaybackDeviceCaps>, StoreError> {
+        let rows = self
+            .client()
+            .query_map::<DeviceCapsListRow, _>(
+                "device_caps_for_all_users",
+                super::playback_device_caps::list_all_sql(),
+                params!(
+                    MAX_DEVICE_LABEL_BYTES as i64,
+                    keys::AUTH_TOKEN_EXPIRY_ENABLED,
+                    keys::AUTH_TOKEN_IDLE_DAYS,
+                    keys::AUTH_TOKEN_EXPIRY_SINCE,
+                    super::playback_device_caps::DEVICE_CAPS_LIST_MAX as i64
+                ),
+            )
+            .await?;
+        Ok(super::playback_device_caps::live(
+            rows.into_iter().map(|row| row.0).collect(),
+            self.now()?,
+        ))
     }
 
     async fn delete_token_by_prefix_for_user(
@@ -8757,6 +9124,39 @@ struct TokenUserRow {
     user: UserRow,
     last_seen_at: i64,
     expiry: Option<crate::auth::TokenIdlePolicy>,
+}
+
+struct DeviceCapsCurrentRow {
+    caps: String,
+}
+
+impl From<&mut Row<'_>> for DeviceCapsCurrentRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            caps: row.get("caps"),
+        }
+    }
+}
+
+struct DeviceCapsListRow(super::playback_device_caps::ListedDeviceCaps);
+
+impl From<&mut Row<'_>> for DeviceCapsListRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(super::playback_device_caps::ListedDeviceCaps {
+            record: PlaybackDeviceCaps {
+                token_prefix: row.get("token_prefix"),
+                device: row.get("device"),
+                user_id: row.get("user_id"),
+                username: row.get("username"),
+                last_seen_at: row.get("last_seen_at"),
+                caps: row.get("caps"),
+                updated_at: row.get("updated_at"),
+            },
+            expiry_enabled: row.get("expiry_enabled"),
+            idle_days: row.get("idle_days"),
+            expiry_since: row.get("expiry_since"),
+        })
+    }
 }
 
 struct TokenSummaryRow {

@@ -2296,7 +2296,10 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // 106 -> 107: media::library_file_paths_under (48ebff9b5) prepares its ?1/?2
 // folder SELECT separately, then binds exactly [library_id, folder] in the
 // following query_map call.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 107;
+// 107 -> 108: media::files_missing_dv_levels (Dolby Vision levels pass)
+// prepares its ?1/?2 page SELECT, then binds exactly [after_id, limit] in the
+// following query_map call, the same shape as its files_missing_* siblings.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 108;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

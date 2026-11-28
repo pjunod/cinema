@@ -342,6 +342,13 @@ pub struct DeviceCaps {
     pub max_height: Option<i64>,
 }
 
+/// The `transports` token a client sends when it plays a split HLS
+/// presentation: one master with an alternate audio group of fMP4 renditions,
+/// selected in place (P62 S2, `docs/streaming/SPLIT-HLS-RENDITION-CONTRACT.md`
+/// §3). A list entry, like `hls-bounded-range-v1`, so a later shape is a new
+/// token rather than a second flag.
+pub const HLS_SPLIT_AV_TRANSPORT: &str = "hls-split-av-v1";
+
 /// The legacy `CAPS_Q` query, as far as the profile is concerned.
 ///
 /// Lives here rather than in the HTTP layer so both wire shapes reach
@@ -456,6 +463,13 @@ impl DeviceCaps {
     /// their player cannot paint.
     pub fn renders_subtitle_overlay(&self, protocol: &str) -> bool {
         self.subtitle_overlays.iter().any(|named| named == protocol)
+    }
+
+    /// Whether this client plays a split HLS presentation.
+    pub fn plays_split_av(&self) -> bool {
+        self.transports
+            .iter()
+            .any(|token| token == HLS_SPLIT_AV_TRANSPORT)
     }
 
     /// True when this document claims nothing at all — the shape a client
@@ -1066,6 +1080,19 @@ mod display_geometry_tests {
 #[cfg(test)]
 mod display_target_tests {
     use super::*;
+    #[test]
+    fn split_av_is_claimed_only_by_its_exact_token() {
+        let caps = |transports: &[&str]| DeviceCaps {
+            v: 2,
+            transports: transports.iter().map(|token| (*token).to_owned()).collect(),
+            ..Default::default()
+        };
+        assert!(caps(&["hls", HLS_SPLIT_AV_TRANSPORT]).plays_split_av());
+        assert!(!caps(&["hls", "hls-bounded-range-v1"]).plays_split_av());
+        assert!(!caps(&["hls-split-av-v2", "HLS-SPLIT-AV-V1"]).plays_split_av());
+        assert!(!caps(&[]).plays_split_av());
+    }
+
     #[test]
     fn display_peak_bucket_rounds_down_and_unknown_stays_master() {
         for (peak, expected) in [

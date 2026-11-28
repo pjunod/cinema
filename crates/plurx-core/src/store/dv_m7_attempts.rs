@@ -359,6 +359,9 @@ pub struct M7LegacyRateStop {
     pub ledger: M7CandidateLedger,
 }
 
+/// The historical NP1 floor, shared by the sweep and the read-only planner replay.
+pub const M7_LEGACY_MIN_TARGET_KBPS: u32 = 83_334;
+
 pub(super) const LEGACY_GATE_PREFIX: &str =
     "NP1 did not land a rate-only candidate: OutsideTargetBounds(";
 
@@ -368,10 +371,9 @@ impl M7LegacyRateStop {
             .gate
             .strip_prefix(LEGACY_GATE_PREFIX)?
             .strip_suffix(')')?;
-        digits
-            .parse::<i64>()
-            .ok()
-            .filter(|value| value.to_string() == digits)
+        digits.parse::<i64>().ok().filter(|value| {
+            (1..i64::from(M7_LEGACY_MIN_TARGET_KBPS)).contains(value) && value.to_string() == digits
+        })
     }
 }
 

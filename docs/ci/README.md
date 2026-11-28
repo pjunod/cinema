@@ -30,7 +30,7 @@ a document to this folder.
 | [CI_EXECUTION_ACCELERATION_PLAN.md](CI_EXECUTION_ACCELERATION_PLAN.md) · [review](CI_EXECUTION_ACCELERATION_REVIEW.md) | Persistent caches, native packaging, exact sharding. | open |
 | [AGENT-COMPILE-LOOP.md](AGENT-COMPILE-LOOP.md) | A compiler for a checkout that has none. | live |
 | [CI-THROUGHPUT.md](CI-THROUGHPUT.md) | What to run before pushing, why a push cancels the PR's in-flight run, which paperwork the lane fixes itself, and the 2026-11-02..12 failure analysis behind both. | built |
-| [MERGE-TRAIN.md](MERGE-TRAIN.md) | How a pull request lands on `main` with the merge train off and on, its four controls (`WIP:`, `hold`, `train:solo`, `MERGE_TRAIN`) and what the bot comment means. | built |
+| [REQUESTED-LANE.md](REQUESTED-LANE.md) | How a pull request lands on `main`: pushes run the cheap gate, the `lane` label requests one full run for a head, `scripts/land` lands it; the merge train is retired. | built |
 | [PAPERWORK.md](PAPERWORK.md) | Which bookkeeping rules run first — on push and as every pull request's first job — and the fix for each. | live |
 | [AI-HARNESS-ASSESSMENT.md](AI-HARNESS-ASSESSMENT.md) | Why agent navigation and dependable feedback should precede new orchestration, and where Ripwire fits. | open |
 | [AI-HARNESS-FABLE-ASSESSMENT.md](AI-HARNESS-FABLE-ASSESSMENT.md) | Fable's assessment: fix the compile loop, test evidence, and prompt drift before navigation tooling; positions on Gemini's and Codex's proposals. | open |
@@ -38,5 +38,6 @@ a document to this folder.
 | [RIPWIRE-IMPLEMENTATION-HANDOFF.md](RIPWIRE-IMPLEMENTATION-HANDOFF.md) | CLI-first build contract for bounded repository navigation, benchmark evidence, validation integration, and rollout limits. | open |
 | [FORGEJO-MAIN-IMAGE-HANDOFF.md](FORGEJO-MAIN-IMAGE-HANDOFF.md) | Publishing the main image from Forgejo. | open |
 | [RUNNER-DISK.md](RUNNER-DISK.md) | What fills a runner, what bounds it, how to reclaim it. | live |
+| [RUNNER-JOB-LEFTOVERS.md](RUNNER-JOB-LEFTOVERS.md) | The volumes and simulators a dead job leaves behind, and what reclaims them. | live |
 | [MEDIA1-RUNNER-ORPHANED-PROCESSES.md](MEDIA1-RUNNER-ORPHANED-PROCESSES.md) | Why effort preflight leaked stopped children on media1, and how cleanup is proved. | open |
 | [MEDIA1-RUNNER-ORPHANED-SLEEP-PROCESSES.md](MEDIA1-RUNNER-ORPHANED-SLEEP-PROCESSES.md) | Evidence for stopped orphaned sleeps in the media1 runner cgroups and the safe cleanup boundary. | open |

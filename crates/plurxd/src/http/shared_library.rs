@@ -774,11 +774,18 @@ pub(super) async fn guard_source_response(
         .into_response();
     };
     let Ok(permit) = CONTENT_MONITORS.clone().try_acquire_owned() else {
-        return fail(StatusCode::TOO_MANY_REQUESTS, "sharing_body_capacity").into_response();
+        // Load, not an outage: typed, so the receiver reads it as a wait.
+        return ApiError::TypedRetry {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "sharing_body_capacity",
+            message: "sharing body capacity".into(),
+            retry_after_seconds: 1,
+        }
+        .into_response();
     };
     // Armed before the admission look, so a revocation applied after the
     // look's read wakes the monitor below (A6 M3).
-    let mut watch = state.applied.sharing_watch(SOURCE_BODY_WATCH);
+    let mut watch = state.cluster.watch(SOURCE_BODY_WATCH);
     let observed = source_content_observation(&state, &authority).await;
     if observed != SharingObservation::Current {
         return content_refusal(observed).into_response();
@@ -825,7 +832,7 @@ pub(super) async fn guard_source_response(
                 () = tokio::time::sleep_until(looked + std::time::Duration::from_secs(1)) => {},
             }
             // Re-armed before the look it follows.
-            watch = state.applied.sharing_watch(SOURCE_BODY_WATCH);
+            watch = state.cluster.watch(SOURCE_BODY_WATCH);
             looked = tokio::time::Instant::now();
             tokio::select! {
                 () = body_live.cancelled() => break,
@@ -1425,6 +1432,7 @@ fn peer_failure(error: crate::sharing_client::PeerError) -> ApiError {
     } else if matches!(
         error,
         crate::sharing_client::PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)
+            | crate::sharing_client::PeerError::Busy { .. }
     ) {
         fail(StatusCode::TOO_MANY_REQUESTS, "sharing_metadata_capacity")
     } else {
@@ -1631,7 +1639,10 @@ async fn viewer_continue_import(
             }
             "online"
         }
-        Err(crate::sharing_client::PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)) => "busy",
+        Err(
+            crate::sharing_client::PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)
+            | crate::sharing_client::PeerError::Busy { .. },
+        ) => "busy",
         Err(_) => "unavailable",
         _ => return Err(invalid()),
     };

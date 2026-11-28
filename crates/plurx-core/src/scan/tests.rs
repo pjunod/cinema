@@ -2081,7 +2081,7 @@ async fn scan_identity_library_root_is_not_a_show_directory_identity() {
     let dir = tempfile::tempdir().expect("tmp");
     let library = show_library(&store, dir.path()).await;
     assert_eq!(
-        usable_source_directory(&library, Some(dir.path())),
+        usable_source_directory(&library, Some(dir.path())).await,
         None,
         "a root/Season N/file layout cannot turn the root into one show"
     );
@@ -2098,7 +2098,7 @@ async fn scan_identity_library_root_is_not_a_show_directory_identity() {
         .await
         .expect("overlapping library");
     assert_eq!(
-        usable_source_directory(&overlapping, Some(&nested)),
+        usable_source_directory(&overlapping, Some(&nested)).await,
         None,
         "a path equal to any configured root is never show identity"
     );

@@ -285,14 +285,13 @@ impl LocalSourceSnapshot {
 
     #[cfg(unix)]
     pub(super) fn from_file(file: &std::fs::File) -> std::io::Result<Self> {
-        file.metadata()
-            .map(|metadata| Self::from_metadata(&metadata))
+        plurx_core::media_io::fstat(file).map(|metadata| Self::from_metadata(&metadata))
     }
 
     #[cfg(windows)]
     pub(super) fn from_file(file: &std::fs::File) -> std::io::Result<Self> {
-        let metadata = file.metadata()?;
-        let identity = plurx_core::fs_secure::std_file_identity(file)?;
+        let metadata = plurx_core::media_io::fstat(file)?;
+        let identity = plurx_core::media_io::identity_in_place(file)?;
         let modified = metadata
             .modified()?
             .duration_since(std::time::UNIX_EPOCH)
@@ -560,13 +559,13 @@ pub async fn pretranscode_source_snapshot(
         }
         let path = path?;
         let open_path = path.clone();
-        let handle = tokio::task::spawn_blocking(move || {
+        let handle = plurx_core::media_io::blocking(move || {
             plurx_core::fs_secure::open_read_nofollow_blocking(&open_path)
         })
         .await
         .ok()?
         .ok()?;
-        let metadata = handle.metadata().ok()?;
+        let metadata = plurx_core::media_io::fstat(&handle).ok()?;
         let snapshot = LocalSourceSnapshot::from_file(&handle).ok()?;
         (metadata.is_file()
             && snapshot.bytes == file.size.max(0) as u64

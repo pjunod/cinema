@@ -13,13 +13,11 @@ use crate::{
     state::AppState,
 };
 use axum::http::StatusCode;
-use plurx_core::{
-    domain::MediaFile,
-    fs_secure::{std_file_identity, FileIdentity},
-};
+use plurx_core::{domain::MediaFile, fs_secure::FileIdentity};
 use std::{
     collections::VecDeque,
     path::PathBuf,
+    sync::atomic::{AtomicU8, Ordering},
     sync::{Arc, LazyLock, Mutex, Weak},
     time::{Duration, Instant},
 };
@@ -27,6 +25,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 const MAX_ENTRIES: usize = 64;
+const NO_BORROWED_SLOT: u8 = MAX_ENTRIES as u8;
 static HASH_IO: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
 
 #[derive(Clone, PartialEq, Eq)]
@@ -46,7 +45,7 @@ struct Work {
 enum Status {
     Running,
     Paused(Work),
-    Ready(SourceFence),
+    Ready(Arc<SourceFence>),
     Failed { changed: bool, retry_at: Instant },
 }
 struct Entry {
@@ -56,7 +55,27 @@ struct Entry {
 }
 pub(crate) struct ReadAttestations {
     entries: Mutex<VecDeque<Entry>>,
+    borrowed_slot: AtomicU8,
     cancel: CancellationToken,
+}
+pub(crate) struct ReadPreparationSlot {
+    owner: Arc<ReadAttestations>,
+    slot: u8,
+}
+
+impl ReadPreparationSlot {
+    pub(crate) fn resource(&self, node_id: &str) -> String {
+        format!("subtitle-read-attest:{node_id}:{}", self.slot)
+    }
+}
+
+impl Drop for ReadPreparationSlot {
+    fn drop(&mut self) {
+        let _entries = self.owner.entries();
+        self.owner
+            .borrowed_slot
+            .store(NO_BORROWED_SLOT, Ordering::Relaxed);
+    }
 }
 impl Drop for ReadAttestations {
     fn drop(&mut self) {
@@ -78,7 +97,23 @@ impl ReadAttestations {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             entries: Mutex::new(VecDeque::new()),
+            borrowed_slot: AtomicU8::new(NO_BORROWED_SLOT),
             cancel: CancellationToken::new(),
+        })
+    }
+    /// Allocation shares the subtitle cache lock and its existing lease keys.
+    pub(super) fn try_borrow_slot(self: &Arc<Self>) -> Option<ReadPreparationSlot> {
+        let entries = self.entries.try_lock().ok()?;
+        if self.borrowed_slot.load(Ordering::Relaxed) != NO_BORROWED_SLOT {
+            return None;
+        }
+        let slot = (0..MAX_ENTRIES as u8)
+            .rev()
+            .find(|slot| !entries.iter().any(|entry| entry.slot == *slot))?;
+        self.borrowed_slot.store(slot, Ordering::Relaxed);
+        Some(ReadPreparationSlot {
+            owner: Arc::clone(self),
+            slot,
         })
     }
     fn entries(&self) -> std::sync::MutexGuard<'_, VecDeque<Entry>> {
@@ -86,33 +121,46 @@ impl ReadAttestations {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    fn lookup(&self, key: &Key) -> Option<Result<(), ApiError>> {
-        let mut entries = self.entries();
-        if let Some(index) = entries.iter().position(|entry| entry.key == *key) {
-            // Every cache hit has already reopened the current pathname and
-            // compared its complete held identity and object version.
+    /// A cached answer for `key`, or `None` when the caller must start (or
+    /// resume) verification.
+    ///
+    /// Every cache hit has already reopened the current pathname and compared
+    /// its complete held identity and object version. Rechecking the held
+    /// source is media I/O, and `entries` is a std mutex that async callers
+    /// take on workers, so the check never runs under it: the ready fence is
+    /// snapshotted, checked on the media bound with the lock released, and
+    /// acted on only if the entry still holds that same fence.
+    async fn lookup(&self, key: &Key) -> Option<Result<(), ApiError>> {
+        let ready = {
+            let entries = self.entries();
+            let index = entries.iter().position(|entry| entry.key == *key)?;
             match &entries[index].status {
-                Status::Ready(fence)
-                    if fence.unchanged()
-                        && std_file_identity(&fence.handle).ok() == Some(key.identity) =>
-                {
-                    if let Some(entry) = entries.remove(index) {
-                        entries.push_back(entry);
-                    }
-                    return Some(Ok(()));
-                }
-                Status::Ready(_) => {
-                    entries.remove(index);
-                }
+                Status::Ready(fence) => Arc::clone(fence),
                 Status::Running => return Some(Err(pending())),
                 Status::Failed { changed: true, .. } => return Some(Err(changed())),
                 Status::Failed { retry_at, .. } if *retry_at > Instant::now() => {
                     return Some(Err(pending()))
                 }
-                Status::Failed { .. } | Status::Paused(_) => {}
+                Status::Failed { .. } | Status::Paused(_) => return None,
             }
+        };
+        let valid = ready.unchanged().await
+            && plurx_core::media_io::identity(&ready.handle).await.ok() == Some(key.identity);
+        let mut entries = self.entries();
+        // Moved or replaced while the check waited: `start` decides from the
+        // entry as it is now.
+        let index = entries.iter().position(|entry| {
+            entry.key == *key
+                && matches!(&entry.status, Status::Ready(fence) if Arc::ptr_eq(fence, &ready))
+        })?;
+        if !valid {
+            entries.remove(index);
+            return None;
         }
-        None
+        if let Some(entry) = entries.remove(index) {
+            entries.push_back(entry);
+        }
+        Some(Ok(()))
     }
     fn start(&self, key: &Key, fresh: Work) -> Result<Work, ApiError> {
         let mut entries = self.entries();
@@ -132,7 +180,9 @@ impl ReadAttestations {
                 },
             );
         }
-        if entries.len() >= MAX_ENTRIES {
+        let borrowed = self.borrowed_slot.load(Ordering::Relaxed);
+        let capacity = MAX_ENTRIES - usize::from(borrowed != NO_BORROWED_SLOT);
+        if entries.len() >= capacity {
             let idle = entries
                 .iter()
                 .position(|entry| !matches!(entry.status, Status::Running))
@@ -140,7 +190,7 @@ impl ReadAttestations {
             entries.remove(idle);
         }
         let slot = (0..MAX_ENTRIES as u8)
-            .find(|slot| !entries.iter().any(|entry| entry.slot == *slot))
+            .find(|slot| *slot != borrowed && !entries.iter().any(|entry| entry.slot == *slot))
             .ok_or_else(pending)?;
         entries.push_back(Entry {
             slot,
@@ -167,8 +217,10 @@ impl ReadAttestations {
         .await
         .map_err(|_| pending())?
         .map_err(|_| changed())?;
-        let identity = std_file_identity(&opened.handle).map_err(|_| changed())?;
-        if u64::try_from(file.size).ok() != Some(identity.size) || !opened.unchanged() {
+        let identity = plurx_core::media_io::identity(&opened.handle)
+            .await
+            .map_err(|_| changed())?;
+        if u64::try_from(file.size).ok() != Some(identity.size) || !opened.unchanged().await {
             return Err(changed());
         }
         let key = Key {
@@ -180,7 +232,7 @@ impl ReadAttestations {
             identity,
             object_version: opened.object_version().into(),
         };
-        if let Some(result) = self.lookup(&key) {
+        if let Some(result) = self.lookup(&key).await {
             return result;
         }
         let limits = state.transcode.read_attestation_limits().await;
@@ -191,9 +243,19 @@ impl ReadAttestations {
             .transcode
             .admit_read_attestation(limits)
             .ok_or_else(pending)?;
+        // The lane and admission are taken without waiting, so a refused
+        // request does no media work. The hash's identity check is an fstat
+        // of the source: it waits on the media bound, and the descriptor is
+        // duplicated only once the slot is held.
+        let slot = plurx_core::media_io::slot().await;
+        let hash_handle = opened.handle.try_clone().map_err(|_| changed())?;
+        let hash = slot
+            .run(move || SourceHash::new(hash_handle, identity))
+            .await
+            .map_err(|_| changed())?
+            .map_err(|_| changed())?;
         let fresh = Work {
-            hash: SourceHash::new(opened.handle.try_clone().map_err(|_| changed())?, identity)
-                .map_err(|_| changed())?,
+            hash,
             fence: opened,
         };
         let work = self.start(&key, fresh)?;
@@ -251,7 +313,8 @@ impl ReadAttestations {
             {
                 Ok(BackgroundSourceRegistration::Registered(receipt)) => receipt,
                 _ => {
-                    settle_read_owner(&store, &source_owner, None, false).await;
+                    crate::background_jobs::settle_read_lease(&store, &source_owner, None, false)
+                        .await;
                     finish(&owner, &key, Status::Paused(work));
                     return;
                 }
@@ -260,7 +323,13 @@ impl ReadAttestations {
                 .await
                 .is_err()
             {
-                settle_read_owner(&store, &source_owner, Some(custody), false).await;
+                crate::background_jobs::settle_read_lease(
+                    &store,
+                    &source_owner,
+                    Some(custody),
+                    false,
+                )
+                .await;
                 finish(&owner, &key, Status::Paused(work));
                 return;
             }
@@ -325,10 +394,10 @@ impl ReadAttestations {
                     Ok(_) if pause => break Status::Paused(work),
                     Ok(Some(digest)) => {
                         let valid = digest == key.sha256
-                            && work.fence.unchanged()
+                            && work.fence.unchanged().await
                             && final_source(&*store, &key).await;
                         break if valid {
-                            Status::Ready(work.fence)
+                            Status::Ready(Arc::new(work.fence))
                         } else {
                             failed(true)
                         };
@@ -343,7 +412,8 @@ impl ReadAttestations {
             };
             // Every hash/read future has physically joined before either its
             // exact coordinator fence or its source custody can be returned.
-            settle_read_owner(&store, &source_owner, Some(custody), true).await;
+            crate::background_jobs::settle_read_lease(&store, &source_owner, Some(custody), true)
+                .await;
             finish(&owner, &key, status);
         });
         Err(pending())
@@ -356,56 +426,7 @@ async fn settle_activated_without_reader(
 ) {
     // This scope activated successfully and started no reader. Its physical
     // join proof must be recorded before the armed receipt can be deleted.
-    settle_read_owner(store, owner, Some(receipt), true).await;
-}
-
-/// This runs inside the pre-existing read owner, never in Drop or a new actor.
-/// Close-before-resolve fences delayed registration/renewal acknowledgements.
-async fn settle_read_owner(
-    store: &Arc<dyn plurx_core::store::Store>,
-    owner: &plurx_core::store::background_jobs_resources::BackgroundSourceOwner,
-    mut receipt: Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken>,
-    physical_joined: bool,
-) {
-    loop {
-        match store
-            .close_read_attestation_source_lease(owner.clone(), crate::state::clock_ms())
-            .await
-        {
-            Ok(_) => break,
-            Err(error) => {
-                tracing::warn!(%error,"read attestation lease settlement pending");
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-        }
-    }
-    loop {
-        if let Some(held) = receipt.take() {
-            if physical_joined {
-                crate::background_jobs::settle_joined_source_custody(store, held).await;
-            } else {
-                crate::background_jobs::settle_no_reader_source_custody(store, held).await;
-            }
-            return;
-        } else {
-            use plurx_core::store::background_jobs_resources::BackgroundSourceRegistration;
-            match store
-                .register_background_source_custody(owner.clone(), crate::state::clock_ms())
-                .await
-            {
-                Ok(BackgroundSourceRegistration::Registered(held)) => {
-                    receipt = Some(held);
-                    continue;
-                }
-                Ok(
-                    BackgroundSourceRegistration::LostOwnership
-                    | BackgroundSourceRegistration::NotRequired,
-                ) => return,
-                Err(error) => tracing::warn!(%error,"resolving read attestation source receipt"),
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    crate::background_jobs::settle_read_lease(store, owner, Some(receipt), true).await;
 }
 
 fn failed(changed: bool) -> Status {
@@ -439,7 +460,8 @@ async fn final_source(store: &dyn plurx_core::store::Store, key: &Key) -> bool {
     else {
         return false;
     };
-    fence.unchanged() && std_file_identity(&fence.handle).ok() == Some(key.identity)
+    fence.unchanged().await
+        && plurx_core::media_io::identity(&fence.handle).await.ok() == Some(key.identity)
 }
 
 #[cfg(test)]
@@ -447,6 +469,37 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use std::io::Write;
+
+    #[tokio::test]
+    async fn borrowed_source_read_slot_uses_the_existing_pool_and_is_released() {
+        let directory = crate::test_tempdir().expect("source directory");
+        let path = directory.path().join("source.mkv");
+        std::fs::write(&path, b"source").expect("source");
+        let (key, fresh) = work(&file(path), &"a".repeat(64)).await;
+        let cache = ReadAttestations::new();
+        let slot = cache.try_borrow_slot().expect("one free slot");
+        assert_eq!(
+            slot.resource("media-node"),
+            "subtitle-read-attest:media-node:63"
+        );
+        assert!(cache.try_borrow_slot().is_none());
+        {
+            let mut entries = cache.entries();
+            for index in 0..(MAX_ENTRIES as u8 - 1) {
+                let mut occupied = key.clone();
+                occupied.file_id += i64::from(index) + 1;
+                entries.push_back(Entry {
+                    slot: index,
+                    key: occupied,
+                    status: Status::Running,
+                });
+            }
+        }
+        drop(slot);
+        assert!(cache.start(&key, fresh).is_ok());
+        assert_eq!(cache.entries().back().expect("new subtitle entry").slot, 63);
+        assert!(cache.try_borrow_slot().is_none());
+    }
 
     fn file(path: PathBuf) -> MediaFile {
         let metadata = std::fs::metadata(&path).expect("source metadata");
@@ -491,7 +544,9 @@ mod tests {
         let fence = open_source_playback_fence(file, None)
             .await
             .expect("held source");
-        let identity = std_file_identity(&fence.handle).expect("identity");
+        let identity = plurx_core::media_io::identity(&fence.handle)
+            .await
+            .expect("identity");
         let key = Key {
             file_id: file.id,
             size: file.size,
@@ -517,7 +572,7 @@ mod tests {
         let cache = ReadAttestations::new();
         let media = file(path.clone());
         let (key, fresh) = work(&media, &expected).await;
-        assert!(cache.lookup(&key).is_none());
+        assert!(cache.lookup(&key).await.is_none());
         let mut hashing = cache.start(&key, fresh).expect("single flight");
         assert!(hashing
             .hash
@@ -541,21 +596,67 @@ mod tests {
             digest, expected,
             "resume must not restart or skip the prefix"
         );
-        finish(&Arc::downgrade(&cache), &key, Status::Ready(resumed.fence));
-        assert!(cache.lookup(&key).expect("retained proof").is_ok());
+        finish(
+            &Arc::downgrade(&cache),
+            &key,
+            Status::Ready(Arc::new(resumed.fence)),
+        );
+        assert!(cache.lookup(&key).await.expect("retained proof").is_ok());
         let replacement = directory.path().join("replacement");
         std::fs::write(&replacement, &bytes).expect("same-sized replacement");
         std::fs::rename(replacement, &path).expect("replace named object");
         let (replacement_key, _) = work(&file(path), &expected).await;
         assert!(
-            cache.lookup(&replacement_key).is_none(),
+            cache.lookup(&replacement_key).await.is_none(),
             "same bytes/scan revision do not reuse another physical identity"
         );
         let restarted = ReadAttestations::new();
         assert!(
-            restarted.lookup(&replacement_key).is_none(),
+            restarted.lookup(&replacement_key).await.is_none(),
             "an in-memory proof cannot survive restart as an inode receipt"
         );
+    }
+    /// A cache hit rechecks the held source, which is media I/O. With every
+    /// media slot held, as a hung mount leaves them, the recheck must wait on
+    /// the media bound, and it must not wait while holding `entries`: async
+    /// readers take that std mutex on runtime workers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cache_hit_recheck_queues_on_the_media_bound_without_the_entries_lock() {
+        let directory = crate::test_tempdir().expect("directory");
+        let path = directory.path().join("source.mkv");
+        std::fs::write(&path, b"verified source").expect("source");
+        let cache = ReadAttestations::new();
+        let media = file(path);
+        let (key, fresh) = work(&media, &"a".repeat(64)).await;
+        let started = cache.start(&key, fresh).expect("start");
+        finish(
+            &Arc::downgrade(&cache),
+            &key,
+            Status::Ready(Arc::new(started.fence)),
+        );
+
+        let held = plurx_core::media_io::hold_every_slot().await;
+        let lookup = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            let key = key.clone();
+            async move { cache.lookup(&key).await.map(|result| result.is_ok()) }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !lookup.is_finished(),
+            "the cache-hit recheck ran without a media slot"
+        );
+        assert!(
+            cache.entries.try_lock().is_ok(),
+            "the recheck waits for a media slot while holding the entries lock"
+        );
+
+        drop(held);
+        let hit = tokio::time::timeout(Duration::from_secs(5), lookup)
+            .await
+            .expect("the recheck runs once a slot is free")
+            .expect("lookup task");
+        assert_eq!(hit, Some(true), "an untouched verified source is a hit");
     }
     #[tokio::test]
     async fn concurrent_reads_single_flight_and_cache_budget_preserve_live_work() {
@@ -601,6 +702,7 @@ mod tests {
         assert_eq!(
             cache
                 .lookup(&key)
+                .await
                 .expect("failure")
                 .expect_err("closed")
                 .code(),

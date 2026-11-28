@@ -701,6 +701,7 @@ pub(crate) async fn diagnostic_offers(
         input.audio_index,
         input.subtitle_index,
         input.hdr10,
+        false,
     )
     .map_err(|reason| ApiError::BadRequest(reason.to_owned()))?;
     Ok(Json(state.media_pool.offers(&state, request).await))
