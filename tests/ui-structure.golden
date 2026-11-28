@@ -1294,11 +1294,8 @@ catalog|item@1280x860|dom|a > span.px-lbl[text]|10
 catalog|item@1280x860|dom|a > svg.px-ico[aria-hidden=true]|10
 catalog|item@1280x860|dom|a.px-tab > span[text]|5
 catalog|item@1280x860|dom|a.px-tab > svg.px-ico[aria-hidden=true]|5
-catalog|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
-catalog|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
-catalog|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-generate-2[role=status aria-live=polite]|1
-catalog|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-search-2|1
 catalog|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div.prep-eyebrow[text]|1
+catalog|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div|1
 catalog|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > dl.specs|1
 catalog|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > h2[text]|1
 catalog|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > h3[text]|1
@@ -1329,6 +1326,7 @@ catalog|item@1280x860|dom|div > div.prep-eyebrow[text]|1
 catalog|item@1280x860|dom|div > h2[text]|2
 catalog|item@1280x860|dom|div > h3[text]|10
 catalog|item@1280x860|dom|div > p[text]|11
+catalog|item@1280x860|dom|div > span.ai-caption-item|1
 catalog|item@1280x860|dom|div#app > div#pxshell.px-shell|1
 catalog|item@1280x860|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
 catalog|item@1280x860|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
@@ -1422,6 +1420,9 @@ catalog|item@1280x860|dom|section.media-preparation-main[aria-label=*] > div#pre
 catalog|item@1280x860|dom|section.media-preparation-main[aria-label=*] > div.analysis-brief.px-admin.th-admin|1
 catalog|item@1280x860|dom|section.media-preparation-main[aria-label=*] > div.prep-heading|1
 catalog|item@1280x860|dom|section.media-preparation-main[aria-label=*] > p.muted.prep-intro[text]|1
+catalog|item@1280x860|dom|span.ai-caption-item > button.ghost.sm[type=button text]|1
+catalog|item@1280x860|dom|span.ai-caption-item > span[role=status]|1
+catalog|item@1280x860|dom|span.ai-caption-item > span|1
 catalog|item@1280x860|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 catalog|item@1280x860|dom|span.listtoggles > button.fav.ghost.listtoggle.sm[aria-pressed=false aria-label=*]|1
 catalog|item@1280x860|dom|span.listtoggles > button.ghost.listtoggle.sm[aria-pressed=false text]|1
@@ -1465,10 +1466,9 @@ catalog|item@1280x860|focus|027|summary "Off 3"
 catalog|item@1280x860|focus|028|summary "Not needed 2"
 catalog|item@1280x860|focus|029|button.ghost.sm "Analyze now"
 catalog|item@1280x860|focus|030|a.ghost.sm "View queue"
-catalog|item@1280x860|focus|031|button.ghost.sm "Find subtitles"
-catalog|item@1280x860|focus|032|button.ghost.sm "Generate subtitles"
-catalog|item@1280x860|focus|033|summary "More actions"
-catalog|item@1280x860|focus|034|<wrap>
+catalog|item@1280x860|focus|031|button.ghost.sm "+ English"
+catalog|item@1280x860|focus|032|summary "More actions"
+catalog|item@1280x860|focus|033|<wrap>
 catalog|item@1280x860|req|GET /api/v1/activity|2
 catalog|item@1280x860|req|GET /api/v1/features|1
 catalog|item@1280x860|req|GET /api/v1/files/<id>/preparation|1
@@ -1484,11 +1484,8 @@ catalog|item@390x780|dom|a > span.px-lbl[text]|10
 catalog|item@390x780|dom|a > svg.px-ico[aria-hidden=true]|10
 catalog|item@390x780|dom|a.px-tab > span[text]|5
 catalog|item@390x780|dom|a.px-tab > svg.px-ico[aria-hidden=true]|5
-catalog|item@390x780|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
-catalog|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
-catalog|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-generate-2[role=status aria-live=polite]|1
-catalog|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-search-2|1
 catalog|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div.prep-eyebrow[text]|1
+catalog|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div|1
 catalog|item@390x780|dom|aside.media-preparation-side[aria-label=*] > dl.specs|1
 catalog|item@390x780|dom|aside.media-preparation-side[aria-label=*] > h2[text]|1
 catalog|item@390x780|dom|aside.media-preparation-side[aria-label=*] > h3[text]|1
@@ -1520,6 +1517,7 @@ catalog|item@390x780|dom|div > div.prep-eyebrow[text]|1
 catalog|item@390x780|dom|div > h2[text]|2
 catalog|item@390x780|dom|div > h3[text]|10
 catalog|item@390x780|dom|div > p[text]|11
+catalog|item@390x780|dom|div > span.ai-caption-item|1
 catalog|item@390x780|dom|div#app > div#pxshell.px-shell|1
 catalog|item@390x780|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
 catalog|item@390x780|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
@@ -1614,6 +1612,9 @@ catalog|item@390x780|dom|section.media-preparation-main[aria-label=*] > div#prep
 catalog|item@390x780|dom|section.media-preparation-main[aria-label=*] > div.analysis-brief.px-admin.th-admin|1
 catalog|item@390x780|dom|section.media-preparation-main[aria-label=*] > div.prep-heading|1
 catalog|item@390x780|dom|section.media-preparation-main[aria-label=*] > p.muted.prep-intro[text]|1
+catalog|item@390x780|dom|span.ai-caption-item > button.ghost.sm[type=button text]|1
+catalog|item@390x780|dom|span.ai-caption-item > span[role=status]|1
+catalog|item@390x780|dom|span.ai-caption-item > span|1
 catalog|item@390x780|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 catalog|item@390x780|dom|span.listtoggles > button.fav.ghost.listtoggle.sm[aria-pressed=false aria-label=*]|1
 catalog|item@390x780|dom|span.listtoggles > button.ghost.listtoggle.sm[aria-pressed=false text]|1
@@ -1648,17 +1649,16 @@ catalog|item@390x780|focus|017|summary "Off 3"
 catalog|item@390x780|focus|018|summary "Not needed 2"
 catalog|item@390x780|focus|019|button.ghost.sm "Analyze now"
 catalog|item@390x780|focus|020|a.ghost.sm "View queue"
-catalog|item@390x780|focus|021|button.ghost.sm "Find subtitles"
-catalog|item@390x780|focus|022|button.ghost.sm "Generate subtitles"
-catalog|item@390x780|focus|023|summary "More actions"
-catalog|item@390x780|focus|024|a.px-tab "Home"
-catalog|item@390x780|focus|025|a.px-tab "Channels"
-catalog|item@390x780|focus|026|a.px-tab "Recordings"
-catalog|item@390x780|focus|027|button.px-tab "Libraries"
-catalog|item@390x780|focus|028|button.px-tab "Search"
-catalog|item@390x780|focus|029|a.px-tab "Shared"
-catalog|item@390x780|focus|030|a.px-tab "Activity"
-catalog|item@390x780|focus|031|<wrap>
+catalog|item@390x780|focus|021|button.ghost.sm "+ English"
+catalog|item@390x780|focus|022|summary "More actions"
+catalog|item@390x780|focus|023|a.px-tab "Home"
+catalog|item@390x780|focus|024|a.px-tab "Channels"
+catalog|item@390x780|focus|025|a.px-tab "Recordings"
+catalog|item@390x780|focus|026|button.px-tab "Libraries"
+catalog|item@390x780|focus|027|button.px-tab "Search"
+catalog|item@390x780|focus|028|a.px-tab "Shared"
+catalog|item@390x780|focus|029|a.px-tab "Activity"
+catalog|item@390x780|focus|030|<wrap>
 catalog|item@390x780|req|GET /api/v1/activity|2
 catalog|item@390x780|req|GET /api/v1/features|1
 catalog|item@390x780|req|GET /api/v1/files/<id>/preparation|1
@@ -2522,8 +2522,8 @@ catalog|player@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* ty
 catalog|player@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|player@1280x860|dom|button.px-tab[type=button] > span[text]|1
 catalog|player@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|player@1280x860|dom|dd > button.ghost.sm[type=button text]|6
 catalog|player@1280x860|dom|dd > div.watch-trks|4
+catalog|player@1280x860|dom|dd > span.ai-caption-item|2
 catalog|player@1280x860|dom|dd > span.mode-chip[text]|2
 catalog|player@1280x860|dom|dd > span.mode-detail[text]|2
 catalog|player@1280x860|dom|dd > span.watch-fmeta[text]|2
@@ -2633,8 +2633,8 @@ catalog|player@1280x860|dom|div.watch-stage > aside#watch-title-panel.watch-titl
 catalog|player@1280x860|dom|div.watch-stage > div.watch-picture|1
 catalog|player@1280x860|dom|div.watch-trks > button.on.trk[aria-pressed=true type=button text]|4
 catalog|player@1280x860|dom|dl.watch-ledger > dd[text]|2
-catalog|player@1280x860|dom|dl.watch-ledger > dd|10
-catalog|player@1280x860|dom|dl.watch-ledger > dt[text]|12
+catalog|player@1280x860|dom|dl.watch-ledger > dd|8
+catalog|player@1280x860|dom|dl.watch-ledger > dt[text]|10
 catalog|player@1280x860|dom|g > path|5
 catalog|player@1280x860|dom|main#main > section#watch-browser.watch-browser[aria-label=*]|1
 catalog|player@1280x860|dom|nav.px-nav > a|3
@@ -2649,10 +2649,11 @@ catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
-catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
-catalog|player@1280x860|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
+catalog|player@1280x860|dom|span.ai-caption-item > button.ghost.sm[type=button text]|2
+catalog|player@1280x860|dom|span.ai-caption-item > span[role=status]|2
+catalog|player@1280x860|dom|span.ai-caption-item > span|2
 catalog|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 catalog|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 catalog|player@1280x860|dom|svg.material-icon[aria-hidden=true] > path|4
@@ -2710,8 +2711,8 @@ catalog|player@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* typ
 catalog|player@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|player@390x780|dom|button.px-tab[type=button] > span[text]|1
 catalog|player@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|player@390x780|dom|dd > button.ghost.sm[type=button text]|6
 catalog|player@390x780|dom|dd > div.watch-trks|4
+catalog|player@390x780|dom|dd > span.ai-caption-item|2
 catalog|player@390x780|dom|dd > span.mode-chip[text]|2
 catalog|player@390x780|dom|dd > span.mode-detail[text]|2
 catalog|player@390x780|dom|dd > span.watch-fmeta[text]|2
@@ -2820,8 +2821,8 @@ catalog|player@390x780|dom|div.watch-stage > aside#watch-title-panel.watch-title
 catalog|player@390x780|dom|div.watch-stage > div.watch-picture|1
 catalog|player@390x780|dom|div.watch-trks > button.on.trk[aria-pressed=true type=button text]|4
 catalog|player@390x780|dom|dl.watch-ledger > dd[text]|2
-catalog|player@390x780|dom|dl.watch-ledger > dd|10
-catalog|player@390x780|dom|dl.watch-ledger > dt[text]|12
+catalog|player@390x780|dom|dl.watch-ledger > dd|8
+catalog|player@390x780|dom|dl.watch-ledger > dt[text]|10
 catalog|player@390x780|dom|g > path|5
 catalog|player@390x780|dom|main#main > section#watch-browser.watch-browser[aria-label=*]|1
 catalog|player@390x780|dom|nav.px-nav > a|3
@@ -2836,10 +2837,11 @@ catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > d
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
-catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
-catalog|player@390x780|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
+catalog|player@390x780|dom|span.ai-caption-item > button.ghost.sm[type=button text]|2
+catalog|player@390x780|dom|span.ai-caption-item > span[role=status]|2
+catalog|player@390x780|dom|span.ai-caption-item > span|2
 catalog|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 catalog|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 catalog|player@390x780|dom|svg.material-icon[aria-hidden=true] > path|4
@@ -3159,7 +3161,7 @@ catalog|settings-developer@1280x860|dom|nav.px-tabs[aria-label=*] > a.px-tab|5
 catalog|settings-developer@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|settings-developer@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|13
 catalog|settings-developer@1280x860|dom|span[text] > small[text]|3
@@ -3181,21 +3183,22 @@ catalog|settings-developer@1280x860|focus|011|button.settab "Libraries"
 catalog|settings-developer@1280x860|focus|012|button.settab "Metadata"
 catalog|settings-developer@1280x860|focus|013|button.settab "Live TV"
 catalog|settings-developer@1280x860|focus|014|button.settab "Playback"
-catalog|settings-developer@1280x860|focus|015|button.settab "Analysis"
-catalog|settings-developer@1280x860|focus|016|button.settab "Maintenance"
-catalog|settings-developer@1280x860|focus|017|button.settab "Users"
-catalog|settings-developer@1280x860|focus|018|button.settab "System"
-catalog|settings-developer@1280x860|focus|019|button.settab "Cluster off"
-catalog|settings-developer@1280x860|focus|020|button.settab "Integrations"
-catalog|settings-developer@1280x860|focus|021|button.settab "Sharing"
-catalog|settings-developer@1280x860|focus|022|button.settab "Remotes & devices"
-catalog|settings-developer@1280x860|focus|023|button.settab.active "Developer"
-catalog|settings-developer@1280x860|focus|024|input#pmacosvideo
-catalog|settings-developer@1280x860|focus|025|summary "Details"
-catalog|settings-developer@1280x860|focus|026|input#pmacoshevc
-catalog|settings-developer@1280x860|focus|027|summary "Details"
-catalog|settings-developer@1280x860|focus|028|input#hevc-unverified
-catalog|settings-developer@1280x860|focus|029|<wrap>
+catalog|settings-developer@1280x860|focus|015|button.settab "Subtitles"
+catalog|settings-developer@1280x860|focus|016|button.settab "Analysis"
+catalog|settings-developer@1280x860|focus|017|button.settab "Maintenance"
+catalog|settings-developer@1280x860|focus|018|button.settab "Users"
+catalog|settings-developer@1280x860|focus|019|button.settab "System"
+catalog|settings-developer@1280x860|focus|020|button.settab "Cluster off"
+catalog|settings-developer@1280x860|focus|021|button.settab "Integrations"
+catalog|settings-developer@1280x860|focus|022|button.settab "Sharing"
+catalog|settings-developer@1280x860|focus|023|button.settab "Remotes & devices"
+catalog|settings-developer@1280x860|focus|024|button.settab.active "Developer"
+catalog|settings-developer@1280x860|focus|025|input#pmacosvideo
+catalog|settings-developer@1280x860|focus|026|summary "Details"
+catalog|settings-developer@1280x860|focus|027|input#pmacoshevc
+catalog|settings-developer@1280x860|focus|028|summary "Details"
+catalog|settings-developer@1280x860|focus|029|input#hevc-unverified
+catalog|settings-developer@1280x860|focus|030|<wrap>
 catalog|settings-developer@1280x860|req|GET /api/v1/activity|2
 catalog|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
 catalog|settings-developer@1280x860|req|GET /api/v1/features|2
@@ -3295,7 +3298,7 @@ catalog|settings-developer@390x780|dom|nav.px-tabs[aria-label=*] > a.px-tab|5
 catalog|settings-developer@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|settings-developer@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|13
 catalog|settings-developer@390x780|dom|span[text] > small[text]|3
@@ -3310,28 +3313,29 @@ catalog|settings-developer@390x780|focus|004|button.settab "Libraries"
 catalog|settings-developer@390x780|focus|005|button.settab "Metadata"
 catalog|settings-developer@390x780|focus|006|button.settab "Live TV"
 catalog|settings-developer@390x780|focus|007|button.settab "Playback"
-catalog|settings-developer@390x780|focus|008|button.settab "Analysis"
-catalog|settings-developer@390x780|focus|009|button.settab "Maintenance"
-catalog|settings-developer@390x780|focus|010|button.settab "Users"
-catalog|settings-developer@390x780|focus|011|button.settab "System"
-catalog|settings-developer@390x780|focus|012|button.settab "Cluster"
-catalog|settings-developer@390x780|focus|013|button.settab "Integrations"
-catalog|settings-developer@390x780|focus|014|button.settab "Sharing"
-catalog|settings-developer@390x780|focus|015|button.settab "Remotes & devices"
-catalog|settings-developer@390x780|focus|016|button.settab.active "Developer"
-catalog|settings-developer@390x780|focus|017|input#pmacosvideo
-catalog|settings-developer@390x780|focus|018|summary "Details"
-catalog|settings-developer@390x780|focus|019|input#pmacoshevc
-catalog|settings-developer@390x780|focus|020|summary "Details"
-catalog|settings-developer@390x780|focus|021|input#hevc-unverified
-catalog|settings-developer@390x780|focus|022|a.px-tab "Home"
-catalog|settings-developer@390x780|focus|023|a.px-tab "Channels"
-catalog|settings-developer@390x780|focus|024|a.px-tab "Recordings"
-catalog|settings-developer@390x780|focus|025|button.px-tab "Libraries"
-catalog|settings-developer@390x780|focus|026|button.px-tab "Search"
-catalog|settings-developer@390x780|focus|027|a.px-tab "Shared"
-catalog|settings-developer@390x780|focus|028|a.px-tab "Activity"
-catalog|settings-developer@390x780|focus|029|<wrap>
+catalog|settings-developer@390x780|focus|008|button.settab "Subtitles"
+catalog|settings-developer@390x780|focus|009|button.settab "Analysis"
+catalog|settings-developer@390x780|focus|010|button.settab "Maintenance"
+catalog|settings-developer@390x780|focus|011|button.settab "Users"
+catalog|settings-developer@390x780|focus|012|button.settab "System"
+catalog|settings-developer@390x780|focus|013|button.settab "Cluster"
+catalog|settings-developer@390x780|focus|014|button.settab "Integrations"
+catalog|settings-developer@390x780|focus|015|button.settab "Sharing"
+catalog|settings-developer@390x780|focus|016|button.settab "Remotes & devices"
+catalog|settings-developer@390x780|focus|017|button.settab.active "Developer"
+catalog|settings-developer@390x780|focus|018|input#pmacosvideo
+catalog|settings-developer@390x780|focus|019|summary "Details"
+catalog|settings-developer@390x780|focus|020|input#pmacoshevc
+catalog|settings-developer@390x780|focus|021|summary "Details"
+catalog|settings-developer@390x780|focus|022|input#hevc-unverified
+catalog|settings-developer@390x780|focus|023|a.px-tab "Home"
+catalog|settings-developer@390x780|focus|024|a.px-tab "Channels"
+catalog|settings-developer@390x780|focus|025|a.px-tab "Recordings"
+catalog|settings-developer@390x780|focus|026|button.px-tab "Libraries"
+catalog|settings-developer@390x780|focus|027|button.px-tab "Search"
+catalog|settings-developer@390x780|focus|028|a.px-tab "Shared"
+catalog|settings-developer@390x780|focus|029|a.px-tab "Activity"
+catalog|settings-developer@390x780|focus|030|<wrap>
 catalog|settings-developer@390x780|req|GET /api/v1/activity|2
 catalog|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
 catalog|settings-developer@390x780|req|GET /api/v1/features|2
@@ -3420,7 +3424,7 @@ catalog|settings@1280x860|dom|nav.px-tabs[aria-label=*] > a.px-tab|5
 catalog|settings@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|settings@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
 catalog|settings@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-catalog|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+catalog|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 catalog|settings@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings@1280x860|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|settings@1280x860|dom|svg.px-ico[aria-hidden=true] > path|11
@@ -3469,31 +3473,32 @@ catalog|settings@1280x860|focus|011|button.settab.active "Libraries 3"
 catalog|settings@1280x860|focus|012|button.settab "Metadata"
 catalog|settings@1280x860|focus|013|button.settab "Live TV"
 catalog|settings@1280x860|focus|014|button.settab "Playback"
-catalog|settings@1280x860|focus|015|button.settab "Analysis"
-catalog|settings@1280x860|focus|016|button.settab "Maintenance"
-catalog|settings@1280x860|focus|017|button.settab "Users"
-catalog|settings@1280x860|focus|018|button.settab "System"
-catalog|settings@1280x860|focus|019|button.settab "Cluster off"
-catalog|settings@1280x860|focus|020|button.settab "Integrations"
-catalog|settings@1280x860|focus|021|button.settab "Sharing"
-catalog|settings@1280x860|focus|022|button.settab "Remotes & devices"
-catalog|settings@1280x860|focus|023|button.settab "Developer"
-catalog|settings@1280x860|focus|024|button.ghost.sm "Scan every library for new & changed files"
-catalog|settings@1280x860|focus|025|button.ghost.sm "Re-fetch metadata & artwork for every libra
-catalog|settings@1280x860|focus|026|button.sm "+ Add library"
-catalog|settings@1280x860|focus|027|a "Add a free key in Metadata"
-catalog|settings@1280x860|focus|028|button.ghost.sm "Scan"
-catalog|settings@1280x860|focus|029|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@1280x860|focus|030|button.ghost.sm "Configure ⌄"
-catalog|settings@1280x860|focus|031|button.ghost.sm "Scan"
-catalog|settings@1280x860|focus|032|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@1280x860|focus|033|button.ghost.sm "Configure ⌄"
-catalog|settings@1280x860|focus|034|button.ghost.sm "Scan"
-catalog|settings@1280x860|focus|035|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@1280x860|focus|036|button.ghost.sm "Configure ⌄"
-catalog|settings@1280x860|focus|037|button.ghost "Load library roots"
-catalog|settings@1280x860|focus|038|button.ghost "Save storage domains"
-catalog|settings@1280x860|focus|039|<wrap>
+catalog|settings@1280x860|focus|015|button.settab "Subtitles"
+catalog|settings@1280x860|focus|016|button.settab "Analysis"
+catalog|settings@1280x860|focus|017|button.settab "Maintenance"
+catalog|settings@1280x860|focus|018|button.settab "Users"
+catalog|settings@1280x860|focus|019|button.settab "System"
+catalog|settings@1280x860|focus|020|button.settab "Cluster off"
+catalog|settings@1280x860|focus|021|button.settab "Integrations"
+catalog|settings@1280x860|focus|022|button.settab "Sharing"
+catalog|settings@1280x860|focus|023|button.settab "Remotes & devices"
+catalog|settings@1280x860|focus|024|button.settab "Developer"
+catalog|settings@1280x860|focus|025|button.ghost.sm "Scan every library for new & changed files"
+catalog|settings@1280x860|focus|026|button.ghost.sm "Re-fetch metadata & artwork for every libra
+catalog|settings@1280x860|focus|027|button.sm "+ Add library"
+catalog|settings@1280x860|focus|028|a "Add a free key in Metadata"
+catalog|settings@1280x860|focus|029|button.ghost.sm "Scan"
+catalog|settings@1280x860|focus|030|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@1280x860|focus|031|button.ghost.sm "Configure ⌄"
+catalog|settings@1280x860|focus|032|button.ghost.sm "Scan"
+catalog|settings@1280x860|focus|033|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@1280x860|focus|034|button.ghost.sm "Configure ⌄"
+catalog|settings@1280x860|focus|035|button.ghost.sm "Scan"
+catalog|settings@1280x860|focus|036|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@1280x860|focus|037|button.ghost.sm "Configure ⌄"
+catalog|settings@1280x860|focus|038|button.ghost "Load library roots"
+catalog|settings@1280x860|focus|039|button.ghost "Save storage domains"
+catalog|settings@1280x860|focus|040|<wrap>
 catalog|settings@1280x860|req|GET /api/v1/activity|2
 catalog|settings@1280x860|req|GET /api/v1/dv-conversions|1
 catalog|settings@1280x860|req|GET /api/v1/features|2
@@ -3584,7 +3589,7 @@ catalog|settings@390x780|dom|nav.px-tabs[aria-label=*] > a.px-tab|5
 catalog|settings@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|settings@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
 catalog|settings@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-catalog|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+catalog|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 catalog|settings@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|settings@390x780|dom|svg.px-ico[aria-hidden=true] > path|11
@@ -3626,38 +3631,39 @@ catalog|settings@390x780|focus|004|button.settab.active "Libraries"
 catalog|settings@390x780|focus|005|button.settab "Metadata"
 catalog|settings@390x780|focus|006|button.settab "Live TV"
 catalog|settings@390x780|focus|007|button.settab "Playback"
-catalog|settings@390x780|focus|008|button.settab "Analysis"
-catalog|settings@390x780|focus|009|button.settab "Maintenance"
-catalog|settings@390x780|focus|010|button.settab "Users"
-catalog|settings@390x780|focus|011|button.settab "System"
-catalog|settings@390x780|focus|012|button.settab "Cluster"
-catalog|settings@390x780|focus|013|button.settab "Integrations"
-catalog|settings@390x780|focus|014|button.settab "Sharing"
-catalog|settings@390x780|focus|015|button.settab "Remotes & devices"
-catalog|settings@390x780|focus|016|button.settab "Developer"
-catalog|settings@390x780|focus|017|button.ghost.sm "Scan every library for new & changed files"
-catalog|settings@390x780|focus|018|button.ghost.sm "Re-fetch metadata & artwork for every libra
-catalog|settings@390x780|focus|019|button.sm "+ Add library"
-catalog|settings@390x780|focus|020|a "Add a free key in Metadata"
-catalog|settings@390x780|focus|021|button.ghost.sm "Scan"
-catalog|settings@390x780|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@390x780|focus|023|button.ghost.sm "Configure ⌄"
-catalog|settings@390x780|focus|024|button.ghost.sm "Scan"
-catalog|settings@390x780|focus|025|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@390x780|focus|026|button.ghost.sm "Configure ⌄"
-catalog|settings@390x780|focus|027|button.ghost.sm "Scan"
-catalog|settings@390x780|focus|028|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@390x780|focus|029|button.ghost.sm "Configure ⌄"
-catalog|settings@390x780|focus|030|button.ghost "Load library roots"
-catalog|settings@390x780|focus|031|button.ghost "Save storage domains"
-catalog|settings@390x780|focus|032|a.px-tab "Home"
-catalog|settings@390x780|focus|033|a.px-tab "Channels"
-catalog|settings@390x780|focus|034|a.px-tab "Recordings"
-catalog|settings@390x780|focus|035|button.px-tab "Libraries"
-catalog|settings@390x780|focus|036|button.px-tab "Search"
-catalog|settings@390x780|focus|037|a.px-tab "Shared"
-catalog|settings@390x780|focus|038|a.px-tab "Activity"
-catalog|settings@390x780|focus|039|<wrap>
+catalog|settings@390x780|focus|008|button.settab "Subtitles"
+catalog|settings@390x780|focus|009|button.settab "Analysis"
+catalog|settings@390x780|focus|010|button.settab "Maintenance"
+catalog|settings@390x780|focus|011|button.settab "Users"
+catalog|settings@390x780|focus|012|button.settab "System"
+catalog|settings@390x780|focus|013|button.settab "Cluster"
+catalog|settings@390x780|focus|014|button.settab "Integrations"
+catalog|settings@390x780|focus|015|button.settab "Sharing"
+catalog|settings@390x780|focus|016|button.settab "Remotes & devices"
+catalog|settings@390x780|focus|017|button.settab "Developer"
+catalog|settings@390x780|focus|018|button.ghost.sm "Scan every library for new & changed files"
+catalog|settings@390x780|focus|019|button.ghost.sm "Re-fetch metadata & artwork for every libra
+catalog|settings@390x780|focus|020|button.sm "+ Add library"
+catalog|settings@390x780|focus|021|a "Add a free key in Metadata"
+catalog|settings@390x780|focus|022|button.ghost.sm "Scan"
+catalog|settings@390x780|focus|023|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@390x780|focus|024|button.ghost.sm "Configure ⌄"
+catalog|settings@390x780|focus|025|button.ghost.sm "Scan"
+catalog|settings@390x780|focus|026|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@390x780|focus|027|button.ghost.sm "Configure ⌄"
+catalog|settings@390x780|focus|028|button.ghost.sm "Scan"
+catalog|settings@390x780|focus|029|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@390x780|focus|030|button.ghost.sm "Configure ⌄"
+catalog|settings@390x780|focus|031|button.ghost "Load library roots"
+catalog|settings@390x780|focus|032|button.ghost "Save storage domains"
+catalog|settings@390x780|focus|033|a.px-tab "Home"
+catalog|settings@390x780|focus|034|a.px-tab "Channels"
+catalog|settings@390x780|focus|035|a.px-tab "Recordings"
+catalog|settings@390x780|focus|036|button.px-tab "Libraries"
+catalog|settings@390x780|focus|037|button.px-tab "Search"
+catalog|settings@390x780|focus|038|a.px-tab "Shared"
+catalog|settings@390x780|focus|039|a.px-tab "Activity"
+catalog|settings@390x780|focus|040|<wrap>
 catalog|settings@390x780|req|GET /api/v1/activity|2
 catalog|settings@390x780|req|GET /api/v1/dv-conversions|1
 catalog|settings@390x780|req|GET /api/v1/features|2
@@ -4723,11 +4729,8 @@ classic|home@390x780|req|GET /api/v1/lists/watchlist|1
 classic|home@390x780|req|GET /api/v1/me|1
 classic|home@390x780|req|GET /api/v1/server|1
 classic|item@1280x860|dom|^ > div#app|1
-classic|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
-classic|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
-classic|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-generate-2[role=status aria-live=polite]|1
-classic|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-search-2|1
 classic|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div.prep-eyebrow[text]|1
+classic|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div|1
 classic|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > dl.specs|1
 classic|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > h2[text]|1
 classic|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > h3[text]|1
@@ -4756,6 +4759,7 @@ classic|item@1280x860|dom|div > div.prep-eyebrow[text]|1
 classic|item@1280x860|dom|div > h2[text]|2
 classic|item@1280x860|dom|div > h3[text]|10
 classic|item@1280x860|dom|div > p[text]|11
+classic|item@1280x860|dom|div > span.ai-caption-item|1
 classic|item@1280x860|dom|div#app > div.layout-frame|1
 classic|item@1280x860|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
 classic|item@1280x860|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
@@ -4833,6 +4837,9 @@ classic|item@1280x860|dom|section.media-preparation-main[aria-label=*] > div#pre
 classic|item@1280x860|dom|section.media-preparation-main[aria-label=*] > div.analysis-brief.px-admin.th-admin|1
 classic|item@1280x860|dom|section.media-preparation-main[aria-label=*] > div.prep-heading|1
 classic|item@1280x860|dom|section.media-preparation-main[aria-label=*] > p.muted.prep-intro[text]|1
+classic|item@1280x860|dom|span.ai-caption-item > button.ghost.sm[type=button text]|1
+classic|item@1280x860|dom|span.ai-caption-item > span[role=status]|1
+classic|item@1280x860|dom|span.ai-caption-item > span|1
 classic|item@1280x860|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 classic|item@1280x860|dom|span.listtoggles > button.fav.ghost.listtoggle.sm[aria-pressed=false aria-label=*]|1
 classic|item@1280x860|dom|span.listtoggles > button.ghost.listtoggle.sm[aria-pressed=false text]|1
@@ -4872,10 +4879,9 @@ classic|item@1280x860|focus|025|summary "Off 3"
 classic|item@1280x860|focus|026|summary "Not needed 2"
 classic|item@1280x860|focus|027|button.ghost.sm "Analyze now"
 classic|item@1280x860|focus|028|a.ghost.sm "View queue"
-classic|item@1280x860|focus|029|button.ghost.sm "Find subtitles"
-classic|item@1280x860|focus|030|button.ghost.sm "Generate subtitles"
-classic|item@1280x860|focus|031|summary "More actions"
-classic|item@1280x860|focus|032|<wrap>
+classic|item@1280x860|focus|029|button.ghost.sm "+ English"
+classic|item@1280x860|focus|030|summary "More actions"
+classic|item@1280x860|focus|031|<wrap>
 classic|item@1280x860|req|GET /api/v1/activity|2
 classic|item@1280x860|req|GET /api/v1/features|1
 classic|item@1280x860|req|GET /api/v1/files/<id>/preparation|1
@@ -4887,11 +4893,8 @@ classic|item@1280x860|req|GET /api/v1/me|1
 classic|item@1280x860|req|GET /api/v1/server|1
 classic|item@1280x860|req|GET /api/v1/tags|1
 classic|item@390x780|dom|^ > div#app|1
-classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
-classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
-classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-generate-2[role=status aria-live=polite]|1
-classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-search-2|1
 classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div.prep-eyebrow[text]|1
+classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div|1
 classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > dl.specs|1
 classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > h2[text]|1
 classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > h3[text]|1
@@ -4920,6 +4923,7 @@ classic|item@390x780|dom|div > div.prep-eyebrow[text]|1
 classic|item@390x780|dom|div > h2[text]|2
 classic|item@390x780|dom|div > h3[text]|10
 classic|item@390x780|dom|div > p[text]|11
+classic|item@390x780|dom|div > span.ai-caption-item|1
 classic|item@390x780|dom|div#app > div.layout-frame|1
 classic|item@390x780|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
 classic|item@390x780|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
@@ -4997,6 +5001,9 @@ classic|item@390x780|dom|section.media-preparation-main[aria-label=*] > div#prep
 classic|item@390x780|dom|section.media-preparation-main[aria-label=*] > div.analysis-brief.px-admin.th-admin|1
 classic|item@390x780|dom|section.media-preparation-main[aria-label=*] > div.prep-heading|1
 classic|item@390x780|dom|section.media-preparation-main[aria-label=*] > p.muted.prep-intro[text]|1
+classic|item@390x780|dom|span.ai-caption-item > button.ghost.sm[type=button text]|1
+classic|item@390x780|dom|span.ai-caption-item > span[role=status]|1
+classic|item@390x780|dom|span.ai-caption-item > span|1
 classic|item@390x780|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 classic|item@390x780|dom|span.listtoggles > button.fav.ghost.listtoggle.sm[aria-pressed=false aria-label=*]|1
 classic|item@390x780|dom|span.listtoggles > button.ghost.listtoggle.sm[aria-pressed=false text]|1
@@ -5036,10 +5043,9 @@ classic|item@390x780|focus|025|summary "Off 3"
 classic|item@390x780|focus|026|summary "Not needed 2"
 classic|item@390x780|focus|027|button.ghost.sm "Analyze now"
 classic|item@390x780|focus|028|a.ghost.sm "View queue"
-classic|item@390x780|focus|029|button.ghost.sm "Find subtitles"
-classic|item@390x780|focus|030|button.ghost.sm "Generate subtitles"
-classic|item@390x780|focus|031|summary "More actions"
-classic|item@390x780|focus|032|<wrap>
+classic|item@390x780|focus|029|button.ghost.sm "+ English"
+classic|item@390x780|focus|030|summary "More actions"
+classic|item@390x780|focus|031|<wrap>
 classic|item@390x780|req|GET /api/v1/activity|2
 classic|item@390x780|req|GET /api/v1/features|1
 classic|item@390x780|req|GET /api/v1/files/<id>/preparation|1
@@ -5731,8 +5737,8 @@ classic|player@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-labe
 classic|player@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|player@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|player@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
-classic|player@1280x860|dom|dd > button.ghost.sm[type=button text]|6
 classic|player@1280x860|dom|dd > div.watch-trks|4
+classic|player@1280x860|dom|dd > span.ai-caption-item|2
 classic|player@1280x860|dom|dd > span.mode-chip[text]|2
 classic|player@1280x860|dom|dd > span.mode-detail[text]|2
 classic|player@1280x860|dom|dd > span.watch-fmeta[text]|2
@@ -5828,8 +5834,8 @@ classic|player@1280x860|dom|div.watch-stage > aside#watch-title-panel.watch-titl
 classic|player@1280x860|dom|div.watch-stage > div.watch-picture|1
 classic|player@1280x860|dom|div.watch-trks > button.on.trk[aria-pressed=true type=button text]|4
 classic|player@1280x860|dom|dl.watch-ledger > dd[text]|2
-classic|player@1280x860|dom|dl.watch-ledger > dd|10
-classic|player@1280x860|dom|dl.watch-ledger > dt[text]|12
+classic|player@1280x860|dom|dl.watch-ledger > dd|8
+classic|player@1280x860|dom|dl.watch-ledger > dt[text]|10
 classic|player@1280x860|dom|g > path|5
 classic|player@1280x860|dom|header.top > a.logo[text]|1
 classic|player@1280x860|dom|header.top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -5848,10 +5854,11 @@ classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
-classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
-classic|player@1280x860|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
+classic|player@1280x860|dom|span.ai-caption-item > button.ghost.sm[type=button text]|2
+classic|player@1280x860|dom|span.ai-caption-item > span[role=status]|2
+classic|player@1280x860|dom|span.ai-caption-item > span|2
 classic|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@1280x860|dom|svg.material-icon[aria-hidden=true] > path|4
@@ -5895,8 +5902,8 @@ classic|player@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label
 classic|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|player@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|player@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
-classic|player@390x780|dom|dd > button.ghost.sm[type=button text]|6
 classic|player@390x780|dom|dd > div.watch-trks|4
+classic|player@390x780|dom|dd > span.ai-caption-item|2
 classic|player@390x780|dom|dd > span.mode-chip[text]|2
 classic|player@390x780|dom|dd > span.mode-detail[text]|2
 classic|player@390x780|dom|dd > span.watch-fmeta[text]|2
@@ -5991,8 +5998,8 @@ classic|player@390x780|dom|div.watch-stage > aside#watch-title-panel.watch-title
 classic|player@390x780|dom|div.watch-stage > div.watch-picture|1
 classic|player@390x780|dom|div.watch-trks > button.on.trk[aria-pressed=true type=button text]|4
 classic|player@390x780|dom|dl.watch-ledger > dd[text]|2
-classic|player@390x780|dom|dl.watch-ledger > dd|10
-classic|player@390x780|dom|dl.watch-ledger > dt[text]|12
+classic|player@390x780|dom|dl.watch-ledger > dd|8
+classic|player@390x780|dom|dl.watch-ledger > dt[text]|10
 classic|player@390x780|dom|g > path|5
 classic|player@390x780|dom|header.top > a.logo[text]|1
 classic|player@390x780|dom|header.top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -6011,10 +6018,11 @@ classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > d
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
-classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
-classic|player@390x780|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
+classic|player@390x780|dom|span.ai-caption-item > button.ghost.sm[type=button text]|2
+classic|player@390x780|dom|span.ai-caption-item > span[role=status]|2
+classic|player@390x780|dom|span.ai-caption-item > span|2
 classic|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@390x780|dom|svg.material-icon[aria-hidden=true] > path|4
@@ -6269,7 +6277,7 @@ classic|settings-developer@1280x860|dom|main#main > div.setlayout|1
 classic|settings-developer@1280x860|dom|nav > a.active[text]|1
 classic|settings-developer@1280x860|dom|nav > a[text]|6
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|13
 classic|settings-developer@1280x860|dom|span[text] > small[text]|3
@@ -6288,21 +6296,22 @@ classic|settings-developer@1280x860|focus|011|button.settab "Libraries"
 classic|settings-developer@1280x860|focus|012|button.settab "Metadata"
 classic|settings-developer@1280x860|focus|013|button.settab "Live TV"
 classic|settings-developer@1280x860|focus|014|button.settab "Playback"
-classic|settings-developer@1280x860|focus|015|button.settab "Analysis"
-classic|settings-developer@1280x860|focus|016|button.settab "Maintenance"
-classic|settings-developer@1280x860|focus|017|button.settab "Users"
-classic|settings-developer@1280x860|focus|018|button.settab "System"
-classic|settings-developer@1280x860|focus|019|button.settab "Cluster off"
-classic|settings-developer@1280x860|focus|020|button.settab "Integrations"
-classic|settings-developer@1280x860|focus|021|button.settab "Sharing"
-classic|settings-developer@1280x860|focus|022|button.settab "Remotes & devices"
-classic|settings-developer@1280x860|focus|023|button.settab.active "Developer"
-classic|settings-developer@1280x860|focus|024|input#pmacosvideo
-classic|settings-developer@1280x860|focus|025|summary "Details"
-classic|settings-developer@1280x860|focus|026|input#pmacoshevc
-classic|settings-developer@1280x860|focus|027|summary "Details"
-classic|settings-developer@1280x860|focus|028|input#hevc-unverified
-classic|settings-developer@1280x860|focus|029|<wrap>
+classic|settings-developer@1280x860|focus|015|button.settab "Subtitles"
+classic|settings-developer@1280x860|focus|016|button.settab "Analysis"
+classic|settings-developer@1280x860|focus|017|button.settab "Maintenance"
+classic|settings-developer@1280x860|focus|018|button.settab "Users"
+classic|settings-developer@1280x860|focus|019|button.settab "System"
+classic|settings-developer@1280x860|focus|020|button.settab "Cluster off"
+classic|settings-developer@1280x860|focus|021|button.settab "Integrations"
+classic|settings-developer@1280x860|focus|022|button.settab "Sharing"
+classic|settings-developer@1280x860|focus|023|button.settab "Remotes & devices"
+classic|settings-developer@1280x860|focus|024|button.settab.active "Developer"
+classic|settings-developer@1280x860|focus|025|input#pmacosvideo
+classic|settings-developer@1280x860|focus|026|summary "Details"
+classic|settings-developer@1280x860|focus|027|input#pmacoshevc
+classic|settings-developer@1280x860|focus|028|summary "Details"
+classic|settings-developer@1280x860|focus|029|input#hevc-unverified
+classic|settings-developer@1280x860|focus|030|<wrap>
 classic|settings-developer@1280x860|req|GET /api/v1/activity|2
 classic|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
 classic|settings-developer@1280x860|req|GET /api/v1/features|2
@@ -6381,7 +6390,7 @@ classic|settings-developer@390x780|dom|main#main > div.setlayout|1
 classic|settings-developer@390x780|dom|nav > a.active[text]|1
 classic|settings-developer@390x780|dom|nav > a[text]|6
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|13
 classic|settings-developer@390x780|dom|span[text] > small[text]|3
@@ -6400,21 +6409,22 @@ classic|settings-developer@390x780|focus|011|button.settab "Libraries"
 classic|settings-developer@390x780|focus|012|button.settab "Metadata"
 classic|settings-developer@390x780|focus|013|button.settab "Live TV"
 classic|settings-developer@390x780|focus|014|button.settab "Playback"
-classic|settings-developer@390x780|focus|015|button.settab "Analysis"
-classic|settings-developer@390x780|focus|016|button.settab "Maintenance"
-classic|settings-developer@390x780|focus|017|button.settab "Users"
-classic|settings-developer@390x780|focus|018|button.settab "System"
-classic|settings-developer@390x780|focus|019|button.settab "Cluster"
-classic|settings-developer@390x780|focus|020|button.settab "Integrations"
-classic|settings-developer@390x780|focus|021|button.settab "Sharing"
-classic|settings-developer@390x780|focus|022|button.settab "Remotes & devices"
-classic|settings-developer@390x780|focus|023|button.settab.active "Developer"
-classic|settings-developer@390x780|focus|024|input#pmacosvideo
-classic|settings-developer@390x780|focus|025|summary "Details"
-classic|settings-developer@390x780|focus|026|input#pmacoshevc
-classic|settings-developer@390x780|focus|027|summary "Details"
-classic|settings-developer@390x780|focus|028|input#hevc-unverified
-classic|settings-developer@390x780|focus|029|<wrap>
+classic|settings-developer@390x780|focus|015|button.settab "Subtitles"
+classic|settings-developer@390x780|focus|016|button.settab "Analysis"
+classic|settings-developer@390x780|focus|017|button.settab "Maintenance"
+classic|settings-developer@390x780|focus|018|button.settab "Users"
+classic|settings-developer@390x780|focus|019|button.settab "System"
+classic|settings-developer@390x780|focus|020|button.settab "Cluster"
+classic|settings-developer@390x780|focus|021|button.settab "Integrations"
+classic|settings-developer@390x780|focus|022|button.settab "Sharing"
+classic|settings-developer@390x780|focus|023|button.settab "Remotes & devices"
+classic|settings-developer@390x780|focus|024|button.settab.active "Developer"
+classic|settings-developer@390x780|focus|025|input#pmacosvideo
+classic|settings-developer@390x780|focus|026|summary "Details"
+classic|settings-developer@390x780|focus|027|input#pmacoshevc
+classic|settings-developer@390x780|focus|028|summary "Details"
+classic|settings-developer@390x780|focus|029|input#hevc-unverified
+classic|settings-developer@390x780|focus|030|<wrap>
 classic|settings-developer@390x780|req|GET /api/v1/activity|2
 classic|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
 classic|settings-developer@390x780|req|GET /api/v1/features|2
@@ -6482,7 +6492,7 @@ classic|settings@1280x860|dom|main#main > div.setlayout|1
 classic|settings@1280x860|dom|nav > a.active[text]|1
 classic|settings@1280x860|dom|nav > a[text]|6
 classic|settings@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-classic|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+classic|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 classic|settings@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings@1280x860|dom|table > tbody|1
 classic|settings@1280x860|dom|table > thead|1
@@ -6528,31 +6538,32 @@ classic|settings@1280x860|focus|011|button.settab.active "Libraries 3"
 classic|settings@1280x860|focus|012|button.settab "Metadata"
 classic|settings@1280x860|focus|013|button.settab "Live TV"
 classic|settings@1280x860|focus|014|button.settab "Playback"
-classic|settings@1280x860|focus|015|button.settab "Analysis"
-classic|settings@1280x860|focus|016|button.settab "Maintenance"
-classic|settings@1280x860|focus|017|button.settab "Users"
-classic|settings@1280x860|focus|018|button.settab "System"
-classic|settings@1280x860|focus|019|button.settab "Cluster off"
-classic|settings@1280x860|focus|020|button.settab "Integrations"
-classic|settings@1280x860|focus|021|button.settab "Sharing"
-classic|settings@1280x860|focus|022|button.settab "Remotes & devices"
-classic|settings@1280x860|focus|023|button.settab "Developer"
-classic|settings@1280x860|focus|024|button.ghost.sm "Scan every library for new & changed files"
-classic|settings@1280x860|focus|025|button.ghost.sm "Re-fetch metadata & artwork for every libra
-classic|settings@1280x860|focus|026|button.sm "+ Add library"
-classic|settings@1280x860|focus|027|a "Add a free key in Metadata"
-classic|settings@1280x860|focus|028|button.ghost.sm "Scan"
-classic|settings@1280x860|focus|029|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@1280x860|focus|030|button.ghost.sm "Configure ⌄"
-classic|settings@1280x860|focus|031|button.ghost.sm "Scan"
-classic|settings@1280x860|focus|032|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@1280x860|focus|033|button.ghost.sm "Configure ⌄"
-classic|settings@1280x860|focus|034|button.ghost.sm "Scan"
-classic|settings@1280x860|focus|035|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@1280x860|focus|036|button.ghost.sm "Configure ⌄"
-classic|settings@1280x860|focus|037|button.ghost "Load library roots"
-classic|settings@1280x860|focus|038|button.ghost "Save storage domains"
-classic|settings@1280x860|focus|039|<wrap>
+classic|settings@1280x860|focus|015|button.settab "Subtitles"
+classic|settings@1280x860|focus|016|button.settab "Analysis"
+classic|settings@1280x860|focus|017|button.settab "Maintenance"
+classic|settings@1280x860|focus|018|button.settab "Users"
+classic|settings@1280x860|focus|019|button.settab "System"
+classic|settings@1280x860|focus|020|button.settab "Cluster off"
+classic|settings@1280x860|focus|021|button.settab "Integrations"
+classic|settings@1280x860|focus|022|button.settab "Sharing"
+classic|settings@1280x860|focus|023|button.settab "Remotes & devices"
+classic|settings@1280x860|focus|024|button.settab "Developer"
+classic|settings@1280x860|focus|025|button.ghost.sm "Scan every library for new & changed files"
+classic|settings@1280x860|focus|026|button.ghost.sm "Re-fetch metadata & artwork for every libra
+classic|settings@1280x860|focus|027|button.sm "+ Add library"
+classic|settings@1280x860|focus|028|a "Add a free key in Metadata"
+classic|settings@1280x860|focus|029|button.ghost.sm "Scan"
+classic|settings@1280x860|focus|030|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@1280x860|focus|031|button.ghost.sm "Configure ⌄"
+classic|settings@1280x860|focus|032|button.ghost.sm "Scan"
+classic|settings@1280x860|focus|033|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@1280x860|focus|034|button.ghost.sm "Configure ⌄"
+classic|settings@1280x860|focus|035|button.ghost.sm "Scan"
+classic|settings@1280x860|focus|036|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@1280x860|focus|037|button.ghost.sm "Configure ⌄"
+classic|settings@1280x860|focus|038|button.ghost "Load library roots"
+classic|settings@1280x860|focus|039|button.ghost "Save storage domains"
+classic|settings@1280x860|focus|040|<wrap>
 classic|settings@1280x860|req|GET /api/v1/activity|2
 classic|settings@1280x860|req|GET /api/v1/dv-conversions|1
 classic|settings@1280x860|req|GET /api/v1/features|2
@@ -6622,7 +6633,7 @@ classic|settings@390x780|dom|main#main > div.setlayout|1
 classic|settings@390x780|dom|nav > a.active[text]|1
 classic|settings@390x780|dom|nav > a[text]|6
 classic|settings@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-classic|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+classic|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 classic|settings@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings@390x780|dom|table > tbody|1
 classic|settings@390x780|dom|table > thead|1
@@ -6668,31 +6679,32 @@ classic|settings@390x780|focus|011|button.settab.active "Libraries"
 classic|settings@390x780|focus|012|button.settab "Metadata"
 classic|settings@390x780|focus|013|button.settab "Live TV"
 classic|settings@390x780|focus|014|button.settab "Playback"
-classic|settings@390x780|focus|015|button.settab "Analysis"
-classic|settings@390x780|focus|016|button.settab "Maintenance"
-classic|settings@390x780|focus|017|button.settab "Users"
-classic|settings@390x780|focus|018|button.settab "System"
-classic|settings@390x780|focus|019|button.settab "Cluster"
-classic|settings@390x780|focus|020|button.settab "Integrations"
-classic|settings@390x780|focus|021|button.settab "Sharing"
-classic|settings@390x780|focus|022|button.settab "Remotes & devices"
-classic|settings@390x780|focus|023|button.settab "Developer"
-classic|settings@390x780|focus|024|button.ghost.sm "Scan every library for new & changed files"
-classic|settings@390x780|focus|025|button.ghost.sm "Re-fetch metadata & artwork for every libra
-classic|settings@390x780|focus|026|button.sm "+ Add library"
-classic|settings@390x780|focus|027|a "Add a free key in Metadata"
-classic|settings@390x780|focus|028|button.ghost.sm "Scan"
-classic|settings@390x780|focus|029|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@390x780|focus|030|button.ghost.sm "Configure ⌄"
-classic|settings@390x780|focus|031|button.ghost.sm "Scan"
-classic|settings@390x780|focus|032|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@390x780|focus|033|button.ghost.sm "Configure ⌄"
-classic|settings@390x780|focus|034|button.ghost.sm "Scan"
-classic|settings@390x780|focus|035|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@390x780|focus|036|button.ghost.sm "Configure ⌄"
-classic|settings@390x780|focus|037|button.ghost "Load library roots"
-classic|settings@390x780|focus|038|button.ghost "Save storage domains"
-classic|settings@390x780|focus|039|<wrap>
+classic|settings@390x780|focus|015|button.settab "Subtitles"
+classic|settings@390x780|focus|016|button.settab "Analysis"
+classic|settings@390x780|focus|017|button.settab "Maintenance"
+classic|settings@390x780|focus|018|button.settab "Users"
+classic|settings@390x780|focus|019|button.settab "System"
+classic|settings@390x780|focus|020|button.settab "Cluster"
+classic|settings@390x780|focus|021|button.settab "Integrations"
+classic|settings@390x780|focus|022|button.settab "Sharing"
+classic|settings@390x780|focus|023|button.settab "Remotes & devices"
+classic|settings@390x780|focus|024|button.settab "Developer"
+classic|settings@390x780|focus|025|button.ghost.sm "Scan every library for new & changed files"
+classic|settings@390x780|focus|026|button.ghost.sm "Re-fetch metadata & artwork for every libra
+classic|settings@390x780|focus|027|button.sm "+ Add library"
+classic|settings@390x780|focus|028|a "Add a free key in Metadata"
+classic|settings@390x780|focus|029|button.ghost.sm "Scan"
+classic|settings@390x780|focus|030|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@390x780|focus|031|button.ghost.sm "Configure ⌄"
+classic|settings@390x780|focus|032|button.ghost.sm "Scan"
+classic|settings@390x780|focus|033|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@390x780|focus|034|button.ghost.sm "Configure ⌄"
+classic|settings@390x780|focus|035|button.ghost.sm "Scan"
+classic|settings@390x780|focus|036|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@390x780|focus|037|button.ghost.sm "Configure ⌄"
+classic|settings@390x780|focus|038|button.ghost "Load library roots"
+classic|settings@390x780|focus|039|button.ghost "Save storage domains"
+classic|settings@390x780|focus|040|<wrap>
 classic|settings@390x780|req|GET /api/v1/activity|2
 classic|settings@390x780|req|GET /api/v1/dv-conversions|1
 classic|settings@390x780|req|GET /api/v1/features|2
@@ -7936,11 +7948,8 @@ meridian|item@1280x860|dom|a[aria-current=page] > svg.px-ico[aria-hidden=true]|2
 meridian|item@1280x860|dom|aside.md-side[aria-label=*] > a.logo.md-brand[text]|1
 meridian|item@1280x860|dom|aside.md-side[aria-label=*] > button.ghost.md-account[aria-label=*]|1
 meridian|item@1280x860|dom|aside.md-side[aria-label=*] > nav#meridian-nav.md-nav[aria-label=*]|1
-meridian|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
-meridian|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
-meridian|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-generate-2[role=status aria-live=polite]|1
-meridian|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-search-2|1
 meridian|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div.prep-eyebrow[text]|1
+meridian|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div|1
 meridian|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > dl.specs|1
 meridian|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > h2[text]|1
 meridian|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > h3[text]|1
@@ -7969,6 +7978,7 @@ meridian|item@1280x860|dom|div > div.prep-eyebrow[text]|1
 meridian|item@1280x860|dom|div > h2[text]|2
 meridian|item@1280x860|dom|div > h3[text]|10
 meridian|item@1280x860|dom|div > p[text]|11
+meridian|item@1280x860|dom|div > span.ai-caption-item|1
 meridian|item@1280x860|dom|div#app > div.md-shell|1
 meridian|item@1280x860|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
 meridian|item@1280x860|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
@@ -8056,6 +8066,9 @@ meridian|item@1280x860|dom|section.media-preparation-main[aria-label=*] > div#pr
 meridian|item@1280x860|dom|section.media-preparation-main[aria-label=*] > div.analysis-brief.px-admin.th-admin|1
 meridian|item@1280x860|dom|section.media-preparation-main[aria-label=*] > div.prep-heading|1
 meridian|item@1280x860|dom|section.media-preparation-main[aria-label=*] > p.muted.prep-intro[text]|1
+meridian|item@1280x860|dom|span.ai-caption-item > button.ghost.sm[type=button text]|1
+meridian|item@1280x860|dom|span.ai-caption-item > span[role=status]|1
+meridian|item@1280x860|dom|span.ai-caption-item > span|1
 meridian|item@1280x860|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 meridian|item@1280x860|dom|span.listtoggles > button.fav.ghost.listtoggle.sm[aria-pressed=false aria-label=*]|1
 meridian|item@1280x860|dom|span.listtoggles > button.ghost.listtoggle.sm[aria-pressed=false text]|1
@@ -8102,10 +8115,9 @@ meridian|item@1280x860|focus|029|summary "Off 3"
 meridian|item@1280x860|focus|030|summary "Not needed 2"
 meridian|item@1280x860|focus|031|button.ghost.sm "Analyze now"
 meridian|item@1280x860|focus|032|a.ghost.sm "View queue"
-meridian|item@1280x860|focus|033|button.ghost.sm "Find subtitles"
-meridian|item@1280x860|focus|034|button.ghost.sm "Generate subtitles"
-meridian|item@1280x860|focus|035|summary "More actions"
-meridian|item@1280x860|focus|036|<wrap>
+meridian|item@1280x860|focus|033|button.ghost.sm "+ English"
+meridian|item@1280x860|focus|034|summary "More actions"
+meridian|item@1280x860|focus|035|<wrap>
 meridian|item@1280x860|req|GET /api/v1/activity|2
 meridian|item@1280x860|req|GET /api/v1/features|1
 meridian|item@1280x860|req|GET /api/v1/files/<id>/preparation|1
@@ -8125,11 +8137,8 @@ meridian|item@390x780|dom|a[aria-current=page] > svg.px-ico[aria-hidden=true]|2
 meridian|item@390x780|dom|aside.md-side[aria-label=*] > a.logo.md-brand[text]|1
 meridian|item@390x780|dom|aside.md-side[aria-label=*] > button.ghost.md-account[aria-label=*]|1
 meridian|item@390x780|dom|aside.md-side[aria-label=*] > nav#meridian-nav.md-nav[aria-label=*]|1
-meridian|item@390x780|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
-meridian|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
-meridian|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-generate-2[role=status aria-live=polite]|1
-meridian|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-search-2|1
 meridian|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div.prep-eyebrow[text]|1
+meridian|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div|1
 meridian|item@390x780|dom|aside.media-preparation-side[aria-label=*] > dl.specs|1
 meridian|item@390x780|dom|aside.media-preparation-side[aria-label=*] > h2[text]|1
 meridian|item@390x780|dom|aside.media-preparation-side[aria-label=*] > h3[text]|1
@@ -8158,6 +8167,7 @@ meridian|item@390x780|dom|div > div.prep-eyebrow[text]|1
 meridian|item@390x780|dom|div > h2[text]|2
 meridian|item@390x780|dom|div > h3[text]|10
 meridian|item@390x780|dom|div > p[text]|11
+meridian|item@390x780|dom|div > span.ai-caption-item|1
 meridian|item@390x780|dom|div#app > div.md-shell|1
 meridian|item@390x780|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
 meridian|item@390x780|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
@@ -8245,6 +8255,9 @@ meridian|item@390x780|dom|section.media-preparation-main[aria-label=*] > div#pre
 meridian|item@390x780|dom|section.media-preparation-main[aria-label=*] > div.analysis-brief.px-admin.th-admin|1
 meridian|item@390x780|dom|section.media-preparation-main[aria-label=*] > div.prep-heading|1
 meridian|item@390x780|dom|section.media-preparation-main[aria-label=*] > p.muted.prep-intro[text]|1
+meridian|item@390x780|dom|span.ai-caption-item > button.ghost.sm[type=button text]|1
+meridian|item@390x780|dom|span.ai-caption-item > span[role=status]|1
+meridian|item@390x780|dom|span.ai-caption-item > span|1
 meridian|item@390x780|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 meridian|item@390x780|dom|span.listtoggles > button.fav.ghost.listtoggle.sm[aria-pressed=false aria-label=*]|1
 meridian|item@390x780|dom|span.listtoggles > button.ghost.listtoggle.sm[aria-pressed=false text]|1
@@ -8279,14 +8292,13 @@ meridian|item@390x780|focus|017|summary "Off 3"
 meridian|item@390x780|focus|018|summary "Not needed 2"
 meridian|item@390x780|focus|019|button.ghost.sm "Analyze now"
 meridian|item@390x780|focus|020|a.ghost.sm "View queue"
-meridian|item@390x780|focus|021|button.ghost.sm "Find subtitles"
-meridian|item@390x780|focus|022|button.ghost.sm "Generate subtitles"
-meridian|item@390x780|focus|023|summary "More actions"
-meridian|item@390x780|focus|024|a "Home"
-meridian|item@390x780|focus|025|button.ghost "Libraries"
-meridian|item@390x780|focus|026|button.ghost "Search"
-meridian|item@390x780|focus|027|button.ghost "More"
-meridian|item@390x780|focus|028|<wrap>
+meridian|item@390x780|focus|021|button.ghost.sm "+ English"
+meridian|item@390x780|focus|022|summary "More actions"
+meridian|item@390x780|focus|023|a "Home"
+meridian|item@390x780|focus|024|button.ghost "Libraries"
+meridian|item@390x780|focus|025|button.ghost "Search"
+meridian|item@390x780|focus|026|button.ghost "More"
+meridian|item@390x780|focus|027|<wrap>
 meridian|item@390x780|req|GET /api/v1/activity|2
 meridian|item@390x780|req|GET /api/v1/features|1
 meridian|item@390x780|req|GET /api/v1/files/<id>/preparation|1
@@ -9104,8 +9116,8 @@ meridian|player@1280x860|dom|button.ghost[aria-label=* type=button] > span.md-la
 meridian|player@1280x860|dom|button.ghost[aria-label=* type=button] > svg.px-ico[aria-hidden=true]|3
 meridian|player@1280x860|dom|button.ghost[type=button] > span[text]|3
 meridian|player@1280x860|dom|button.ghost[type=button] > svg.px-ico[aria-hidden=true]|3
-meridian|player@1280x860|dom|dd > button.ghost.sm[type=button text]|6
 meridian|player@1280x860|dom|dd > div.watch-trks|4
+meridian|player@1280x860|dom|dd > span.ai-caption-item|2
 meridian|player@1280x860|dom|dd > span.mode-chip[text]|2
 meridian|player@1280x860|dom|dd > span.mode-detail[text]|2
 meridian|player@1280x860|dom|dd > span.watch-fmeta[text]|2
@@ -9201,8 +9213,8 @@ meridian|player@1280x860|dom|div.watch-stage > aside#watch-title-panel.watch-tit
 meridian|player@1280x860|dom|div.watch-stage > div.watch-picture|1
 meridian|player@1280x860|dom|div.watch-trks > button.on.trk[aria-pressed=true type=button text]|4
 meridian|player@1280x860|dom|dl.watch-ledger > dd[text]|2
-meridian|player@1280x860|dom|dl.watch-ledger > dd|10
-meridian|player@1280x860|dom|dl.watch-ledger > dt[text]|12
+meridian|player@1280x860|dom|dl.watch-ledger > dd|8
+meridian|player@1280x860|dom|dl.watch-ledger > dt[text]|10
 meridian|player@1280x860|dom|g > path|5
 meridian|player@1280x860|dom|header.md-top > a.logo.md-mobile-brand[text]|1
 meridian|player@1280x860|dom|header.md-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -9226,10 +9238,11 @@ meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] >
 meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
 meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
-meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
 meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 meridian|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
-meridian|player@1280x860|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
+meridian|player@1280x860|dom|span.ai-caption-item > button.ghost.sm[type=button text]|2
+meridian|player@1280x860|dom|span.ai-caption-item > span[role=status]|2
+meridian|player@1280x860|dom|span.ai-caption-item > span|2
 meridian|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 meridian|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 meridian|player@1280x860|dom|svg.material-icon[aria-hidden=true] > path|4
@@ -9288,8 +9301,8 @@ meridian|player@390x780|dom|button.ghost[aria-label=* type=button] > span.md-lab
 meridian|player@390x780|dom|button.ghost[aria-label=* type=button] > svg.px-ico[aria-hidden=true]|3
 meridian|player@390x780|dom|button.ghost[type=button] > span[text]|3
 meridian|player@390x780|dom|button.ghost[type=button] > svg.px-ico[aria-hidden=true]|3
-meridian|player@390x780|dom|dd > button.ghost.sm[type=button text]|6
 meridian|player@390x780|dom|dd > div.watch-trks|4
+meridian|player@390x780|dom|dd > span.ai-caption-item|2
 meridian|player@390x780|dom|dd > span.mode-chip[text]|2
 meridian|player@390x780|dom|dd > span.mode-detail[text]|2
 meridian|player@390x780|dom|dd > span.watch-fmeta[text]|2
@@ -9384,8 +9397,8 @@ meridian|player@390x780|dom|div.watch-stage > aside#watch-title-panel.watch-titl
 meridian|player@390x780|dom|div.watch-stage > div.watch-picture|1
 meridian|player@390x780|dom|div.watch-trks > button.on.trk[aria-pressed=true type=button text]|4
 meridian|player@390x780|dom|dl.watch-ledger > dd[text]|2
-meridian|player@390x780|dom|dl.watch-ledger > dd|10
-meridian|player@390x780|dom|dl.watch-ledger > dt[text]|12
+meridian|player@390x780|dom|dl.watch-ledger > dd|8
+meridian|player@390x780|dom|dl.watch-ledger > dt[text]|10
 meridian|player@390x780|dom|g > path|5
 meridian|player@390x780|dom|header.md-top > a.logo.md-mobile-brand[text]|1
 meridian|player@390x780|dom|header.md-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -9409,10 +9422,11 @@ meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > 
 meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
 meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
-meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
 meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 meridian|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
-meridian|player@390x780|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
+meridian|player@390x780|dom|span.ai-caption-item > button.ghost.sm[type=button text]|2
+meridian|player@390x780|dom|span.ai-caption-item > span[role=status]|2
+meridian|player@390x780|dom|span.ai-caption-item > span|2
 meridian|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 meridian|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 meridian|player@390x780|dom|svg.material-icon[aria-hidden=true] > path|4
@@ -9717,7 +9731,7 @@ meridian|settings-developer@1280x860|dom|nav#meridian-nav.md-nav[aria-label=*] >
 meridian|settings-developer@1280x860|dom|nav.md-bottom[aria-label=*] > a|1
 meridian|settings-developer@1280x860|dom|nav.md-bottom[aria-label=*] > button.ghost[type=button]|3
 meridian|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-meridian|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+meridian|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 meridian|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 meridian|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|13
 meridian|settings-developer@1280x860|dom|span[text] > small[text]|3
@@ -9740,21 +9754,22 @@ meridian|settings-developer@1280x860|focus|012|button.settab "Libraries"
 meridian|settings-developer@1280x860|focus|013|button.settab "Metadata"
 meridian|settings-developer@1280x860|focus|014|button.settab "Live TV"
 meridian|settings-developer@1280x860|focus|015|button.settab "Playback"
-meridian|settings-developer@1280x860|focus|016|button.settab "Analysis"
-meridian|settings-developer@1280x860|focus|017|button.settab "Maintenance"
-meridian|settings-developer@1280x860|focus|018|button.settab "Users"
-meridian|settings-developer@1280x860|focus|019|button.settab "System"
-meridian|settings-developer@1280x860|focus|020|button.settab "Cluster off"
-meridian|settings-developer@1280x860|focus|021|button.settab "Integrations"
-meridian|settings-developer@1280x860|focus|022|button.settab "Sharing"
-meridian|settings-developer@1280x860|focus|023|button.settab "Remotes & devices"
-meridian|settings-developer@1280x860|focus|024|button.settab.active "Developer"
-meridian|settings-developer@1280x860|focus|025|input#pmacosvideo
-meridian|settings-developer@1280x860|focus|026|summary "Details"
-meridian|settings-developer@1280x860|focus|027|input#pmacoshevc
-meridian|settings-developer@1280x860|focus|028|summary "Details"
-meridian|settings-developer@1280x860|focus|029|input#hevc-unverified
-meridian|settings-developer@1280x860|focus|030|<wrap>
+meridian|settings-developer@1280x860|focus|016|button.settab "Subtitles"
+meridian|settings-developer@1280x860|focus|017|button.settab "Analysis"
+meridian|settings-developer@1280x860|focus|018|button.settab "Maintenance"
+meridian|settings-developer@1280x860|focus|019|button.settab "Users"
+meridian|settings-developer@1280x860|focus|020|button.settab "System"
+meridian|settings-developer@1280x860|focus|021|button.settab "Cluster off"
+meridian|settings-developer@1280x860|focus|022|button.settab "Integrations"
+meridian|settings-developer@1280x860|focus|023|button.settab "Sharing"
+meridian|settings-developer@1280x860|focus|024|button.settab "Remotes & devices"
+meridian|settings-developer@1280x860|focus|025|button.settab.active "Developer"
+meridian|settings-developer@1280x860|focus|026|input#pmacosvideo
+meridian|settings-developer@1280x860|focus|027|summary "Details"
+meridian|settings-developer@1280x860|focus|028|input#pmacoshevc
+meridian|settings-developer@1280x860|focus|029|summary "Details"
+meridian|settings-developer@1280x860|focus|030|input#hevc-unverified
+meridian|settings-developer@1280x860|focus|031|<wrap>
 meridian|settings-developer@1280x860|req|GET /api/v1/activity|2
 meridian|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
 meridian|settings-developer@1280x860|req|GET /api/v1/features|2
@@ -9846,7 +9861,7 @@ meridian|settings-developer@390x780|dom|nav#meridian-nav.md-nav[aria-label=*] > 
 meridian|settings-developer@390x780|dom|nav.md-bottom[aria-label=*] > a|1
 meridian|settings-developer@390x780|dom|nav.md-bottom[aria-label=*] > button.ghost[type=button]|3
 meridian|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-meridian|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+meridian|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 meridian|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 meridian|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|13
 meridian|settings-developer@390x780|dom|span[text] > small[text]|3
@@ -9860,25 +9875,26 @@ meridian|settings-developer@390x780|focus|003|button.settab "Libraries"
 meridian|settings-developer@390x780|focus|004|button.settab "Metadata"
 meridian|settings-developer@390x780|focus|005|button.settab "Live TV"
 meridian|settings-developer@390x780|focus|006|button.settab "Playback"
-meridian|settings-developer@390x780|focus|007|button.settab "Analysis"
-meridian|settings-developer@390x780|focus|008|button.settab "Maintenance"
-meridian|settings-developer@390x780|focus|009|button.settab "Users"
-meridian|settings-developer@390x780|focus|010|button.settab "System"
-meridian|settings-developer@390x780|focus|011|button.settab "Cluster"
-meridian|settings-developer@390x780|focus|012|button.settab "Integrations"
-meridian|settings-developer@390x780|focus|013|button.settab "Sharing"
-meridian|settings-developer@390x780|focus|014|button.settab "Remotes & devices"
-meridian|settings-developer@390x780|focus|015|button.settab.active "Developer"
-meridian|settings-developer@390x780|focus|016|input#pmacosvideo
-meridian|settings-developer@390x780|focus|017|summary "Details"
-meridian|settings-developer@390x780|focus|018|input#pmacoshevc
-meridian|settings-developer@390x780|focus|019|summary "Details"
-meridian|settings-developer@390x780|focus|020|input#hevc-unverified
-meridian|settings-developer@390x780|focus|021|a "Home"
-meridian|settings-developer@390x780|focus|022|button.ghost "Libraries"
-meridian|settings-developer@390x780|focus|023|button.ghost "Search"
-meridian|settings-developer@390x780|focus|024|button.ghost "More"
-meridian|settings-developer@390x780|focus|025|<wrap>
+meridian|settings-developer@390x780|focus|007|button.settab "Subtitles"
+meridian|settings-developer@390x780|focus|008|button.settab "Analysis"
+meridian|settings-developer@390x780|focus|009|button.settab "Maintenance"
+meridian|settings-developer@390x780|focus|010|button.settab "Users"
+meridian|settings-developer@390x780|focus|011|button.settab "System"
+meridian|settings-developer@390x780|focus|012|button.settab "Cluster"
+meridian|settings-developer@390x780|focus|013|button.settab "Integrations"
+meridian|settings-developer@390x780|focus|014|button.settab "Sharing"
+meridian|settings-developer@390x780|focus|015|button.settab "Remotes & devices"
+meridian|settings-developer@390x780|focus|016|button.settab.active "Developer"
+meridian|settings-developer@390x780|focus|017|input#pmacosvideo
+meridian|settings-developer@390x780|focus|018|summary "Details"
+meridian|settings-developer@390x780|focus|019|input#pmacoshevc
+meridian|settings-developer@390x780|focus|020|summary "Details"
+meridian|settings-developer@390x780|focus|021|input#hevc-unverified
+meridian|settings-developer@390x780|focus|022|a "Home"
+meridian|settings-developer@390x780|focus|023|button.ghost "Libraries"
+meridian|settings-developer@390x780|focus|024|button.ghost "Search"
+meridian|settings-developer@390x780|focus|025|button.ghost "More"
+meridian|settings-developer@390x780|focus|026|<wrap>
 meridian|settings-developer@390x780|req|GET /api/v1/activity|2
 meridian|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
 meridian|settings-developer@390x780|req|GET /api/v1/features|2
@@ -9959,7 +9975,7 @@ meridian|settings@1280x860|dom|nav#meridian-nav.md-nav[aria-label=*] > div.md-di
 meridian|settings@1280x860|dom|nav.md-bottom[aria-label=*] > a|1
 meridian|settings@1280x860|dom|nav.md-bottom[aria-label=*] > button.ghost[type=button]|3
 meridian|settings@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-meridian|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+meridian|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 meridian|settings@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 meridian|settings@1280x860|dom|svg.px-ico[aria-hidden=true] > circle|2
 meridian|settings@1280x860|dom|svg.px-ico[aria-hidden=true] > path|8
@@ -10009,31 +10025,32 @@ meridian|settings@1280x860|focus|012|button.settab.active "Libraries 3"
 meridian|settings@1280x860|focus|013|button.settab "Metadata"
 meridian|settings@1280x860|focus|014|button.settab "Live TV"
 meridian|settings@1280x860|focus|015|button.settab "Playback"
-meridian|settings@1280x860|focus|016|button.settab "Analysis"
-meridian|settings@1280x860|focus|017|button.settab "Maintenance"
-meridian|settings@1280x860|focus|018|button.settab "Users"
-meridian|settings@1280x860|focus|019|button.settab "System"
-meridian|settings@1280x860|focus|020|button.settab "Cluster off"
-meridian|settings@1280x860|focus|021|button.settab "Integrations"
-meridian|settings@1280x860|focus|022|button.settab "Sharing"
-meridian|settings@1280x860|focus|023|button.settab "Remotes & devices"
-meridian|settings@1280x860|focus|024|button.settab "Developer"
-meridian|settings@1280x860|focus|025|button.ghost.sm "Scan every library for new & changed files"
-meridian|settings@1280x860|focus|026|button.ghost.sm "Re-fetch metadata & artwork for every libra
-meridian|settings@1280x860|focus|027|button.sm "+ Add library"
-meridian|settings@1280x860|focus|028|a "Add a free key in Metadata"
-meridian|settings@1280x860|focus|029|button.ghost.sm "Scan"
-meridian|settings@1280x860|focus|030|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-meridian|settings@1280x860|focus|031|button.ghost.sm "Configure ⌄"
-meridian|settings@1280x860|focus|032|button.ghost.sm "Scan"
-meridian|settings@1280x860|focus|033|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-meridian|settings@1280x860|focus|034|button.ghost.sm "Configure ⌄"
-meridian|settings@1280x860|focus|035|button.ghost.sm "Scan"
-meridian|settings@1280x860|focus|036|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-meridian|settings@1280x860|focus|037|button.ghost.sm "Configure ⌄"
-meridian|settings@1280x860|focus|038|button.ghost "Load library roots"
-meridian|settings@1280x860|focus|039|button.ghost "Save storage domains"
-meridian|settings@1280x860|focus|040|<wrap>
+meridian|settings@1280x860|focus|016|button.settab "Subtitles"
+meridian|settings@1280x860|focus|017|button.settab "Analysis"
+meridian|settings@1280x860|focus|018|button.settab "Maintenance"
+meridian|settings@1280x860|focus|019|button.settab "Users"
+meridian|settings@1280x860|focus|020|button.settab "System"
+meridian|settings@1280x860|focus|021|button.settab "Cluster off"
+meridian|settings@1280x860|focus|022|button.settab "Integrations"
+meridian|settings@1280x860|focus|023|button.settab "Sharing"
+meridian|settings@1280x860|focus|024|button.settab "Remotes & devices"
+meridian|settings@1280x860|focus|025|button.settab "Developer"
+meridian|settings@1280x860|focus|026|button.ghost.sm "Scan every library for new & changed files"
+meridian|settings@1280x860|focus|027|button.ghost.sm "Re-fetch metadata & artwork for every libra
+meridian|settings@1280x860|focus|028|button.sm "+ Add library"
+meridian|settings@1280x860|focus|029|a "Add a free key in Metadata"
+meridian|settings@1280x860|focus|030|button.ghost.sm "Scan"
+meridian|settings@1280x860|focus|031|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+meridian|settings@1280x860|focus|032|button.ghost.sm "Configure ⌄"
+meridian|settings@1280x860|focus|033|button.ghost.sm "Scan"
+meridian|settings@1280x860|focus|034|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+meridian|settings@1280x860|focus|035|button.ghost.sm "Configure ⌄"
+meridian|settings@1280x860|focus|036|button.ghost.sm "Scan"
+meridian|settings@1280x860|focus|037|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+meridian|settings@1280x860|focus|038|button.ghost.sm "Configure ⌄"
+meridian|settings@1280x860|focus|039|button.ghost "Load library roots"
+meridian|settings@1280x860|focus|040|button.ghost "Save storage domains"
+meridian|settings@1280x860|focus|041|<wrap>
 meridian|settings@1280x860|req|GET /api/v1/activity|2
 meridian|settings@1280x860|req|GET /api/v1/dv-conversions|1
 meridian|settings@1280x860|req|GET /api/v1/features|2
@@ -10116,7 +10133,7 @@ meridian|settings@390x780|dom|nav#meridian-nav.md-nav[aria-label=*] > div.md-div
 meridian|settings@390x780|dom|nav.md-bottom[aria-label=*] > a|1
 meridian|settings@390x780|dom|nav.md-bottom[aria-label=*] > button.ghost[type=button]|3
 meridian|settings@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-meridian|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+meridian|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 meridian|settings@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 meridian|settings@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
 meridian|settings@390x780|dom|svg.px-ico[aria-hidden=true] > path|8
@@ -10157,35 +10174,36 @@ meridian|settings@390x780|focus|003|button.settab.active "Libraries"
 meridian|settings@390x780|focus|004|button.settab "Metadata"
 meridian|settings@390x780|focus|005|button.settab "Live TV"
 meridian|settings@390x780|focus|006|button.settab "Playback"
-meridian|settings@390x780|focus|007|button.settab "Analysis"
-meridian|settings@390x780|focus|008|button.settab "Maintenance"
-meridian|settings@390x780|focus|009|button.settab "Users"
-meridian|settings@390x780|focus|010|button.settab "System"
-meridian|settings@390x780|focus|011|button.settab "Cluster"
-meridian|settings@390x780|focus|012|button.settab "Integrations"
-meridian|settings@390x780|focus|013|button.settab "Sharing"
-meridian|settings@390x780|focus|014|button.settab "Remotes & devices"
-meridian|settings@390x780|focus|015|button.settab "Developer"
-meridian|settings@390x780|focus|016|button.ghost.sm "Scan every library for new & changed files"
-meridian|settings@390x780|focus|017|button.ghost.sm "Re-fetch metadata & artwork for every libra
-meridian|settings@390x780|focus|018|button.sm "+ Add library"
-meridian|settings@390x780|focus|019|a "Add a free key in Metadata"
-meridian|settings@390x780|focus|020|button.ghost.sm "Scan"
-meridian|settings@390x780|focus|021|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-meridian|settings@390x780|focus|022|button.ghost.sm "Configure ⌄"
-meridian|settings@390x780|focus|023|button.ghost.sm "Scan"
-meridian|settings@390x780|focus|024|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-meridian|settings@390x780|focus|025|button.ghost.sm "Configure ⌄"
-meridian|settings@390x780|focus|026|button.ghost.sm "Scan"
-meridian|settings@390x780|focus|027|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-meridian|settings@390x780|focus|028|button.ghost.sm "Configure ⌄"
-meridian|settings@390x780|focus|029|button.ghost "Load library roots"
-meridian|settings@390x780|focus|030|button.ghost "Save storage domains"
-meridian|settings@390x780|focus|031|a "Home"
-meridian|settings@390x780|focus|032|button.ghost "Libraries"
-meridian|settings@390x780|focus|033|button.ghost "Search"
-meridian|settings@390x780|focus|034|button.ghost "More"
-meridian|settings@390x780|focus|035|<wrap>
+meridian|settings@390x780|focus|007|button.settab "Subtitles"
+meridian|settings@390x780|focus|008|button.settab "Analysis"
+meridian|settings@390x780|focus|009|button.settab "Maintenance"
+meridian|settings@390x780|focus|010|button.settab "Users"
+meridian|settings@390x780|focus|011|button.settab "System"
+meridian|settings@390x780|focus|012|button.settab "Cluster"
+meridian|settings@390x780|focus|013|button.settab "Integrations"
+meridian|settings@390x780|focus|014|button.settab "Sharing"
+meridian|settings@390x780|focus|015|button.settab "Remotes & devices"
+meridian|settings@390x780|focus|016|button.settab "Developer"
+meridian|settings@390x780|focus|017|button.ghost.sm "Scan every library for new & changed files"
+meridian|settings@390x780|focus|018|button.ghost.sm "Re-fetch metadata & artwork for every libra
+meridian|settings@390x780|focus|019|button.sm "+ Add library"
+meridian|settings@390x780|focus|020|a "Add a free key in Metadata"
+meridian|settings@390x780|focus|021|button.ghost.sm "Scan"
+meridian|settings@390x780|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+meridian|settings@390x780|focus|023|button.ghost.sm "Configure ⌄"
+meridian|settings@390x780|focus|024|button.ghost.sm "Scan"
+meridian|settings@390x780|focus|025|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+meridian|settings@390x780|focus|026|button.ghost.sm "Configure ⌄"
+meridian|settings@390x780|focus|027|button.ghost.sm "Scan"
+meridian|settings@390x780|focus|028|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+meridian|settings@390x780|focus|029|button.ghost.sm "Configure ⌄"
+meridian|settings@390x780|focus|030|button.ghost "Load library roots"
+meridian|settings@390x780|focus|031|button.ghost "Save storage domains"
+meridian|settings@390x780|focus|032|a "Home"
+meridian|settings@390x780|focus|033|button.ghost "Libraries"
+meridian|settings@390x780|focus|034|button.ghost "Search"
+meridian|settings@390x780|focus|035|button.ghost "More"
+meridian|settings@390x780|focus|036|<wrap>
 meridian|settings@390x780|req|GET /api/v1/activity|2
 meridian|settings@390x780|req|GET /api/v1/dv-conversions|1
 meridian|settings@390x780|req|GET /api/v1/features|2
@@ -11291,11 +11309,8 @@ theater|home@390x780|req|GET /api/v1/lists/watchlist|1
 theater|home@390x780|req|GET /api/v1/me|1
 theater|home@390x780|req|GET /api/v1/server|1
 theater|item@1280x860|dom|^ > div#app|1
-theater|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
-theater|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
-theater|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-generate-2[role=status aria-live=polite]|1
-theater|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-search-2|1
 theater|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div.prep-eyebrow[text]|1
+theater|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div|1
 theater|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > dl.specs|1
 theater|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > h2[text]|1
 theater|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > h3[text]|1
@@ -11320,6 +11335,7 @@ theater|item@1280x860|dom|div > div.prep-eyebrow[text]|1
 theater|item@1280x860|dom|div > h2[text]|2
 theater|item@1280x860|dom|div > h3[text]|10
 theater|item@1280x860|dom|div > p[text]|11
+theater|item@1280x860|dom|div > span.ai-caption-item|1
 theater|item@1280x860|dom|div#app > div.layout-frame|1
 theater|item@1280x860|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
 theater|item@1280x860|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
@@ -11404,6 +11420,9 @@ theater|item@1280x860|dom|section.media-preparation-main[aria-label=*] > div#pre
 theater|item@1280x860|dom|section.media-preparation-main[aria-label=*] > div.analysis-brief.px-admin.th-admin|1
 theater|item@1280x860|dom|section.media-preparation-main[aria-label=*] > div.prep-heading|1
 theater|item@1280x860|dom|section.media-preparation-main[aria-label=*] > p.muted.prep-intro[text]|1
+theater|item@1280x860|dom|span.ai-caption-item > button.ghost.sm[type=button text]|1
+theater|item@1280x860|dom|span.ai-caption-item > span[role=status]|1
+theater|item@1280x860|dom|span.ai-caption-item > span|1
 theater|item@1280x860|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 theater|item@1280x860|dom|span.listtoggles > button.fav.ghost.listtoggle.sm[aria-pressed=false aria-label=*]|1
 theater|item@1280x860|dom|span.listtoggles > button.ghost.listtoggle.sm[aria-pressed=false text]|1
@@ -11442,10 +11461,9 @@ theater|item@1280x860|focus|024|summary "Off 3"
 theater|item@1280x860|focus|025|summary "Not needed 2"
 theater|item@1280x860|focus|026|button.ghost.sm "Analyze now"
 theater|item@1280x860|focus|027|a.ghost.sm "View queue"
-theater|item@1280x860|focus|028|button.ghost.sm "Find subtitles"
-theater|item@1280x860|focus|029|button.ghost.sm "Generate subtitles"
-theater|item@1280x860|focus|030|summary "More actions"
-theater|item@1280x860|focus|031|<wrap>
+theater|item@1280x860|focus|028|button.ghost.sm "+ English"
+theater|item@1280x860|focus|029|summary "More actions"
+theater|item@1280x860|focus|030|<wrap>
 theater|item@1280x860|req|GET /api/v1/activity|2
 theater|item@1280x860|req|GET /api/v1/features|1
 theater|item@1280x860|req|GET /api/v1/files/<id>/preparation|1
@@ -11457,11 +11475,8 @@ theater|item@1280x860|req|GET /api/v1/me|1
 theater|item@1280x860|req|GET /api/v1/server|1
 theater|item@1280x860|req|GET /api/v1/tags|1
 theater|item@390x780|dom|^ > div#app|1
-theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
-theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
-theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-generate-2[role=status aria-live=polite]|1
-theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-search-2|1
 theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div.prep-eyebrow[text]|1
+theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div|1
 theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > dl.specs|1
 theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > h2[text]|1
 theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > h3[text]|1
@@ -11486,6 +11501,7 @@ theater|item@390x780|dom|div > div.prep-eyebrow[text]|1
 theater|item@390x780|dom|div > h2[text]|2
 theater|item@390x780|dom|div > h3[text]|10
 theater|item@390x780|dom|div > p[text]|11
+theater|item@390x780|dom|div > span.ai-caption-item|1
 theater|item@390x780|dom|div#app > div.layout-frame|1
 theater|item@390x780|dom|div#item-tags.item-tags > button.ghost.sm.tag-add[aria-haspopup=dialog text]|1
 theater|item@390x780|dom|div#item-tags.item-tags > span.item-tags-label[text]|1
@@ -11570,6 +11586,9 @@ theater|item@390x780|dom|section.media-preparation-main[aria-label=*] > div#prep
 theater|item@390x780|dom|section.media-preparation-main[aria-label=*] > div.analysis-brief.px-admin.th-admin|1
 theater|item@390x780|dom|section.media-preparation-main[aria-label=*] > div.prep-heading|1
 theater|item@390x780|dom|section.media-preparation-main[aria-label=*] > p.muted.prep-intro[text]|1
+theater|item@390x780|dom|span.ai-caption-item > button.ghost.sm[type=button text]|1
+theater|item@390x780|dom|span.ai-caption-item > span[role=status]|1
+theater|item@390x780|dom|span.ai-caption-item > span|1
 theater|item@390x780|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 theater|item@390x780|dom|span.listtoggles > button.fav.ghost.listtoggle.sm[aria-pressed=false aria-label=*]|1
 theater|item@390x780|dom|span.listtoggles > button.ghost.listtoggle.sm[aria-pressed=false text]|1
@@ -11601,17 +11620,16 @@ theater|item@390x780|focus|017|summary "Off 3"
 theater|item@390x780|focus|018|summary "Not needed 2"
 theater|item@390x780|focus|019|button.ghost.sm "Analyze now"
 theater|item@390x780|focus|020|a.ghost.sm "View queue"
-theater|item@390x780|focus|021|button.ghost.sm "Find subtitles"
-theater|item@390x780|focus|022|button.ghost.sm "Generate subtitles"
-theater|item@390x780|focus|023|summary "More actions"
-theater|item@390x780|focus|024|a "Home"
-theater|item@390x780|focus|025|a "Shared libraries"
-theater|item@390x780|focus|026|a "Live TV"
-theater|item@390x780|focus|027|a "Recordings"
-theater|item@390x780|focus|028|a "Library channels"
-theater|item@390x780|focus|029|a "Activity"
-theater|item@390x780|focus|030|a "Settings"
-theater|item@390x780|focus|031|<wrap>
+theater|item@390x780|focus|021|button.ghost.sm "+ English"
+theater|item@390x780|focus|022|summary "More actions"
+theater|item@390x780|focus|023|a "Home"
+theater|item@390x780|focus|024|a "Shared libraries"
+theater|item@390x780|focus|025|a "Live TV"
+theater|item@390x780|focus|026|a "Recordings"
+theater|item@390x780|focus|027|a "Library channels"
+theater|item@390x780|focus|028|a "Activity"
+theater|item@390x780|focus|029|a "Settings"
+theater|item@390x780|focus|030|<wrap>
 theater|item@390x780|req|GET /api/v1/activity|2
 theater|item@390x780|req|GET /api/v1/features|1
 theater|item@390x780|req|GET /api/v1/files/<id>/preparation|1
@@ -12309,8 +12327,8 @@ theater|player@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-labe
 theater|player@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|player@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|player@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
-theater|player@1280x860|dom|dd > button.ghost.sm[type=button text]|6
 theater|player@1280x860|dom|dd > div.watch-trks|4
+theater|player@1280x860|dom|dd > span.ai-caption-item|2
 theater|player@1280x860|dom|dd > span.mode-chip[text]|2
 theater|player@1280x860|dom|dd > span.mode-detail[text]|2
 theater|player@1280x860|dom|dd > span.watch-fmeta[text]|2
@@ -12406,8 +12424,8 @@ theater|player@1280x860|dom|div.watch-stage > aside#watch-title-panel.watch-titl
 theater|player@1280x860|dom|div.watch-stage > div.watch-picture|1
 theater|player@1280x860|dom|div.watch-trks > button.on.trk[aria-pressed=true type=button text]|4
 theater|player@1280x860|dom|dl.watch-ledger > dd[text]|2
-theater|player@1280x860|dom|dl.watch-ledger > dd|10
-theater|player@1280x860|dom|dl.watch-ledger > dt[text]|12
+theater|player@1280x860|dom|dl.watch-ledger > dd|8
+theater|player@1280x860|dom|dl.watch-ledger > dt[text]|10
 theater|player@1280x860|dom|g > path|5
 theater|player@1280x860|dom|header.th-top > a.logo[text]|1
 theater|player@1280x860|dom|header.th-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -12426,10 +12444,11 @@ theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
-theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
-theater|player@1280x860|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
+theater|player@1280x860|dom|span.ai-caption-item > button.ghost.sm[type=button text]|2
+theater|player@1280x860|dom|span.ai-caption-item > span[role=status]|2
+theater|player@1280x860|dom|span.ai-caption-item > span|2
 theater|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@1280x860|dom|svg.material-icon[aria-hidden=true] > path|4
@@ -12473,8 +12492,8 @@ theater|player@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label
 theater|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|player@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|player@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
-theater|player@390x780|dom|dd > button.ghost.sm[type=button text]|6
 theater|player@390x780|dom|dd > div.watch-trks|4
+theater|player@390x780|dom|dd > span.ai-caption-item|2
 theater|player@390x780|dom|dd > span.mode-chip[text]|2
 theater|player@390x780|dom|dd > span.mode-detail[text]|2
 theater|player@390x780|dom|dd > span.watch-fmeta[text]|2
@@ -12569,8 +12588,8 @@ theater|player@390x780|dom|div.watch-stage > aside#watch-title-panel.watch-title
 theater|player@390x780|dom|div.watch-stage > div.watch-picture|1
 theater|player@390x780|dom|div.watch-trks > button.on.trk[aria-pressed=true type=button text]|4
 theater|player@390x780|dom|dl.watch-ledger > dd[text]|2
-theater|player@390x780|dom|dl.watch-ledger > dd|10
-theater|player@390x780|dom|dl.watch-ledger > dt[text]|12
+theater|player@390x780|dom|dl.watch-ledger > dd|8
+theater|player@390x780|dom|dl.watch-ledger > dt[text]|10
 theater|player@390x780|dom|g > path|5
 theater|player@390x780|dom|header.th-top > a.logo[text]|1
 theater|player@390x780|dom|header.th-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -12589,10 +12608,11 @@ theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > d
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-shared-captions[tabindex=-1 aria-label=* hidden]|1
-theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-text-translation[tabindex=-1 aria-label=* hidden]|1
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
-theater|player@390x780|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
+theater|player@390x780|dom|span.ai-caption-item > button.ghost.sm[type=button text]|2
+theater|player@390x780|dom|span.ai-caption-item > span[role=status]|2
+theater|player@390x780|dom|span.ai-caption-item > span|2
 theater|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@390x780|dom|svg.material-icon[aria-hidden=true] > path|4
@@ -12844,7 +12864,7 @@ theater|settings-developer@1280x860|dom|label.tog > input#pmacosvideo[type=check
 theater|settings-developer@1280x860|dom|label.tog > span[text]|3
 theater|settings-developer@1280x860|dom|main#main > div.setlayout|1
 theater|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-theater|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+theater|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 theater|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 theater|settings-developer@1280x860|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings-developer@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|6
@@ -12867,21 +12887,22 @@ theater|settings-developer@1280x860|focus|011|button.settab "Libraries"
 theater|settings-developer@1280x860|focus|012|button.settab "Metadata"
 theater|settings-developer@1280x860|focus|013|button.settab "Live TV"
 theater|settings-developer@1280x860|focus|014|button.settab "Playback"
-theater|settings-developer@1280x860|focus|015|button.settab "Analysis"
-theater|settings-developer@1280x860|focus|016|button.settab "Maintenance"
-theater|settings-developer@1280x860|focus|017|button.settab "Users"
-theater|settings-developer@1280x860|focus|018|button.settab "System"
-theater|settings-developer@1280x860|focus|019|button.settab "Cluster off"
-theater|settings-developer@1280x860|focus|020|button.settab "Integrations"
-theater|settings-developer@1280x860|focus|021|button.settab "Sharing"
-theater|settings-developer@1280x860|focus|022|button.settab "Remotes & devices"
-theater|settings-developer@1280x860|focus|023|button.settab.active "Developer"
-theater|settings-developer@1280x860|focus|024|input#pmacosvideo
-theater|settings-developer@1280x860|focus|025|summary "Details"
-theater|settings-developer@1280x860|focus|026|input#pmacoshevc
-theater|settings-developer@1280x860|focus|027|summary "Details"
-theater|settings-developer@1280x860|focus|028|input#hevc-unverified
-theater|settings-developer@1280x860|focus|029|<wrap>
+theater|settings-developer@1280x860|focus|015|button.settab "Subtitles"
+theater|settings-developer@1280x860|focus|016|button.settab "Analysis"
+theater|settings-developer@1280x860|focus|017|button.settab "Maintenance"
+theater|settings-developer@1280x860|focus|018|button.settab "Users"
+theater|settings-developer@1280x860|focus|019|button.settab "System"
+theater|settings-developer@1280x860|focus|020|button.settab "Cluster off"
+theater|settings-developer@1280x860|focus|021|button.settab "Integrations"
+theater|settings-developer@1280x860|focus|022|button.settab "Sharing"
+theater|settings-developer@1280x860|focus|023|button.settab "Remotes & devices"
+theater|settings-developer@1280x860|focus|024|button.settab.active "Developer"
+theater|settings-developer@1280x860|focus|025|input#pmacosvideo
+theater|settings-developer@1280x860|focus|026|summary "Details"
+theater|settings-developer@1280x860|focus|027|input#pmacoshevc
+theater|settings-developer@1280x860|focus|028|summary "Details"
+theater|settings-developer@1280x860|focus|029|input#hevc-unverified
+theater|settings-developer@1280x860|focus|030|<wrap>
 theater|settings-developer@1280x860|req|GET /api/v1/activity|2
 theater|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
 theater|settings-developer@1280x860|req|GET /api/v1/features|2
@@ -12958,7 +12979,7 @@ theater|settings-developer@390x780|dom|label.tog > input#pmacosvideo[type=checkb
 theater|settings-developer@390x780|dom|label.tog > span[text]|3
 theater|settings-developer@390x780|dom|main#main > div.setlayout|1
 theater|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-theater|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+theater|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 theater|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 theater|settings-developer@390x780|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings-developer@390x780|dom|nav.th-nav[aria-label=*] > a[text]|6
@@ -12974,28 +12995,29 @@ theater|settings-developer@390x780|focus|004|button.settab "Libraries"
 theater|settings-developer@390x780|focus|005|button.settab "Metadata"
 theater|settings-developer@390x780|focus|006|button.settab "Live TV"
 theater|settings-developer@390x780|focus|007|button.settab "Playback"
-theater|settings-developer@390x780|focus|008|button.settab "Analysis"
-theater|settings-developer@390x780|focus|009|button.settab "Maintenance"
-theater|settings-developer@390x780|focus|010|button.settab "Users"
-theater|settings-developer@390x780|focus|011|button.settab "System"
-theater|settings-developer@390x780|focus|012|button.settab "Cluster"
-theater|settings-developer@390x780|focus|013|button.settab "Integrations"
-theater|settings-developer@390x780|focus|014|button.settab "Sharing"
-theater|settings-developer@390x780|focus|015|button.settab "Remotes & devices"
-theater|settings-developer@390x780|focus|016|button.settab.active "Developer"
-theater|settings-developer@390x780|focus|017|input#pmacosvideo
-theater|settings-developer@390x780|focus|018|summary "Details"
-theater|settings-developer@390x780|focus|019|input#pmacoshevc
-theater|settings-developer@390x780|focus|020|summary "Details"
-theater|settings-developer@390x780|focus|021|input#hevc-unverified
-theater|settings-developer@390x780|focus|022|a "Home"
-theater|settings-developer@390x780|focus|023|a "Shared libraries"
-theater|settings-developer@390x780|focus|024|a "Live TV"
-theater|settings-developer@390x780|focus|025|a "Recordings"
-theater|settings-developer@390x780|focus|026|a "Library channels"
-theater|settings-developer@390x780|focus|027|a "Activity"
-theater|settings-developer@390x780|focus|028|a.on "Settings"
-theater|settings-developer@390x780|focus|029|<wrap>
+theater|settings-developer@390x780|focus|008|button.settab "Subtitles"
+theater|settings-developer@390x780|focus|009|button.settab "Analysis"
+theater|settings-developer@390x780|focus|010|button.settab "Maintenance"
+theater|settings-developer@390x780|focus|011|button.settab "Users"
+theater|settings-developer@390x780|focus|012|button.settab "System"
+theater|settings-developer@390x780|focus|013|button.settab "Cluster"
+theater|settings-developer@390x780|focus|014|button.settab "Integrations"
+theater|settings-developer@390x780|focus|015|button.settab "Sharing"
+theater|settings-developer@390x780|focus|016|button.settab "Remotes & devices"
+theater|settings-developer@390x780|focus|017|button.settab.active "Developer"
+theater|settings-developer@390x780|focus|018|input#pmacosvideo
+theater|settings-developer@390x780|focus|019|summary "Details"
+theater|settings-developer@390x780|focus|020|input#pmacoshevc
+theater|settings-developer@390x780|focus|021|summary "Details"
+theater|settings-developer@390x780|focus|022|input#hevc-unverified
+theater|settings-developer@390x780|focus|023|a "Home"
+theater|settings-developer@390x780|focus|024|a "Shared libraries"
+theater|settings-developer@390x780|focus|025|a "Live TV"
+theater|settings-developer@390x780|focus|026|a "Recordings"
+theater|settings-developer@390x780|focus|027|a "Library channels"
+theater|settings-developer@390x780|focus|028|a "Activity"
+theater|settings-developer@390x780|focus|029|a.on "Settings"
+theater|settings-developer@390x780|focus|030|<wrap>
 theater|settings-developer@390x780|req|GET /api/v1/activity|2
 theater|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
 theater|settings-developer@390x780|req|GET /api/v1/features|2
@@ -13061,7 +13083,7 @@ theater|settings@1280x860|dom|header.th-top > span#activity.activity|1
 theater|settings@1280x860|dom|header.th-top > span.spacer|1
 theater|settings@1280x860|dom|main#main > div.setlayout|1
 theater|settings@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-theater|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+theater|settings@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 theater|settings@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 theater|settings@1280x860|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|6
@@ -13111,31 +13133,32 @@ theater|settings@1280x860|focus|011|button.settab.active "Libraries 3"
 theater|settings@1280x860|focus|012|button.settab "Metadata"
 theater|settings@1280x860|focus|013|button.settab "Live TV"
 theater|settings@1280x860|focus|014|button.settab "Playback"
-theater|settings@1280x860|focus|015|button.settab "Analysis"
-theater|settings@1280x860|focus|016|button.settab "Maintenance"
-theater|settings@1280x860|focus|017|button.settab "Users"
-theater|settings@1280x860|focus|018|button.settab "System"
-theater|settings@1280x860|focus|019|button.settab "Cluster off"
-theater|settings@1280x860|focus|020|button.settab "Integrations"
-theater|settings@1280x860|focus|021|button.settab "Sharing"
-theater|settings@1280x860|focus|022|button.settab "Remotes & devices"
-theater|settings@1280x860|focus|023|button.settab "Developer"
-theater|settings@1280x860|focus|024|button.ghost.sm "Scan every library for new & changed files"
-theater|settings@1280x860|focus|025|button.ghost.sm "Re-fetch metadata & artwork for every libra
-theater|settings@1280x860|focus|026|button.sm "+ Add library"
-theater|settings@1280x860|focus|027|a "Add a free key in Metadata"
-theater|settings@1280x860|focus|028|button.ghost.sm "Scan"
-theater|settings@1280x860|focus|029|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@1280x860|focus|030|button.ghost.sm "Configure ⌄"
-theater|settings@1280x860|focus|031|button.ghost.sm "Scan"
-theater|settings@1280x860|focus|032|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@1280x860|focus|033|button.ghost.sm "Configure ⌄"
-theater|settings@1280x860|focus|034|button.ghost.sm "Scan"
-theater|settings@1280x860|focus|035|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@1280x860|focus|036|button.ghost.sm "Configure ⌄"
-theater|settings@1280x860|focus|037|button.ghost "Load library roots"
-theater|settings@1280x860|focus|038|button.ghost "Save storage domains"
-theater|settings@1280x860|focus|039|<wrap>
+theater|settings@1280x860|focus|015|button.settab "Subtitles"
+theater|settings@1280x860|focus|016|button.settab "Analysis"
+theater|settings@1280x860|focus|017|button.settab "Maintenance"
+theater|settings@1280x860|focus|018|button.settab "Users"
+theater|settings@1280x860|focus|019|button.settab "System"
+theater|settings@1280x860|focus|020|button.settab "Cluster off"
+theater|settings@1280x860|focus|021|button.settab "Integrations"
+theater|settings@1280x860|focus|022|button.settab "Sharing"
+theater|settings@1280x860|focus|023|button.settab "Remotes & devices"
+theater|settings@1280x860|focus|024|button.settab "Developer"
+theater|settings@1280x860|focus|025|button.ghost.sm "Scan every library for new & changed files"
+theater|settings@1280x860|focus|026|button.ghost.sm "Re-fetch metadata & artwork for every libra
+theater|settings@1280x860|focus|027|button.sm "+ Add library"
+theater|settings@1280x860|focus|028|a "Add a free key in Metadata"
+theater|settings@1280x860|focus|029|button.ghost.sm "Scan"
+theater|settings@1280x860|focus|030|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@1280x860|focus|031|button.ghost.sm "Configure ⌄"
+theater|settings@1280x860|focus|032|button.ghost.sm "Scan"
+theater|settings@1280x860|focus|033|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@1280x860|focus|034|button.ghost.sm "Configure ⌄"
+theater|settings@1280x860|focus|035|button.ghost.sm "Scan"
+theater|settings@1280x860|focus|036|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@1280x860|focus|037|button.ghost.sm "Configure ⌄"
+theater|settings@1280x860|focus|038|button.ghost "Load library roots"
+theater|settings@1280x860|focus|039|button.ghost "Save storage domains"
+theater|settings@1280x860|focus|040|<wrap>
 theater|settings@1280x860|req|GET /api/v1/activity|2
 theater|settings@1280x860|req|GET /api/v1/dv-conversions|1
 theater|settings@1280x860|req|GET /api/v1/features|2
@@ -13203,7 +13226,7 @@ theater|settings@390x780|dom|header.th-top > span#activity.activity|1
 theater|settings@390x780|dom|header.th-top > span.spacer|1
 theater|settings@390x780|dom|main#main > div.setlayout|1
 theater|settings@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
-theater|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|12
+theater|settings@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|13
 theater|settings@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 theater|settings@390x780|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings@390x780|dom|nav.th-nav[aria-label=*] > a[text]|6
@@ -13246,38 +13269,39 @@ theater|settings@390x780|focus|004|button.settab.active "Libraries"
 theater|settings@390x780|focus|005|button.settab "Metadata"
 theater|settings@390x780|focus|006|button.settab "Live TV"
 theater|settings@390x780|focus|007|button.settab "Playback"
-theater|settings@390x780|focus|008|button.settab "Analysis"
-theater|settings@390x780|focus|009|button.settab "Maintenance"
-theater|settings@390x780|focus|010|button.settab "Users"
-theater|settings@390x780|focus|011|button.settab "System"
-theater|settings@390x780|focus|012|button.settab "Cluster"
-theater|settings@390x780|focus|013|button.settab "Integrations"
-theater|settings@390x780|focus|014|button.settab "Sharing"
-theater|settings@390x780|focus|015|button.settab "Remotes & devices"
-theater|settings@390x780|focus|016|button.settab "Developer"
-theater|settings@390x780|focus|017|button.ghost.sm "Scan every library for new & changed files"
-theater|settings@390x780|focus|018|button.ghost.sm "Re-fetch metadata & artwork for every libra
-theater|settings@390x780|focus|019|button.sm "+ Add library"
-theater|settings@390x780|focus|020|a "Add a free key in Metadata"
-theater|settings@390x780|focus|021|button.ghost.sm "Scan"
-theater|settings@390x780|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@390x780|focus|023|button.ghost.sm "Configure ⌄"
-theater|settings@390x780|focus|024|button.ghost.sm "Scan"
-theater|settings@390x780|focus|025|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@390x780|focus|026|button.ghost.sm "Configure ⌄"
-theater|settings@390x780|focus|027|button.ghost.sm "Scan"
-theater|settings@390x780|focus|028|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@390x780|focus|029|button.ghost.sm "Configure ⌄"
-theater|settings@390x780|focus|030|button.ghost "Load library roots"
-theater|settings@390x780|focus|031|button.ghost "Save storage domains"
-theater|settings@390x780|focus|032|a "Home"
-theater|settings@390x780|focus|033|a "Shared libraries"
-theater|settings@390x780|focus|034|a "Live TV"
-theater|settings@390x780|focus|035|a "Recordings"
-theater|settings@390x780|focus|036|a "Library channels"
-theater|settings@390x780|focus|037|a "Activity"
-theater|settings@390x780|focus|038|a.on "Settings"
-theater|settings@390x780|focus|039|<wrap>
+theater|settings@390x780|focus|008|button.settab "Subtitles"
+theater|settings@390x780|focus|009|button.settab "Analysis"
+theater|settings@390x780|focus|010|button.settab "Maintenance"
+theater|settings@390x780|focus|011|button.settab "Users"
+theater|settings@390x780|focus|012|button.settab "System"
+theater|settings@390x780|focus|013|button.settab "Cluster"
+theater|settings@390x780|focus|014|button.settab "Integrations"
+theater|settings@390x780|focus|015|button.settab "Sharing"
+theater|settings@390x780|focus|016|button.settab "Remotes & devices"
+theater|settings@390x780|focus|017|button.settab "Developer"
+theater|settings@390x780|focus|018|button.ghost.sm "Scan every library for new & changed files"
+theater|settings@390x780|focus|019|button.ghost.sm "Re-fetch metadata & artwork for every libra
+theater|settings@390x780|focus|020|button.sm "+ Add library"
+theater|settings@390x780|focus|021|a "Add a free key in Metadata"
+theater|settings@390x780|focus|022|button.ghost.sm "Scan"
+theater|settings@390x780|focus|023|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@390x780|focus|024|button.ghost.sm "Configure ⌄"
+theater|settings@390x780|focus|025|button.ghost.sm "Scan"
+theater|settings@390x780|focus|026|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@390x780|focus|027|button.ghost.sm "Configure ⌄"
+theater|settings@390x780|focus|028|button.ghost.sm "Scan"
+theater|settings@390x780|focus|029|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@390x780|focus|030|button.ghost.sm "Configure ⌄"
+theater|settings@390x780|focus|031|button.ghost "Load library roots"
+theater|settings@390x780|focus|032|button.ghost "Save storage domains"
+theater|settings@390x780|focus|033|a "Home"
+theater|settings@390x780|focus|034|a "Shared libraries"
+theater|settings@390x780|focus|035|a "Live TV"
+theater|settings@390x780|focus|036|a "Recordings"
+theater|settings@390x780|focus|037|a "Library channels"
+theater|settings@390x780|focus|038|a "Activity"
+theater|settings@390x780|focus|039|a.on "Settings"
+theater|settings@390x780|focus|040|<wrap>
 theater|settings@390x780|req|GET /api/v1/activity|2
 theater|settings@390x780|req|GET /api/v1/dv-conversions|1
 theater|settings@390x780|req|GET /api/v1/features|2
