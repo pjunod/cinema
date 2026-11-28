@@ -406,9 +406,9 @@ test_anchor = "testPanelOwnsNativeFocusAndBackPreservesLibraryRoute"
 id = "subtitles.apple-stopped-operation-recovery"
 commits = ["9996d26f4b57643f097c4b10864ca929353d81a1"]
 source = "clients/apple/Sources/ProgressiveCaptionSession.swift"
-source_anchor = "private func recoverStopped("
+source_anchor = "private func pollAI("
 test = "clients/apple/Tests/ProgressiveCaptionTests.swift"
-test_anchor = "testStoppedCreateDiscoversUnpreparedOperationAndRequiresExplicitResume"
+test_anchor = "testStoppedOperationEndsPresentationAndReleasesViewer"
 
 [[fixes]]
 id = "subtitles.apple-current-core-failure"
@@ -8417,7 +8417,7 @@ supplements = "android.subtitle-pending-producer-handoff"
 source = "clients/apple/Sources/ProgressiveCaptionSession.swift"
 source_anchor = "func mediaChanged(seek: Bool = false, positionMs: Int? = nil) {"
 test = "clients/apple/Tests/ProgressiveCaptionTests.swift"
-test_anchor = "func testAdvancingPlaybackKeepsContinuityAcrossCoreBoundaryPauseRateAndAttachment("
+test_anchor = "func testAdvancingPlaybackKeepsViewerAcrossCoreBoundaryPauseRateAndAttachment("
 
 [[fixes]]
 id = "android.subtitle-pending-producer-handoff"
