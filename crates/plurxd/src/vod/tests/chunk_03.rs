@@ -1939,6 +1939,211 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         drop(waits);
     }
 
+    async fn run_cross_rendition_pressure(dormant: bool, reclaimable: bool) {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let mut viewer = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut viewer).expect("unshared").working_set_budget = 128;
+        viewer.attach_reader("viewer", 0).await;
+        viewer
+            .dir
+            .materialize(&mut *viewer.manifest.lock().await, 0, &[0; 32], now_ms())
+            .await
+            .expect("viewer window");
+
+        let mut donor = synthetic_rendition(&base.path().join("donor")).await;
+        Arc::get_mut(&mut donor).expect("unshared").key = "other-title".to_owned();
+        let cold = donor.plan.len() as u32 - 1;
+        let contribution = if reclaimable { cold } else { 1 };
+        {
+            let mut manifest = donor.manifest.lock().await;
+            donor
+                .dir
+                .materialize(&mut manifest, 0, &[0; 32], now_ms())
+                .await
+                .expect("donor reader window");
+            donor
+                .dir
+                .materialize(&mut manifest, contribution, &[0; 128], now_ms())
+                .await
+                .expect("donor contribution");
+        }
+        if dormant {
+            *donor.dormant_since.lock().expect("dormant lock") =
+                Some(Instant::now() - Duration::from_secs(1));
+        } else {
+            donor.attach_reader("donor-reader", 0).await;
+            assert!(!donor.reader_windows().await[0].covers(cold));
+        }
+        {
+            let mut renditions = serve.shared.renditions.lock().await;
+            renditions.insert(viewer.key.clone(), Arc::clone(&viewer));
+            renditions.insert(donor.key.clone(), Arc::clone(&donor));
+        }
+        serve.shared.working_set.store(192, Relaxed);
+        let wait = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: viewer.key.clone(),
+                    index: 1,
+                },
+                "viewer",
+            )
+            .expect("blocked playback");
+        driver_pass(&serve.shared, &viewer).await;
+        let _settled = tokio::time::timeout(
+            Duration::from_secs(4),
+            serve.shared.working_set_reclaim.lock(),
+        )
+        .await
+        .expect("pressure pass settles without waiting for periodic maintenance");
+
+        let viewer_manifest = viewer.manifest.lock().await;
+        assert!(viewer_manifest.state(0).expect("planned").is_materialized());
+        assert_eq!(serve.shared.pool.blocked_on(&viewer.key), Some(1));
+        if !reclaimable {
+            use futures_util::FutureExt;
+            assert_eq!(serve.shared.working_set.load(Relaxed), 192);
+            assert!(donor.manifest.lock().await.state(1).expect("planned").is_materialized());
+            assert!(viewer.wake.notified().now_or_never().is_none());
+            return;
+        }
+        let used_bytes = if dormant { 32 } else { 64 };
+        assert_eq!(serve.shared.working_set.load(Relaxed), used_bytes);
+        assert_eq!(serve.shared.renditions.lock().await.contains_key(&donor.key), !dormant);
+        let manifest = donor.manifest.lock().await;
+        assert!(!manifest.state(cold).expect("planned").is_materialized());
+        assert_eq!(manifest.state(0).expect("planned").is_materialized(), !dormant);
+        assert_eq!(
+            decide(
+                &viewer_manifest,
+                &[Demand::waiting_on(1)],
+                Position {
+                    produced_through: None,
+                    positioned_at: None,
+                    seconds_per_segment: viewer.seconds_per_segment,
+                    ahead_held: false,
+                    permit_wanted: false,
+                    working_set: WorkingSet {
+                        used_bytes,
+                        budget_bytes: 128,
+                        held: true,
+                    },
+                },
+                &[],
+            ),
+            Action::Reposition { to: 1 },
+        );
+        tokio::time::timeout(Duration::from_secs(4), viewer.wake.notified())
+            .await
+            .expect("reclaim wakes the blocked driver");
+        drop(wait);
+    }
+
+    #[tokio::test]
+    async fn vod_working_set_pressure_reclaims_space_from_other_renditions() {
+        run_cross_rendition_pressure(true, true).await;
+        run_cross_rendition_pressure(false, true).await;
+        run_cross_rendition_pressure(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn vod_working_set_pressure_keeps_a_second_request_when_the_first_reader_leaves() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        for (key, age) in [("older", 2), ("newer", 1)] {
+            let mut donor = synthetic_rendition(&base.path().join(key)).await;
+            Arc::get_mut(&mut donor).expect("unshared").key = key.to_owned();
+            donor
+                .dir
+                .materialize(&mut *donor.manifest.lock().await, 0, &[0; 96], now_ms())
+                .await
+                .expect("donor contribution");
+            *donor.dormant_since.lock().expect("dormant lock") =
+                Some(Instant::now() - Duration::from_secs(age));
+            serve.shared.renditions.lock().await.insert(key.to_owned(), donor);
+        }
+        serve.shared.working_set.store(192, Relaxed);
+        let waiting = |key: &str| {
+            serve.shared.pool.register(
+                WaitKey {
+                    rendition: key.to_owned(),
+                    index: 1,
+                },
+                key,
+            ).expect("blocked playback")
+        };
+        let first = waiting("first");
+        let pause = serve.shared.test_hooks().dormant_purge.arm("first donor removed");
+        serve.shared.reclaim_working_set("first", 64);
+        let held = tokio::time::timeout(Duration::from_secs(4), pause.reached())
+            .await
+            .expect("first reclaim starts");
+        let second = waiting("second");
+        serve.shared.reclaim_working_set("second", 64);
+        drop(first);
+        held.release();
+
+        let _settled = tokio::time::timeout(
+            Duration::from_secs(4),
+            serve.shared.working_set_reclaim.lock(),
+        )
+        .await
+        .expect("both pressure requests settle");
+        assert_eq!(serve.shared.pool.blocked_on("second"), Some(1));
+        assert_eq!(serve.shared.working_set.load(Relaxed), 0);
+        assert!(serve.shared.renditions.lock().await.is_empty());
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn vod_working_set_pressure_can_reclaim_a_departed_requester_in_the_same_batch() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let mut donor = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut donor).expect("unshared").key = "first".to_owned();
+        donor
+            .dir
+            .materialize(&mut *donor.manifest.lock().await, 0, &[0; 160], now_ms())
+            .await
+            .expect("sole working-set donor");
+        *donor.dormant_since.lock().expect("dormant lock") =
+            Some(Instant::now() - Duration::from_secs(1));
+        serve.shared.renditions.lock().await.insert(donor.key.clone(), donor);
+        serve.shared.working_set.store(160, Relaxed);
+
+        let waiting = |key: &str| {
+            serve.shared.pool.register(
+                WaitKey {
+                    rendition: key.to_owned(),
+                    index: 1,
+                },
+                key,
+            ).expect("blocked playback")
+        };
+        let first = waiting("first");
+        let second = waiting("second");
+        let gate = serve.shared.working_set_reclaim.lock().await;
+        serve.shared.reclaim_working_set("first", 64);
+        serve.shared.reclaim_working_set("second", 64);
+        drop(first);
+        drop(gate);
+        serve.shared.reclaim_working_set("second", 64);
+
+        let _settled = tokio::time::timeout(
+            Duration::from_secs(4),
+            serve.shared.working_set_reclaim.lock(),
+        )
+        .await
+        .expect("coalesced requests settle");
+        assert_eq!(serve.shared.pool.blocked_on("second"), Some(1));
+        assert_eq!(serve.shared.working_set.load(Relaxed), 0);
+        assert!(serve.shared.renditions.lock().await.is_empty());
+        drop(second);
+    }
+
     #[tokio::test]
     async fn a_zero_progress_eviction_does_not_self_schedule_a_hot_loop() {
         use futures_util::FutureExt;
