@@ -114,7 +114,22 @@ impl CopyTrackProjection {
     /// Project a complete encoded VOD segment. The segment can concatenate
     /// muxed pairs and pairs containing only one of its two admitted tracks.
     pub fn vod_window(&self, bytes: &[u8], index: u32) -> Result<ProjectedVodWindow, Fmp4Error> {
-        let (audio, video) = self.window_tracks(bytes, index)?;
+        self.pair_window(bytes, index, true)
+    }
+
+    /// A growing verified range opens on a sync sample. Later ceiling cuts can
+    /// depend on preceding media because the event master keeps that timeline.
+    pub fn range_window(&self, bytes: &[u8], index: u32) -> Result<ProjectedVodWindow, Fmp4Error> {
+        self.pair_window(bytes, index, index == 0)
+    }
+
+    fn pair_window(
+        &self,
+        bytes: &[u8],
+        index: u32,
+        independent_video: bool,
+    ) -> Result<ProjectedVodWindow, Fmp4Error> {
+        let (audio, video) = self.window_tracks(bytes, index, independent_video)?;
         let (Some(audio), Some(video)) = (audio, video) else {
             return malformed("split VOD window does not contain both admitted tracks");
         };
@@ -129,7 +144,7 @@ impl CopyTrackProjection {
     /// Preserve a terminal verified range-copy soundtrack flush without
     /// adding a video row to the independent picture playlist.
     pub fn audio_tail(&self, bytes: &[u8], index: u32) -> Result<ProjectedWindowTrack, Fmp4Error> {
-        match self.window_tracks(bytes, index)? {
+        match self.window_tracks(bytes, index, false)? {
             (Some(audio), None) => Ok(audio),
             _ => malformed("split range tail must contain only its admitted audio track"),
         }
@@ -139,6 +154,7 @@ impl CopyTrackProjection {
         &self,
         bytes: &[u8],
         index: u32,
+        independent_video: bool,
     ) -> Result<(Option<ProjectedWindowTrack>, Option<ProjectedWindowTrack>), Fmp4Error> {
         if bytes.len() > MAX_BOX_BYTES {
             return Err(unsupported("split VOD window exceeds the fMP4 size limit"));
@@ -197,7 +213,8 @@ impl CopyTrackProjection {
                 } else {
                     return Err(unsupported("split VOD window contains an unknown track"));
                 };
-                if track.track_id == self.video.tracks[0].id
+                if independent_video
+                    && track.track_id == self.video.tracks[0].id
                     && decode.is_none()
                     && track
                         .runs

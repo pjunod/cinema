@@ -1111,6 +1111,12 @@ async fn status(
         || entry.ending.lock().expect("Source ending owner").is_some();
     if !cleanup_only {
         receiver_presentation::require_current_receiver(&entry, &headers)?;
+        if !headers.arrived_forwarded()
+            && receiver_presentation::recipe_uses_split(&entry.identity.recipe)
+            && !receiver_presentation::authenticated_receiver_split(&headers)
+        {
+            return Err(receiver_presentation::unavailable());
+        }
         ingress::register_local(
             &state,
             &connection.as_ref().ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_status.connection", error_class = "absent", "Source status refused"); unavailable() })?.0,

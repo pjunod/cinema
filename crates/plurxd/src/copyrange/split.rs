@@ -241,7 +241,7 @@ impl SplitRange {
             }
             let parts = author
                 .author
-                .vod_window(&input, sequence)
+                .range_window(&input, sequence)
                 .map_err(broken_window)?;
             let video = track_row(SharingHlsRole::Video, &parts.video, parts.video_decode)?;
             let audio = track_row(SharingHlsRole::Audio, &parts.audio, parts.audio_decode)?;
@@ -317,7 +317,7 @@ impl SplitRange {
             } else {
                 let parts = self
                     .author
-                    .vod_window(&bytes, sequence)
+                    .range_window(&bytes, sequence)
                     .map_err(|error| error.to_string())?;
                 match role {
                     SharingHlsRole::Video => parts.video,
