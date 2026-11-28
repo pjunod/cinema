@@ -1585,7 +1585,9 @@ pattern = "VodPublication"
 # ResponseOwner, beside the continuous master. It creates no producer or
 # response owner and transfers none.
 [module_symbols.occurrences]
-"crates/plurxd/src/vod/serve/delivery.rs" = 34
+# Projected master, child playlists, and child bytes use the exact encoded owner.
+"crates/plurxd/src/vod/serve/encoded_split.rs" = 8
+"crates/plurxd/src/vod/serve/delivery.rs" = 35
 "crates/plurxd/src/vod/serve/end.rs" = 2
 "crates/plurxd/src/vod/serve/serve.rs" = 4
 "crates/plurxd/src/vod/serve/split.rs" = 2
@@ -1735,6 +1737,8 @@ pattern = "commit_guard_before"
 # which returns the refusal reason for publication commits only);
 # publication.rs -1 (moved onto it). Existing callers keep the old signature.
 [module_symbols.occurrences]
+# Recheck serving authority when committing the selected encoded layout.
+"crates/plurxd/src/vod/serve/encoded_split.rs" = 1
 "crates/plurxd/src/http/hls/control.rs" = 2
 "crates/plurxd/src/http/hls/create.rs" = 5
 "crates/plurxd/src/http/hls/tests/chunk_05.rs" = 2
@@ -3027,6 +3031,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Native split measured need (#1973): +1 joined test task in copyseg.rs that
 # stands in for the session's periodic scratch walk. No production task.
 [module_structures.occurrences]
+# Offload one bounded projection and retain its scratch and worker permits.
+"crates/plurxd/src/vod/serve/encoded_split.rs" = 1
 "crates/plurx-core/src/process/bounded.rs" = 6
 "crates/plurx-core/src/process/bounded/pause.rs" = 2
 "crates/plurx-core/src/process/priority.rs" = 1
@@ -4832,6 +4838,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # tokio::time::timeout bounds on the yield and selected-split tests, and the
 # sleep of the joined task that stands in for the session's periodic walk.
 [module_structures.occurrences]
+# Use the inherited private verification and child delivery deadlines.
+"crates/plurxd/src/vod/serve/encoded_split.rs" = 2
 "crates/plurx-core/src/process/bounded.rs" = 17
 "crates/plurx-core/src/process/bounded/pause.rs" = 18
 "crates/plurx-core/src/process/mod.rs" = 5
