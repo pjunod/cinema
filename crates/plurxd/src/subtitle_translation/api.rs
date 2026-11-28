@@ -971,7 +971,7 @@ pub async fn stop(
             operation_id,
             expected_operation_epoch: number(&input.expected_operation_epoch, true)?,
         },
-        "released",
+        "viewer_released",
     )
     .await
 }

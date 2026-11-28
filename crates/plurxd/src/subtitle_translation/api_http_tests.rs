@@ -723,7 +723,7 @@ async fn create_reuses_the_recipe_and_stop_releases_only_the_requesting_viewer()
         .expect("stop root"),
     )
     .await;
-    assert_eq!(stopped["outcome"], "released");
+    assert_eq!(stopped["outcome"], "viewer_released");
     assert_eq!(stopped["operation_epoch"], "1");
     let stopped_replay = body(
         stop(
