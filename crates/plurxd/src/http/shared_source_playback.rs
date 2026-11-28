@@ -4,7 +4,9 @@ use super::{
     hls::{CreateSession, SourcePlaybackTarget},
 };
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse as _;
 use serde_json::Value;
+use std::{collections::BTreeMap, fmt::Write as _, sync::Mutex};
 use uuid::Uuid;
 
 pub(crate) mod receiver_presentation;
@@ -335,6 +337,7 @@ enum SourceStartFailure {
     CopySyncUnverified,
     CopyInputLimit,
     CopyOutputSkew,
+    CopyHevcInspectionFailed,
     HevcConfigurationUnsupported,
     Capacity,
     Conflict,
@@ -1284,6 +1287,7 @@ impl From<crate::transcode::source_actor::SourceWorkerError> for SourceStartFail
             E::CopySyncUnverified => Self::CopySyncUnverified,
             E::CopyInputLimit => Self::CopyInputLimit,
             E::CopyOutputSkew => Self::CopyOutputSkew,
+            E::CopyHevcInspectionFailed => Self::CopyHevcInspectionFailed,
             E::HevcConfigurationUnsupported => Self::HevcConfigurationUnsupported,
             E::Capacity => Self::Capacity,
             E::Conflict => Self::Conflict,
@@ -1304,6 +1308,10 @@ impl SourceStartFailure {
             Self::CopySyncUnverified => (StatusCode::UNPROCESSABLE_ENTITY, "copy_sync_unverified"),
             Self::CopyInputLimit => (StatusCode::UNPROCESSABLE_ENTITY, "copy_range_input_limit"),
             Self::CopyOutputSkew => (StatusCode::UNPROCESSABLE_ENTITY, "copy_observation_skew"),
+            Self::CopyHevcInspectionFailed => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "copy_hevc_inspection_failed",
+            ),
             Self::HevcConfigurationUnsupported => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "hevc_configuration_unsupported",
@@ -1892,6 +1900,76 @@ async fn resources(
     .await)
 }
 
+#[derive(Default)]
+struct SourceStartRefusals {
+    counts: Mutex<BTreeMap<(&'static str, String), u64>>,
+}
+
+impl SourceStartRefusals {
+    fn record(&self, response: &axum::response::Response) {
+        let status = response.status();
+        if !status.is_client_error() && !status.is_server_error() {
+            return;
+        }
+        let stage = response
+            .extensions()
+            .get::<SourceStartStage>()
+            .map_or("peer_guard", |stage| stage.0);
+        let code = response
+            .extensions()
+            .get::<super::error::ApiErrorCode>()
+            .map_or_else(|| status.as_u16().to_string(), |code| code.0.to_owned());
+        *self
+            .counts
+            .lock()
+            .expect("Source Start refusal counts")
+            .entry((stage, code))
+            .or_default() += 1;
+    }
+
+    fn prometheus(&self) -> String {
+        let mut out = String::from(
+            "# HELP plurx_shared_source_start_refusals_total Shared Source Start refusals by stage and response code.\n\
+             # TYPE plurx_shared_source_start_refusals_total counter\n",
+        );
+        for ((stage, code), count) in self
+            .counts
+            .lock()
+            .expect("Source Start refusal counts")
+            .iter()
+        {
+            let _ = writeln!(out, "plurx_shared_source_start_refusals_total{{stage=\"{stage}\",code=\"{code}\"}} {count}");
+        }
+        out
+    }
+}
+
+static SOURCE_START_REFUSALS: std::sync::LazyLock<SourceStartRefusals> =
+    std::sync::LazyLock::new(SourceStartRefusals::default);
+
+pub(super) fn source_start_refusals_prometheus() -> String {
+    SOURCE_START_REFUSALS.prometheus()
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct SourceStartStage(pub(super) &'static str);
+
+pub(super) async fn observe_source_start(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let is_start = request.method() == axum::http::Method::POST
+        && request
+            .extensions()
+            .get::<axum::extract::MatchedPath>()
+            .is_some_and(|path| path.as_str() == forwarding::INGRESS_ROUTE);
+    let response = next.run(request).await;
+    if is_start {
+        SOURCE_START_REFUSALS.record(&response);
+    }
+    response
+}
+
 async fn start(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
     headers: SourceHeaders,
@@ -1899,24 +1977,36 @@ async fn start(
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     clock: Option<axum::Extension<SourceStartClock>>,
     body: axum::body::Body,
-) -> Result<axum::response::Response, ApiError> {
+) -> Result<axum::response::Response, axum::response::Response> {
+    let refusal = |stage| {
+        move |error: ApiError| {
+            let mut response = error.into_response();
+            response.extensions_mut().insert(SourceStartStage(stage));
+            response
+        }
+    };
     let clock = clock
         .map(|clock| clock.0)
         .unwrap_or_else(|| SourceStartClock::new(&headers));
     let deadline = clock.work_deadline();
     let bytes = axum::body::to_bytes(body, 128 * 1024)
         .await
-        .map_err(|_| invalid())?;
-    let input = parse_start_request(&bytes, &item, &file)?;
-    let viewer = viewer_hash(&headers)?;
-    let (authenticated_hash, grant) = current_reference(&state, &headers, &input.reference).await?;
+        .map_err(|_| invalid())
+        .map_err(refusal("parse"))?;
+    let input = parse_start_request(&bytes, &item, &file).map_err(refusal("parse"))?;
+    let viewer = viewer_hash(&headers).map_err(refusal("authorize"))?;
+    let (authenticated_hash, grant) = current_reference(&state, &headers, &input.reference)
+        .await
+        .map_err(refusal("authorize"))?;
     let target = input.reference.clone();
-    receiver_presentation::require_receiver_for_start(&input, &headers)?;
+    receiver_presentation::require_receiver_for_start(&input, &headers)
+        .map_err(refusal("receiver_presentation"))?;
     let (entry, new) = state
         .transcode
         .source_http_starts
         .register(grant, &viewer, &input, &authenticated_hash)
-        .map_err(|failure| clock.refusal(failure))?;
+        .map_err(|failure| clock.refusal(failure))
+        .map_err(refusal("register"))?;
     if new {
         // No await separates insertion and spawning the owned task. Disconnect
         // drops only a waiter; durable/physical work stays owned by this entry.
@@ -1925,28 +2015,37 @@ async fn start(
     }
     let assignment = clock
         .answer(ingress::assigned(&state, &entry, deadline))
-        .await??;
-    let connection = connection.ok_or_else(unavailable)?;
-    ingress::register_local(&state, &connection.0, &entry, &assignment, deadline).await?;
+        .await
+        .map_err(refusal("assignment"))?
+        .map_err(refusal("assignment"))?;
+    let connection = connection
+        .ok_or_else(unavailable)
+        .map_err(refusal("ingress"))?;
+    ingress::register_local(&state, &connection.0, &entry, &assignment, deadline)
+        .await
+        .map_err(refusal("ingress"))?;
     let owned = clock
         .answer(entry.wait(deadline))
-        .await?
-        .map_err(SourceStartFailure::response)?;
+        .await
+        .map_err(refusal("prepare"))?
+        .map_err(SourceStartFailure::response)
+        .map_err(refusal("prepare"))?;
     if owned.actor.is_direct() {
         return direct::published_reply(&state, &headers, &entry, &owned, &target, grant, deadline)
             .await
-            .map_err(|refusal| refusal.answer);
+            .map_err(|failure| failure.answer)
+            .map_err(refusal("direct_published"));
     }
     // Wait for the first publication on the viewer's clock alone, then open
     // the response under the owner's: opening reserves a body and is not
     // abandoned midway.
     clock
         .answer(owned.actor.wait_ready(deadline))
-        .await?
+        .await.map_err(refusal("wait_ready"))?
         .map_err(|e| {
             tracing::warn!(target: "plurx::sharing", stage = "source_start.wait_ready", error_class = ?e, "Source start refused");
             SourceStartFailure::from(e).response()
-        })?;
+        }).map_err(refusal("wait_ready"))?;
     let (response, guard) = owned
         .actor
         .open_start_response(deadline)
@@ -1958,20 +2057,26 @@ async fn start(
             } else {
                 SourceStartFailure::from(refusal.error).response()
             }
-        })?;
-    let (_, current_grant) = current_reference(&state, &headers, &target).await?;
+        }).map_err(refusal("open_response"))?;
+    let (_, current_grant) = current_reference(&state, &headers, &target)
+        .await
+        .map_err(refusal("publish"))?;
     if current_grant != grant {
-        return Err(unavailable());
+        return Err(refusal("publish")(unavailable()));
     }
-    ingress::publication_allowed(&state, &owned.assignment).await?;
+    ingress::publication_allowed(&state, &owned.assignment)
+        .await
+        .map_err(ApiError::from)
+        .map_err(refusal("publish"))?;
     entry
         .observe_published(&owned, &response)
-        .map_err(SourceStartFailure::response)?;
+        .map_err(SourceStartFailure::response)
+        .map_err(refusal("publish"))?;
     let response = super::shared_library::source_file_json(
         grant,
         &target,
         serde_json::json!({"reference":target,"incarnation_id":owned.assignment.binding().incarnation_id(),"response":response}),
-    )?;
+    ).map_err(refusal("publish"))?;
     Ok(hold_start_body(response, guard))
 }
 /// A peer Start's clock. A receiver that sends the viewer's remaining start

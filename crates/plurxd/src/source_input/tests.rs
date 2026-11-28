@@ -572,6 +572,7 @@ async fn verified_seek_bootstrap_unlocks_only_its_fresh_primary_input() {
         .expect("source input fixture");
     assert!(!token.is_verified());
     assert!(primary.seal_seek_bootstrap_limit(u64::MAX).is_err());
+    assert!(!token.refused_read());
     assert_eq!(
         read_source(&primary.state, 0, bytes.len() as u64)
             .await
@@ -584,12 +585,15 @@ async fn verified_seek_bootstrap_unlocks_only_its_fresh_primary_input() {
             .await
             .is_err()
     );
+    assert!(token.refused_read());
     let (other, _other_file, _other_budget) = input(&bytes, SOURCE_WINDOW_MAX, None).await;
     let other_token = other
         .seal_seek_bootstrap_limit(SOURCE_HTTP_CHUNK as u64)
         .expect("source input fixture");
     token.verified_landing();
     assert!(token.is_verified());
+    assert!(!token.refused_read());
+    assert!(!other_token.refused_read());
     assert!(!other_token.is_verified());
     assert_eq!(
         read_source(&primary.state, SOURCE_HTTP_CHUNK as u64, bytes.len() as u64)
