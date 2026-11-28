@@ -1,10 +1,9 @@
 # FEL reference composition — build plan
 
-**Status:** in progress — owner approved 5.1–5.2 on 2026-11-24 and 5.3 on
-2026-11-25; 5.1 built (section 8); 5.2 decided **go** (section 9); 5.3 built
-and matches the reference code for code, worker-GPU frame time still to
-measure (section 10); 5.4 built, admitting clamp-binding titles under
-`pq-ccm001-*` (section 11) · **Written:** 2026-11-23 · **Owner:** Claude ·
+**Status:** in progress. 5.1 and 5.2 landed in #1900. 5.3 passed parity
+and worker-GPU timing on 2026-11-28 (section 10). 5.4 admits clamp-binding
+titles under `pq-ccm001-*` (section 11). Requalification and Linux player
+parity remain open. · **Written:** 2026-11-23 · **Owner:** Codex ·
 **Source baseline:** `bb2f165`
 
 Companion to [FEL-P81-RECONSTRUCTION.md](FEL-P81-RECONSTRUCTION.md) (the
@@ -398,8 +397,20 @@ alternating runs) on this Mac. GPU time per frame: the stage's passes
 2.0 ms, libplacebo's pass 0.44 ms (was 0.88 ms with the EL). The first
 version computed the polynomial per pixel and the EL filters inline
 (+14 %); the table and the separate vertical pass brought it inside 10 %.
-The acceptance names the worker GPU, which is not yet measured: it waits
-until it cannot disturb `E-C599053EB8`'s trials.
+On 2026-11-28, lab6's AMD Phoenix iGPU ran the same 48-frame 4K *Michael*
+window with VA-API decoding and RADV. Both export identities used the same
+helper from integration tree `3282cc4eed672d61b243faf37160a6187012528c`.
+The test alternated the order across two runs per identity and measured
+elapsed time from `gpu_ready` to `rendered` per frame.
+
+| Export identity | Run 1 (ms/frame) | Run 2 (ms/frame) | Median (ms/frame) |
+|---|---:|---:|---:|
+| `pq-bilinear-rgb48-v1` | 146.301 | 93.530 | 119.916 |
+| `pq-ccm001-rgb48-v1` | 115.451 | 105.063 | 110.257 |
+
+The CCM 001 median was 8.05% lower, within the allowed 10% increase.
+Individual timings varied across the two pairs. The worker benchmark
+receipt is `EV-87777bd41f` in effort `E-9D8E2CE6D2`.
 
 **Also found.** libplacebo refuses a pass that binds one texture twice and
 says so only in its log, so a mapped P010 surface (Cb and Cr in one
@@ -464,4 +475,3 @@ lists now include it. The existing
 `test_every_source_compiled_into_the_bundle_is_in_its_identity` catches it.
 5.3 missed it because the task gate only compiles and that test was not
 among 5.3's local runs. The main-bound fast lane would have failed on it.
-
