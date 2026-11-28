@@ -1751,9 +1751,8 @@ impl VodServe {
         custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
     ) -> Option<VodPublication<Option<SegmentReady>>> {
         let name = request.media_name()?;
-        if let Some(split) = self
-            .encoded_split_segment(session_id, request, deadline, custody)
-            .await
+        if let Some(split) =
+            Box::pin(self.encoded_split_segment(session_id, request, deadline, custody)).await
         {
             return Some(split);
         }
