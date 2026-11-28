@@ -22,7 +22,7 @@ Every `file:line` is from `8724851ba`; re-verify by function name.
 | Surface | Candidate evidence | Remaining evidence |
 |---|---|---|
 | Indexed VOD copy | Real Chrome muxed and split attachments played without stalls. The aligned AAC control used two copy producers and no encoder. The primed fixture used an AAC encoder. | Representative capacity and retained audio-switch comparisons. |
-| Encoded VOD | S4 passed the verified opening-window and fallback regressions for SDR, HDR10, and processed Dolby Vision Profile 8.1. | Same-title cold and retained attachment capacity across muxed and split. |
+| Encoded VOD | The SDR, HDR10, and processed Dolby Vision Profile 8.1 opening-window regressions passed. Chrome played the same encoded title on first and retained attachments in both layouts. | HDR and Dolby Vision display qualification and capacity under concurrent load. |
 | Rolling HLS | S5 covers stable rendition IDs, paired discontinuities, takeover epochs, and native FEL source-clock verification. | Exact promotion and device qualification. |
 | Live TV and Shared Source | The production Live TV writer and finite and growing Source HTTP fixtures served the verified child objects. The growing Source soundtrack retains its terminal audio flush. | Exact promotion and mixed-fleet playback. |
 | Jellyfin | The typed grammar keeps owner-authenticated video and audio links. Its device profile controls split negotiation. | Physical client playback. |
@@ -31,7 +31,15 @@ Every `file:line` is from `8724851ba`; re-verify by function name.
 The [45-second copy comparison](../performance/evidence/split-hls-copy-qualification-20261128.json)
 records the request count, bytes, first-frame time, producer generations,
 and sampled CPU and scratch. The sampled split CPU was higher for the
-single-viewer primed fixture. Capacity remains open.
+single-viewer primed fixture. Chrome also completed 20 decoded soundtrack
+switches on one attachment with the aligned AAC fixture.
+
+The [encoded playback comparison](../performance/evidence/split-hls-encoded-qualification-20261128.json)
+records four passing Chrome attachments on the default worker stack. The
+first attachment used one encoder generation in each layout. The retained
+attachment used no new encoder generation. Split requested 31 HLS objects
+per attachment and muxed requested 15, with about 12.46 MB delivered in
+either layout. Capacity remains open.
 
 If qualification exposes incorrect A/V alignment, a missing issued child
 object, failure on a previously supported client, or a sustained capacity

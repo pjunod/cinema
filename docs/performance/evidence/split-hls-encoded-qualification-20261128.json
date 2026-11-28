@@ -1,0 +1,98 @@
+{
+  "source_head": "c8a35356513d711dc107e3dd220fa56a46b890dd",
+  "s6_child_fix": "64a717a061203fe16059a72e419246743b49cedb",
+  "runtime_digest": "c0637c06bdf620a87349fcdf1440bd8674abb30ece25c58362fd3be1c8af4409",
+  "runtime": "macOS pinned Jellyfin FFmpeg 8.1.3, bound Wasmtime source parser; default Tokio worker stack",
+  "fixture": "transcode-mpeg4-mp3-720",
+  "sample_note": "14 seconds per attachment, first and retained repeat with the same build and each requested layout; debug daemon, sampled CPU lower bound.",
+  "results": [
+    {
+      "result": "passed",
+      "attachment": "first",
+      "layout": {
+        "requested": "muxed",
+        "observed": "muxed"
+      },
+      "ttff_ms": 1054,
+      "clock_rate": 0.999,
+      "hitches": 0,
+      "stalls": 0,
+      "hls_requests": 15,
+      "hls_response_bytes": 12464918,
+      "producer_generations": {
+        "plurx_vod_producer_generations_total{kind=\"encoded\"}": 1
+      },
+      "resources": {
+        "sample_count": 9,
+        "observed_processes": 17,
+        "cpu_seconds_sampled_lower_bound": 17.84,
+        "daemon_data_allocated_kib_peak_delta": 19508
+      }
+    },
+    {
+      "result": "passed",
+      "attachment": "repeat",
+      "layout": {
+        "requested": "muxed",
+        "observed": "muxed"
+      },
+      "ttff_ms": 194,
+      "clock_rate": 1,
+      "hitches": 0,
+      "stalls": 0,
+      "hls_requests": 15,
+      "hls_response_bytes": 12464918,
+      "producer_generations": {},
+      "resources": {
+        "sample_count": 9,
+        "observed_processes": 7,
+        "cpu_seconds_sampled_lower_bound": 15.36,
+        "daemon_data_allocated_kib_peak_delta": 0
+      }
+    },
+    {
+      "result": "passed",
+      "attachment": "first",
+      "layout": {
+        "requested": "split",
+        "observed": "split"
+      },
+      "ttff_ms": 1426,
+      "clock_rate": 1,
+      "hitches": 0,
+      "stalls": 0,
+      "hls_requests": 31,
+      "hls_response_bytes": 12464881,
+      "producer_generations": {
+        "plurx_vod_producer_generations_total{kind=\"encoded\"}": 1
+      },
+      "resources": {
+        "sample_count": 9,
+        "observed_processes": 13,
+        "cpu_seconds_sampled_lower_bound": 17.66,
+        "daemon_data_allocated_kib_peak_delta": 19496
+      }
+    },
+    {
+      "result": "passed",
+      "attachment": "repeat",
+      "layout": {
+        "requested": "split",
+        "observed": "split"
+      },
+      "ttff_ms": 307,
+      "clock_rate": 0.998,
+      "hitches": 0,
+      "stalls": 0,
+      "hls_requests": 31,
+      "hls_response_bytes": 12464881,
+      "producer_generations": {},
+      "resources": {
+        "sample_count": 9,
+        "observed_processes": 8,
+        "cpu_seconds_sampled_lower_bound": 12.93,
+        "daemon_data_allocated_kib_peak_delta": 300
+      }
+    }
+  ]
+}
