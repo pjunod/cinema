@@ -5010,12 +5010,12 @@ async function runSuite(manifest, options, dependencies = {}) {
     browserInfo = await (dependencies.prepareBrowser || prepareBrowser)(driver, server.token);
     system = await (dependencies.api || api)(server.baseUrl, "/system", { token: server.token });
     process.stdout.write(`CAPS    ${browserInfo.browser}: video=${browserInfo.caps.vcodec} · audio=${browserInfo.caps.acodec} · hdr=${browserInfo.caps.hdr} · native_hls=${browserInfo.native_hls}\n\n`);
-    if (hlsLayout) await claimLabHlsLayout(driver, hlsLayout);
     for (let index = 0; index < plan.cases.length; index += 1) {
       const testCase = plan.cases[index];
       const fixture = plan.fixtures.get(testCase.fixture);
       process.stdout.write(`CASE    ${String(index + 1).padStart(2)}/${plan.cases.length} ${testCase.name}\n`);
       const caseLogStart = Date.now();
+      if (hlsLayout) await claimLabHlsLayout(driver, hlsLayout);
       const metricsBefore = (hlsLayout || enabledOption(options.server_metrics))
         ? await readServerMetrics(server).catch((error) => error)
         : null;
