@@ -7,16 +7,13 @@ on:
       - clients/linux-player/debian/changelog
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 concurrency:
   group: linux-player-apt-release
   cancel-in-progress: false
 
 jobs:
   package:
-    if: github.server_url != 'https://github.com'
+    if: github.server_url != 'https://github.com' && github.ref == 'refs/heads/main'
     runs-on: [ci-nonvoter-heavy-amd64]
     timeout-minutes: 45
     steps:
@@ -24,7 +21,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Build and verify the Debian package
-        run: make linux-player-deb
+        run: env -u FORGEJO_TOKEN -u GITHUB_TOKEN -u GITEA_TOKEN make linux-player-deb
         env:
           PLURX_DEB_JOBS: 4
       - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
@@ -40,8 +37,6 @@ jobs:
     if: github.server_url != 'https://github.com' && github.ref == 'refs/heads/main'
     runs-on: [ci-nonvoter-heavy-amd64]
     timeout-minutes: 10
-    permissions:
-      contents: write
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
