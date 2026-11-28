@@ -1550,6 +1550,7 @@ async function executePlaybackMediaChange(p,change){
     method,sessionId:change.previousSessionId||p.sessionId,
     cause:change.recoveryCause||"unknown"}):null;
   if(opts&&change.candidateId) Object.assign(opts,{candidate_id:change.candidateId});
+  if(opts&&change.splitAudio===false) opts.split_audio=false;
   newAttempt(change.reason||"stream-change");
   p.stallFrom=pos;
   if(change.automatic&&p.abr) p.abr.switching=true;
@@ -1594,7 +1595,7 @@ async function executePlaybackMediaChange(p,change){
     }else if(change.copyHls||playbackFileContextForPlayer(p).source_ref.kind!=="local"){
       // A Shared file has no progressive remux: every other route change of a
       // Shared direct play (an audio switch, a quality move) is Copy HLS.
-      if(!await startCopyHls(v,pos,live,null,preparation,()=>retirePlaybackPredecessor(p))) return false;
+      if(!await startCopyHls(v,pos,live,null,preparation,()=>retirePlaybackPredecessor(p),change.splitAudio)) return false;
     }else{
       retirePlaybackPredecessor(p);
       teardownHls(); resetMediaSource(v); clearSubs(v);
@@ -1666,7 +1667,7 @@ async function executePlaybackMediaChange(p,change){
 // `live` (optional) is re-checked after the await: a seek or audio switch that
 // has since been superseded must not attach, or two hls.js instances end up
 // pulling two server sessions at once. Returns false when it bailed.
-async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeAttach){
+async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeAttach, splitAudio){
   const aidx=selectedAudioIndex(PLAYER);
   const src=PLAYER.source||{}, track=PLAYER.audio&&PLAYER.audio[PLAYER.curAudio];
   const codec=track&&track.codec;
@@ -1687,8 +1688,8 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
     const fileId=PLAYER.fileId, options={copy:true,aac,
       preserve_dolby_vision:!!PLAYER.preserveDolbyVision,start:startSec||0,audio:aidx,
       audio_offset_ms:PLAYER.aoffset||0,
-      // hls.js can select soundtracks itself; native HLS keeps the muxed copy.
-      ...(!native&&!hevcCopy&&!PLAYER.preserveDolbyVision&&(PLAYER.audio||[]).length>1?{split_audio:true}:{})};
+      ...(splitAudio===false?{split_audio:false}:
+        !native&&!hevcCopy&&!PLAYER.preserveDolbyVision&&(PLAYER.audio||[]).length>1?{split_audio:true}:{})};
     // `vod_index_pending` has a better answer than waiting on this path — the
     // progressive remux below — so it is answered locally instead of retried.
     const retry={context:playbackCreateRetryContext(),preparation,
@@ -1711,7 +1712,7 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
           // when the encoders are busy, keep the copy without alternates.
           // The server reports the family's encoder refusal as the typed
           // `transcode_capacity_pending`; older builds named it directly.
-          if(!options.split_audio||!error||!["vod_family_capacity","transcode_capacity_pending"].includes(error.code)) throw error;
+          if(options.split_audio===false||!error||!["vod_family_capacity","transcode_capacity_pending"].includes(error.code)) throw error;
           // `false` is the explicit muxed request; it outranks the caps token.
           const muxed={...options,split_audio:false};
           return openSessionRetryingNotYet(playbackFileContextForPlayer(PLAYER),muxed,signal,retry);

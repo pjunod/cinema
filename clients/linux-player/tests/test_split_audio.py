@@ -3,7 +3,7 @@ from concurrent.futures import Future
 from unittest.mock import Mock
 
 import support
-from plurx_player.playback import Playback, split_audio_names
+from plurx_player.playback import Playback, SplitAudioGroup, split_audio_group
 
 
 def master():
@@ -19,21 +19,21 @@ def master():
 
 class SplitAudioTests(unittest.TestCase):
     def test_uses_only_distinct_renditions_referenced_by_the_variant(self):
-        self.assertEqual(split_audio_names(master()), {"English, Original": 2, "French": 9})
-        self.assertEqual(split_audio_names(master().replace('AUDIO="audio"', 'AUDIO="other"')), {})
-        self.assertEqual(split_audio_names(master().replace('NAME="French"', 'NAME="English, Original"')), {})
+        self.assertEqual(split_audio_group(master()), SplitAudioGroup({"English, Original": 2, "French": 9}, 2))
+        self.assertIsNone(split_audio_group(master().replace('AUDIO="audio"', 'AUDIO="other"')))
+        self.assertIsNone(split_audio_group(master().replace('NAME="French"', 'NAME="English, Original"')))
 
     def test_only_the_owning_attachment_can_confirm_and_retain_a_selection(self):
         mpv = Mock()
         properties = {"path": "http://server/api/v1/hls/session/master.m3u8",
-                      "track-list": [{"type": "audio", "title": "English, Original", "selected": True},
-                                     {"type": "audio", "title": "French", "selected": False}]}
+                      "track-list": [{"type": "audio", "id": 1, "title": "English, Original", "selected": True},
+                                     {"type": "audio", "id": 2, "title": "French", "selected": False}]}
         mpv.get.side_effect = properties.get
         playback = Playback(Mock(), mpv, {"file_id": 3}, {}, Mock(), Mock())
         playback.session = {"session_id": "session"}
         probe = Future()
-        probe.set_result(split_audio_names(master()))
-        playback.split_audio_probe = (properties["path"], "session", probe)
+        probe.set_result(master())
+        playback.split_audio_probe = (properties["path"], "session", "/master.m3u8", 0, probe)
         playback.observe_split_audio()
         self.assertEqual(playback.observed_split_audio, 2)
         self.assertIsNone(playback.requested_audio)
@@ -47,3 +47,23 @@ class SplitAudioTests(unittest.TestCase):
         properties["track-list"][1]["selected"] = False
         playback.observe_split_audio()
         self.assertEqual(playback.requested_audio, 9)
+
+    def test_nonfirst_default_is_pinned_before_reporting_what_mpv_picked(self):
+        mpv = Mock()
+        properties = {"path": "http://server/api/v1/hls/session/master.m3u8",
+                      "track-list": [{"type": "audio", "id": 1, "title": "English, Original", "selected": True},
+                                     {"type": "audio", "id": 2, "title": "French", "selected": False}]}
+        mpv.get.side_effect = properties.get
+        playback = Playback(Mock(), mpv, {"file_id": 3}, {}, Mock(), Mock())
+        playback.session = {"session_id": "session"}
+        probe = Future()
+        probe.set_result(master().replace("DEFAULT=YES", "DEFAULT=TEMP").replace("DEFAULT=NO", "DEFAULT=YES").replace("DEFAULT=TEMP", "DEFAULT=NO"))
+        playback.split_audio_probe = (properties["path"], "session", "/master.m3u8", 0, probe)
+        playback.observe_split_audio()
+        mpv.set.assert_called_once_with("aid", 2)
+        self.assertIsNone(playback.observed_split_audio)
+        properties["track-list"][0]["selected"] = False
+        properties["track-list"][1]["selected"] = True
+        playback.observe_split_audio()
+        self.assertEqual(playback.observed_split_audio, 9)
+        self.assertIsNone(playback.requested_audio)

@@ -14,7 +14,13 @@ internal object SplitHlsAudio {
     private val videoPath = Regex("/video/[0-9a-f]{64}/index\\.m3u8$")
     private val stableId = Regex("a(0|[1-9][0-9]*)")
 
-    data class Option(val sourceIndex: Long, val group: TrackGroup, val index: Int, val selected: Boolean)
+    data class Option(
+        val sourceIndex: Long,
+        val group: TrackGroup,
+        val index: Int,
+        val selected: Boolean,
+        val default: Boolean,
+    )
 
     fun options(
         master: HlsMultivariantPlaylist,
@@ -42,7 +48,8 @@ internal object SplitHlsAudio {
                 (0 until group.length).mapNotNull { index ->
                     if (!group.isTrackSupported(index) ||
                         !matches(group.getTrackFormat(index), groupId, rendition.name)
-                    ) null else Option(source, group.mediaTrackGroup, index, group.isTrackSelected(index))
+                    ) null else Option(source, group.mediaTrackGroup, index, group.isTrackSelected(index),
+                        rendition.format.selectionFlags and C.SELECTION_FLAG_DEFAULT != 0)
                 }
             }.singleOrNull()
         }

@@ -5,6 +5,18 @@ enum SplitHLSAudio {
 
     /// Only the server's own rendition group has stable source-track indices.
     /// Require the same master to name the group on a video variant.
+    static func ownsMaster(_ url: URL, origin: String, session: String) -> Bool {
+        guard !session.isEmpty,
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.user == nil, components.password == nil, components.fragment == nil,
+              components.percentEncodedPath == "/api/v1/hls/\(session)/master.m3u8" else { return false }
+        components.path = ""
+        components.query = nil
+        guard let authority = components.string,
+              let expected = Session.canonicalOrigin(origin) else { return false }
+        return Session.canonicalOrigin(authority) == expected
+    }
+
     struct Rendition {
         let index: Int
         let name: String

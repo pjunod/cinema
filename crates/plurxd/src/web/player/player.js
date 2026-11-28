@@ -549,6 +549,7 @@ function abortHlsStartupLoaders(episode,detachMetadata=false){
   }
   if(detachMetadata&&episode.native?.audioListener){
     episode.native.audioList?.removeEventListener('change',episode.native.audioListener);
+    episode.native.audioList?.removeEventListener('addtrack',episode.native.audioListener);
     episode.native.audioListener=null;
     episode.native.audioList=null;
   }
@@ -558,6 +559,7 @@ function cancelHlsStartup(player,reason){
   if(!episode||episode.state==='cancelled') return;
   if(episode.state==='presenting'){
     episode.establishedSuspension=null;
+    abortHlsStartupLoaders(episode,true);
     return;
   }
   clearTimeout(episode.native?.deadlineTimer);
@@ -1880,7 +1882,7 @@ function nativeHlsTimeline(media){
 async function nativeHlsPlaylists(player,episode,sourceOwner){
   episode.manifestState='loading';
   const master=await nativeHlsFetch(player,episode,tok(episode.playlistUrl),{sourceOwner});
-  let media=master,audio=null,renditions=[];
+  let media=master,audio=null,renditions=[],defaultAudio=null;
   const lines=master.text.split(/\r?\n/).map(line=>line.trim());
   const variants=lines.map((line,i)=>line.startsWith('#EXT-X-STREAM-INF:')?i:-1).filter(i=>i>=0);
   if(variants.length){
@@ -1890,6 +1892,7 @@ async function nativeHlsPlaylists(player,episode,sourceOwner){
     const {AUDIO:group}=nativeHlsAttributes(lines[variants[0]]);
     let audioUri=null;
     if(group){
+      episode.native.hasSeparateAudio=true;
       const choices=lines.filter(line=>line.startsWith('#EXT-X-MEDIA:')).map(nativeHlsAttributes)
         .filter(attrs=>attrs.TYPE==='AUDIO'&&attrs['GROUP-ID']===group);
       const defaults=choices.filter(row=>row.DEFAULT==='YES');
@@ -1902,6 +1905,7 @@ async function nativeHlsPlaylists(player,episode,sourceOwner){
         throw Object.assign(new Error('The HLS master has an ambiguous audio group.'),{terminal:true});
       for(const row of renditions) row.uri=nativeHlsResourceUrl(row.uri,master.url);
       audioUri=nativeHlsResourceUrl(defaults[0].URI,master.url);
+      defaultAudio=defaults[0]['STABLE-RENDITION-ID'];
     }
     const videoUri=nativeHlsResourceUrl(uri,master.url);
     if(audioUri===videoUri) throw Object.assign(new Error('The HLS audio URI matches the video URI.'),{terminal:true});
@@ -1913,7 +1917,7 @@ async function nativeHlsPlaylists(player,episode,sourceOwner){
   }
   nativeHlsTimeline(media);
   episode.manifestState='parsed';
-  return {...media,audio,renditions};
+  return {...media,audio,renditions,defaultAudio};
 }
 function nativeRenditionForTrack(choices,track,tracks){
   const exact=choices.find(row=>track.id===row.stable);
@@ -1931,27 +1935,39 @@ function observeNativeAudio(video,player,episode){
     const observed=()=>{
       if(!owner.current()) return;
       const tracks=Array.from(list),enabled=tracks.filter(track=>track.enabled);
-      const selected=enabled.length===1?nativeRenditionForTrack(episode.native.audioRenditions,enabled[0],tracks):null;
+      const rendition=track=>nativeRenditionForTrack(episode.native.audioRenditions,track,tracks);
+      const selected=enabled.length===1?rendition(enabled[0]):null;
+      const first=episode.native.defaultAudio;
+      if(first&&selected?.stable!==first){
+        const matches=tracks.filter(track=>rendition(track)?.stable===first);
+        if(matches.length===1) for(const track of tracks) track.enabled=track===matches[0];
+        return;
+      }
       if(!selected) return;
+      episode.native.defaultAudio=null;
       const ordinal=player.audio?.findIndex(track=>'a'+track.index===selected.stable)??-1;
       player.selectedAudioRendition=selected.stable;
       if(ordinal>=0&&ordinal!==player.curAudio){
-        player.curAudio=ordinal;
         if(typeof translationRetire==='function') translationRetire('audio changed');
-        if(typeof rememberPlaybackSelection==='function') rememberPlaybackSelection('audio',player.audio[ordinal].index);
+        player.curAudio=ordinal;
+        player.mediaAttachment.audioOrdinal=player.audio[ordinal].index;
+        if(!first&&typeof rememberPlaybackSelection==='function') rememberPlaybackSelection('audio',player.audio[ordinal].index);
         if(typeof renderPlayerInfo==='function') renderPlayerInfo();
       }
     };
     episode.native.audioList?.removeEventListener('change',episode.native.audioListener);
+    episode.native.audioList?.removeEventListener('addtrack',episode.native.audioListener);
     episode.native.audioList=list;
     episode.native.audioListener=observed;
     list.addEventListener('change',observed);
+    list.addEventListener('addtrack',observed);
   }
   episode.native.audioListener?.();
 }
 function selectNativeAudio(video,player,index){
   const episode=player.hlsStartup,list=video.audioTracks,wanted=player.audio?.[index];
   if(episode?.transport!=='native'||!list||!wanted||!episode.native.audioRenditions?.length
+    ||episode.native.defaultAudio
     ||!nativeHlsSourceOwner(video,player,episode,episode.native.execution,true).current()) return false;
   const tracks=Array.from(list),matches=tracks.filter(track=>
     nativeRenditionForTrack(episode.native.audioRenditions,track,tracks)?.stable==='a'+wanted.index);
@@ -2002,6 +2018,7 @@ async function runNativeHlsReadiness(video,player,episode){
     if(!sourceOwner.current()||!nativeHlsCurrent(player,episode,execution,intent)) return;
     player.segSrc=media.url;player.segTimes=parseSegTimes(media.text);player._segIdx=null;
     episode.native.audioRenditions=media.renditions;
+    episode.native.defaultAudio=media.defaultAudio;
     player.selectedAudioRendition=null;
     clearStreamFailure();episode.latestFailure=null;
     player.controlRenderOverride=null;
@@ -2030,8 +2047,11 @@ async function runNativeHlsReadiness(video,player,episode){
     if(nativeHlsRecoverAuthority(video,player,episode,execution,sourceOwner)) return;
     if(!sourceOwner.current()||!nativeHlsCurrent(player,episode,execution,intent)) return;
     if(nativeHlsAuthenticationRefused(player,episode,sourceOwner)) return;
-    if(error.terminal){episode.latestFailure=episode.latestFailure||{message:error.message};
-      exhaustHlsStartup(player,'native_readiness_refused',sourceOwner);}
+    if(error.terminal){
+      if(await retryNativeMuxed(player,episode,sourceOwner)) return;
+      episode.latestFailure=episode.latestFailure||{message:error.message};
+      exhaustHlsStartup(player,'native_readiness_refused',sourceOwner);
+    }
     else if(!error.cancelled) armNativeHlsReadiness(video,player,episode);
   }finally{
     episode.native.busy=false;
@@ -2041,6 +2061,15 @@ async function runNativeHlsReadiness(video,player,episode){
       &&hlsStartupCurrent(player,episode)&&(player.controlIntentGeneration||0)!==intent)
       armNativeHlsReadiness(video,player,episode);
   }
+}
+async function retryNativeMuxed(player,episode,owner){
+  if(!episode.native.hasSeparateAudio||player.nativeMuxedStartupRetried||!owner.current()
+    ||typeof requestPlaybackMediaChange!=='function') return false;
+  player.nativeMuxedStartupRetried=true;
+  const copyHls=player.method!=='transcode'&&!!player.copyHls;
+  if(!copyHls&&player.method!=='transcode') return false;
+  return await requestPlaybackMediaChange(player,{method:player.method,copyHls,splitAudio:false,
+    reason:'native_muxed_startup'});
 }
 async function classifyNativeHlsError(video,player,code,message,sourceOwner=null){
   const episode=player&&player.hlsStartup;
@@ -2083,6 +2112,8 @@ async function classifyNativeHlsError(video,player,code,message,sourceOwner=null
       runNativeHlsReadiness(video,player,episode).catch(()=>{});
       return true;
     }
+    if(await retryNativeMuxed(player,episode,owner)) return true;
+    if(!current()) return true;
     if(player.triedFallback) return exhaustHlsStartup(player,'fallback_spent',owner);
     if(!qualityCatalogSelectionCurrent(player)||!Array.isArray(player.qualityCandidates)){
       episode.latestFailure={message:'The compatible route could not be verified for this selection.'};
@@ -2109,8 +2140,11 @@ async function classifyNativeHlsError(video,player,code,message,sourceOwner=null
       return true;
     }
     if(nativeHlsAuthenticationRefused(player,episode,owner)) return true;
-    if(error.terminal){episode.latestFailure=episode.latestFailure||{message:error.message};
-      exhaustHlsStartup(player,'native_readiness_refused',owner);}
+    if(error.terminal){
+      if(await retryNativeMuxed(player,episode,owner)) return true;
+      episode.latestFailure=episode.latestFailure||{message:error.message};
+      exhaustHlsStartup(player,'native_readiness_refused',owner);
+    }
     else if(!error.cancelled){
       episode.native.execution++;episode.native.attached=false;
       abortHlsStartupLoaders(episode,true);

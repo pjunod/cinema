@@ -2,6 +2,16 @@ import XCTest
 @testable import plurx
 
 final class SplitHLSAudioTests: XCTestCase {
+    func testOnlyTheCurrentServerAndSessionCanSupplyAudibleOptions() throws {
+        let origin = "https://media.test"
+        let own = try XCTUnwrap(URL(string: origin + ":443/api/v1/hls/session/master.m3u8?native=1"))
+        XCTAssertTrue(SplitHLSAudio.ownsMaster(own, origin: origin, session: "session"))
+        XCTAssertFalse(SplitHLSAudio.ownsMaster(own, origin: "https://other.test", session: "session"))
+        XCTAssertFalse(SplitHLSAudio.ownsMaster(own, origin: origin, session: "other"))
+        let traversal = try XCTUnwrap(URL(string: origin + "/other/session/master.m3u8"))
+        XCTAssertFalse(SplitHLSAudio.ownsMaster(traversal, origin: origin, session: "session"))
+    }
+
     func testIdentifiesOnlyUnambiguousAudioFromTheVideoGroup() {
         let video = String(repeating: "a", count: 64)
         let audio = String(repeating: "b", count: 64)

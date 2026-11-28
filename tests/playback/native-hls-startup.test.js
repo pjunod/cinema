@@ -76,8 +76,8 @@ test('native readiness waits for the audio child and confirms selections on the 
  const h=harness();await flush();
  const audioEvents=new Map();
  h.video.audioTracks=[
-  {id:'a0',label:'Original',enabled:true},
-  {id:'a1',label:'Commentary',enabled:false},
+  {id:'a0',label:'Original',enabled:false},
+  {id:'a1',label:'Commentary',enabled:true},
  ];
  h.video.audioTracks.addEventListener=(name,listener)=>audioEvents.set(name,listener);
  h.video.audioTracks.removeEventListener=(name,listener)=>{
@@ -92,15 +92,38 @@ test('native readiness waits for the audio child and confirms selections on the 
  assert.match(h.requests.at(-1).url,/audio\/default\/index\.m3u8\?token=fixture$/);
  release(h.response(media));await flush();await h.metadata();
  assert.equal(h.sources.length,1);assert.match(h.sources[0],/master\.m3u8/);
+ assert.equal(h.video.audioTracks[0].enabled,true,'server default is pinned even when the browser chose an alternate');
+ assert.equal(h.player.selectedAudioRendition,null);
+ audioEvents.get('change')();
  assert.equal(h.player.selectedAudioRendition,'a0');
  assert.equal(h.ctx.selectNativeAudio(h.video,h.player,1),true);
  assert.equal(h.player.curAudio,0,'requested track is not confirmed yet');
  audioEvents.get('change')();
  assert.equal(h.player.curAudio,1);assert.equal(h.player.selectedAudioRendition,'a1');
+ assert.equal(h.player.mediaAttachment.audioOrdinal,1);
  const stale=audioEvents.get('change');
+ h.player.hlsStartup.state='presenting';
  h.stop();
+ assert.equal(audioEvents.size,0);
+ h.player.mediaAttachment={};
  h.video.audioTracks[0].enabled=true;h.video.audioTracks[1].enabled=false;stale();
  assert.equal(h.player.curAudio,1,'a retired attachment cannot confirm audio');
+});
+test('native split startup refusal retries muxed once with the existing recipe',async()=>{
+ const h=harness();await flush();
+ const changes=[];
+ h.player.copyHls=true;
+ h.ctx.requestPlaybackMediaChange=async(_player,change)=>{changes.push(change);return true;};
+ const invalid='#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,AUDIO="audio"\nvideo/main/index.m3u8\n';
+ h.answers.push(h.response(invalid));h.advance(1000);await flush();
+ assert.equal(h.sources.length,0);
+ assert.equal(changes.length,1);
+ assert.equal(changes[0].splitAudio,false);
+ assert.equal(changes[0].method,'remux');
+ assert.equal(changes[0].copyHls,true);
+ h.answers.push(h.response(invalid));h.retry();await flush();
+ assert.equal(changes.length,1);
+ h.stop();
 });
 function processedMoviePlaylist(entries=5915){
  return '#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MAP:URI="init.mp4"\n'+

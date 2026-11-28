@@ -2388,6 +2388,7 @@ class Controller internal constructor(
         val epoch: Long,
         val session: String,
         val player: ExoPlayer,
+        val authorization: Long,
         val sequence: Long,
         val recipe: PlaybackRecipeOwnership.Claim,
         val option: SplitHlsAudio.Option,
@@ -2410,6 +2411,7 @@ class Controller internal constructor(
         confirmedSplitAudio = observed?.sourceIndex
         val pending = pendingSplitAudio ?: return
         if (player !== pending.player || sessionId != pending.session || mediaMutationEpoch != pending.epoch ||
+            pending.authorization != Session.playbackAuthorization().generation ||
             !playbackIntent.isCurrent(pending.sequence) || currentRecipe() != pending.recipe
         ) {
             pendingSplitAudio = null
@@ -2442,8 +2444,11 @@ class Controller internal constructor(
         sampleTargetPresentationDeadline()
         val publicationEpoch = mediaMutationEpoch
         val incumbent = player
+        val authorization = Session.playbackAuthorization().generation
         scope.launch {
-            if (!publishIntent(pending, publicationEpoch = publicationEpoch)) return@launch
+            if (!publishIntent(pending, publicationEpoch = publicationEpoch) ||
+                authorization != Session.playbackAuthorization().generation
+            ) return@launch
             val sameMedia = attached?.recipe?.copy(audioIndex = index)?.hasSameMedia(recipe.recipe) == true
             val alternate = if (!inheritedSeek && sameMedia && attachedSession != null &&
                 sessionId == attachedSession && player === incumbent && recipeOwnership.attached == attached
@@ -2452,7 +2457,7 @@ class Controller internal constructor(
                 restartAt(position, "audio")
                 return@launch
             }
-            pendingSplitAudio = PendingSplitAudio(publicationEpoch, attachedSession, incumbent,
+            pendingSplitAudio = PendingSplitAudio(publicationEpoch, attachedSession, incumbent, authorization,
                 pending.sequence, recipe, alternate)
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .setOverrideForType(TrackSelectionOverride(alternate.group, alternate.index))
@@ -3226,42 +3231,37 @@ class Controller internal constructor(
             .build()
     }
 
-    /**
-     * Pin the audio track the server said would play.
-     *
-     * Only direct play needs this, and only direct play may have it: the raw
-     * file carries every stream, so ExoPlayer picks one — and it picks with
-     * `setPreferredAudioLanguage`, a client-side language preference that can
-     * disagree with the server's `select_tracks` (the dual-audio anime rule
-     * selects Japanese original audio against an English preference). Leaving
-     * that unpinned would make the detail screen's default marker, and any
-     * pre-play choice the server answered with a `direct` verdict, describe a
-     * track other than the one on the speakers.
-     *
-     * Every other transport already delivers exactly one audio stream — the
-     * one the plan's `?audio=` or the session body's `audio` selected — so an
-     * override there would index into a list of one.
-     */
+    /** Pin the resolved soundtrack using the track identity the attached transport exposes. */
     private fun applyAudioSelection() {
         if (!audioSelectionArmed) return
         val index = selectionRecipe?.recipe?.audioIndex
-        if (index == null || !directTransport) {
-            audioSelectionArmed = false
-            return
+        val target = if (directTransport) {
+            if (index == null) {
+                audioSelectionArmed = false
+                return
+            }
+            val ordinal = embeddedAudioTrackIndex(index, plan.audio, embeddedLanguages(C.TRACK_TYPE_AUDIO))
+            ordinal?.let { trackAt(C.TRACK_TYPE_AUDIO, it) } ?: return
+        } else {
+            if (player.currentManifest == null && player.currentTracks.isEmpty) return
+            val options = splitAudioOptions()
+            val option = options.singleOrNull { it.sourceIndex == index }
+                ?: options.singleOrNull { it.default }
+            if (option == null) {
+                audioSelectionArmed = false
+                return
+            }
+            option.group to option.index
         }
-        val ordinal = embeddedAudioTrackIndex(index, plan.audio, embeddedLanguages(C.TRACK_TYPE_AUDIO))
-        // Nothing to select yet — the media is still being prepared, or the
-        // player never published this track. Stay armed and let the next
-        // onTracksChanged retry; ExoPlayer's own pick is the honest fallback
-        // for a track that is genuinely not there.
-        val target = ordinal?.let { trackAt(C.TRACK_TYPE_AUDIO, it) } ?: return
         audioSelectionArmed = !player.currentTracks.groups.any {
             it.mediaTrackGroup == target.first && it.isTrackSelected(target.second)
         }
-        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setOverrideForType(TrackSelectionOverride(target.first, target.second))
-            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
-            .build()
+        if (audioSelectionArmed) {
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setOverrideForType(TrackSelectionOverride(target.first, target.second))
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                .build()
+        }
     }
 
     /** The player's tracks of one type, flattened in publication order. */

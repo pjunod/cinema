@@ -3093,14 +3093,24 @@ final class PlayerController: ObservableObject {
         guard index != selectedAudio || pendingSplitAudio != nil else { return }
         let actionEpoch = beginViewerAction()
         guard index != selectedAudio else { return }
+        let credentials = Session.shared.playbackAuthorization
         if let sessionId, let item = player.currentItem, let path = activeMediaPath,
+           let url = Session.shared.url(path),
+           SplitHLSAudio.ownsMaster(url, origin: credentials.origin, session: sessionId),
            seekState.pendingMs == nil, !isChangingStream, !recipeRevision.needsReopen {
+            let isOwner = {
+                !Task.isCancelled && self.started && self.player.currentItem === item
+                    && self.sessionId == sessionId && self.activeMediaPath == path
+                    && self.viewerActionEpoch == actionEpoch
+                    && Session.shared.playbackAuthorization.generation == credentials.generation
+            }
             pendingSplitAudio = index
             Task {
-                let selected = await selectSplitHLSAudio(index, in: item, path: path,
-                                                         session: sessionId, epoch: actionEpoch)
-                guard actionEpoch == viewerActionEpoch, started, pendingSplitAudio == index else { return }
+                let selected = await selectSplitHLSAudio(index, in: item, url: url,
+                                                         token: credentials.token, isOwner: isOwner)
+                guard actionEpoch == viewerActionEpoch, pendingSplitAudio == index else { return }
                 pendingSplitAudio = nil
+                guard isOwner() else { return }
                 if selected {
                     selectedAudio = index
                     audioOverride = index
@@ -3145,14 +3155,11 @@ final class PlayerController: ObservableObject {
         }
     }
 
-    private func selectSplitHLSAudio(_ index: Int, in item: AVPlayerItem,
-                                     path: String, session: String, epoch: Int) async -> Bool {
-        guard let url = Session.shared.url(path), url.pathComponents.contains(session),
-              url.lastPathComponent == "master.m3u8",
-              Session.canonicalOrigin(url.absoluteString) == Session.shared.canonicalPrimaryOrigin else { return false }
-        let credentials = Session.shared.credentials
+    private func selectSplitHLSAudio(_ index: Int, in item: AVPlayerItem, url: URL,
+                                     token: String?, isOwner: () -> Bool) async -> Bool {
+        guard isOwner() else { return false }
         var request = URLRequest(url: url, timeoutInterval: 2)
-        Session.shared.authorize(&request)
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForResource = 2
         let loader = URLSession(configuration: configuration, delegate: AutoVODPlaylistRedirectRefusal(), delegateQueue: nil)
@@ -3171,11 +3178,7 @@ final class PlayerController: ObservableObject {
                   let group = try await item.asset.loadMediaSelectionGroup(for: .audible)
             else { return false }
             let matches = group.options.filter { $0.displayName == name }
-            guard matches.count == 1, let option = matches.first,
-                  !Task.isCancelled, started, player.currentItem === item,
-                  sessionId == session, activeMediaPath == path, epoch == viewerActionEpoch,
-                  Session.shared.credentials.origin == credentials.origin,
-                  Session.shared.credentials.token == credentials.token else { return false }
+            guard matches.count == 1, let option = matches.first, isOwner() else { return false }
             item.select(option, in: group)
             return item.currentMediaSelection.selectedMediaOption(in: group) == option
         } catch {

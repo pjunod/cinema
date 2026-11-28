@@ -88,6 +88,7 @@ function playbackChangeRecipeKey(p,targetSec,change){
     c.copyHls===undefined?!!p.copyHls:!!c.copyHls,
     c.height==null?null:c.height,
     c.candidateId||null,
+    c.splitAudio??null,
     !!c.forceReopen,
     c.previousSessionId||null,
     c.recoveryCause||null,

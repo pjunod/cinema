@@ -43,9 +43,16 @@ HLS_ATTRIBUTE = re.compile(r'(?:^|,)([A-Z0-9-]+)=("[^"]*"|[^,]+)')
 SPLIT_CHILD = re.compile(r'([a-z]+)/[0-9a-f]{64}/index\.m3u8')
 
 
-def split_audio_names(master):
+@dataclass(frozen=True)
+class SplitAudioGroup:
+    names: dict[str, int]
+    default: int
+
+
+def split_audio_group(master):
     """Associate only unique, referenced rendition names with source IDs."""
     audio = {}
+    defaults = []
     variants = []
     for line in master.splitlines():
         if line.startswith("#EXT-X-MEDIA:"):
@@ -56,19 +63,24 @@ def split_audio_names(master):
             stable = re.fullmatch(r"a(0|[1-9][0-9]{0,3})", attrs.get("STABLE-RENDITION-ID", ""))
             name, group = attrs.get("NAME"), attrs.get("GROUP-ID")
             if not uri or uri[1] != "audio" or not stable or not name or not group or name in audio:
-                return {}
-            audio[name] = (int(stable[1]), group)
+                return None
+            index = int(stable[1])
+            audio[name] = (index, group)
+            if attrs.get("DEFAULT") == "YES":
+                defaults.append(index)
         elif line.startswith("#EXT-X-STREAM-INF:"):
             attrs = {key: value.strip('"') for key, value in HLS_ATTRIBUTE.findall(line.partition(":")[2])}
             variants.append(attrs.get("AUDIO"))
         elif line and not line.startswith("#") and variants:
             uri = SPLIT_CHILD.fullmatch(line)
             if not uri or uri[1] != "video":
-                return {}
+                return None
     groups = {group for _, group in audio.values()}
     if len(groups) != 1 or set(variants) != groups or len({idx for idx, _ in audio.values()}) != len(audio):
-        return {}
-    return {name: idx for name, (idx, _) in audio.items()}
+        return None
+    if len(defaults) != 1:
+        return None
+    return SplitAudioGroup({name: idx for name, (idx, _) in audio.items()}, defaults[0])
 
 
 
@@ -174,7 +186,8 @@ class Playback:
         self.retryable = False
         self.pending_quality = None
         self.split_audio_probe = None
-        self.split_audio_names = {}
+        self.split_audio_group = None
+        self.split_audio_pin_requested = False
         self.observed_split_audio = None
         self.deferred_film_seek = None
         self._seed_context = handoff.get("cinema_context")
@@ -332,16 +345,15 @@ class Playback:
     def load(self, url, start_local_s):
         self.reset_renderer_facts()
         self.split_audio_probe = None
-        self.split_audio_names = {}
+        self.split_audio_group = None
+        self.split_audio_pin_requested = False
         self.observed_split_audio = None
         self.mpv.set("user-data/cinema-audio-rendition", "")
         if self.session is not None:
             sid = self.session["session_id"]
             path = self.http.path_of(url)
             if urllib.parse.urlsplit(path).path == f"/api/v1/hls/{sid}/master.m3u8":
-                result = Future()
-                self.split_audio_probe = (url, sid, result)
-                Thread(target=self._probe_split_audio, args=(path, result), daemon=True).start()
+                self.start_split_audio_probe(url, sid, path)
         if (self.mode == "direct" or self.sidecar) and not self._auth_header:
             # Over the private IPC socket, never argv: `ps` shows argv to everyone.
             self.mpv.set("http-header-fields", [f"Authorization: Bearer {self.http.token}"])
@@ -436,28 +448,51 @@ class Playback:
                 indices = [t.get("index") for t in self.decision.get("audio") or [] if isinstance(t, dict)]
                 if self.audio in indices:
                     self.mpv.set("aid", indices.index(self.audio) + 1)
+            self.observe_split_audio()
         except MpvError as error:
             self.log(f"track selection failed: {error}")
 
+    def start_split_audio_probe(self, url, sid, path, retries=1):
+        result = Future()
+        self.split_audio_probe = (url, sid, path, retries, result)
+        Thread(target=self._probe_split_audio, args=(path, result), daemon=True).start()
+
     def _probe_split_audio(self, path, result):
-        result.set_result(split_audio_names(self.http.read_hls_master(path)))
+        result.set_result(self.http.read_hls_master(path))
 
     def observe_split_audio(self):
-        if self.split_audio_probe is None or self.session is None or self.loading:
+        if self.split_audio_probe is None or self.session is None:
             return
-        url, sid, result = self.split_audio_probe
+        url, sid, path, retries, result = self.split_audio_probe
         if not result.done() or self.session["session_id"] != sid or self.mpv.get("path") != url:
             return
-        if not self.split_audio_names:
-            self.split_audio_names = result.result()
-            if not self.split_audio_names:
+        if self.split_audio_group is None:
+            master = result.result()
+            if master is None and retries > 0:
+                self.start_split_audio_probe(url, sid, path, retries - 1)
+                return
+            self.split_audio_group = split_audio_group(master or "")
+            if self.split_audio_group is None:
                 self.split_audio_probe = None
                 return
-        tracks = [track for track in self.mpv.get("track-list", []) if track.get("type") == "audio"]
+        group = self.split_audio_group
+        tracks = [track for track in (self.mpv.get("track-list") or []) if track.get("type") == "audio"]
+        if self.observed_split_audio is None:
+            requested = self.requested_audio
+            wanted = requested if requested in group.names.values() else group.default
+            choices = [track for track in tracks if group.names.get(track.get("title")) == wanted]
+            if len(choices) != 1:
+                return
+            choice = choices[0]
+            if not choice.get("selected"):
+                if not self.split_audio_pin_requested and isinstance(choice.get("id"), int):
+                    self.mpv.set("aid", choice["id"])
+                    self.split_audio_pin_requested = True
+                return
         selected = [track.get("title") for track in tracks if track.get("selected")]
         if len(selected) != 1 or sum(track.get("title") == selected[0] for track in tracks) != 1:
             return
-        source = self.split_audio_names.get(selected[0])
+        source = group.names.get(selected[0])
         if source is None or source == self.observed_split_audio:
             return
         if self.observed_split_audio is not None:

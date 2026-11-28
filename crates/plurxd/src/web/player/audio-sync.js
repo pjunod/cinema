@@ -284,6 +284,7 @@ function splitAudioSwitched(me,hls,trackId){
   if(typeof translationRetire==="function")translationRetire("audio changed");
   me.curAudio=want.index;
   const track=me.audio[want.index];
+  if(me.mediaAttachment&&track) me.mediaAttachment.audioOrdinal=track.index;
   rememberPlaybackSelection("audio", track?track.index:want.index);
   renderPlayerInfo();
   toast("Audio: "+(langName(track&&track.language)||("Track "+(want.index+1))));

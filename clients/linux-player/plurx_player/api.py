@@ -76,7 +76,7 @@ class Http:
                 raw = response.read(65_537)
                 return raw.decode("utf-8") if response.status == 200 and len(raw) <= 65_536 else ""
         except (urllib.error.URLError, OSError, ValueError):
-            return ""
+            return None
 
     def request(self, method, path, body=None, auth=True, timeout=None):
         """Return ``(status, json_or_none)``; raise ApiError only when nothing answered."""
