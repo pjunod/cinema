@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import subprocess
 
+from validation import mirror_guard
 from validation.main_preflight_adoption import (
     UNADOPTABLE, api_context, bind_event, commit_available, git, journal_key,
     reason, terminal_status,
@@ -61,8 +62,8 @@ def job_block(workflow, name):
 
 
 def producer(commit, current):
-    old = git('show', commit + ':' + WORKFLOW)
-    now = git('show', current + ':' + WORKFLOW)
+    old = mirror_guard.strip(git('show', commit + ':' + WORKFLOW))
+    now = mirror_guard.strip(git('show', current + ':' + WORKFLOW))
     block = job_block(old, 'web_compile')
     digest = hashlib.sha256(block.encode()).hexdigest()
     require(digest in (LEGACY_JOB_SHA256, WRAPPED_JOB_SHA256), 'Unknown web command producer')

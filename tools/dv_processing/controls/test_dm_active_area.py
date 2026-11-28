@@ -16,6 +16,7 @@ SOURCES = (
     "tools/dv_processing/dv_dm.h",
     "tools/dv_processing/dm_closed_form.h",
     "tools/dv_processing/dm_cm29_gamut_tables.h",
+    "tools/dv_processing/dm_pq_tables.h",
 )
 
 

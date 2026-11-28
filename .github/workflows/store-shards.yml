@@ -30,6 +30,7 @@ on:
 
 jobs:
   shard:
+    if: github.server_url != 'https://github.com'
     name: replicated Store shard ${{ matrix.shard_index }}
     # Every shard selects the same label set, so a shard cannot be pinned to a
     # runner class of its own — which is precisely how shard 1 came to ask for
@@ -147,7 +148,7 @@ jobs:
   aggregate:
     name: replicated Store shard union
     needs: shard
-    if: always()
+    if: github.server_url != 'https://github.com' && (always())
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d

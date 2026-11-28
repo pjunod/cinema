@@ -4,13 +4,14 @@ GLSL has no log1p/expm1. Extract the legacy scalar functions (pq_*) from
 dv_dm.h and map only GLSL builtins/literals to float C; this catches
 cancellation returning when the shader source changes.
 
-The precise CM4 helpers (dfi_eq_finish_eotf, eqpq_oetf3 and the r20q_*/eq*
-split-float functions under them) are three channels wide, so their GLSL is
-compiled unchanged as C++ against a small vec3 shim
-(controls/pq_helper_port.py). With a fused fma and no reassociation they must
-return the correctly rounded float32 of the exact ST 2084 functions on every
-sample; with fma as a*b+c, or compiled as if `precise` were absent, they must
-not, which is what makes the same check meaningful on a GPU.
+The CM4 transfer helpers (dfi_eq_finish_eotf, eqpq_oetf3 and the table-driven
+pqt_* functions under them) read dm_pq_tables.h, so their GLSL is compiled
+unchanged as C++ against a small shim (controls/pq_helper_port.py). Fused or
+with fma as a*b+c they must stay within 1 ULP of the correctly rounded float32
+of the exact ST 2084 functions on every sample (every float32 input:
+controls/pq_helper_exhaustive.py); the two fma modes must differ, and compiled
+as if `precise` were absent they must move further, which is what makes the
+same comparison meaningful on a GPU.
 
 Actual shader compilation and driver behaviour remain the job of
 controls/run_dm_parity.py and controls/run_pq_helper_exact.py.
@@ -158,7 +159,7 @@ class ShaderPQPrecision(unittest.TestCase):
             self.assertAlmostEqual(actual / expected, 1, delta=1e-4)
 
 
-class PreciseHelperExactness(unittest.TestCase):
+class TableHelperBounds(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scratch = tempfile.TemporaryDirectory()
@@ -173,11 +174,12 @@ class PreciseHelperExactness(unittest.TestCase):
         xs, want = self.samples[helper]
         return pq_helper_port.compare(xs, self.ports[mode].run(helper, xs), want)
 
-    def test_precise_helpers_are_correctly_rounded(self):
-        for helper in pq_helper_port.HELPERS:
-            with self.subTest(helper=helper):
-                self.assertGreater(len(self.samples[helper][0]), 9000)
-                self.assertEqual(self.wrong("fused", helper), (0, 0, None))
+    def test_table_helpers_are_within_one_ulp(self):
+        for mode in ("fused", "unfused-fma"):
+            for helper in pq_helper_port.HELPERS:
+                with self.subTest(mode=mode, helper=helper):
+                    self.assertGreater(len(self.samples[helper][0]), 9000)
+                    self.assertLessEqual(self.wrong(mode, helper)[1], 1)
 
     def test_loading_the_ports_leaves_subnormals_in_this_process(self):
         # setUpClass has loaded every mode, "no-precise" (-ffast-math) included. A port linked
@@ -188,21 +190,97 @@ class PreciseHelperExactness(unittest.TestCase):
         self.assertEqual(smallest_normal.value / 2, 2.0 ** -1023)
         self.assertGreater(ctypes.c_double(smallest_normal.value / 2).value * 1.0, 0.0)
 
-    def test_precise_helpers_need_a_fused_fma(self):
-        # The product's error term is fma(a,b,-a*b): unfused it is zero and the low words are lost.
+    def differ(self, mode, other, helper):
+        xs = self.samples[helper][0]
+        return pq_helper_port.compare(xs, self.ports[mode].run(helper, xs), self.ports[other].run(helper, xs))[0]
+
+    def test_unfused_fma_is_visible(self):
+        # c1_hi tau is split exactly by fma(c1_hi, tau, -c1_hi*tau); unfused its low word is lost,
+        # which stays within 1 ULP but changes results, so a GPU's fusion can be told from them.
         for helper in pq_helper_port.HELPERS:
             with self.subTest(helper=helper):
-                count, worst, _ = self.wrong("unfused-fma", helper)
-                self.assertGreater(count, len(self.samples[helper][0]) // 2)
-                self.assertGreater(worst, 8)
+                self.assertGreater(self.differ("fused", "unfused-fma", helper), 20)
 
-    def test_precise_helpers_need_precise(self):
+    def test_table_helpers_need_precise(self):
         # Free to reassociate, a compiler cancels the error-free sums: (a+b)-a becomes b.
         for helper in pq_helper_port.HELPERS:
             with self.subTest(helper=helper):
-                self.assertGreater(self.wrong("no-precise", helper)[0], len(self.samples[helper][0]) // 2)
+                self.assertGreater(self.differ("fused", "no-precise", helper), len(self.samples[helper][0]) // 8)
+                self.assertGreater(self.wrong("no-precise", helper)[1], 1)
 
-    def test_precise_helper_edges(self):
+    def test_table_generator_reproduces_the_table_layout(self):
+        # The fitted words may differ in their low bits on another libm (a regenerated header
+        # must pass pq_helper_exhaustive.py again); the layout the shader indexes may not.
+        compiler = shutil.which("cc")
+        if not compiler:
+            raise RuntimeError("C compiler required for the PQ table generator")
+        controls = ROOT / "tools/dv_processing/controls"
+        work = Path(self.scratch.name)
+        subprocess.run([compiler, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-I", str(controls),
+                        str(controls / "pq_table_gen.c"), "-o", str(work / "pq_table_gen"), "-lm"], check=True)
+        subprocess.run([str(work / "pq_table_gen"), str(work / "tables.h")], check=True, capture_output=True)
+
+        def layout(text):
+            return (pq_helper_port.glsl_literals(text, "DM_PQT_GLSL"),
+                    re.search(r"(\d+) binades", text).group(1), re.search(r"DM_PQT_WIDTH (\d+)", text).group(1))
+
+        self.assertEqual(layout((work / "tables.h").read_text()), layout(pq_helper_port.TABLES.read_text()))
+
+    def test_double_reference_is_inside_the_bound_the_exhaustive_check_assumes(self):
+        # pq_helper_exhaustive.py decides each input from pq_reference.h unless it lies within
+        # PQR_BOUND (2^-36) of a rounding midpoint; that is sound only while the reference is
+        # that accurate. Keep a 16x margin: every sample, and the black, pole and white edges.
+        compiler = shutil.which("cc")
+        if not compiler:
+            raise RuntimeError("C compiler required for the PQ reference")
+        controls = ROOT / "tools/dv_processing/controls"
+        work = Path(self.scratch.name)
+        (work / "reference.c").write_text(
+            '#include "pq_reference.h"\n'
+            'double reference_eotf(double e) { return pqr_eotf(e); }\n'
+            'double reference_oetf(double y) { return pqr_oetf(y); }\n'
+            'double reference_bound(void) { return PQR_BOUND; }\n')
+        subprocess.run([compiler, "-std=c11", "-O2", "-fPIC", "-Wall", "-Wextra", "-Werror", "-I", str(controls),
+                        "-c", str(work / "reference.c"), "-o", str(work / "reference.o")], check=True)
+        subprocess.run([compiler, "-shared", str(work / "reference.o"), "-o", str(work / "reference.so"), "-lm"], check=True)
+        library = ctypes.CDLL(str(work / "reference.so"))
+        for name in ("reference_eotf", "reference_oetf", "reference_bound"):
+            getattr(library, name).restype = ctypes.c_double
+        library.reference_eotf.argtypes = library.reference_oetf.argtypes = [ctypes.c_double]
+        bound = library.reference_bound() / 16
+        value = pq_helper_port.value
+        from decimal import Decimal, getcontext
+        M1, M2, C1, C2, C3 = (pq_helper_port.M1, pq_helper_port.M2, pq_helper_port.C1,
+                              pq_helper_port.C2, pq_helper_port.C3)
+
+        def eotf(x):
+            getcontext().prec = 60
+            if not x > 0:
+                return None
+            p = Decimal(x) ** (1 / M2)
+            if p <= C1 or C2 - C3 * p <= 0:
+                return None
+            return 10000 * ((p - C1) / (C2 - C3 * p)) ** (1 / M1)
+
+        def oetf(y):
+            getcontext().prec = 60
+            p = (Decimal(y) / 10000) ** M1
+            return ((C1 + C2 * p) / (1 + C3 * p)) ** M2
+
+        edges = [value(w) for w in list(range(0x35443723, 0x35443723 + 4000, 13)) + list(range(0x3ffefbae - 4000, 0x3ffefbae, 11))]
+        for name, xs, exact, reference in (
+                ("eotf", self.samples["eotf"][0] + edges, eotf, library.reference_eotf),
+                ("oetf", [y for y in self.samples["oetf"][0] if 0 < y < 10000], oetf, library.reference_oetf)):
+            worst = 0
+            for x in xs:
+                want = exact(x)
+                if want is None or want == 0:
+                    continue
+                worst = max(worst, abs(Decimal(reference(x)) - want) / want)
+            with self.subTest(helper=name):
+                self.assertLess(worst, bound)
+
+    def test_table_helper_edges(self):
         port, bits = self.ports["fused"], pq_helper_port.bits
         inf = float("inf")
         # Black and below, the unit code, the pole of the extended EOTF and beyond.

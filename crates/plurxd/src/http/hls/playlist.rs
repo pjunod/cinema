@@ -210,7 +210,7 @@ pub(super) async fn master_playlist_response_local_before(
             .transcode
             .vod_file_for_owner(&owner)
             .ok_or_else(vod_resurrection_unavailable)?;
-        let bytes = continuous_master_with_subtitles(bytes, &file, query.subtitle)
+        let bytes = split_master_with_subtitles(bytes, &file, query.subtitle)
             .map_err(ApiError::Internal)?;
         return complete_buffered_response_before(
             state,
@@ -238,10 +238,23 @@ pub(super) async fn master_playlist_response_local_before(
     } else {
         None
     };
-    if let Some(ids) = native_split {
-        let bytes = native_split_master_text(&file, &context, &ids);
-        let bytes = continuous_master_with_subtitles(bytes, &file, query.subtitle)
-            .map_err(ApiError::Internal)?;
+    // The muxed copy keeps being written beside the split, so a split master
+    // the writer refuses (a fact it cannot prove) falls back to the muxed
+    // master rather than failing every later fetch of this session.
+    let native_split = native_split.and_then(|(ids, audio_index)| {
+        let presentation = native_split_presentation(&file, &context, &ids, audio_index);
+        split_master_with_subtitles(presentation, &file, query.subtitle)
+            .inspect_err(|error| {
+                tracing::warn!(
+                    target: "plurxd::http::hls",
+                    session = %crate::transcode::session_log_id(session),
+                    %error,
+                    "native split master refused; serving the muxed master"
+                );
+            })
+            .ok()
+    });
+    if let Some(bytes) = native_split {
         return complete_buffered_response_before(
             state,
             session,

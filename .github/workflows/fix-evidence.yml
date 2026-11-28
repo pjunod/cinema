@@ -10,6 +10,7 @@ on:
 
 jobs:
   revert-proof:
+    if: github.server_url != 'https://github.com'
     name: report whether retained Rust tests reject the base implementation
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:

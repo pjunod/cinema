@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   publish:
+    if: github.server_url != 'https://github.com'
     name: publish the ci image
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 60
@@ -94,6 +95,7 @@ jobs:
   # whole, on the image's own interpreter. A failure, an error, or a skip that
   # tests/ci-image-skips.toml does not carry with a reason fails the run.
   probe:
+    if: github.server_url != 'https://github.com'
     name: preflight suites on the published image, no unreviewed skip
     needs: publish
     runs-on: [self-hosted, Linux, X64, lab, general]

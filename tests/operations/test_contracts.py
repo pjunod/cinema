@@ -11,6 +11,8 @@ import tempfile
 import textwrap
 import tomllib
 import unittest
+
+from validation import mirror_guard
 from unittest import mock
 
 from validation import runner_fleet as runner_fleet_module
@@ -38,8 +40,15 @@ GITHUB_HOSTED_RUNNERS = frozenset(
 )
 
 
-def read(path: str) -> str:
+def read_raw(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def read(path: str) -> str:
+    # A CI workflow is read without its public-mirror gate: every contract here
+    # is about the recipe, and the gate is held by its own test below.
+    text = read_raw(path)
+    return mirror_guard.strip(text) if mirror_guard.is_ci_workflow(path) else text
 
 
 def make_dry_run_commands(target: str, *variables: str) -> list[str]:
@@ -67,8 +76,12 @@ def make_dry_run_commands(target: str, *variables: str) -> list[str]:
     return commands
 
 
-def workflow_job_blocks(path: str) -> dict[str, str]:
-    jobs = read(path).split("\njobs:\n", 1)[1]
+def raw_job_blocks(path: str) -> dict[str, str]:
+    return workflow_job_blocks(path, raw=True)
+
+
+def workflow_job_blocks(path: str, raw: bool = False) -> dict[str, str]:
+    jobs = (read_raw(path) if raw else read(path)).split("\njobs:\n", 1)[1]
     starts = list(re.finditer(r"(?m)^  ([a-zA-Z0-9_-]+):\n", jobs))
     return {
         match.group(1): jobs[match.start() : starts[index + 1].start()]
@@ -5592,6 +5605,54 @@ assert.equal(context.ACT_TIMER, null);
             if path.relative_to(ROOT).as_posix() in GITHUB_ONLY_WORKFLOWS:
                 continue  # GitHub-hosted by design; see the GitHub-only contract
             self.assertNotRegex(workflow, r"(?m)^ +runs-on: (?:ubuntu|macos)-")
+
+    def test_every_forgejo_job_is_skipped_on_the_public_github_mirror(self):
+        # The mirror is a verbatim push of every ref, so each file here also
+        # exists on github.com, where a workflow file can be edited by anyone
+        # whose pull request a maintainer approves. A guard inside a file is
+        # therefore only defence in depth: the boundary is that no self-hosted
+        # runner is registered to the mirror, which no test here can see. What
+        # this does hold is that a newly added or renamed Forgejo workflow does
+        # not arrive on GitHub already willing to start a job. Every job of
+        # every workflow that is not GitHub-only carries the exact negative
+        # gate in its own job-level `if`, and none can start from
+        # pull_request_target.
+        gate = "github.server_url != 'https://github.com'"
+        checked = 0
+        repository_gated = {".github/workflows/compile.yml", ".github/workflows/validation-marker-units.yml"}
+        for path in sorted(
+            p for pattern in ("*.yml", "*.yaml") for p in (ROOT / ".github/workflows").glob(pattern)
+        ):
+            relative = path.relative_to(ROOT).as_posix()
+            if relative in GITHUB_ONLY_WORKFLOWS or relative == ".github/workflows/media-runtime-public.yml":
+                continue
+            text = read_raw(relative)
+            self.assertNotIn("pull_request_target", text, relative)
+            for name, block in raw_job_blocks(relative).items():
+                with self.subTest(job=f"{relative}:{name}"):
+                    code = "\n".join(l for l in block.splitlines() if not l.lstrip().startswith("#"))
+                    header = re.split(r"(?m)^    steps:", code, maxsplit=1)[0]
+                    condition = re.search(r"(?ms)^    if:(.*?)(?=^    [a-z_-]+:|\Z)", header)
+                    self.assertIsNotNone(condition, f"{relative}:{name} has no job-level if")
+                    # The gate leads the condition and everything else is its
+                    # right operand: `gate`, `gate && (...)` or the same inside
+                    # `${{ }}`. `x || gate`, `!(gate)` and `gate || x` all start
+                    # the job on the mirror and are refused.
+                    flat = " ".join(condition.group(1).split())
+                    flat = re.sub(r"^>-? ", "", flat)
+                    if relative in repository_gated:
+                        self.assertTrue(
+                            flat.startswith("${{ github.repository == 'noirr/plurx' && "), relative)
+                    elif flat == gate + " && github.ref == 'refs/heads/main'":
+                        pass  # landing-check and mobile-channels: the original exact form
+                    else:
+                        self.assertRegex(
+                            flat,
+                            r"^(?:\$\{\{ )?" + re.escape(gate) + r"(?: && \(.*\))?(?: \}\})?$",
+                            f"{relative}:{name} is not gated off on the mirror",
+                        )
+                    checked += 1
+        self.assertGreater(checked, 80)
 
     def test_github_only_workflows_never_reach_the_fleet(self):
         # Forgejo runs every file in .github/workflows, and the GitHub mirror

@@ -29,6 +29,7 @@ import urllib.request
 import zipfile
 import zlib
 
+from validation import mirror_guard
 from validation.apple_simulator_runtime import runtime_identifier
 from validation.main_preflight_adoption import (
     UNADOPTABLE, api_context, bind_event, commit_available, git, input_digest,
@@ -111,9 +112,11 @@ BUILD_SPECS = {
     # P62 S1 adds only `node --test tests/playback/server-metrics.test.js`
     # to the web-unit-check recipe (a Node playback-lab test); no native
     # recipe changes.
-    # plurx#1979/#1988 change only docker-up (scripts/shared-image pull before
-    # the budget proof, --no-build for a shared image, push after a build) and
-    # its comment; no native recipe changes.
+    # plurx#1979 changes only the docker-up deploy recipe (fleet-image
+    # pull/push around `docker compose up`) and its comment; no native recipe
+    # changes.
+    # plurx#1988 renames that helper to scripts/shared-image and rewords the
+    # docker-up comment; no native recipe changes.
     'Makefile': 'd79b9aebf5a9a9bc4d615fec1f9935d77b68ae5e9c6d26ba3fe94842a9d8d389',
     # Reviewed raw project spec with derived build numbers: the placeholder
     # CURRENT_PROJECT_VERSION "1", user-script sandboxing off on the two app
@@ -123,8 +126,8 @@ BUILD_SPECS = {
     # spec closure through APPLE_PROJECT_SHAPE; actual Git blobs still bind
     # fingerprints and case compatibility. Resource, script, or flag changes
     # require a newly reviewed boundary, not counter normalization.
-    # release: v0.9.2 changes only MARKETING_VERSION "0.9.1" -> "0.9.2".
-    'clients/apple/project.yml': 'f20d8ed75aa34011197a65bd9fa063c53440aee5eed69166b2ac1e914e33e33d',
+    # release: v0.9.3 changes only MARKETING_VERSION "0.9.2" -> "0.9.3".
+    'clients/apple/project.yml': '3172ecb5cec720bd997ce764ff39a3e36a25590f22982b5d643aeade0d1f82c2',
     'validation/apple_simulator_runtime.py': '76b4169a6c3dab2dbf32c28ee5f765f0c0b09a24ca9d83abce5cfa2e7ec95a32',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
@@ -152,8 +155,8 @@ def native_block(workflow):
 
 
 def producer(commit, current):
-    old = native_block(git('show', commit + ':' + WORKFLOW))
-    now = native_block(git('show', current + ':' + WORKFLOW))
+    old = native_block(mirror_guard.strip(git('show', commit + ':' + WORKFLOW)))
+    now = native_block(mirror_guard.strip(git('show', current + ':' + WORKFLOW)))
     require(hashlib.sha256(old.encode()).hexdigest() in (LEGACY_JOB_SHA256, CASE_LEGACY_JOB_SHA256,
                                                          RETENTION90_JOB_SHA256) or old == now,
             'Unknown native workflow producer')
@@ -164,7 +167,7 @@ def producer(commit, current):
 # The reviewed input closure is unchanged by the generated positive integer
 # build counter. Actual input fingerprints and case compatibility still use
 # complete Git blobs, so this does not transfer passes between build numbers.
-APPLE_PROJECT_SHAPE = "9ef3285ec7f9ce17eafad6719c7c53f0de0f6a090b7418f9174f9ff5ec425df0"
+APPLE_PROJECT_SHAPE = "ff637429449139680dc13f70d975c1e57717e4bda78c7b7725824f3138b17524"
 APPLE_BUILD_COUNTER = re.compile(rb'(?m)^(    CURRENT_PROJECT_VERSION: ")[1-9][0-9]*(")$')
 
 
