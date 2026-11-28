@@ -2501,6 +2501,7 @@ async fn staging_route_with_recovery_on(
     let incarnation_id = uuid::Uuid::new_v4().to_string();
     let predecessor_request = crate::transcode::SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,

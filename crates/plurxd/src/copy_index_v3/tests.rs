@@ -244,6 +244,14 @@ impl Fixture {
         &self,
         mode: ResolveMode,
     ) -> Result<Option<ResolvedCopyIndex>, String> {
+        self.resolve_exact_with_mode(mode, None).await
+    }
+
+    async fn resolve_exact_with_mode(
+        &self,
+        mode: ResolveMode,
+        expected_key: Option<&str>,
+    ) -> Result<Option<ResolvedCopyIndex>, String> {
         resolve(
             &self.store,
             None,
@@ -255,6 +263,7 @@ impl Fixture {
             self.video,
             Some(&self.defects),
             mode,
+            expected_key,
         )
         .await
         .map(|resolution| resolution.index)
@@ -357,6 +366,19 @@ async fn the_origin_plans_from_its_exact_head_and_local_blob() {
     );
     fixture.install(&artifact, &blob).await;
     let resolved = fixture.resolve().await.expect("the published index");
+    let exact = fixture
+        .resolve_exact_with_mode(ResolveMode::Foreground, Some(&resolved.rendition_cache_key))
+        .await
+        .expect("exact lookup")
+        .expect("the issued index is still readable");
+    assert_eq!(exact.rendition_cache_key, resolved.rendition_cache_key);
+    let missing = format!("copy-index-v3:{}", "a".repeat(64));
+    assert!(fixture
+        .resolve_exact_with_mode(ResolveMode::Foreground, Some(&missing))
+        .await
+        .expect("unknown contract lookup")
+        .is_none());
+
     assert_eq!(resolved.index.rows, rows());
     assert_eq!(resolved.object_version, fixture.object_version);
     assert_eq!(

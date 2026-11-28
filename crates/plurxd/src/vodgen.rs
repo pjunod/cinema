@@ -181,6 +181,7 @@ pub struct Generation {
     /// Encoded AAC begins before video so its transform/overlap state is
     /// warm at the cut. Its origin is a film-global 1024-sample boundary.
     pub encoded_audio_anchor: Option<u64>,
+    pub source_audio: Option<plurx_core::transcode::VodSourceAudio>,
     /// Frozen output cadence; copy generations have no encoded grid.
     pub encoded_frame_ticks: Option<u32>,
     /// Explicit reconstructed video phase on the encoder's AAC-preroll
@@ -477,16 +478,19 @@ impl<S: Sink> GenerationRun<'_, S> {
                         .iter()
                         .all(|entry| entry.kind == PlanEntryKind::AudioTail)
                 {
-                    if self.generation.encoded_audio_anchor.is_none() {
+                    if self.generation.encoded_audio_anchor.is_none()
+                        && self.generation.source_audio.is_none()
+                    {
                         return Err(landing_failed(
-                            "shared AAC generation has no film-clock anchor".into(),
+                            "soundtrack generation has no film-clock anchor".into(),
                         ));
                     }
                     self.audio_segmenter = Some(
-                        plurx_core::fmp4::PlannedAudioSegmenter::new(
+                        plurx_core::fmp4::PlannedAudioSegmenter::with_source_copy(
                             served.clone(),
                             self.generation.plan.clone(),
                             self.generation.start_entry,
+                            self.generation.source_audio.clone(),
                         )
                         .map_err(|error| landing_failed(error.to_string()))?,
                     );
@@ -538,8 +542,8 @@ impl<S: Sink> GenerationRun<'_, S> {
             if fragment.tracks.is_empty() {
                 return Ok(());
             }
-            // place_encoded_audio uses the same relative origin as muxed VOD;
-            // the independent soundtrack cutter requires absolute film ticks.
+            // The producer clock starts at this interval's origin. The
+            // independent soundtrack cutter requires absolute film ticks.
             let origin = self
                 .generation
                 .plan
@@ -550,7 +554,7 @@ impl<S: Sink> GenerationRun<'_, S> {
                 track.base_decode_time = track
                     .base_decode_time
                     .checked_add(origin)
-                    .ok_or_else(|| landing_failed("shared AAC film clock overflow".into()))?;
+                    .ok_or_else(|| landing_failed("soundtrack film clock overflow".into()))?;
             }
             let published = segmenter
                 .push(fragment)
@@ -1371,6 +1375,7 @@ mod tests {
             landing_clock: None,
             encoded_frame_ticks: Some(1),
             encoded_audio_anchor: Some(0),
+            source_audio: None,
             encoded_video_origin: Some(48),
             identity,
             start_entry: 1,
@@ -1511,6 +1516,7 @@ mod tests {
             landing_clock: None,
             encoded_frame_ticks: Some(1001),
             encoded_audio_anchor: None,
+            source_audio: None,
             encoded_video_origin: Some(48048),
             identity: InitIdentity::establish(&init, Default::default())
                 .expect("authored identity"),
@@ -2223,6 +2229,7 @@ mod tests {
             index: Some(film.index.clone()),
             landing_clock: None,
             encoded_audio_anchor: None,
+            source_audio: None,
             encoded_frame_ticks: None,
             encoded_video_origin: None,
             identity: film.identity.clone(),
@@ -2712,6 +2719,7 @@ mod tests {
             index: Some(film.index.clone()),
             landing_clock: None,
             encoded_audio_anchor: None,
+            source_audio: None,
             encoded_frame_ticks: None,
             encoded_video_origin: None,
             identity,

@@ -983,6 +983,37 @@ pub(crate) async fn held_source_packet_probe_json(
     timeout: Duration,
     max_stdout_bytes: u64,
 ) -> Result<Vec<u8>, HeldPacketProbeError> {
+    held_source_packet_probe(source, request, timeout, max_stdout_bytes, false).await
+}
+
+/// Read packet clocks and payload identity from an independently opened held input.
+pub(crate) async fn held_source_audio_packets(
+    source: &std::fs::File,
+    stream_index: u32,
+    timeout: Duration,
+    max_stdout_bytes: u64,
+) -> Result<Vec<u8>, HeldPacketProbeError> {
+    held_source_packet_probe(
+        source,
+        HeldPacketProbeRequest {
+            stream_index,
+            start_seconds: None,
+            packet_limit: None,
+        },
+        timeout,
+        max_stdout_bytes,
+        true,
+    )
+    .await
+}
+
+async fn held_source_packet_probe(
+    source: &std::fs::File,
+    request: HeldPacketProbeRequest,
+    timeout: Duration,
+    max_stdout_bytes: u64,
+    payload_hash: bool,
+) -> Result<Vec<u8>, HeldPacketProbeError> {
     #[cfg(windows)]
     let (source_path, held_identity) = {
         let held_identity = plurx_core::media_io::identity_in_place(source).map_err(|error| {
@@ -1033,8 +1064,15 @@ pub(crate) async fn held_source_packet_probe_json(
         &request.stream_index.to_string(),
         "-show_packets",
         "-show_entries",
-        "packet=stream_index,pts,dts,duration",
+        if payload_hash {
+            "packet=stream_index,pts,dts,duration,size,flags,data_hash:packet_side_data=side_data_type"
+        } else {
+            "packet=stream_index,pts,dts,duration"
+        },
     ]);
+    if payload_hash {
+        command.args(["-show_data_hash", "sha256"]);
+    }
     let interval = match (request.start_seconds, request.packet_limit) {
         (None, Some(limit)) => Some(format!("%+#{limit}")),
         (Some(start), None) => Some(format!("{}%+{EOF_PROBE_SPAN_SECONDS}", start.max(0))),

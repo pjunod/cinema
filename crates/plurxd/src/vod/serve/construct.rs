@@ -328,6 +328,7 @@ impl VodServe {
             session_id.to_owned(),
             Session {
                 requested_audio_index: None,
+                vod_copy_layout: None,
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -611,6 +612,17 @@ impl VodServe {
         video: CopyVideoOptions,
         purpose: AttachmentPurpose,
     ) -> Result<Option<crate::copy_index_v3::Resolution>, String> {
+        self.try_copy_index_v3_matching(file, video, purpose, None)
+            .await
+    }
+
+    pub(super) async fn try_copy_index_v3_matching(
+        &self,
+        file: &MediaFile,
+        video: CopyVideoOptions,
+        purpose: AttachmentPurpose,
+        expected_key: Option<&str>,
+    ) -> Result<Option<crate::copy_index_v3::Resolution>, String> {
         use crate::copy_index_v3::ResolveMode;
         let Some(node_id) = self.shared.cluster_node_id.as_deref() else {
             return Ok(None);
@@ -649,6 +661,7 @@ impl VodServe {
                     video,
                     self.shared.copy_analysis.get().map(Arc::as_ref),
                     mode,
+                    expected_key,
                 )
                 .await
             }
@@ -708,6 +721,19 @@ impl VodServe {
         purpose: AttachmentPurpose,
         verify_hevc: bool,
     ) -> Result<Option<(FragmentIndex, String, String)>, String> {
+        self.try_cluster_fragment_index_matching(file, video, viewer, purpose, None, verify_hevc)
+            .await
+    }
+
+    pub(super) async fn try_cluster_fragment_index_matching(
+        &self,
+        file: &MediaFile,
+        video: CopyVideoOptions,
+        viewer: Option<&crate::state::PlaybackViewerDemand>,
+        purpose: AttachmentPurpose,
+        expected_key: Option<&str>,
+        verify_hevc: bool,
+    ) -> Result<Option<(FragmentIndex, String, String)>, String> {
         if let Some(viewer) = viewer {
             viewer.require_local_authority().map_err(str::to_owned)?;
         }
@@ -761,16 +787,18 @@ impl VodServe {
         let artifact = self
             .shared
             .store
-            .cluster_fragment_index_artifact(&cache_key)
+            .cluster_fragment_index_artifact(expected_key.unwrap_or(&cache_key))
             .await
             .map_err(|error| format!("reading cluster index catalog: {error}"))?
             .filter(|artifact| {
-                artifact.source_size == file.size
+                expected_key.is_none_or(|key| artifact.cache_key == key)
+                    && artifact.file_id == file.id
+                    && artifact.source_size == file.size
                     && artifact.source_sha256 == observation.source_sha256
                     && artifact.pipeline_sha256 == pipeline
             });
         let Some(artifact) = artifact else {
-            if purpose == AttachmentPurpose::SelectedDetail {
+            if expected_key.is_some() || purpose == AttachmentPurpose::SelectedDetail {
                 return Ok(None);
             }
             let queued = self
@@ -822,6 +850,9 @@ impl VodServe {
             .await?
         };
         let Some(mut index) = index else {
+            if expected_key.is_some() {
+                return Ok(None);
+            }
             let repair = repair_job_for_artifact(repair, &artifact);
             // Lost work: without this transition the exact artifact remains
             // permanently complete even though no verified holder can serve it.

@@ -1740,6 +1740,7 @@ impl TranscodeManager {
         );
 
         Ok(StartInfo {
+            vod_copy_layout: None,
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
@@ -2763,6 +2764,7 @@ impl TranscodeManager {
         .await;
 
         Ok(StartInfo {
+            vod_copy_layout: None,
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,

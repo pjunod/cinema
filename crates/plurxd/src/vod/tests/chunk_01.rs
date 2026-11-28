@@ -434,16 +434,16 @@ async fn exercise_cluster_converting_artifact(stale_refusal: bool) {
             hydrated.is_none(),
             "the verified path can use its local index"
         );
+        let purpose = super::shared::AttachmentPurpose::SelectedDetail;
         assert!(serve
-            .try_cluster_fragment_index(
-                &file,
-                video,
-                None,
-                super::shared::AttachmentPurpose::SelectedDetail,
-                false,
-            )
+            .try_cluster_fragment_index_matching(&file, video, None, purpose, Some(&cache_key), true)
             .await
-            .expect("unverified selection keeps the usable artifact")
+            .expect("verify the issued v2 artifact")
+            .is_none());
+        assert!(serve
+            .try_cluster_fragment_index_matching(&file, video, None, purpose, Some(&cache_key), false)
+            .await
+            .expect("unverified recovery keeps the issued artifact")
             .is_some());
         return;
     }
@@ -550,6 +550,7 @@ pub(super) fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
 fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
     SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -872,6 +873,7 @@ async fn insert_control_session(
         session_id.to_owned(),
         Session {
             requested_audio_index: None,
+            vod_copy_layout: None,
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
@@ -1006,6 +1008,7 @@ async fn insert_terminal_session(
         session_id.to_owned(),
         Session {
             requested_audio_index: None,
+            vod_copy_layout: None,
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
