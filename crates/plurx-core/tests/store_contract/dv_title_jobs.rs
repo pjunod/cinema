@@ -67,7 +67,7 @@ async fn demand(store: &Arc<dyn Store>, file: i64, scanner: &str) -> TitleDemand
 async fn bound(store: &Arc<dyn Store>, file: i64, scanner: &str) -> TitleDemand {
     let current = demand(store, file, scanner).await;
     store
-        .bind_dv_title_demand(current.probe_revision, scanner, 1)
+        .bind_dv_title_demand(current.probe_revision, scanner, 1, 1_000)
         .await
         .expect("bind installed scanner");
     demand(store, file, scanner).await
@@ -291,7 +291,7 @@ async fn title_manual_cancel_wins_publication_and_does_not_become_scheduler_yiel
         );
         assert_eq!(
             store
-                .bind_dv_title_demand(demand.probe_revision, &scanner, 1)
+                .bind_dv_title_demand(demand.probe_revision, &scanner, 1, 1_000)
                 .await
                 .expect("idempotent scanner binding"),
             Some(demand.probe_revision),
@@ -590,7 +590,7 @@ async fn title_demand_and_manual_cancel_suppression_survive_store_reopen() {
         .is_empty());
     assert_eq!(
         store
-            .bind_dv_title_demand(current.probe_revision, &scanner, 1)
+            .bind_dv_title_demand(current.probe_revision, &scanner, 1, 1_000)
             .await
             .expect("same scanner"),
         Some(current.probe_revision)
@@ -1063,7 +1063,7 @@ async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
         );
         assert_eq!(
             store
-                .bind_dv_title_demand(open.probe_revision, &scanner, 1)
+                .bind_dv_title_demand(open.probe_revision, &scanner, 1, 1_000)
                 .await
                 .expect("rebind"),
             Some(open.probe_revision),
@@ -1079,7 +1079,7 @@ async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
         let other = "b".repeat(64);
         assert_eq!(
             store
-                .bind_dv_title_demand(open.probe_revision, &other, 1)
+                .bind_dv_title_demand(open.probe_revision, &other, 1, 1_000)
                 .await
                 .expect("conflicting bind"),
             None,
@@ -1088,7 +1088,7 @@ async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
 
         // The successor rotates demand while retaining the published aggregate.
         let rotated = store
-            .bind_dv_title_demand(open.probe_revision, &other, 2)
+            .bind_dv_title_demand(open.probe_revision, &other, 2, 1_000)
             .await
             .expect("rotate")
             .expect("rotated");
@@ -1100,13 +1100,18 @@ async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
         );
         assert_eq!(
             store
-                .bind_dv_title_demand(rotated, &scanner, 1)
+                .bind_dv_title_demand(rotated, &scanner, 1, 1_000)
                 .await
                 .expect("old worker"),
             None,
             "{backend}"
         );
         assert!(!demand(&store, file.id, &other).await.aggregate_current);
+        assert!(store
+            .dv_title_demand_for_file(&scanner, 1, file.id, 1_000)
+            .await
+            .expect("old worker discovery")
+            .is_none());
         assert_eq!(
             store
                 .publish_dv_title_from_analysis(analysis(&file, &scanner))
@@ -1535,8 +1540,17 @@ async fn title_expired_unbounded_cancelled_and_stale_playback_do_not_promote() {
                         .expect("replace source");
                 }
                 "scanner" => {
+                    let successor = "c".repeat(64);
+                    assert_eq!(
+                        store
+                            .bind_dv_title_demand(requested.probe_revision, &successor, 2, 1_001)
+                            .await
+                            .expect("live viewer fences rotation"),
+                        None,
+                        "{backend}"
+                    );
                     store
-                        .bind_dv_title_demand(requested.probe_revision, &"c".repeat(64), 2)
+                        .bind_dv_title_demand(requested.probe_revision, &successor, 2, 5_000)
                         .await
                         .expect("replace scanner generation");
                 }
@@ -1954,7 +1968,7 @@ async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
             .await
             .expect("rebuild after restart"));
         let later = store
-            .dv_title_demand_for_file(&scanner, file.id, 2_000)
+            .dv_title_demand_for_file(&scanner, 1, file.id, 2_000)
             .await
             .expect("look up the warm target independent of the cursor")
             .expect("existing head episode");
@@ -1996,7 +2010,7 @@ async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
             .await
             .expect("deduplicated refresh"));
         let pending = store
-            .dv_title_demand_for_file(&scanner, file.id, 2_005)
+            .dv_title_demand_for_file(&scanner, 1, file.id, 2_005)
             .await
             .expect("read prewarm demand")
             .expect("queued refresh");
@@ -2214,18 +2228,18 @@ async fn failed_title_revisit_leaves_the_next_discovery_turn_available() {
         let new = seed(&store, "title-after-error").await;
         let mut cursor = TitleMaintenanceCursor::default();
         let (rows, after) = cursor
-            .next_page(store.as_ref(), &scanner, 1000)
+            .next_page(store.as_ref(), &scanner, 1, 1000)
             .await
             .expect("discovery");
         assert_eq!(rows[0].file_id, old.id, "{backend}");
         *after = rows[0].probe_revision;
         // Make just the revisit read fail, before it can return or advance a row.
         assert!(cursor
-            .next_page(store.as_ref(), "invalid scanner", 1001)
+            .next_page(store.as_ref(), "invalid scanner", 1, 1001)
             .await
             .is_err());
         let (rows, after) = cursor
-            .next_page(store.as_ref(), &scanner, 1002)
+            .next_page(store.as_ref(), &scanner, 1, 1002)
             .await
             .expect("next turn");
         assert_eq!(
@@ -2234,17 +2248,17 @@ async fn failed_title_revisit_leaves_the_next_discovery_turn_available() {
         );
         *after = rows[0].probe_revision;
         let (rows, after) = cursor
-            .next_page(store.as_ref(), &scanner, 1003)
+            .next_page(store.as_ref(), &scanner, 1, 1003)
             .await
             .expect("historical turn");
         assert_eq!(rows[0].file_id, old.id, "{backend}");
         *after = rows[0].probe_revision;
         assert!(cursor
-            .next_page(store.as_ref(), "invalid scanner", 1004)
+            .next_page(store.as_ref(), "invalid scanner", 1, 1004)
             .await
             .is_err());
         let (rows, _) = cursor
-            .next_page(store.as_ref(), &scanner, 1005)
+            .next_page(store.as_ref(), &scanner, 1, 1005)
             .await
             .expect("retry historical work");
         assert_eq!(
@@ -2315,7 +2329,7 @@ async fn maintenance_revisits_the_oldest_released_source_while_new_titles_arrive
         // A permanently blocked prefix must leave a discovery turn for the next disk.
         for _ in 0..2 {
             let (rows, after) = cursor
-                .next_page(store.as_ref(), &scanner, 1_003)
+                .next_page(store.as_ref(), &scanner, 1, 1_003)
                 .await
                 .expect("page");
             assert_eq!(rows.len(), 128, "{backend}");
@@ -2348,14 +2362,14 @@ async fn maintenance_revisits_the_oldest_released_source_while_new_titles_arrive
             *after = rows.last().expect("full page").probe_revision;
         }
         let (rows, after) = cursor
-            .next_page(store.as_ref(), &scanner, 1_004)
+            .next_page(store.as_ref(), &scanner, 1, 1_004)
             .await
             .expect("next disk");
         let free = rows.first().expect("disjoint title");
         assert_eq!(free.file_id, independent.id, "{backend}");
         *after = free.probe_revision;
         store
-            .bind_dv_title_demand(free.probe_revision, &scanner, 1)
+            .bind_dv_title_demand(free.probe_revision, &scanner, 1, 1_000)
             .await
             .expect("bind independent");
         let EnqueueOutcome::Accepted {
@@ -2384,7 +2398,7 @@ async fn maintenance_revisits_the_oldest_released_source_while_new_titles_arrive
             .await
             .expect("new demand keeps the forward walk nonempty");
         let (rows, after) = cursor
-            .next_page(store.as_ref(), &scanner, 1_006)
+            .next_page(store.as_ref(), &scanner, 1, 1_006)
             .await
             .expect("revisit released disk");
         let revisited = rows.first().expect("old demand");
@@ -2434,7 +2448,7 @@ async fn title_live_paging_reaches_after_full_page_and_direct_own_interest() {
                 .find(|demand| demand.file_id == id)
                 .expect("new source follows the setup cursor");
             store
-                .bind_dv_title_demand(current.probe_revision, &scanner, 1)
+                .bind_dv_title_demand(current.probe_revision, &scanner, 1, 1_000)
                 .await
                 .expect("bind fixture scanner")
                 .expect("current fixture generation");
@@ -3021,7 +3035,7 @@ async fn title_verdicts_carry_forward_only_where_the_successor_reproduces_them()
         // and it still reopens when the source changes.
         assert_eq!(
             store
-                .bind_dv_title_demand(carried, &successor, 2)
+                .bind_dv_title_demand(carried, &successor, 2, 1_000)
                 .await
                 .expect("bind carried"),
             Some(carried),

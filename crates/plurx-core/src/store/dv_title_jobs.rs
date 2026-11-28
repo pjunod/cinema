@@ -61,6 +61,7 @@ impl TitleMaintenanceCursor {
         &mut self,
         store: &dyn super::BackgroundJobStore,
         scanner: &str,
+        generation: i64,
         now_ms: i64,
     ) -> Result<(Vec<TitleDemand>, &mut i64), StoreError> {
         if self.revisit_next {
@@ -74,7 +75,13 @@ impl TitleMaintenanceCursor {
             // contains an observation this worker cannot decode or read.
             self.revisit_next = false;
             let rows = store
-                .dv_title_demands_through(scanner, self.revisit_after, self.revisit_through, now_ms)
+                .dv_title_demands_through(
+                    scanner,
+                    Some(generation),
+                    self.revisit_after,
+                    self.revisit_through,
+                    now_ms,
+                )
                 .await?;
             if !rows.is_empty() {
                 return Ok((rows, &mut self.revisit_after));
@@ -88,7 +95,13 @@ impl TitleMaintenanceCursor {
         // eligible for its turn. At startup that prefix is still empty.
         self.revisit_next = self.forward_after > 0;
         let rows = store
-            .dv_title_demands(scanner, self.forward_after, now_ms)
+            .dv_title_demands_through(
+                scanner,
+                Some(generation),
+                self.forward_after,
+                i64::MAX,
+                now_ms,
+            )
             .await?;
         if rows.is_empty() {
             *self = Self::default();
@@ -223,6 +236,8 @@ fn maintenance_demands_sql() -> String {
         r#"
 WHERE file.revision>json_extract($1,'$.after') AND file.revision<=json_extract($1,'$.through')
  AND (json_extract($1,'$.file_id') IS NULL OR file.id=json_extract($1,'$.file_id'))
+ AND (json_extract($1,'$.generation') IS NULL OR file.scanner_generation<json_extract($1,'$.generation')
+  OR (file.scanner_generation=json_extract($1,'$.generation') AND file.scanner_digest IS json_extract($1,'$.scanner')))
  AND (file.terminal=0 OR file.scanner_digest IS NOT json_extract($1,'$.scanner'))
  AND (json_array_length(file.playback_recipes)>0 OR NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
  THEN json_extract(file.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END))
@@ -235,12 +250,14 @@ ORDER BY file.revision LIMIT 128"#
 pub(super) async fn demands<T: QueueSql>(
     store: &T,
     scanner: &str,
+    generation: Option<i64>,
     after: i64,
     through: i64,
     now_ms: i64,
     file_id: Option<i64>,
 ) -> Result<Vec<TitleDemand>, StoreError> {
     if !digest(scanner)
+        || generation.is_some_and(|generation| generation <= 0)
         || after < 0
         || through < after
         || now_ms < 0
@@ -251,7 +268,7 @@ pub(super) async fn demands<T: QueueSql>(
     let rows = store
         .queue_sql(
             maintenance_demands_sql(),
-            encode(&serde_json::json!({"scanner":scanner,"after":after,"through":through,"now":now_ms,"file_id":file_id}))?,
+            encode(&serde_json::json!({"scanner":scanner,"generation":generation,"after":after,"through":through,"now":now_ms,"file_id":file_id}))?,
             false,
             true,
         )
@@ -300,6 +317,11 @@ FROM eligible GROUP BY revision ORDER BY revision LIMIT 128
     rows.iter().map(|row| decode(row)).collect()
 }
 
+pub(super) enum BindAdmission {
+    Worker { now_ms: i64 },
+    Analysis,
+}
+
 /// Bind a trusted installed scanner to this revision. The command atomically
 /// invalidates old scanner work without publishing fresh ordinary probe facts.
 pub(super) async fn bind<T: QueueSql>(
@@ -307,11 +329,16 @@ pub(super) async fn bind<T: QueueSql>(
     revision: i64,
     scanner: &str,
     generation: i64,
+    admission: BindAdmission,
 ) -> Result<Option<i64>, StoreError> {
-    if revision <= 0 || !digest(scanner) || generation <= 0 {
+    let now_ms = match admission {
+        BindAdmission::Worker { now_ms } => Some(now_ms),
+        BindAdmission::Analysis => None,
+    };
+    if revision <= 0 || !digest(scanner) || generation <= 0 || now_ms.is_some_and(|now| now < 0) {
         return Err(StoreError::Task("invalid title scanner binding".into()));
     }
-    let body = serde_json::json!({"id":uuid::Uuid::new_v4().to_string(),"revision":revision,"scanner":scanner,"generation":generation});
+    let body = serde_json::json!({"id":uuid::Uuid::new_v4().to_string(),"revision":revision,"scanner":scanner,"generation":generation,"now_ms":now_ms});
     let rows=store.queue_sql(r#"
 INSERT INTO background_job_commands(id,operation,request_json,result_json)
 SELECT json_extract($1,'$.id'),'bind_dv_title',json($1),json_object(
@@ -320,11 +347,20 @@ SELECT json_extract($1,'$.id'),'bind_dv_title',json($1),json_object(
   THEN (SELECT seq+1 FROM sqlite_sequence WHERE name='dv_title_jobs_demand') ELSE revision END,
  'rotate',scanner_digest IS NOT NULL AND scanner_digest IS NOT json_extract($1,'$.scanner'),
  'changed',scanner_digest IS NOT json_extract($1,'$.scanner'),'bound',json('true'))
-FROM dv_title_jobs_demand WHERE revision=json_extract($1,'$.revision')
+FROM dv_title_jobs_demand d WHERE revision=json_extract($1,'$.revision')
  AND (scanner_generation<json_extract($1,'$.generation') OR
   (scanner_generation=json_extract($1,'$.generation') AND scanner_digest IS json_extract($1,'$.scanner')))
  AND (scanner_digest IS NULL OR scanner_digest IS json_extract($1,'$.scanner')
-  OR (SELECT seq FROM sqlite_sequence WHERE name='dv_title_jobs_demand')<9223372036854775807)
+  OR ((SELECT seq FROM sqlite_sequence WHERE name='dv_title_jobs_demand')<9223372036854775807
+   AND NOT EXISTS(SELECT 1 FROM background_jobs j
+    WHERE j.kind='dv_title_scan' AND j.state IN ('queued','running','cancelling')
+     AND json_extract(j.payload_json,'$.file_id')=d.file_id
+     AND json_extract(j.payload_json,'$.probe_revision')=d.revision
+     AND (json_extract($1,'$.now_ms') IS NULL OR EXISTS(
+      SELECT 1 FROM background_job_waiters w WHERE w.job_id=j.id
+       AND w.consumer_kind IN ('playback_qualification','native_fel_head')
+       AND w.state IN ('pending','awaiting_hydration')
+       AND w.deadline_ms>json_extract($1,'$.now_ms'))))))
 RETURNING result_json
 "#.into(),encode(&body)?,true,true).await?;
     #[derive(Deserialize)]
@@ -490,17 +526,16 @@ pub(super) async fn publish_from_analysis<T: QueueSql>(
             ("current", _) => return Ok(AnalysisTitleOutcome::Current),
             ("busy", _) => return Ok(AnalysisTitleOutcome::Busy),
             ("unbound", Some(revision)) => {
-                if bind(
+                // The bind compares in-flight work again in its own write.
+                // Re-read the verdict if a concurrent enqueue wins the race.
+                bind(
                     store,
                     revision,
                     &output.scanner_digest,
                     output.scanner_generation,
+                    BindAdmission::Analysis,
                 )
-                .await?
-                .is_none()
-                {
-                    return Ok(AnalysisTitleOutcome::NoDemand);
-                }
+                .await?;
             }
             _ => return Ok(AnalysisTitleOutcome::NoDemand),
         }

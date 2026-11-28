@@ -343,11 +343,14 @@ pub(crate) async fn publish_title_with_tools_for_control(
     let scanner = tools.title_scanner_digest();
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
     let mut demand = store
-        .dv_title_demands(&scanner, 0, crate::source_probe::now_ms())
+        .dv_title_demand_for_file(
+            &scanner,
+            crate::dv_tools::TITLE_SCANNER_GENERATION,
+            file.id,
+            crate::source_probe::now_ms(),
+        )
         .await
         .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|demand| demand.file_id == file.id)
         .ok_or("ordinary probe created no current title demand")?;
     if demand.source_size != file.size || demand.source_mtime != file.mtime {
         return Err("title control source does not match ordinary probe demand".into());
@@ -357,6 +360,7 @@ pub(crate) async fn publish_title_with_tools_for_control(
             demand.probe_revision,
             &scanner,
             crate::dv_tools::TITLE_SCANNER_GENERATION,
+            crate::source_probe::now_ms(),
         )
         .await
         .map_err(|e| e.to_string())?

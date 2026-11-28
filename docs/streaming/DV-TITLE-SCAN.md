@@ -22,6 +22,15 @@ eligible title worker runs the guard before deploying a scanner change.
 Advance `TITLE_SCANNER_GENERATION` when changing scanner releases and verify
 that the eligible workers for that release report the same title scanner
 digest. Existing jobs can drain against their exact bound revisions.
+Workers from before the guard skip fresh reads with a retained aggregate
+because their reuse logic cannot distinguish it from a current result.
+
+Take a verified store backup before applying the migration. SQLite version
+139 and the replicated title extension version 3 require a guard-capable
+binary to start. Running older workers can drain during the rollout. Restart
+a node with a guard-capable binary once the new schema commits. An older
+binary requires restoring a pre-migration store through the recovery
+procedure.
 
 ## The scanner follows the renderer’s picture rules
 

@@ -162,6 +162,13 @@ UPDATE dv_title_jobs_demand SET scanner_digest='old';
 
         rotate(r#"{"scanner":"new","generation":1}"#).expect("ordered bind");
         assert_eq!(demand(), (2, "new".into(), 1, None));
+        let repeat_bind = conn.execute(
+            r#"INSERT INTO background_job_commands VALUES('bind','bind_dv_title','{"scanner":"new"}',
+                '{"previous_revision":2,"revision":2,"file_id":1,"rotate":false}')"#,
+            [],
+        ).expect("legacy worker skips retained aggregate");
+        assert_eq!(repeat_bind, 0, "legacy worker must not claim and reuse");
+
         let complete: bool = conn
             .query_row(
                 "SELECT json_extract(probe_json,'$.plurx_dv_title_v1.complete') FROM files",

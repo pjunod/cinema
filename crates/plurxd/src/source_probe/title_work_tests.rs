@@ -109,7 +109,7 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
         .expect("demand")[0]
         .probe_revision;
     let revision = store
-        .bind_dv_title_demand(revision, &scanner, 1)
+        .bind_dv_title_demand(revision, &scanner, 1, 1_000)
         .await
         .expect("bind")
         .expect("current");
@@ -716,7 +716,7 @@ async fn physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict() {
         .find(|demand| demand.file_id == id)
         .expect("demand");
     demand.probe_revision = store
-        .bind_dv_title_demand(demand.probe_revision, &scanner, 1)
+        .bind_dv_title_demand(demand.probe_revision, &scanner, 1, 1_000)
         .await
         .expect("bind")
         .expect("bound");
@@ -890,7 +890,7 @@ fn title_discovery_waits_for_the_pass_then_reuses_by_generation() {
         .find("state.jobs.title_scan_awaits_index_pass(file.id)")
         .expect("discovery waits for the index pass");
     let bind = source
-        .find(".bind_dv_title_demand(demand.probe_revision, &scanner, generation)")
+        .find(".bind_dv_title_demand(demand.probe_revision, &scanner, generation, now_ms())")
         .expect("bind");
     let reuse = source
         .find("let reused = reusable_aggregate(&demand, revision);")

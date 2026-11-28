@@ -6,7 +6,7 @@ ALTER TABLE dv_title_jobs_demand ADD COLUMN aggregate_revision INTEGER;
 -- next statement
 UPDATE dv_title_jobs_demand SET aggregate_revision=revision
  WHERE scanner_digest IS NOT NULL AND EXISTS(SELECT 1 FROM files f WHERE f.id=file_id
-  AND json_extract(f.probe_json,'$.plurx_dv_title_v1.complete')=1);
+  AND json_valid(f.probe_json) AND json_extract(f.probe_json,'$.plurx_dv_title_v1.complete')=1);
 -- next statement
 CREATE TRIGGER dv_title_jobs_scanner_authority
 BEFORE UPDATE OF scanner_digest,scanner_generation ON dv_title_jobs_demand
@@ -23,6 +23,15 @@ BEGIN
  -- Rotation deletes the old row, so validate authority before that delete.
  -- A draining legacy worker may repeat its existing binding or first bind
  -- an unowned row. It cannot replace an existing scanner.
+ -- Legacy workers always bind before claiming and assume any visible
+ -- aggregate belongs to that revision. Leave retained results for readers
+ -- and let an updated worker take any demand that needs a fresh read.
+ SELECT RAISE(IGNORE)
+ WHERE json_extract(NEW.request_json,'$.generation') IS NULL
+  AND EXISTS(SELECT 1 FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+   WHERE d.revision=json_extract(NEW.result_json,'$.previous_revision')
+    AND d.aggregate_revision IS NOT d.revision
+    AND json_type(f.probe_json,'$.plurx_dv_title_v1') IS NOT NULL);
  SELECT RAISE(ABORT,'stale or conflicting title scanner generation')
  WHERE NOT EXISTS(SELECT 1 FROM dv_title_jobs_demand d
   WHERE d.revision=json_extract(NEW.result_json,'$.previous_revision')

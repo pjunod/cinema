@@ -273,7 +273,7 @@ async fn title(fx: &Fixture, name: &str, profile: i64, fel: bool) -> MediaFile {
         .find(|d| d.file_id == id)
         .expect("title demand for the file");
     let revision = store
-        .bind_dv_title_demand(demand.probe_revision, &scanner, 1)
+        .bind_dv_title_demand(demand.probe_revision, &scanner, 1, 1_000)
         .await
         .expect("bind")
         .expect("bound");

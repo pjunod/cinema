@@ -3187,13 +3187,14 @@ pub trait BackgroundJobStore: Send + Sync {
         after: i64,
         now_ms: i64,
     ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError> {
-        self.dv_title_demands_through(scanner, after, i64::MAX, now_ms)
+        self.dv_title_demands_through(scanner, None, after, i64::MAX, now_ms)
             .await
     }
     /// Page the current maintenance demands in a fixed (after, through] revision range.
     async fn dv_title_demands_through(
         &self,
         scanner: &str,
+        generation: Option<i64>,
         after: i64,
         through: i64,
         now_ms: i64,
@@ -3202,6 +3203,7 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn dv_title_demand_for_file(
         &self,
         scanner: &str,
+        generation: i64,
         file_id: i64,
         now_ms: i64,
     ) -> Result<Option<super::dv_title_jobs::TitleDemand>, StoreError>;
@@ -3210,6 +3212,7 @@ pub trait BackgroundJobStore: Send + Sync {
         revision: i64,
         scanner: &str,
         generation: i64,
+        now_ms: i64,
     ) -> Result<Option<i64>, StoreError>;
     /// Re-point settled title verdicts `scanner` reproduces from its named
     /// predecessors, keeping their aggregates; see `dv_title_jobs::carry_forward`.
@@ -4391,31 +4394,47 @@ LIMIT 1
     async fn dv_title_demands_through(
         &self,
         scanner: &str,
+        generation: Option<i64>,
         after: i64,
         through: i64,
         now_ms: i64,
     ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError> {
-        super::dv_title_jobs::demands(self, scanner, after, through, now_ms, None).await
+        super::dv_title_jobs::demands(self, scanner, generation, after, through, now_ms, None).await
     }
     async fn dv_title_demand_for_file(
         &self,
         scanner: &str,
+        generation: i64,
         file_id: i64,
         now_ms: i64,
     ) -> Result<Option<super::dv_title_jobs::TitleDemand>, StoreError> {
-        Ok(
-            super::dv_title_jobs::demands(self, scanner, 0, i64::MAX, now_ms, Some(file_id))
-                .await?
-                .pop(),
+        Ok(super::dv_title_jobs::demands(
+            self,
+            scanner,
+            Some(generation),
+            0,
+            i64::MAX,
+            now_ms,
+            Some(file_id),
         )
+        .await?
+        .pop())
     }
     async fn bind_dv_title_demand(
         &self,
         revision: i64,
         scanner: &str,
         generation: i64,
+        now_ms: i64,
     ) -> Result<Option<i64>, StoreError> {
-        super::dv_title_jobs::bind(self, revision, scanner, generation).await
+        super::dv_title_jobs::bind(
+            self,
+            revision,
+            scanner,
+            generation,
+            super::dv_title_jobs::BindAdmission::Worker { now_ms },
+        )
+        .await
     }
     async fn carry_forward_dv_title_verdicts(
         &self,

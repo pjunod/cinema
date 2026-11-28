@@ -194,7 +194,7 @@ impl TitleTask {
                 // A targeted lookup moves neither discovery position.
                 let demands = state
                     .store
-                    .dv_title_demand_for_file(&scanner, file_id, now_ms())
+                    .dv_title_demand_for_file(&scanner, generation, file_id, now_ms())
                     .await?
                     .into_iter()
                     .collect();
@@ -202,7 +202,7 @@ impl TitleTask {
             }
             TitleDispatch::Maintenance => {
                 let (demands, after) = maintenance
-                    .next_page(state.store.as_ref(), &scanner, now_ms())
+                    .next_page(state.store.as_ref(), &scanner, generation, now_ms())
                     .await?;
                 (demands, Some(after))
             }
@@ -330,7 +330,7 @@ impl TitleTask {
             } else {
                 let Some(revision) = state
                     .store
-                    .bind_dv_title_demand(demand.probe_revision, &scanner, generation)
+                    .bind_dv_title_demand(demand.probe_revision, &scanner, generation, now_ms())
                     .await?
                 else {
                     continue;

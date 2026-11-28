@@ -135,7 +135,7 @@ async fn title_decorations_preserve_queued_running_published_and_cancelled_gener
                     );
                     assert_eq!(
                         store
-                            .bind_dv_title_demand(current.probe_revision, &scanner, 1)
+                            .bind_dv_title_demand(current.probe_revision, &scanner, 1, 1_000)
                             .await
                             .expect("same scanner"),
                         Some(current.probe_revision)
