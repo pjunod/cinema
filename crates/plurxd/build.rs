@@ -33,6 +33,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "build_support/m7_source.rs"]
+mod m7_source;
 #[path = "build_support/source_date.rs"]
 mod source_date;
 #[path = "build_support/source_identity.rs"]
@@ -45,7 +47,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo:rerun-if-changed=build_support/source_date.rs");
     println!("cargo:rerun-if-changed=build_support/source_identity.rs");
+    println!("cargo:rerun-if-changed=build_support/m7_source.rs");
     watch_git_head();
+    stamp_m7_source();
 
     let build = std::env::var("PLURX_BUILD_REF")
         .ok()
@@ -67,6 +71,22 @@ fn main() {
         built_at(build.ends_with("-dirty"))
     );
     embed_windows_manifest();
+}
+
+/// `PLURX_M7_SOURCE_SHA256`, the M7 half of a settled title's M7 identity;
+/// see `build_support/m7_source.rs` for the file set. The sources are this
+/// workspace's own, so a missing one is a broken checkout and fails the build.
+fn stamp_m7_source() {
+    let crate_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("Cargo always sets CARGO_MANIFEST_DIR"),
+    );
+    let workspace = crate_dir.join("../..");
+    let source = m7_source::m7_source_digest(&workspace)
+        .unwrap_or_else(|err| panic!("hashing the M7 sources: {err}"));
+    for path in &source.watched {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    println!("cargo:rustc-env=PLURX_M7_SOURCE_SHA256={}", source.sha256);
 }
 
 fn embed_windows_manifest() {

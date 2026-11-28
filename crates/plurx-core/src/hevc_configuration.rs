@@ -217,6 +217,7 @@ pub struct RangeInspection {
 #[derive(Default)]
 pub struct Trace {
     line: Vec<u8>,
+    allow_authored_rpu_notice: bool,
     sets: [Option<Vec<u8>>; 3],
     ids: [Option<i64>; 3],
     parents: [Option<i64>; 3],
@@ -242,6 +243,15 @@ pub struct Trace {
 }
 
 impl Trace {
+    /// Inspect an M7-authored clip whose Dolby Vision RPU payloads are
+    /// verified independently of FFmpeg's decoder-configuration trace.
+    pub fn for_m7_authored_clip() -> Self {
+        Self {
+            allow_authored_rpu_notice: true,
+            ..Self::default()
+        }
+    }
+
     /// The first FFmpeg message showing the pass read a damaged source, if
     /// any. Independent of the trace verdict: the caller refuses the index.
     pub fn source_fault(&self) -> Option<&'static str> {
@@ -369,6 +379,16 @@ impl Trace {
             return;
         };
         let line = line.trim();
+        if self.allow_authored_rpu_notice
+            && line
+                .strip_prefix("Decomposition unimplemented for unit ")
+                .and_then(|unit| unit.strip_suffix(" (type 62)."))
+                .is_some_and(|unit| {
+                    !unit.is_empty() && unit.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        {
+            return;
+        }
         if !line.as_bytes().first().is_some_and(u8::is_ascii_digit) {
             self.end_section();
             if line.starts_with("Packet:") {
@@ -598,6 +618,40 @@ mod tests {
             .iter()
             .all(|p| p.slices == 1 && p.configuration_sha256 == range.configuration_sha256));
         assert_eq!(range.configuration_sha256.len(), 64);
+    }
+
+    #[test]
+    fn m7_authored_trace_ignores_only_the_exact_rpu_decomposition_notice() {
+        let notice = line("Decomposition unimplemented for unit 7 (type 62).");
+        let input = fixture();
+        let with_notice = input.replace(
+            &line("4 rbsp_stop_one_bit 1 = 1"),
+            &(notice.clone() + &line("4 rbsp_stop_one_bit 1 = 1")),
+        ) + &notice;
+        let inspect = |mut trace: Trace, input: &str| {
+            let mut packets = Vec::new();
+            trace.feed_with_packets(input.as_bytes(), |packet| packets.push(packet));
+            trace
+                .finish_range(|packet| packets.push(packet))
+                .map(|range| (range, packets))
+        };
+        assert_eq!(
+            inspect(Trace::for_m7_authored_clip(), &with_notice).expect("authored trace"),
+            inspect(Trace::default(), &input).expect("baseline trace")
+        );
+        assert!(inspect(Trace::default(), &with_notice).is_err());
+        for refusal in [
+            "Decomposition unimplemented for unit 7 (type 63).",
+            "Decomposition unimplemented for unit  (type 62).",
+            "Decomposition unimplemented for unit 7 (type 62). extra text",
+            "Failed to read unit 7 (type 62).",
+        ] {
+            assert!(inspect(
+                Trace::for_m7_authored_clip(),
+                &(with_notice.clone() + &line(refusal))
+            )
+            .is_err());
+        }
     }
 
     #[test]

@@ -321,6 +321,7 @@ async fn title(fx: &Fixture, name: &str, profile: i64, fel: bool) -> MediaFile {
                 scanner_digest: scanner,
                 stats,
             },
+            m7: None,
             now_ms: now_ms(),
         })
         .await

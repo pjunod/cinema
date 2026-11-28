@@ -166,6 +166,7 @@ fn publication(
             scanner_digest: scanner.into(),
             stats: stats(),
         },
+        m7: None,
         now_ms: now,
     }
 }
@@ -2733,6 +2734,546 @@ async fn title_manual_cancellation_suppresses_same_viewer_renewal_until_new_inte
                 .active_job_id
                 .as_deref(),
             Some(id.as_str())
+        );
+    })
+    .await;
+}
+
+fn m7_receipt(
+    demand: &TitleDemand,
+    scanner: &str,
+    probe: &plurx_core::transcode::dv_m7_receipt::M7SourceProbe,
+    experiment: u8,
+) -> plurx_core::transcode::dv_m7_receipt::M7Receipt {
+    use plurx_core::transcode::{
+        dv_m7_receipt::{CalibrationWindow, M7Binding, M7Receipt, WindowBinding, MODEL_VERSION},
+        dv_m7_scoring::{
+            aggregation::{Aggregator, FrozenMargin, WindowShape, AGGREGATION_REVISION},
+            ModelSampleScore, SCORING_REVISION,
+        },
+        dv_refit::FIT_VERSION,
+        Rational,
+    };
+    let clock = Rational::new(1, 1_000).expect("clock");
+    let binding = M7Binding {
+        file_id: demand.file_id,
+        source_size: demand.source_size,
+        source_mtime: demand.source_mtime,
+        probe_revision: demand.probe_revision,
+        source_sha256: [1; 32],
+        held_source_version: "attested-source".into(),
+        probe_sha256: probe.sha256(),
+        scanner_digest: scanner.into(),
+        renderer_digest: "b".repeat(64),
+        scorer_sha256: [2; 32],
+        model_version: MODEL_VERSION.into(),
+        scoring_revision: SCORING_REVISION,
+        aggregation_revision: AGGREGATION_REVISION,
+        protocol_sha256: [3; 32],
+        recipe_sha256: [experiment; 32],
+        fit_method: FIT_VERSION.into(),
+        fit_table_sha256: [4; 32],
+        calibration: vec![CalibrationWindow {
+            first_ordinal: 0,
+            last_ordinal: 0,
+            first_pts: 0,
+            end_pts: 1,
+            time_base: clock,
+            receipt_sha256: [5; 32],
+        }],
+        margin: 0.12345678901234567,
+        windows: vec![WindowBinding {
+            first_ordinal: 1,
+            last_ordinal: 1,
+            first_pts: 1,
+            end_pts: 2,
+            time_base: clock,
+            frames: 1,
+            sites_per_frame: 2,
+            source_census_sha256: [6; 32],
+            candidate_census_sha256: [7; 32],
+            authored_crop_sha256: [8; 32],
+            encoder_sha256: [9; 32],
+            encoded_sha256: [10; 32],
+            authored_sha256: [11; 32],
+            authoring_receipt_sha256: [12; 32],
+            source_vcl_sha256: [13; 32],
+            whole_publication_sha256: [14; 32],
+            whole_readback_sha256: [15; 32],
+            whole_rpu_sha256: [16; 32],
+            seek_publication_sha256: [17; 32],
+            seek_readback_sha256: [18; 32],
+            seek_rpu_sha256: [19; 32],
+        }],
+    };
+    let scratch = tempfile::tempdir().expect("scratch");
+    let plan = [WindowShape {
+        frames: 1,
+        sites_per_frame: 2,
+    }];
+    let mut aggregate = Aggregator::new(
+        scratch.path(),
+        &plan,
+        FrozenMargin::new(binding.margin).expect("margin"),
+        Aggregator::required_spill_bytes(&plan).expect("bound"),
+    )
+    .expect("aggregator");
+    let sample = |nits| {
+        [ModelSampleScore {
+            reference_luminance_nits: nits,
+            served_fplus_delta_e_itp: 10.123456789012345,
+            candidate_delta_e_itp: if experiment == 1 { 12.34 } else { 2.34 },
+        }; 4]
+    };
+    aggregate
+        .push_frame(
+            &[
+                sample(0.02),
+                sample(if experiment == 2 { 0.03 } else { 0.5 }),
+            ],
+            || false,
+        )
+        .expect("score");
+    let report = aggregate.finish(|| false).expect("report");
+    let mut raw = Vec::new();
+    let receipt = M7Receipt::from_report(binding, 1_000 + i64::from(experiment), &report, &mut raw)
+        .expect("receipt");
+    assert_eq!(
+        receipt.report_sha256(),
+        <[u8; 32]>::from(Sha256::digest(&raw))
+    );
+    receipt
+}
+
+#[tokio::test]
+async fn m7_receipts_are_fenced_bounded_and_nonterminal_on_each_backend() {
+    use plurx_core::{
+        store::dv_m7_receipts::RecordM7Receipt,
+        transcode::{
+            dv_m7_receipt::{M7SourceProbe, PROBE_KEY as M7_KEY},
+            dv_m7_scoring::aggregation::Disposition,
+        },
+    };
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let file = seed(&store, "title-m7").await;
+        let (demand, job) = active(&store, file.id, &scanner, 1_000).await;
+        let source = M7SourceProbe::from_probe_json(&demand.probe_json).expect("source probe");
+        let token = job.token.clone().expect("live claim");
+        let record = |receipt, source_probe, token: JobToken, now_ms| RecordM7Receipt {
+            token,
+            source_probe,
+            receipt,
+            now_ms,
+        };
+        let rejected = m7_receipt(&demand, &scanner, &source, 1);
+        let uncertain = m7_receipt(&demand, &scanner, &source, 2);
+        assert_eq!(rejected.disposition(), Disposition::Refused);
+        assert_eq!(uncertain.disposition(), Disposition::Inconclusive);
+
+        let mut stale_token = token.clone();
+        stale_token.revision += 1;
+        assert!(!store
+            .record_dv_m7_receipt(record(rejected.clone(), source.clone(), stale_token, 1_001,))
+            .await
+            .expect("lost revision"));
+        assert!(!store
+            .record_dv_m7_receipt(record(
+                rejected.clone(),
+                source.clone(),
+                token.clone(),
+                token.lease_expires_ms,
+            ))
+            .await
+            .expect("expired lease"));
+
+        let unrelated = M7SourceProbe::from_probe_json(
+            r#"{"streams":[{"index":0,"codec_type":"video","color_primaries":"bt2020"}]}"#,
+        )
+        .expect("different source contents");
+        let receipt = m7_receipt(&demand, &scanner, &unrelated, 3);
+        assert!(!store
+            .record_dv_m7_receipt(record(receipt, unrelated, token.clone(), 1_003,))
+            .await
+            .expect("source facts changed"));
+
+        for receipt in [&rejected, &rejected, &uncertain] {
+            assert!(
+                store
+                    .record_dv_m7_receipt(record(
+                        receipt.clone(),
+                        source.clone(),
+                        token.clone(),
+                        1_002,
+                    ))
+                    .await
+                    .expect("payload recorded"),
+                "{backend}"
+            );
+            let exact = store
+                .dv_m7_receipt(receipt.binding(), &source)
+                .await
+                .expect("lookup")
+                .expect("exact receipt");
+            assert_eq!(exact.disposition(), receipt.disposition());
+            assert_eq!(exact.report_sha256(), receipt.report_sha256());
+        }
+        let mut changed = uncertain.binding().clone();
+        changed.windows[0].seek_readback_sha256 = [200; 32];
+        assert!(store
+            .dv_m7_receipt(&changed, &source)
+            .await
+            .expect("lookup")
+            .is_none());
+        changed = uncertain.binding().clone();
+        changed.source_sha256 = [201; 32];
+        assert!(store
+            .dv_m7_receipt(&changed, &source)
+            .await
+            .expect("lookup")
+            .is_none());
+        changed = uncertain.binding().clone();
+        changed.margin += 0.001;
+        assert!(store
+            .dv_m7_receipt(&changed, &source)
+            .await
+            .expect("lookup")
+            .is_none());
+
+        for experiment in 3..=9 {
+            let receipt = m7_receipt(&demand, &scanner, &source, experiment);
+            assert!(store
+                .record_dv_m7_receipt(record(receipt, source.clone(), token.clone(), 1_020,))
+                .await
+                .expect("record an independent measurement"));
+        }
+        assert!(store
+            .dv_m7_receipt(rejected.binding(), &source)
+            .await
+            .expect("lookup")
+            .is_none());
+        assert!(store
+            .dv_m7_receipt(uncertain.binding(), &source)
+            .await
+            .expect("lookup")
+            .is_some());
+        let raw = store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("read")
+            .expect("source");
+        let document: serde_json::Value = serde_json::from_str(&raw).expect("stored JSON");
+        assert_eq!(document[M7_KEY].as_object().expect("measurements").len(), 8);
+        assert_eq!(
+            M7SourceProbe::from_probe_json(&raw)
+                .expect("same source")
+                .sha256(),
+            source.sha256()
+        );
+        let live = store
+            .background_job(&job.id)
+            .await
+            .expect("job")
+            .expect("running");
+        assert_eq!(live.state, JobState::Running);
+        assert_eq!(live.token.expect("held token").revision, token.revision);
+        let waiters = store
+            .job_waiters(WaiterQuery {
+                job_id: job.id.clone(),
+                after: None,
+                limit: 20,
+            })
+            .await
+            .expect("maintenance waiter");
+        assert!(waiters
+            .waiters
+            .iter()
+            .any(|waiter| waiter.consumer_kind == "dv_title_scan" && waiter.state == "pending"));
+
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&demand, &job, &scanner, 1_021))
+                .await
+                .expect("ordinary title can still publish"),
+            JobPublishOutcome::Published { .. }
+        ));
+        assert!(store
+            .dv_m7_receipt(uncertain.binding(), &source)
+            .await
+            .expect("after title publish")
+            .is_some());
+        assert!(!store
+            .record_dv_m7_receipt(record(uncertain.clone(), source.clone(), token, 1_022,))
+            .await
+            .expect("settled claim fenced"));
+        reprobe(&store, &file).await;
+        assert!(store
+            .dv_m7_receipt(uncertain.binding(), &source)
+            .await
+            .expect("after reprobe")
+            .is_none());
+    })
+    .await;
+}
+
+#[tokio::test]
+#[expect(
+    clippy::unwrap_used,
+    reason = "fixture setup and assertions intentionally stop at the first invalid store result"
+)]
+#[expect(
+    clippy::cloned_ref_to_slice_refs,
+    reason = "the assertion compares the owned journal vector against an owned fixture slot"
+)]
+async fn m7_candidate_slots_survive_reprobe_duplicate_catalogue_ids_and_owner_change() {
+    use plurx_core::{
+        store::dv_m7_attempts::{
+            M7CandidateAnchor, M7CandidateAuthority, M7CandidateIntent, M7CandidatePlan,
+            M7CandidateReservation, M7CandidateScope,
+        },
+        transcode::dv_m7_receipt::M7SourceProbe,
+    };
+    for_each_backend(|store, backend| async move {
+        let digest = [31; 32];
+        let scanner = "a".repeat(64);
+        let old = seed(&store, "m7-replicated-old").await;
+        let mut fel_probe = probe();
+        fel_probe.dolby_vision.el_present = Some(true);
+        store
+            .upsert_file(
+                old.item_id,
+                old.path.to_str().unwrap(),
+                old.size,
+                old.mtime,
+                &fel_probe,
+            )
+            .await
+            .unwrap();
+        let alias = seed(&store, "m7-replicated-alias").await;
+        assert_ne!(old.id, alias.id);
+        let authority =
+            |demand: &TitleDemand, token: JobToken, scanner: &str, now_ms| M7CandidateAuthority {
+                token,
+                source_probe: M7SourceProbe::from_probe_json(&demand.probe_json).unwrap(),
+                scope: M7CandidateScope {
+                    file_id: demand.file_id,
+                    source_size: demand.source_size,
+                    source_mtime: demand.source_mtime,
+                    probe_revision: demand.probe_revision,
+                    scanner_digest: scanner.into(),
+                    source_sha256: digest,
+                },
+                now_ms,
+            };
+        let plan = M7CandidatePlan {
+            protocol_sha256: [32; 32],
+            recipe_sha256: [33; 32],
+            maximum_attempts: 4,
+        };
+        let intent = |slot, binding| M7CandidateIntent {
+            source_sha256: digest,
+            protocol_sha256: plan.protocol_sha256,
+            recipe_sha256: plan.recipe_sha256,
+            binding_sha256: [binding; 32],
+            slot,
+            target_kbps: 90_000 + u32::from(slot),
+            maximum_attempts: plan.maximum_attempts,
+        };
+        let (demand, job) = active(&store, old.id, &scanner, 1000).await;
+        let owner_a = authority(&demand, job.token.unwrap(), &scanner, 1001);
+        let fit_method = plurx_core::transcode::dv_refit::FIT_VERSION;
+        assert!(store
+            .dv_refit_demands(&scanner, fit_method, true, 0, 16)
+            .await
+            .unwrap()
+            .is_empty());
+        let mut complete = stats();
+        complete.el_kind = TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Fel);
+        let mut expired = owner_a.clone();
+        expired.now_ms = expired.token.lease_expires_ms;
+        assert!(!store
+            .record_dv_m7_title_facts(&expired, &complete)
+            .await
+            .unwrap());
+        assert!(store
+            .record_dv_m7_title_facts(&owner_a, &complete)
+            .await
+            .unwrap());
+        assert!(store
+            .dv_refit_demands(&scanner, fit_method, true, 0, 16)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.file_id == old.id));
+        assert_eq!(
+            store
+                .background_job(&owner_a.token.job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            JobState::Running
+        );
+        assert_eq!(
+            store.anchor_dv_m7_candidate(&owner_a, plan).await.unwrap(),
+            M7CandidateAnchor::Ready,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .reserve_dv_m7_candidate_slot(&owner_a, intent(1, 41))
+                .await
+                .unwrap(),
+            M7CandidateReservation::Conflict,
+            "slot zero must be reserved before slot one"
+        );
+        let first = intent(0, 41);
+        let (one, two) = tokio::join!(
+            store.reserve_dv_m7_candidate_slot(&owner_a, first.clone()),
+            store.reserve_dv_m7_candidate_slot(&owner_a, first.clone())
+        );
+        assert!(matches!(
+            (one.unwrap(), two.unwrap()),
+            (
+                M7CandidateReservation::Reserved,
+                M7CandidateReservation::AlreadyConsumed
+            ) | (
+                M7CandidateReservation::AlreadyConsumed,
+                M7CandidateReservation::Reserved
+            )
+        ));
+        assert!(store
+            .settle_job(SettleJob {
+                token: owner_a.token.clone(),
+                settlement: JobSettlement::Yield {
+                    error_code: Some("fixture_m7_restart".into()),
+                    checkpoint: None,
+                    not_before_ms: 1003,
+                },
+                now_ms: 1002,
+            })
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .reserve_dv_m7_candidate_slot(&owner_a, intent(1, 41))
+                .await
+                .unwrap(),
+            M7CandidateReservation::Fenced
+        );
+
+        let alias_demand = bound(&store, alias.id, &scanner).await;
+        let EnqueueOutcome::Accepted { job_id, .. } =
+            enqueue(&store, &alias_demand, &scanner, 1003).await
+        else {
+            panic!("new catalogue file must enqueue");
+        };
+        let candidate = store.background_job(&job_id).await.unwrap().unwrap();
+        let ClaimOutcome::Claimed { job } = store
+            .claim_job(ClaimJob {
+                job_id,
+                expected_revision: candidate.revision,
+                node_id: "m7-takeover-node".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::DvTitleScan,
+                payload_version: 1,
+                now_ms: 1003,
+                dispatched_at_ms: 1003,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("a fresh owner must be able to claim the duplicate catalogue file");
+        };
+        let owner_b = authority(&alias_demand, job.token.unwrap(), &scanner, 1004);
+        let conflicting = M7CandidatePlan {
+            protocol_sha256: [45; 32],
+            ..plan
+        };
+        assert_eq!(
+            store
+                .anchor_dv_m7_candidate(&owner_b, conflicting)
+                .await
+                .unwrap(),
+            M7CandidateAnchor::DifferentProtocol,
+            "a current claim on a byte-identical file cannot replace the frozen source protocol"
+        );
+        assert_eq!(
+            store
+                .dv_m7_candidate_slots(&owner_b)
+                .await
+                .unwrap()
+                .unwrap()
+                .slots,
+            [first.clone()]
+        );
+        assert_eq!(
+            store
+                .reserve_dv_m7_candidate_slot(&owner_b, intent(0, 99))
+                .await
+                .unwrap(),
+            M7CandidateReservation::AlreadyConsumed
+        );
+        let mut changed_probe = owner_b.clone();
+        changed_probe.source_probe =
+            M7SourceProbe::from_probe_json(r#"{"format":{"changed":true}}"#).unwrap();
+        assert_eq!(
+            store
+                .reserve_dv_m7_candidate_slot(&changed_probe, intent(1, 41))
+                .await
+                .unwrap(),
+            M7CandidateReservation::Fenced
+        );
+        assert!(store
+            .settle_job(SettleJob {
+                token: owner_b.token.clone(),
+                settlement: JobSettlement::Yield {
+                    error_code: Some("fixture_m7_worker_finished".into()),
+                    checkpoint: None,
+                    not_before_ms: 1006,
+                },
+                now_ms: 1005,
+            })
+            .await
+            .unwrap());
+
+        reprobe(&store, &old).await;
+        let next_scanner = "b".repeat(64);
+        let (new_demand, new_job) = active(&store, old.id, &next_scanner, 1007).await;
+        let owner_c = authority(&new_demand, new_job.token.unwrap(), &next_scanner, 1008);
+        assert_eq!(
+            store.anchor_dv_m7_candidate(&owner_c, plan).await.unwrap(),
+            M7CandidateAnchor::Ready,
+        );
+        for slot in 1..4 {
+            assert_eq!(
+                store
+                    .reserve_dv_m7_candidate_slot(&owner_c, intent(slot, 41))
+                    .await
+                    .unwrap(),
+                M7CandidateReservation::Reserved,
+            );
+        }
+        let journal = store
+            .dv_m7_candidate_slots(&owner_c)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            journal.slots,
+            [first, intent(1, 41), intent(2, 41), intent(3, 41)]
+        );
+        assert!(store
+            .reserve_dv_m7_candidate_slot(&owner_c, intent(4, 41))
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .anchor_dv_m7_candidate(&owner_c, conflicting)
+                .await
+                .unwrap(),
+            M7CandidateAnchor::DifferentProtocol,
         );
     })
     .await;

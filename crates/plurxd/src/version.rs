@@ -53,6 +53,10 @@ mod source_date;
 mod source_identity;
 
 #[cfg(test)]
+#[path = "../build_support/m7_source.rs"]
+mod m7_source;
+
+#[cfg(test)]
 mod tests {
     use super::source_date::{format_utc, resolve_source_date};
     use super::*;

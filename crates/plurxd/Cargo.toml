@@ -35,6 +35,7 @@ tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 rayon = "1.12"
 toml = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 axum = { workspace = true }
 # The response-body wrapper that times delivery implements `http_body::Body`
 # directly so it can delegate `size_hint`; the crate is already in the tree
@@ -111,6 +112,10 @@ windows-sys = { version = "0.61", features = [
 # The source-only parser has no native executable/dependency/descendant closure.
 # No WASI filesystem or process implementation is linked into its runtime.
 wasmtime = { version = "=50.0.0", default-features = false, features = ["std", "runtime", "cranelift"] }
+
+# build.rs hashes the M7 sources (build_support/m7_source.rs).
+[build-dependencies]
+sha2 = { workspace = true }
 
 [dev-dependencies]
 # Invitation seam tests compose the released broker Router and trusted local TLS.

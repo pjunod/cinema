@@ -29,6 +29,7 @@
 #include <inttypes.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/dovi_meta.h>
 #include <libavutil/parseutils.h>
 #include <libavutil/sha.h>
 #include <libdovi/rpu_parser.h>
@@ -262,7 +263,7 @@ static void hold_rpu(const struct nal *nal) {
 }
 
 // One picture's metadata: the RPU the decoder attaches to it, if any.
-static void observe_rpu(int64_t pts) {
+static void observe_rpu(int64_t pts, bool m7_selected) {
   if (!rpu.held) {
     stats.missing++;
     unknown_constants();
@@ -284,6 +285,10 @@ static void observe_rpu(int64_t pts) {
     header = dovi_rpu_get_header(parsed);
     dm = dovi_rpu_get_vdr_dm_data(parsed);
   }
+  if (m7_selected)
+    need(header && !header->use_prev_vdr_rpu_flag && header->guessed_profile == 7 &&
+             header->el_type && strcmp(header->el_type, "FEL") == 0 && dm,
+         "fresh parsed FEL RPU for the M7 source census");
   // The rendering contract admits fresh metadata only.
   if (!header || header->use_prev_vdr_rpu_flag || !dm) {
     stats.invalid++;
@@ -347,6 +352,8 @@ done:
 // The decoder starts as if after an end of sequence, and an EOS/EOB NAL
 // reaches only the next packet it is handed (or its own, at the front).
 static bool seen_picture, eos_pending = true, skip_rasl;
+static int by_pts(const void *a, const void *b);
+#include "m7_title_census.h"
 
 // One demuxed access unit of the selected stream.
 static void observe_unit(const AVPacket *packet, int length_size) {
@@ -425,7 +432,8 @@ static void observe_unit(const AVPacket *packet, int length_size) {
   times[stats.frames].pts = packet->pts;
   times[stats.frames].duration = packet->duration;
   stats.frames++;
-  observe_rpu(packet->pts);
+  bool m7_selected = m7_window_count && m7_title_observe_coded(packet);
+  observe_rpu(packet->pts, m7_selected);
 }
 
 static int by_pts(const void *a, const void *b) {
@@ -458,8 +466,11 @@ static int configuration(const AVCodecParameters *par) {
 }
 
 int main(int argc, char **argv) {
-  need(argc == 3 || (argc == 5 && strcmp(argv[3], "--rpu-timeline") == 0),
-       "usage: scan_title HELD_SOURCE VIDEO_INDEX [--rpu-timeline OUTPUT]");
+  bool census = argc >= 7 && strcmp(argv[3], "--m7-window-census-v3") == 0;
+  need(argc == 3 || census || (argc == 5 && strcmp(argv[3], "--rpu-timeline") == 0),
+       "usage: scan_title HELD_SOURCE VIDEO_INDEX "
+       "[--rpu-timeline OUTPUT | --m7-window-census-v3 OUTPUT FIRST_PTS END_PTS ...]");
+  if (census) m7_title_select_windows(argc - 5, argv + 5);
   char *end;
   errno = 0;
   long index = strtol(argv[2], &end, 10);
@@ -504,7 +515,24 @@ int main(int argc, char **argv) {
     bool seen, joined;
   } audio[256];
   int length_size = configuration(stream->codecpar);
-  if (argc == 5) {
+  FILE *census_output = NULL;
+  if (census) {
+    need(m7_supported_raster(stream->codecpar->width, stream->codecpar->height),
+         "supported M7 census raster");
+    need(length_size == 4, "M7 census requires four-byte hvcC access units");
+    const AVPacketSideData *config = av_packet_side_data_get(
+        stream->codecpar->coded_side_data, stream->codecpar->nb_coded_side_data,
+        AV_PKT_DATA_DOVI_CONF);
+    need(config && config->size >= sizeof(AVDOVIDecoderConfigurationRecord),
+         "declared M7 source Dolby Vision configuration");
+    const AVDOVIDecoderConfigurationRecord *cfg = (const void *)config->data;
+    need(cfg->dv_profile == 7 && cfg->bl_present_flag && cfg->el_present_flag && cfg->rpu_present_flag,
+         "declared M7 Profile 7 dual-layer source");
+    int output_fd = open(argv[4], O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    need(output_fd >= 0, "exclusive M7 census file");
+    census_output = fdopen(output_fd, "wb");
+    need(census_output != NULL, "M7 census output stream");
+  } else if (argc == 5) {
     rpu_timeline = fopen(argv[4], "wx");
     need(rpu_timeline != NULL, "exclusive RPU timeline sidecar");
     need(fprintf(rpu_timeline, "# %d/%d\n", stream->time_base.num,
@@ -516,7 +544,14 @@ int main(int argc, char **argv) {
   while ((ret = av_read_frame(input, packet)) >= 0) {
     if (packet->stream_index == index) {
       need(!(packet->flags & AV_PKT_FLAG_CORRUPT), "corrupt demux packet");
+      if (census)
+        need(packet->size > 0 && packet->size <= M7_TITLE_MAX_PACKET_BYTES,
+             "bounded positive M7 selected video packet size");
+      const uint64_t previous_frames = stats.frames;
       observe_unit(packet, length_size);
+      // Each packet in the M7 rate numerator must supply its own picture.
+      need(!census || stats.frames == previous_frames + 1,
+           "one admitted display picture per M7 selected video packet");
     } else if (segment_endpoint) {
       // A lost cluster takes every track's blocks with it, so it leaves a
       // gap here even where the video has already ended. A gap of up to one
@@ -547,11 +582,14 @@ int main(int argc, char **argv) {
   // Pictures leave the decoder in presentation order; prove that order is
   // contiguous, allowing one source tick of packet-clock rounding per step.
   qsort(times, stats.frames, sizeof(*times), by_pts);
-  int64_t first_pts = times[0].pts, last_end = times[0].pts;
+  int64_t first_pts = times[0].pts, last_end = times[0].pts, max_end = times[0].pts;
   for (uint64_t i = 0; i < stats.frames; i++) {
     need(i == 0 || (times[i].pts >= last_end - 1 && times[i].pts <= last_end + 1),
          "contiguous decoded title coverage");
+    need(!census || i == 0 || times[i].pts > times[i - 1].pts,
+         "unique M7 title presentation time");
     last_end = times[i].pts + times[i].duration;
+    if (last_end > max_end) max_end = last_end;
   }
   need(stream->start_time != AV_NOPTS_VALUE && first_pts == stream->start_time &&
        last_end < INT64_MAX, "observed declared video origin");
@@ -618,6 +656,7 @@ int main(int argc, char **argv) {
     endpoint_known = true;
   }
   need(endpoint_known, "independent complete selected-video endpoint unavailable");
+  if (census_output) m7_title_write_windows(census_output, stream, index, first_pts, max_end);
   // `decoded_frames` keeps its schema-1 name: it counts the pictures the
   // decoder would output, established here without decoding them.
   printf("{\"schema\":1,\"complete\":true,\"decoded_frames\":%"PRIu64

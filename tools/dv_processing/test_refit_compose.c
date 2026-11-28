@@ -379,7 +379,6 @@ static void scene_pooling(void) {
   assert(refit_median(odd, 3) == 2);
 }
 
-
 // libdovi's delta-coded pivots against FFmpeg's absolute ones. The nine-pivot
 // luma curve is the one from frame 0 of a real P7 FEL title that the
 // element-wise comparison refused; two-pivot curves agree either way.
@@ -397,6 +396,7 @@ static void pivot_cross_check_accumulates_libdovi_deltas(void) {
   assert(!refit_pivots_agree(luma_deltas, 8, luma_absolute, 9));
   assert(!refit_pivots_agree(NULL, 9, luma_absolute, 9));
   assert(!refit_pivots_agree(chroma, 1, chroma, 1));
+  // The running sum must refuse a wrapped 16-bit pivot.
   const uint16_t overflow[2] = {65535, 1};
   const uint16_t wrapped[2] = {65535, 0};
   assert(!refit_pivots_agree(overflow, 2, wrapped, 2));

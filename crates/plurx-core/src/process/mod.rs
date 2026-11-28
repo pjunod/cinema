@@ -471,6 +471,18 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_declared_bounded_launch_verifies_under_its_captured_manifest() {
+        let output = output_job_owned(&mut child("bounded-captured-declaration"), TEST_WORK)
+            .await
+            .expect("bounded declaration subprocess");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn approved_probe_cannot_load_explicit_or_inherited_environment_code() {
@@ -586,6 +598,67 @@ mod tests {
                         .purpose,
                     "source observation refusal"
                 );
+            }
+            Ok("bounded-captured-declaration") => {
+                use source_lifetime::{no_source, set_daemon_roots};
+                let data = tempfile::tempdir().expect("isolated probe cwd");
+                let program = std::fs::canonicalize("/usr/bin/true").expect("native probe tool");
+                set_daemon_roots(
+                    &[data.path().to_owned()],
+                    &[program.parent().expect("tool root").to_owned()],
+                )
+                .expect("roots");
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                let launch = |captured: bool, purpose: &'static str| {
+                    // No working directory: the captured launcher supplies the
+                    // daemon-owned one, never this process's own.
+                    let mut command = tokio::process::Command::new(&program);
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        runtime.block_on(no_source(async {
+                            let work = ChildWork::background(purpose);
+                            let wall = Duration::from_secs(10);
+                            if captured {
+                                bounded::output_command_captured(&mut command, wall, 1024, work)
+                                    .await
+                            } else {
+                                bounded::output_command(&mut command, wall, 1024, work).await
+                            }
+                        }))
+                    }))
+                };
+                let before = source_lifetime::launch_snapshot();
+                // The bounded launcher rewrites the environment before it
+                // spawns; it binds the captured manifest after that rewrite.
+                let output = launch(true, "source observation bounded captured")
+                    .expect("verified launch does not refuse")
+                    .expect("bounded child");
+                assert!(output.status.success());
+                let verified = source_lifetime::launch_snapshot();
+                assert_eq!(verified.verified, before.verified + 1);
+                assert_eq!(verified.no_source, before.no_source + 1);
+                // Without a manifest the same declared launch cannot verify.
+                let refused = launch(false, "source observation bounded uncaptured");
+                assert_eq!(refused.is_err(), cfg!(debug_assertions));
+                let after = source_lifetime::launch_snapshot();
+                assert_eq!(after.verified, verified.verified);
+                assert_eq!(after.unverified, verified.unverified + 1);
+                assert_eq!(
+                    after
+                        .latest_unknown
+                        .expect("uncaptured launch counted")
+                        .purpose,
+                    "source observation bounded uncaptured",
+                );
+                if cfg!(debug_assertions) {
+                    let reason = refused
+                        .expect_err("uncaptured launch refused")
+                        .downcast::<String>()
+                        .expect("declaration refusal reason");
+                    assert!(reason.contains("missing_descriptor_manifest"));
+                }
             }
             Ok("source-snapshot") => {
                 // A fresh subprocess proves startup attribution, and failed

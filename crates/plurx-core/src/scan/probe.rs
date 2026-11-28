@@ -348,9 +348,10 @@ async fn probe_with_input(
     let stdout = if let Some(stdout) = synthetic_stdout {
         stdout
     } else {
-        let output = crate::process::bounded::output(
-            &invocation.program,
-            &invocation.args,
+        let mut command = tokio::process::Command::new(&invocation.program);
+        command.args(&invocation.args);
+        let output = crate::process::bounded::output_command_captured(
+            &mut command,
             invocation.wall_time,
             SCAN_PROBE_MAX_BYTES,
             crate::process::ChildWork::background("library scan media probe"),
@@ -529,29 +530,30 @@ async fn probe_first_frame(
     threads: Option<usize>,
     purpose: &'static str,
 ) -> Result<Value, ProbeError> {
-    let output = crate::process::bounded::output(
-        ffprobe_bin(),
-        &[
-            OsString::from("-threads"),
-            OsString::from(threads.unwrap_or(0).to_string()),
-            OsString::from("-v"),
-            OsString::from("error"),
-            OsString::from("-print_format"),
-            OsString::from("json"),
-            OsString::from("-select_streams"),
-            // Uppercase `V` excludes attached pictures, matching the primary
-            // probe's first-playable-video selection.
-            OsString::from("V:0"),
-            OsString::from("-show_frames"),
-            OsString::from("-read_intervals"),
-            OsString::from("%+#1"),
-            OsString::from("-show_entries"),
-            OsString::from(
-                "frame=color_transfer,color_primaries,color_space:\
+    let mut command = tokio::process::Command::new(ffprobe_bin());
+    command.args([
+        OsString::from("-threads"),
+        OsString::from(threads.unwrap_or(0).to_string()),
+        OsString::from("-v"),
+        OsString::from("error"),
+        OsString::from("-print_format"),
+        OsString::from("json"),
+        OsString::from("-select_streams"),
+        // Uppercase `V` excludes attached pictures, matching the primary
+        // probe's first-playable-video selection.
+        OsString::from("V:0"),
+        OsString::from("-show_frames"),
+        OsString::from("-read_intervals"),
+        OsString::from("%+#1"),
+        OsString::from("-show_entries"),
+        OsString::from(
+            "frame=color_transfer,color_primaries,color_space:\
                  frame_side_data=side_data_type,max_content,max_average,max_luminance",
-            ),
-            path.as_os_str().to_owned(),
-        ],
+        ),
+        path.as_os_str().to_owned(),
+    ]);
+    let output = crate::process::bounded::output_command_captured(
+        &mut command,
         FRAME_LUMINANCE_PROBE_TIMEOUT,
         FRAME_LUMINANCE_PROBE_MAX_BYTES,
         crate::process::ChildWork::background(purpose),
@@ -2232,6 +2234,10 @@ mod namespace_tests {
                     continue;
                 }
                 let source = std::fs::read_to_string(&path).expect("store source");
+                // The M7 receipt SQL names its graft through a substituted
+                // placeholder; check the key it actually resolves to.
+                let source =
+                    source.replace("__PROBE_KEY__", crate::transcode::dv_m7_receipt::PROBE_KEY);
                 for (at, _) in source.match_indices("probe_json") {
                     let rest = source[at + "probe_json".len()..].trim_start();
                     let Some(rest) = rest.strip_prefix(',') else {

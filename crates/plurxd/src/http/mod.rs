@@ -451,6 +451,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/classification"
         | "/api/v1/items/{id}/photo"
         | "/api/v1/items/{id}/reanalyze"
+        | "/api/v1/items/{id}/m7/reevaluate"
         | "/api/v1/items/{id}/get-it-back"
         | "/api/v1/items/{id}/offload-status"
         | "/api/v1/items/{id}/refresh-artwork"
@@ -2234,6 +2235,7 @@ pub fn router(state: AppState) -> Router {
             post(libraries::reset_root_identity),
         )
         .route("/items/{id}/reanalyze", post(items::reanalyze))
+        .route("/items/{id}/m7/reevaluate", post(items::reevaluate_m7))
         .route("/items/{id}/get-it-back", post(offload::get_it_back))
         .route("/items/{id}/offload-status", get(offload::offload_status))
         .route("/items/{id}/refresh-artwork", post(items::refresh_artwork))

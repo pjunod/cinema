@@ -5,6 +5,10 @@
 //                         [--frames FIRST LAST | --resume FIRST FIRST_PTS]
 //   segment_decode_render --dump-composed SOURCE VIDEO_INDEX FIRST LAST
 //   segment_decode_render --export-composed-topleft SOURCE VIDEO_INDEX FIRST LAST NEW_OUTPUT.yuv
+//   segment_decode_render --m7-sample-fel-v1 SOURCE VIDEO_INDEX FIRST LAST
+//                         FIRST_PTS END_PTS X0 Y0 X1 Y1 NEW_OUTPUT
+//   segment_decode_render --m7-sample-candidate-v1 AUTHORED VIDEO_INDEX 0 LAST
+//                         FIRST_PTS END_PTS X0 Y0 X1 Y1 NEW_OUTPUT
 //
 // The first two modes take a trailing diagnostic [--area LEFT RIGHT TOP BOTTOM], which
 // replaces every frame's L5 active area with these offsets, to reproduce an
@@ -22,6 +26,19 @@
 // yuv420p10le file and a stdout JSONL sidecar with the versioned color tags,
 // source clocks, RPU and frame hashes. The final export_complete record
 // follows a successful close of the complete raw file.
+//
+// --m7-sample-fel-v1 seeks on exact source ticks, bounds preroll, and writes
+// raw BL/EL lattice samples plus frame and coded AU identities to a new file.
+// FIRST/LAST and FIRST_PTS/END_PTS come from the held source's frame census.
+// --m7-sample-candidate-v1 reads the entire selected authored P8.1 clip, with
+// ordinal zero and clocks in that clip. Both modes bind each decoded RPU to
+// its coded access unit. The matching --m7-census-fel-v1 and
+// --m7-census-candidate-v1 commands use the same arguments and emit frame
+// identity only. The FEL census verifies absolute presentation ordinals from
+// the start of the held stream, within the finite read and prefix envelope.
+// --m7-export-full-planes-v1 uses the same FEL window arguments and writes
+// complete original BL and composed TopLeft planes for the exact candidate
+// crop. The M7 header defines the distinct wire representations.
 //
 // --refit-stats writes JSON lines to stdout: one per pooled scene,
 //   {"kind":"refit_scene","first_frame":N,"frames":K,"first_pts":TICKS,
@@ -74,7 +91,7 @@
 
 #define REFIT_EXIT_CONTENT 3
 
-static bool refit_dump, refit_area_override, refit_topleft;
+static bool refit_dump, refit_area_override, refit_topleft, refit_m7, refit_m7_census, refit_m7_planes;
 static FILE *refit_topleft_output;
 // --resume: the resume point, and the preroll decoded before it.
 static int64_t refit_resume_frame = -1, refit_resume_pts, refit_preroll;
@@ -228,24 +245,56 @@ static bool refit_scene_refresh(const uint8_t *nalu, size_t size, const AVDOVIMe
   return refresh;
 }
 
+static inline void refit_base_sample(const AVFrame *bl, int x, int y,
+                                     const struct refit_sites *sites, uint16_t base[3]) {
+  base[0] = refit_code(bl, 0, x, y);
+  base[1] = refit_code(bl, 1, sites->bl_chroma[0], sites->bl_chroma[1]);
+  base[2] = refit_code(bl, 2, sites->bl_chroma[0], sites->bl_chroma[1]);
+}
+
 static void refit_sample(const AVFrame *bl, const AVFrame *el, int x, int y,
                          uint16_t base[3], uint16_t enhancement[3]) {
   struct refit_sites sites = refit_pair(x, y, bl->width, bl->height);
-  base[0] = refit_code(bl, 0, x, y);
-  base[1] = refit_code(bl, 1, sites.bl_chroma[0], sites.bl_chroma[1]);
-  base[2] = refit_code(bl, 2, sites.bl_chroma[0], sites.bl_chroma[1]);
+  refit_base_sample(bl, x, y, &sites, base);
   enhancement[0] = refit_code(el, 0, sites.el_luma[0], sites.el_luma[1]);
   enhancement[1] = refit_code(el, 1, sites.el_chroma[0], sites.el_chroma[1]);
   enhancement[2] = refit_code(el, 2, sites.el_chroma[0], sites.el_chroma[1]);
 }
 
+static void refit_topleft_pixels(const AVFrame *bl, const AVFrame *el,
+                                 const struct refit_exact *mapping,
+                                 const AVDOVIColorMetadata *color,
+                                 uint8_t *pixels_out) {
+  size_t pixels = (size_t)bl->width * bl->height;
+  uint8_t *cb = pixels_out + 2 * pixels;
+  uint8_t *cr = cb + pixels / 2;
+  for (int y = 0; y < bl->height; y++) {
+    for (int x = 0; x < bl->width; x++) {
+      uint16_t base[3], enhancement[3], composed[3], rgb[3];
+      refit_sample(bl, el, x, y, base, enhancement);
+      refit_exact_compose(mapping, base, enhancement, composed);
+      refit_topleft_rgb(color, composed, rgb);
+      int64_t luma;
+      uint16_t code = refit_topleft_luma(rgb, &luma);
+      refit_topleft_store(pixels_out, (size_t)y * bl->width + x, code);
+      if (!(x % 2) && !(y % 2)) {
+        size_t chroma = (size_t)(y / 2) * (bl->width / 2) + x / 2;
+        refit_topleft_store(cb, chroma, refit_topleft_chroma(rgb[2], luma, 18814));
+        refit_topleft_store(cr, chroma, refit_topleft_chroma(rgb[0], luma, 14746));
+      }
+    }
+  }
+}
+
+#include "m7_sample_v1.h"
+static struct m7_sample_v1 refit_m7_sample;
+
 static void refit_topleft_frame(const AVFrame *bl, const AVFrame *el,
                               const AVDOVIMetadata *data,
-                              const struct refit_mapping *mapping, int64_t ordinal,
+                              const struct refit_exact *mapping, int64_t ordinal,
                               const uint8_t *nalu, size_t nalu_size) {
   const AVDOVIColorMetadata *color = av_dovi_get_color(data);
-  refit_content(refit_topleft_mapping(data), "TopLeft v1 requires identity mapping and calibrated linear NLQ");
-  refit_content(refit_topleft_color(color), "TopLeft v1 requires the calibrated Q13/Q28 full-range color matrix");
+  refit_content(refit_topleft_color(color), "TopLeft v2 requires the calibrated Q13/Q28 full-range color matrix");
   size_t pixels = (size_t)bl->width * bl->height;
   size_t bytes = 3 * pixels;
   if (!refit_records) {
@@ -254,24 +303,7 @@ static void refit_topleft_frame(const AVFrame *bl, const AVFrame *el,
     refit_records_capacity = bytes;
   }
   need(bytes == refit_records_capacity, "stable TopLeft raster");
-  uint8_t *cb = refit_records + 2 * pixels;
-  uint8_t *cr = cb + pixels / 2;
-  for (int y = 0; y < bl->height; y++) {
-    for (int x = 0; x < bl->width; x++) {
-      uint16_t base[3], enhancement[3], composed[3], rgb[3];
-      refit_sample(bl, el, x, y, base, enhancement);
-      refit_compose(mapping, base, enhancement, composed);
-      refit_topleft_rgb(color, composed, rgb);
-      int64_t luma;
-      uint16_t code = refit_topleft_luma(rgb, &luma);
-      refit_topleft_store(refit_records, (size_t)y * bl->width + x, code);
-      if (!(x % 2) && !(y % 2)) {
-        size_t chroma = (size_t)(y / 2) * (bl->width / 2) + x / 2;
-        refit_topleft_store(cb, chroma, refit_topleft_chroma(rgb[2], luma, 18814));
-        refit_topleft_store(cr, chroma, refit_topleft_chroma(rgb[0], luma, 14746));
-      }
-    }
-  }
+  refit_topleft_pixels(bl, el, mapping, color, refit_records);
   char rpu_sha[65], frame_sha[65];
   hash_bytes(nalu, nalu_size, rpu_sha);
   hash_bytes(refit_records, bytes, frame_sha);
@@ -290,6 +322,22 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
                 "fresh decoder-attached RPU required; cached metadata insufficient");
   uint8_t nalu[4098] = {0x7c, 0x01};
   memcpy(nalu + 2, raw->data, raw->size);
+  if (!el) {
+    struct base_mapping admitted;
+    base_metadata(bl, nalu, raw->size + 2, source_profile, &admitted);
+    const AVFrameSideData *side = av_frame_get_side_data(bl, AV_FRAME_DATA_DOVI_METADATA);
+    refit_content(side != NULL, "decoder-derived P8.1 metadata");
+    const AVDOVIMetadata *data = (const void *)side->data;
+    refit_scene_refresh(nalu, raw->size + 2, data);
+    int w = bl->width;
+    refit_content(bl->format == AV_PIX_FMT_YUV420P10LE &&
+                      bl->linesize[0] >= 2 * w && bl->linesize[1] >= w && bl->linesize[2] >= w,
+                  "software-decoded planar ten-bit candidate");
+    m7_sample_v1_frame(&refit_m7_sample, bl, NULL, data, NULL, ordinal, nalu, raw->size + 2);
+    refit_end_pts = bl->pts + bl->duration;
+    refit_composed++;
+    return;
+  }
   // The playback path's admission, refusals included; it prints nothing here.
   struct pl_dovi_metadata admitted;
   // Its refusals are refusals of this RPU's content.
@@ -303,6 +351,14 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
   const char *refused = refit_mapping_from_dovi(data, &mapping);
   refit_content(refused == NULL, refused ? refused : "");
   bool refresh = refit_scene_refresh(nalu, raw->size + 2, data);
+  // M7 and the TopLeft export compose Model B exactly; the F+ statistics
+  // below keep refit_compose's binary64 renderer model.
+  struct refit_exact exact;
+  memset(&exact, 0, sizeof(exact));
+  if (refit_m7 || refit_topleft) {
+    const char *inexact = refit_exact_from_dovi(data, &exact);
+    refit_content(inexact == NULL, inexact ? inexact : "");
+  }
 
   int w = bl->width, h = bl->height, ew = el->width, eh = el->height;
   // The frozen pairing covers a half-resolution EL only.
@@ -311,8 +367,14 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
            bl->linesize[0] >= 2 * w && bl->linesize[1] >= w && bl->linesize[2] >= w &&
            el->linesize[0] >= 2 * ew && el->linesize[1] >= ew && el->linesize[2] >= ew,
        "software-decoded planar ten-bit layers");
+  if (refit_m7) {
+    m7_sample_v1_frame(&refit_m7_sample, bl, el, data, &exact, ordinal, nalu, raw->size + 2);
+    refit_end_pts = bl->pts + bl->duration;
+    refit_composed++;
+    return;
+  }
   if (refit_topleft) {
-    refit_topleft_frame(bl, el, data, &mapping, ordinal, nalu, raw->size + 2);
+    refit_topleft_frame(bl, el, data, &exact, ordinal, nalu, raw->size + 2);
     refit_composed++;
     return;
   }
@@ -404,23 +466,28 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
 
 // receive()'s pair consumer in these modes, in place of render_pairs.
 static void refit_pairs(void) {
-  while (layers[0].count && layers[1].count) {
-    AVFrame *bl = layers[0].queue[0], *el = layers[1].queue[0];
-    need(bl->pts == el->pts && bl->duration == el->duration && bl->duration > 0,
-         "unmatched or ambiguous BL/EL PTS/duration");
+  while (layers[0].count && (base_only || layers[1].count)) {
+    AVFrame *bl = layers[0].queue[0], *el = base_only ? NULL : layers[1].queue[0];
+    need(bl->duration > 0 && (!el || (bl->pts == el->pts && bl->duration == el->duration)),
+         el ? "unmatched or ambiguous BL/EL PTS/duration" : "positive M7 candidate frame duration");
     need(last_pts == AV_NOPTS_VALUE || bl->pts > last_pts,
          "duplicate/out-of-order paired frame");
     last_pts = bl->pts;
+    if (refit_m7_census && !base_only && !refit_paired)
+      need((bl->flags & AV_FRAME_FLAG_KEY) && (el->flags & AV_FRAME_FLAG_KEY),
+           "independent first BL/EL pair required for an absolute M7 census");
     if (refit_resume_frame >= 0 && !refit_resume_started) {
-      // The window path's rule: decoding starts at an independent BL/EL
-      // random-access pair at or before the point composition starts.
+      // Decode from an independent random-access picture. FEL windows can
+      // seek into preroll. The whole candidate starts on its first picture.
       if (!refit_preroll_seen) {
-        need((bl->flags & AV_FRAME_FLAG_KEY) && (el->flags & AV_FRAME_FLAG_KEY) &&
+        need((bl->flags & AV_FRAME_FLAG_KEY) && (!el || (el->flags & AV_FRAME_FLAG_KEY)) &&
                  bl->pts <= refit_resume_pts,
-             "independent BL/EL random-access preroll required before the resume point");
+             el ? "independent BL/EL random-access preroll required before the resume point"
+                : "independent random-access frame required at the start of the M7 candidate");
         refit_preroll_seen = true;
       }
       if (bl->pts < refit_resume_pts) {
+        need(!base_only, "M7 candidate must start at the first declared PTS");
         need(++refit_preroll <= REFIT_MAX_PREROLL, "bounded resume preroll");
         drop_pair();
         continue;
@@ -432,12 +499,18 @@ static void refit_pairs(void) {
     int64_t ordinal = refit_paired++;
     need(refit_paired <= REFIT_MAX_TITLE_FRAMES, "bounded title frame count");
     if (ordinal > refit_last) {
+      need(!base_only, "extra decoded frame in M7 candidate");
+      need(!refit_m7 || bl->pts >= refit_m7_sample.end_pts,
+           "extra M7 frame within the requested clock interval");
       window_done = true;
       drop_pair();
       return;
     }
-    if (ordinal >= refit_first)
+    if (ordinal >= refit_first) {
+      if (refit_m7_census && ordinal == refit_first)
+        need(bl->pts == refit_resume_pts, "M7 census first presentation ordinal and PTS disagree");
       refit_frame(bl, el, ordinal);
+    }
     drop_pair();
   }
 }
@@ -466,16 +539,17 @@ static void refit_queue(struct layer *layer, AVFrame *frame) {
   av_frame_unref(frame);
 }
 
-// End of title: flush both decoders, then take one frame from each in turn,
-// so neither layer's queue runs ahead of its partner's.
+// Flush the active decoders and alternate layers so a queue cannot run ahead
+// of its partner during drain.
 static void refit_drain(void) {
-  for (int k = 0; k < 2; k++)
+  int layer_count = base_only ? 1 : 2;
+  for (int k = 0; k < layer_count; k++)
     need(avcodec_send_packet(layers[k].decoder, NULL) >= 0, "decoder drain");
   AVFrame *frame = av_frame_alloc();
   need(frame != NULL, "decode frame allocation");
-  bool done[2] = {false, false};
+  bool done[2] = {false, base_only};
   while (!window_done && !(done[0] && done[1])) {
-    for (int k = 0; k < 2 && !window_done; k++) {
+    for (int k = 0; k < layer_count && !window_done; k++) {
       if (done[k])
         continue;
       int result = avcodec_receive_frame(layers[k].decoder, frame);
@@ -494,13 +568,34 @@ static void refit_drain(void) {
 static int refit_main(int argc, char **argv) {
   refit_dump = !strcmp(argv[1], "--dump-composed");
   refit_topleft = !strcmp(argv[1], "--export-composed-topleft");
+  bool candidate_census = !strcmp(argv[1], "--m7-census-candidate-v1");
+  refit_m7_census = candidate_census || !strcmp(argv[1], "--m7-census-fel-v1");
+  base_only = candidate_census || !strcmp(argv[1], "--m7-sample-candidate-v1");
+  refit_m7_planes = !strcmp(argv[1], "--m7-export-full-planes-v1");
+  refit_m7 = base_only || refit_m7_census || refit_m7_planes || !strcmp(argv[1], "--m7-sample-fel-v1");
   refit_area_override = argc >= 5 && !strcmp(argv[argc - 5], "--area");
   if (refit_area_override) {
     for (int i = 0; i < 4; i++)
       refit_area[i] = number(argv[argc - 4 + i], 0, 4095);
     argc -= 5;
   }
-  if (refit_topleft)
+  if (refit_m7_planes)
+    need(argc == 13 && !refit_area_override,
+         "usage: segment_decode_render --m7-export-full-planes-v1 SOURCE VIDEO_INDEX "
+         "FIRST LAST FIRST_PTS END_PTS X0 Y0 X1 Y1 NEW_OUTPUT");
+  else if (refit_m7_census)
+    need(argc == 13 && !refit_area_override,
+         "usage: segment_decode_render --m7-census-{fel,candidate}-v1 SOURCE VIDEO_INDEX "
+         "FIRST LAST FIRST_PTS END_PTS X0 Y0 X1 Y1 NEW_OUTPUT");
+  else if (base_only)
+    need(argc == 13 && !refit_area_override,
+         "usage: segment_decode_render --m7-sample-candidate-v1 AUTHORED VIDEO_INDEX 0 LAST "
+         "FIRST_PTS END_PTS X0 Y0 X1 Y1 NEW_OUTPUT");
+  else if (refit_m7)
+    need(argc == 13 && !refit_area_override,
+         "usage: segment_decode_render --m7-sample-fel-v1 SOURCE VIDEO_INDEX FIRST LAST "
+         "FIRST_PTS END_PTS X0 Y0 X1 Y1 NEW_OUTPUT");
+  else if (refit_topleft)
     need(argc == 7 && !refit_area_override,
          "usage: segment_decode_render --export-composed-topleft SOURCE VIDEO_INDEX FIRST LAST NEW_OUTPUT.yuv");
   else if (refit_dump)
@@ -514,11 +609,27 @@ static int refit_main(int argc, char **argv) {
   // Refusals leave without exit-time teardown while decoder threads run.
   dv_threads_live = true;
   int stream_index = number(argv[3], 0, 255);
-  if (refit_dump || refit_topleft) {
+  if (refit_dump || refit_topleft || refit_m7) {
     refit_first = number(argv[4], 0, REFIT_MAX_TITLE_FRAMES - 1);
     refit_last = number(argv[5], 0, REFIT_MAX_TITLE_FRAMES - 1);
     need(refit_first <= refit_last, "ordered frame range");
-    if (refit_topleft) {
+    if (refit_m7) {
+      frame_cap = (int)(refit_last - refit_first + 1);
+      need(frame_cap <= M7_SAMPLE_MAX_FRAMES, "bounded M7 frame count");
+      need(!refit_m7_planes || frame_cap == REFIT_TOPLEFT_FRAMES,
+           "M7 full-plane encoder input requires exactly 48 frames");
+      need(!base_only || refit_first == 0, "M7 candidate ordinals start at zero");
+      if (refit_m7_census && !base_only)
+        need(refit_first <= REFIT_MAX_PREROLL, "bounded absolute M7 source census prefix");
+      else
+        refit_resume_frame = refit_first;
+      refit_resume_pts = refit_ticks(argv[6]);
+      refit_m7_sample.end_pts = refit_ticks(argv[7]);
+      need(refit_resume_pts < refit_m7_sample.end_pts, "ordered M7 clock interval");
+      for (int i = 0; i < 4; i++)
+        refit_m7_sample.roi[i] = number(argv[8 + i], 0, 4096);
+      refit_threads = 1;
+    } else if (refit_topleft) {
       need(refit_last - refit_first + 1 == REFIT_TOPLEFT_FRAMES,
            "TopLeft export requires exactly 48 frames");
       refit_threads = 1;
@@ -559,15 +670,16 @@ static int refit_main(int argc, char **argv) {
   input->max_analyze_duration = AV_TIME_BASE;
   input->max_probe_packets = 32;
   input->max_streams = 256;
-  // The whole title is read: lift the playback window's read budget for this
-  // source only, as scan_title does.
+  // The bounded M7 window retains the playback read budget. The other
+  // modes can read the whole title, as scan_title does.
   need(movie_source_open(&refit_io, argv[2]) >= 0,
        "held regular title source or private source capability");
   // A demuxer reads a title about once; allow four reads plus room for
   // probing and index seeks, and refuse anything that needs more.
   need(refit_io.length > 0 && (uint64_t)refit_io.length <= (UINT64_C(1) << 56),
        "bounded title length");
-  refit_io.read_limit = 4 * (uint64_t)refit_io.length + (UINT64_C(64) << 20);
+  if (!refit_m7)
+    refit_io.read_limit = 4 * (uint64_t)refit_io.length + (UINT64_C(64) << 20);
   uint8_t *buffer = av_malloc(65536);
   need(buffer != NULL, "bounded title IO buffer");
   refit_avio = avio_alloc_context(buffer, 65536, 0, &refit_io, movie_read, NULL, movie_seek);
@@ -604,27 +716,48 @@ static int refit_main(int argc, char **argv) {
   refit_content(config && config->size >= sizeof(AVDOVIDecoderConfigurationRecord),
                 "declared source Dolby Vision configuration");
   const AVDOVIDecoderConfigurationRecord *cfg = (const void *)config->data;
-  refit_content(cfg->dv_profile == 7 && cfg->bl_present_flag && cfg->el_present_flag &&
-                    cfg->rpu_present_flag,
-                "Profile 7 dual-layer source");
+  if (base_only) {
+    refit_content(cfg->dv_version_major == 1 && cfg->dv_profile == 8 &&
+                      cfg->dv_bl_signal_compatibility_id == 1 && cfg->dv_md_compression == 0 &&
+                      cfg->bl_present_flag && !cfg->el_present_flag && cfg->rpu_present_flag,
+                  "M7 candidate requires declared Profile 8.1 with BL and RPU only");
+    source_profile = cfg->dv_profile;
+  } else {
+    refit_content(cfg->dv_profile == 7 && cfg->bl_present_flag && cfg->el_present_flag &&
+                      cfg->rpu_present_flag,
+                  "Profile 7 dual-layer source");
+  }
   expected_w[0] = stream->codecpar->width;
   expected_h[0] = stream->codecpar->height;
   refit_content(expected_w[0] >= 64 && expected_w[0] <= 4096 && expected_h[0] >= 64 &&
                     expected_h[0] <= 2160 && expected_w[0] % 2 == 0 && expected_h[0] % 2 == 0,
                 "supported even raster bound");
   expected_w[1] = expected_h[1] = 0;
-  discover_el = true;
-  if (refit_resume_frame >= 0)
+  discover_el = !base_only;
+  if (!base_only && refit_resume_frame >= 0)
     need(avformat_seek_file(input, stream_index, INT64_MIN, refit_resume_pts, refit_resume_pts,
                             AVSEEK_FLAG_BACKWARD) >= 0,
          "keyframe seek before the resume point");
 
-  if (refit_topleft) {
+  if (refit_topleft || refit_m7) {
     const AVCodecParameters *codec = stream->codecpar;
     refit_content(codec->color_primaries == AVCOL_PRI_BT2020 && codec->color_trc == AVCOL_TRC_SMPTE2084 &&
                       codec->color_space == AVCOL_SPC_BT2020_NCL && codec->color_range == AVCOL_RANGE_MPEG &&
                       codec->chroma_location == AVCHROMA_LOC_TOPLEFT,
-                  "TopLeft v1 requires declared BT.2020 PQ video range and TopLeft chroma");
+                  refit_m7 ? "M7 requires declared BT.2020 PQ video range and TopLeft chroma"
+                           : "TopLeft v1 requires declared BT.2020 PQ video range and TopLeft chroma");
+  }
+  if (refit_m7) {
+    const AVCodecParameters *codec = stream->codecpar;
+    refit_content(codec->extradata_size >= 23 && codec->extradata[0] == 1 &&
+                      (codec->extradata[21] & 3) == 3,
+                  "M7 requires four-byte hvcC NAL framing for coded AU binding");
+    m7_sample_v1_open(&refit_m7_sample, argv[12], stream_index, source_time_base,
+                      expected_w[0], expected_h[0], refit_first, refit_last, refit_resume_pts,
+                      base_only, refit_m7_planes ? M7_STREAM_FULL_PLANES :
+                          refit_m7_census ? M7_STREAM_CENSUS : M7_STREAM_LATTICE);
+  }
+  if (refit_topleft) {
     int fd = open(argv[6], O_WRONLY | O_CREAT | O_EXCL, 0600);
     need(fd >= 0, "new exclusive TopLeft output");
     refit_topleft_output = fdopen(fd, "wb");
@@ -639,12 +772,14 @@ static int refit_main(int argc, char **argv) {
                 (long long)refit_first, (long long)refit_last, stream_index, expected_w[0], expected_h[0]) > 0,
          "TopLeft export header");
   }
-  refit_raw = calloc(1, sizeof(*refit_raw));
-  refit_pooled = calloc(1, sizeof(*refit_pooled));
-  refit_frame_stats[0] = calloc(1, sizeof(*refit_frame_stats[0]));
-  refit_frame_stats[1] = calloc(1, sizeof(*refit_frame_stats[1]));
-  need(refit_raw && refit_pooled && refit_frame_stats[0] && refit_frame_stats[1],
-       "scene statistics allocation");
+  if (!refit_m7) {
+    refit_raw = calloc(1, sizeof(*refit_raw));
+    refit_pooled = calloc(1, sizeof(*refit_pooled));
+    refit_frame_stats[0] = calloc(1, sizeof(*refit_frame_stats[0]));
+    refit_frame_stats[1] = calloc(1, sizeof(*refit_frame_stats[1]));
+    need(refit_raw && refit_pooled && refit_frame_stats[0] && refit_frame_stats[1],
+         "scene statistics allocation");
+  }
   if (refit_dump)
     need(printf("{\"kind\":\"composed_dump\",\"format\":\"plurx-composed-v1\","
                 "\"time_base\":\"%d/%d\",\"first\":%lld,\"last\":%lld,\"area\":\"%s\","
@@ -657,19 +792,33 @@ static int refit_main(int argc, char **argv) {
          "composed dump header");
 
   layers[0] = open_layer(stream, 0);
-  layers[1] = open_layer(stream, 1);
+  if (!base_only)
+    layers[1] = open_layer(stream, 1);
   AVPacket *packet = av_packet_alloc();
   need(packet != NULL, "demux packet");
   int result = 0;
+  unsigned m7_packets = 0;
   while (!window_done && (result = av_read_frame(input, packet)) >= 0) {
     need(packet->size <= REFIT_MAX_PACKET_BYTES, "bounded packet size");
+    if (refit_m7)
+      need(++m7_packets <= M7_SAMPLE_MAX_PACKETS, "bounded M7 demux packet count");
     if (packet->stream_index == stream_index) {
+      if (refit_m7) {
+        need(packet->pts != AV_NOPTS_VALUE && packet->duration > 0,
+             "M7 coded access unit requires PTS and positive duration");
+        bool in_window = packet->pts >= refit_resume_pts && packet->pts < refit_m7_sample.end_pts;
+        need(!base_only || in_window, "extra coded picture outside declared M7 candidate interval");
+        if (in_window)
+          inspect_coded_au(packet, run_current, true, false);
+      }
       send_layer(&layers[0], packet);
-      if (!window_done)
+      if (!window_done && !base_only)
         send_layer(&layers[1], packet);
     }
     av_packet_unref(packet);
   }
+  if (refit_m7)
+    need(!refit_io.exhausted, "bounded M7 source read budget");
   if (!window_done) {
     need(result == AVERROR_EOF, "complete title read");
     refit_drain();
@@ -680,7 +829,11 @@ static int refit_main(int argc, char **argv) {
     need(refit_paired > refit_last, "requested frame range extends past the title");
   need(refit_composed > 0, "nonempty frame range");
 
-  if (refit_topleft) {
+  if (refit_m7) {
+    need(refit_composed == frame_cap && refit_end_pts == refit_m7_sample.end_pts,
+         "complete M7 frame and clock window");
+    m7_sample_v1_finish(&refit_m7_sample, refit_composed);
+  } else if (refit_topleft) {
     need(refit_composed == REFIT_TOPLEFT_FRAMES && fclose(refit_topleft_output) == 0,
          "complete 48-frame TopLeft output");
     need(printf("{\"kind\":\"export_complete\",\"format\":\"%s\",\"frames\":%lld}\n",
@@ -705,7 +858,7 @@ static int refit_main(int argc, char **argv) {
          "refit summary write");
   }
   need(fflush(stdout) == 0, "observations flush");
-  for (int k = 0; k < 2; k++) {
+  for (int k = 0; k < (base_only ? 1 : 2); k++) {
     for (int i = 0; i < layers[k].count; i++)
       av_frame_free(&layers[k].queue[i]);
     av_bsf_free(&layers[k].split);

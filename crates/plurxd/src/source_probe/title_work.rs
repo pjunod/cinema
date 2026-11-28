@@ -1,4 +1,10 @@
 //! One owned future inside the existing source-probe scheduler. No new daemon.
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "expected title fixtures and serialized settlement checkpoints"
+)]
+mod m7_settlement_tests;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "title_work_tests.rs"]
 mod tests;
@@ -10,8 +16,9 @@ use plurx_core::{
     store::{
         background_jobs::{
             CandidateCursor, CandidateQuery, ClaimJob, ClaimVerdict, EnqueueJob, EnqueueOutcome,
-            JobKind, JobPayload, JobRequest, JobSettlement,
+            JobKind, JobPayload, JobPublishOutcome, JobRequest, JobSettlement,
         },
+        dv_m7_outcomes::M7TitleOutcome,
         dv_title_jobs::{TitleDemand, TitleMaintenanceCursor, TitleOutput},
     },
 };
@@ -210,6 +217,9 @@ impl TitleTask {
         #[cfg(target_os = "linux")]
         if demands.is_empty() && dispatch == TitleDispatch::Maintenance {
             requalify_stale_fel_titles(state, &tools, &scanner).await;
+        }
+        if demands.is_empty() && dispatch == TitleDispatch::Maintenance {
+            reopen_stale_m7_titles(state, &tools).await;
         }
         for mut demand in demands {
             if let Some(after) = after.as_deref_mut() {
@@ -723,6 +733,37 @@ async fn eligible_file(
     Ok(Some(file))
 }
 
+/// A settled title's M7 outcome is recorded under the M7 identity (the M7
+/// sources this daemon was built from and the tools it runs) and the fitted
+/// F+ table it saw. While no title work waits, reopen a bounded batch of
+/// titles with no recorded outcome, or refused (`unsupported`) under another
+/// identity or table, each with a queued title job; the next maintenance turn
+/// runs them from their stored aggregate, without rescanning the title. The
+/// store marks each reopen so a title reopens at most once per identity and
+/// table.
+async fn reopen_stale_m7_titles(state: &AppState, tools: &ToolSet) {
+    if state.m7_experiment_dir.is_none() {
+        return;
+    }
+    let identity = super::m7_title::identity(tools);
+    match state
+        .store
+        .reopen_stale_dv_m7_titles(
+            &identity,
+            plurx_core::transcode::dv_refit::FIT_VERSION,
+            16,
+            now_ms(),
+        )
+        .await
+    {
+        Ok(titles) if !titles.is_empty() => {
+            tracing::info!(?titles, %identity, "reopened stale M7 titles for evaluation");
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "listing stale M7 titles"),
+    }
+}
+
 /// A renderer, recipe or encoder change leaves every FEL verdict measured
 /// under the old identity. While no title work waits, ask for a bounded batch
 /// of those titles again: their demand is rebound, and the title job rescans
@@ -754,7 +795,98 @@ async fn requalify_stale_fel_titles(state: &AppState, tools: &ToolSet, scanner: 
     }
 }
 
-/// A job may reuse only an aggregate for the revision it will claim.
+/// The title's settlement after its M7 evaluation: the outcome to publish
+/// with the aggregate (`None`: M7 did not run, record nothing), or a yield
+/// that keeps the aggregate for the retry.
+fn m7_settlement(
+    aggregate: &TitleOutput,
+    evaluation: super::m7_title::Evaluation,
+    identity: &str,
+    interrupted: bool,
+    now: i64,
+) -> Result<Option<M7TitleOutcome>, JobSettlement> {
+    use super::m7_title::EvaluationError;
+    let deferred = match &evaluation {
+        Ok(_) => false,
+        Err(error @ EvaluationError::Deferred(_)) => {
+            tracing::debug!(file_id = aggregate.file_id, %error, "maintenance M7 retry pending");
+            true
+        }
+        Err(error @ (EvaluationError::Unsupported(_) | EvaluationError::Inconclusive(_))) => {
+            tracing::debug!(file_id = aggregate.file_id, %error, "maintenance M7 experiment ended");
+            false
+        }
+    };
+    let (reason, delay) = if interrupted {
+        ("title_interrupted", 5_000)
+    } else if deferred {
+        ("m7_retry_pending", 30_000)
+    } else {
+        return Ok(super::m7_title::outcome_record(&evaluation, identity));
+    };
+    Err(JobSettlement::Yield {
+        error_code: Some(reason.into()),
+        not_before_ms: now.saturating_add(delay),
+        checkpoint: Some(serde_json::json!({"fel_title_aggregate": aggregate})),
+    })
+}
+
+async fn complete_title<E, P>(
+    demand: &TitleDemand,
+    output: TitleOutput,
+    identity: &str,
+    evaluate: E,
+    interrupted: impl FnOnce() -> bool,
+    publish: impl FnOnce(TitleOutput, Option<M7TitleOutcome>) -> P,
+    retry_at: impl FnOnce() -> i64,
+) -> Result<(), JobSettlement>
+where
+    E: Future<Output = (super::m7_title::Evaluation, Option<String>)>,
+    P: Future<Output = Result<JobPublishOutcome, StoreError>>,
+{
+    // The native_fel_head waiter reopens an already-settled title only to
+    // rebuild that node's local prefix: M7 does not run, and the
+    // generation's recorded outcome stays as it was.
+    let (evaluation, observed_fit) = if demand.fel_head_target.is_some() {
+        (Ok(super::m7_title::Evaluated::Skipped), None)
+    } else {
+        evaluate.await
+    };
+    let m7 =
+        m7_settlement(&output, evaluation, identity, interrupted(), now_ms())?.map(|mut m7| {
+            m7.observed_fit_table = observed_fit;
+            m7
+        });
+    match publish(output.clone(), m7).await {
+        Ok(JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }) => {
+            Ok(())
+        }
+        Ok(JobPublishOutcome::ArtifactConflict) => Err(JobSettlement::Yield {
+            error_code: Some("m7_fit_changed".into()),
+            not_before_ms: now_ms().saturating_add(5_000),
+            checkpoint: Some(serde_json::json!({"fel_title_aggregate": output})),
+        }),
+        Ok(JobPublishOutcome::LostOwnership | JobPublishOutcome::SourceChanged) => {
+            Err(JobSettlement::Stop {
+                error_code: "title_publication_fenced".into(),
+            })
+        }
+        Err(error) => {
+            tracing::warn!(%error, "title publication unavailable");
+            Err(JobSettlement::Retry {
+                error_code: "title_publication_failed".into(),
+                not_before_ms: retry_at(),
+            })
+        }
+    }
+}
+
+/// The aggregate this title's job may settle with instead of reading the
+/// file: one stored under the generation the worker's bind left unchanged.
+/// Only a publisher bound to that generation's scanner stores one (an index
+/// pass's ride-along, or an earlier job), and a bind to another scanner
+/// rotates the generation and drops it in the same transaction — so a
+/// generation that moved, or a document read before it moved, reuses nothing.
 pub(super) fn reusable_aggregate(
     demand: &TitleDemand,
     bound_revision: i64,
@@ -937,27 +1069,34 @@ async fn execute(
                         checkpoint: Some(serde_json::json!({"fel_title_aggregate":output})),
                     })
                 } else {
-                    match fence.publish_dv_title(output).await {
-                        Ok(true) => {
-                            published = true;
-                            None
-                        }
-                        Ok(false) => Some(JobSettlement::Stop {
-                            error_code: "title_publication_fenced".into(),
-                        }),
-                        Err(error) => {
-                            tracing::warn!(%error,"title publication unavailable");
-                            Some(JobSettlement::Retry {
-                                error_code: "title_publication_failed".into(),
-                                not_before_ms: now_ms().saturating_add(
-                                    crate::background_jobs::retry_delay_ms(
-                                        &job.id,
-                                        job.failed_attempts,
-                                    ),
-                                ),
-                            })
-                        }
-                    }
+                    let context = super::m7_comparison::TitleContext {
+                        state: &state,
+                        file: &file,
+                        demand: &demand,
+                        tools: &tools,
+                        admission: &admission,
+                        fence: &fence,
+                        cancel: &cancel,
+                        shutdown: &shutdown,
+                    };
+                    let identity = super::m7_title::identity(&tools);
+                    let outcome = complete_title(
+                        &demand,
+                        output,
+                        &identity,
+                        super::m7_title::evaluate(&context, &stats),
+                        || cancel.is_cancelled() || shutdown.is_cancelled(),
+                        |output, m7| fence.publish_dv_title(output, m7),
+                        || {
+                            now_ms().saturating_add(crate::background_jobs::retry_delay_ms(
+                                &job.id,
+                                job.failed_attempts,
+                            ))
+                        },
+                    )
+                    .await;
+                    published = outcome.is_ok();
+                    outcome.err()
                 }
             }
             Ok(TitleAcquisition::QualificationOnly(_)) => {

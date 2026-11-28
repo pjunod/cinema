@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-24, plurx has 446 routes declared by the ordinary listener's
+As of 2026-11-25, plurx has 447 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 446 routes across the registered routers.
+plurx has 447 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -996,6 +996,7 @@ node does not hold, `409` while a session is reading the published artifact.
 | GET | `/api/v1/items/{id}` | bearer | Item detail: item, ancestors, children, files, editions, reading. Each video file carries its Dolby Vision record (`dv_profile`, `dv_level`, `dv_bl_compat_id`, `dv_el_present`, and `dv_el_kind` `fel`/`mel` once the complete-title scan found it), `dv_facts` (those facts as the one line every client shows as sent, e.g. "Profile 7 · FEL · full enhancement layer · level 6 · HDR10 base") and `plays_on[{id, device, client, label, method, el_dropped, full_quality}]`: how it plays on each of the caller's signed-in devices with no track chosen, from the same verdict function `POST /files/{id}/decision` uses (transport-narrowed conversion, learned limits still in force, decoder geometry, the language policy's audio track) |
 | PATCH | `/api/v1/items/{id}` | admin | Hand-edits metadata — **home libraries only** |
 | POST | `/api/v1/items/{id}/reanalyze` | admin | Re-runs ffprobe over every file on the item |
+| POST | `/api/v1/items/{id}/m7/reevaluate` | admin | Clears eligible settled M7 outcomes for the idle sweep. Returns 409 without M7 configuration. |
 | POST | `/api/v1/items/{id}/refresh-artwork` | admin | Forces an artwork re-fetch for the item and its ancestors |
 | GET | `/api/v1/items/{id}/photo` | bearer | Original photo bytes with range support, or the thumbnail |
 | GET | `/api/v1/hubs` | bearer | Home rows: continue watching, next up, recently added |
@@ -1392,6 +1393,13 @@ cluster-wide leases can run the pass. Each refusal is a typed 503 with a
 | `probe_repair_busy` | 30 | A probe repair is running, on another node named in `message` or on this one. |
 | `probe_repair_interrupted` | 5 | This node lost the lease mid-pass. Files already re-probed stay published, so re-read the item before retrying. |
 | `probe_repair_not_eligible` | 5 | This node cannot take cluster-wide leases right now: it is entering maintenance, cannot read committed membership, or has just been demoted. Retry, or send the request to another voter. A learner is refused earlier with `learner_route_ineligible`. |
+
+`POST /items/{id}/m7/reevaluate` clears eligible settled M7 outcomes for the
+item and returns the number cleared in `cleared`. Active evaluations and
+legacy rate stops retain the evidence the idle title sweep needs. The sweep
+reopens eligible titles under the running M7 identity while no other title work
+waits. A server without an M7 experiment directory answers 409 with "M7 is not
+configured on this server".
 
 ### 6.7 Images
 

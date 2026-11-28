@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import subprocess
 import shlex
+import sys
 import tempfile
 import unittest
 
@@ -99,6 +100,30 @@ class MetadataAdmission(unittest.TestCase):
                             "-lm", "-lpthread", "-ldl"], check=True, timeout=120)
             subprocess.run([str(binary), str(vectors)], check=True, timeout=60)
             self.assertEqual(vectors.read_bytes(), fixture.read_bytes())
+
+    def test_exact_model_b_composition(self):
+        """M7 Model B v2: identity is the frozen composition; nonidentity
+        mappings agree with the renderer model away from rounding ties; the
+        vectors equal the ones plurx-core's dv_m7_scoring replays, and an
+        independent rational evaluation reproduces every one of them."""
+        directory_of_tests = Path(__file__).resolve().parent
+        source = directory_of_tests / "test_refit_exact.c"
+        fixture = (directory_of_tests.parents[1] / "crates/plurx-core/tests/"
+                   "fixtures/dv-m7/exact-composer-vectors.json")
+        flags = shlex.split(subprocess.check_output(
+            ["pkg-config", "--static", "--cflags", "--libs", "libavutil"],
+            text=True, timeout=15))
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "refit-exact"
+            vectors = Path(directory) / "vectors.json"
+            subprocess.run([os.environ.get("CC", "cc"), "-O2", "-fno-math-errno",
+                            "-frounding-math", "-ffp-contract=off", "-std=c11", "-Wall",
+                            "-Wextra", "-Werror", str(source), "-o", str(binary), *flags,
+                            "-lm", "-lpthread", "-ldl"], check=True, timeout=120)
+            subprocess.run([str(binary), str(vectors)], check=True, timeout=120)
+            self.assertEqual(vectors.read_bytes(), fixture.read_bytes())
+            subprocess.run([sys.executable, "-I", str(directory_of_tests / "fraction_oracle.py"),
+                            str(fixture)], check=True, timeout=120)
 
     def test_public_piecewise_fel_mapping(self):
         """Pinned public headers/libraries; CPU-only mapping and refusal grid."""

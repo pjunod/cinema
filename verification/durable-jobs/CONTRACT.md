@@ -13,6 +13,25 @@ source mapping**, not an automatic refinement proof. Item hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+## M7 title settlement and schema extensions — 2026-11-28
+
+The independent source review checked the M7 changes to the shared Store
+trait and adapter, which add eleven methods on the DV title path. A
+maintenance sweep admits only an eligible settled title
+without an active title job. Its own queued job authorizes reopening. The
+new enqueue predicate is scoped to `dv_title_scan`.
+
+`TITLE_JOB_OWNERSHIP` checks the DV title claim and generation. `publish`
+substitutes that guard in `PUBLISH_SQL`, which recognizes a replay before
+checking ownership and returns a conflict if the observed fit has changed.
+The outcome trigger accepts only a successful `publish_dv_title` command
+carrying M7 and writes the extension table. The Hiqlite installer adds the
+same extension tables that SQLite appends as v142–144 after source leases.
+The selected library bind, renewal, cancellation and `insert_item_fenced`
+authority transitions retain their existing correspondence. The model and
+configurations retain their prior identities. The requested lane records its
+own smoke results.
+
 
 ## Expired-lease sweep under source leases — port review on 2026-11-27
 

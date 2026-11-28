@@ -84,12 +84,36 @@ pub(super) const CONTENT_REFUSALS: &[&str] = &[
     "independent complete selected-video endpoint unavailable",
 ];
 
+// Planned-census refusals about the held video. Sidecar, allocation and
+// argument failures still retry, like their ordinary scanner counterparts.
+const M7_CONTENT_REFUSALS: &[&str] = &[
+    "supported M7 census raster",
+    "M7 census requires four-byte hvcC access units",
+    "declared M7 source Dolby Vision configuration",
+    "declared M7 Profile 7 dual-layer source",
+    "bounded positive M7 selected video packet size",
+    "one admitted display picture per M7 selected video packet",
+    "unique M7 title presentation time",
+    "fresh parsed FEL RPU for the M7 source census",
+    "bounded M7 census frame count",
+    "one fresh same-access-unit BL, EL and RPU in the M7 selected track",
+    "bounded M7 selected video packet extent",
+    "complete M7 census interval",
+    "exact M7 census interval start",
+    "M7 coded picture matches sorted title clock",
+    "complete M7 source presentation ordinal coverage",
+    "exact M7 census interval end",
+];
+
 /// `scan_title`'s `need()` prints this prefix, then its reason, and exits 1.
 const REFUSAL_PREFIX: &str = "DV title scan refused: ";
 
 /// The content refusal a scanner that exited 1 reported, if its last refusal
 /// line names one exactly.
-fn content_refusal(output: &plurx_core::process::bounded::Output) -> Option<&'static str> {
+fn content_refusal(
+    output: &plurx_core::process::bounded::Output,
+    additional: &'static [&'static str],
+) -> Option<&'static str> {
     if output.status.code() != Some(1) {
         return None;
     }
@@ -100,6 +124,7 @@ fn content_refusal(output: &plurx_core::process::bounded::Output) -> Option<&'st
     })?;
     CONTENT_REFUSALS
         .iter()
+        .chain(additional)
         .copied()
         .find(|reason| *reason == line)
 }
@@ -159,6 +184,14 @@ pub(super) fn scanner_verdict(
     output: std::io::Result<plurx_core::process::bounded::Output>,
     read: SourceRead,
 ) -> Result<Vec<u8>, TitleScanError> {
+    scanner_verdict_with_refusals(output, read, &[])
+}
+
+fn scanner_verdict_with_refusals(
+    output: std::io::Result<plurx_core::process::bounded::Output>,
+    read: SourceRead,
+    additional: &'static [&'static str],
+) -> Result<Vec<u8>, TitleScanError> {
     let describe = |output: &std::io::Result<plurx_core::process::bounded::Output>| match output {
         Ok(output) => {
             let tail = stderr_tail(&output.stderr);
@@ -181,9 +214,12 @@ pub(super) fn scanner_verdict(
         ))),
         SourceRead::Clean => match output {
             Ok(output) if output.status.success() => Ok(output.stdout),
-            Ok(output) if content_refusal(&output).is_some() => Err(TitleScanError::Refused(
-                format!("complete-title DV scan refused ({})", describe(&Ok(output))),
-            )),
+            Ok(output) if content_refusal(&output, additional).is_some() => {
+                Err(TitleScanError::Refused(format!(
+                    "complete-title DV scan refused ({})",
+                    describe(&Ok(output))
+                )))
+            }
             failed => Err(TitleScanError::Failed(format!(
                 "complete-title DV scan failed ({})",
                 describe(&failed)
@@ -193,6 +229,9 @@ pub(super) fn scanner_verdict(
 }
 
 use std::{path::Path, time::Duration};
+
+mod m7_census;
+pub(super) use m7_census::{M7WindowRange, VerifiedSourceCensus};
 
 /// Launch from the held source or its budgeted bridge under one owned child.
 pub(crate) async fn launch_scanner(
@@ -204,6 +243,33 @@ pub(crate) async fn launch_scanner(
     wall_time: Duration,
     work: plurx_core::process::ChildWork,
 ) -> std::io::Result<plurx_core::process::bounded::Output> {
+    launch_scanner_with_args(
+        scanner,
+        index,
+        held,
+        input,
+        runtime_cache,
+        wall_time,
+        work,
+        &[],
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "scanner process, source and owner controls"
+)]
+async fn launch_scanner_with_args(
+    scanner: &Path,
+    index: &str,
+    held: &std::fs::File,
+    input: Option<&SourceInput>,
+    runtime_cache: &Path,
+    wall_time: Duration,
+    work: plurx_core::process::ChildWork,
+    args: &[String],
+) -> std::io::Result<plurx_core::process::bounded::Output> {
     use crate::producer_spawn::{ChildStdio, ChildStdios, Descriptors};
 
     let mut command = tokio::process::Command::new(scanner);
@@ -213,7 +279,9 @@ pub(crate) async fn launch_scanner(
     } else {
         "/dev/fd/3"
     };
-    command.args([input.map_or(descriptor, SourceInput::url), index]);
+    command
+        .args([input.map_or(descriptor, SourceInput::url), index])
+        .args(args);
     let manifest = Descriptors::from_files(input.is_none().then_some(held), None, None, false)
         .prepare(
             &mut command,
@@ -244,13 +312,54 @@ pub(super) async fn scan(
     tools: &ToolSet,
     runtime_cache: &Path,
 ) -> Result<DvTitleStats, TitleScanError> {
-    let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
+    scan_owned(file, document, tools, runtime_cache, None)
+        .await
+        .map(|(stats, _)| stats)
+}
+
+/// Select the planned windows before the whole scan. Their actual source
+/// ordinals and AU hashes are settled by that same scanner at complete EOF.
+pub(super) async fn scan_with_m7_census(
+    file: &MediaFile,
+    source: &crate::fragment_index_cluster::SourceFence,
+    document: &str,
+    tools: &ToolSet,
+    runtime_cache: &Path,
+    ranges: &[M7WindowRange],
+) -> Result<(DvTitleStats, VerifiedSourceCensus), TitleScanError> {
+    let (stats, census) =
+        scan_owned(file, document, tools, runtime_cache, Some((source, ranges))).await?;
+    Ok((stats, census.ok_or("planned M7 census was not returned")?))
+}
+
+async fn scan_owned(
+    file: &MediaFile,
+    document: &str,
+    tools: &ToolSet,
+    runtime_cache: &Path,
+    census: Option<(
+        &crate::fragment_index_cluster::SourceFence,
+        &[M7WindowRange],
+    )>,
+) -> Result<(DvTitleStats, Option<VerifiedSourceCensus>), TitleScanError> {
+    let ranges = census.map(|(_, ranges)| ranges);
+    let args = ranges.map(m7_census::arguments).transpose()?;
+    let census_dir = ranges
+        .map(|_| tempfile::tempdir_in(runtime_cache))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let expected = census.map(|(source, _)| source.object_version());
+    let source = crate::fragment_index_cluster::open_source_playback_fence(file, expected).await?;
     let document: serde_json::Value = serde_json::from_str(document).map_err(|e| e.to_string())?;
     let index = selected_video_index(&document).ok_or("unknown selected video stream")?;
     if !tools.is_current().await {
         return Err("DV scanner identity changed".into());
     }
-    let input = match crate::background_jobs::source_budget() {
+    let budget = crate::background_jobs::source_budget();
+    if ranges.is_some() && budget.is_none() {
+        return Err("planned M7 census requires an owned title source budget".into());
+    }
+    let input = match budget {
         Some(budget) => Some(
             crate::source_input::SourceInput::open_background_held(
                 crate::fragment_index_cluster::SourceFence::clone_held(
@@ -264,18 +373,33 @@ pub(super) async fn scan(
         ),
         None => None,
     };
-    let output = launch_scanner(
-        &tools.scanner,
-        &index.to_string(),
-        &source.handle,
-        input.as_ref(),
-        runtime_cache,
-        Duration::from_secs(6 * 60 * 60),
-        plurx_core::process::ChildWork::background("complete-title Dolby Vision scan"),
-    )
-    .await;
-    // Read the bridge's verdict before it is closed: the scanner has exited,
-    // so every served read that could fail has already been observed.
+    let work = plurx_core::process::ChildWork::background("complete-title Dolby Vision scan");
+    let index_text = index.to_string();
+    let wall_time = Duration::from_secs(6 * 60 * 60);
+    let output = if let (Some(args), Some(census_dir)) = (args.as_ref(), census_dir.as_ref()) {
+        launch_scanner_with_args(
+            &tools.scanner,
+            &index_text,
+            &source.handle,
+            input.as_ref(),
+            census_dir.path(),
+            wall_time,
+            work,
+            args,
+        )
+        .await
+    } else {
+        launch_scanner(
+            &tools.scanner,
+            &index_text,
+            &source.handle,
+            input.as_ref(),
+            runtime_cache,
+            wall_time,
+            work,
+        )
+        .await
+    };
     let read = source_read(input.as_ref());
     if let Some(input) = input {
         input
@@ -283,14 +407,25 @@ pub(super) async fn scan(
             .await
             .map_err(|error| format!("joining title source input: {error}"))?;
     }
-    let verdict = scanner_verdict(output, read);
+    let verdict = if ranges.is_some() {
+        scanner_verdict_with_refusals(output, read, M7_CONTENT_REFUSALS)
+    } else {
+        scanner_verdict(output, read)
+    };
     // An aggregate and a content refusal are both judgements of these bytes
     // by this scanner: trust either only while both are still current.
     if matches!(verdict, Ok(_) | Err(TitleScanError::Refused(_))) {
         if !tools.is_current().await {
             return Err("DV scanner identity changed".into());
         }
-        if !source.unchanged().await || source.reopen(file).await.is_err() {
+        if !source.unchanged().await
+            || crate::fragment_index_cluster::open_source_playback_fence(
+                file,
+                Some(source.object_version()),
+            )
+            .await
+            .is_err()
+        {
             return Err("source changed during title scan".into());
         }
     }
@@ -300,7 +435,20 @@ pub(super) async fn scan(
     if stats.eligibility() == TitleEligibility::InvalidAggregate || !stats.complete {
         return Err("incomplete or inconsistent DV aggregate".into());
     }
-    Ok(stats)
+    let census = census_dir
+        .zip(ranges)
+        .map(|(dir, ranges)| {
+            m7_census::read(
+                &dir.path().join(m7_census::OUTPUT),
+                &source,
+                tools,
+                index,
+                stats.decoded_frames,
+                ranges,
+            )
+        })
+        .transpose()?;
+    Ok((stats, census))
 }
 
 /// Physical controls start from an ordinary probe and use the same durable
@@ -479,18 +627,25 @@ pub(crate) async fn publish_title_with_tools_for_control(
         {
             return Err("title scanner or source changed before control publication".into());
         }
-        if !fence
-            .publish_dv_title(TitleOutput {
-                file_id: file.id,
-                probe_revision: demand.probe_revision,
-                source_size: demand.source_size,
-                source_mtime: demand.source_mtime,
-                scanner_digest: scanner,
-                stats,
-            })
+        let publication = fence
+            .publish_dv_title(
+                TitleOutput {
+                    file_id: file.id,
+                    probe_revision: demand.probe_revision,
+                    source_size: demand.source_size,
+                    source_mtime: demand.source_mtime,
+                    scanner_digest: scanner,
+                    stats,
+                },
+                None,
+            )
             .await
-            .map_err(|e| e.to_string())?
-        {
+            .map_err(|e| e.to_string())?;
+        use plurx_core::store::background_jobs::JobPublishOutcome;
+        if !matches!(
+            publication,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        ) {
             return Err("title control publication fenced".into());
         }
         let stored = store
@@ -538,6 +693,43 @@ mod tests {
             selected_video_index(&serde_json::json!({"streams":[]})),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_census_content_refusals_are_terminal_over_clean_reads() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = |status: i32, reason: &str| {
+            Ok(plurx_core::process::bounded::Output {
+                status: std::process::ExitStatus::from_raw(status),
+                stdout: Vec::new(),
+                stderr: format!("DV title scan refused: {reason}\n").into_bytes(),
+            })
+        };
+        let interval = "exact M7 census interval end";
+        let classify = |status, reason, read| {
+            scanner_verdict_with_refusals(output(status, reason), read, M7_CONTENT_REFUSALS)
+        };
+        assert!(matches!(
+            classify(256, interval, SourceRead::Clean),
+            Err(TitleScanError::Refused(_))
+        ));
+        assert!(matches!(
+            classify(256, interval, SourceRead::StorageFailed),
+            Err(TitleScanError::SourceReadFailed(_))
+        ));
+        assert!(matches!(
+            classify(9, interval, SourceRead::Clean),
+            Err(TitleScanError::Failed(_))
+        ));
+        assert!(matches!(
+            classify(256, "exclusive M7 census file", SourceRead::Clean),
+            Err(TitleScanError::Failed(_))
+        ));
+        assert!(matches!(
+            scanner_verdict(output(256, interval), SourceRead::Clean),
+            Err(TitleScanError::Failed(_))
+        ));
     }
 }
 

@@ -1,6 +1,7 @@
 """Build a relocatable arm64 macOS DV helper bundle from explicit local inputs."""
 
 import argparse
+import hashlib
 from collections import deque
 import json
 import os
@@ -70,7 +71,7 @@ def expand_loader_path(name, image, executable):
     raise ValueError(f"unsupported Mach-O path {name!r} in {image}")
 
 
-def resolve_link(name, image, executable, runpaths, prefixes):
+def resolve_link(name, image, executable, runpaths, prefixes, pins):
     if name.startswith("@rpath/"):
         candidates = [root / name[len("@rpath/"):] for root in runpaths]
     else:
@@ -79,16 +80,20 @@ def resolve_link(name, image, executable, runpaths, prefixes):
     if len(resolved) != 1:
         raise ValueError(f"unresolved or ambiguous Mach-O dependency {name!r} in {image}: {resolved}")
     path = resolved.pop()
-    if not any(path.is_relative_to(root) for root in prefixes):
-        raise ValueError(f"Mach-O dependency outside supplied prefixes: {image} -> {path}")
     if not path.name.endswith(".dylib"):
         raise ValueError(f"expected a dylib: {path}")
-    if re.match(r"libav(?:codec|format|util)[.]", path.name):
-        raise ValueError(f"static FFmpeg unexpectedly linked a dynamic library: {path}")
+    if pins is not None:
+        if path not in pins:
+            raise ValueError(f"M7 Mach-O dependency is outside the exact encoder pin: {image} -> {path}")
+    else:
+        if not any(path.is_relative_to(root) for root in prefixes):
+            raise ValueError(f"Mach-O dependency outside supplied prefixes: {image} -> {path}")
+        if re.match(r"libav(?:codec|format|util)[.]", path.name):
+            raise ValueError(f"static FFmpeg unexpectedly linked a dynamic library: {path}")
     return path
 
 
-def dependency_graph(executables, prefixes):
+def dependency_graph(executables, prefixes, pins=None):
     graph = {}
     library_names = {}
     visited = set()
@@ -105,7 +110,7 @@ def dependency_graph(executables, prefixes):
         for name in names:
             if system_link(name):
                 continue
-            dependency = resolve_link(name, image, executable, search, prefixes)
+            dependency = resolve_link(name, image, executable, search, prefixes, pins)
             previous = library_names.setdefault(dependency.name, dependency)
             if previous != dependency:
                 raise ValueError(f"conflicting dylib basename: {previous} and {dependency}")
@@ -118,18 +123,35 @@ def dependency_graph(executables, prefixes):
     return graph, library_names
 
 
-def relocate(root, executables, graph, libraries):
-    lib_dir = root / "lib"
-    lib_dir.mkdir()
-    for name, src in libraries.items():
-        target = lib_dir / name
-        if run("lipo", "-archs", src).split() == ["arm64"]:
-            shutil.copy2(src, target)
-        else:
-            run("lipo", src, "-thin", "arm64", "-output", target)
-        target.chmod(0o755)
+def sha(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def copy_macho(source, target, expected=None):
+    archs = run("lipo", "-archs", source).split()
+    if expected is not None and archs != ["arm64"]:
+        raise ValueError(f"M7 pinned artifact must be arm64: {source}")
+    if archs == ["arm64"]:
+        shutil.copy2(source, target)
+    else:
+        run("lipo", source, "-thin", "arm64", "-output", target)
+    if expected is not None and sha(target) != expected:
+        raise ValueError(f"copied M7 artifact does not match the exact encoder pin: {source}")
+    target.chmod(0o755)
+
+
+def relocate(root, executables, graph, libraries, *, library_dir="lib", copies=None, pins=None):
+    lib_dir = root / library_dir
+    lib_dir.mkdir(parents=True)
+    installed = {image: image for image in executables}
+    for source, target in (copies or {}).items():
+        copy_macho(source, target, pins[source])
+        installed[source] = target
+    for name, source in libraries.items():
+        copy_macho(source, lib_dir / name, None if pins is None else pins[source])
     for src, edges in graph.items():
-        image = src if src in executables else lib_dir / src.name
+        image = installed.get(src, lib_dir / src.name)
         _, rpaths, ids = macho_links(image)
         args = ["install_name_tool"]
         for old, dependency in edges.items():
@@ -147,7 +169,7 @@ def relocate(root, executables, graph, libraries):
         run("codesign", "--verify", "--strict", image)
 
     receipt = {}
-    for image in [*executables, *(lib_dir / name for name in sorted(libraries))]:
+    for image in [*installed.values(), *(lib_dir / name for name in sorted(libraries))]:
         names, rpaths, ids = macho_links(image)
         expected_id = [f"@loader_path/{image.name}"] if image.parent == lib_dir else []
         if rpaths or ids != expected_id:
@@ -180,13 +202,72 @@ def pkg_config(search_path, *args):
     return run("pkg-config", *args, env=env).strip()
 
 
+def read_encoder_pin(path, prefix):
+    # The native comparison receipt already records the independent CLI and
+    # every non-system dylib it used. Consume only those input identities.
+    if path.stat().st_size > 1024 * 1024:
+        raise ValueError("M7 encoder pin exceeds its size bound")
+    data = json.loads(path.read_bytes())
+    try:
+        if type(data["schema"]) is not int or data["schema"] != 1:
+            raise ValueError("unsupported M7 encoder pin schema")
+        cli_artifact = data["artifacts"]["ffmpeg"]
+        closure = data["encoder_closure"]
+        if not isinstance(closure, list) or not 1 <= len(closure) <= 32:
+            raise ValueError("invalid M7 encoder closure")
+        pins = {}
+        for artifact in [cli_artifact, *closure]:
+            source = Path(artifact["path"])
+            digest = artifact["sha256"]
+            if not source.is_absolute() or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("invalid M7 encoder artifact reference")
+            resolved = source.resolve(strict=True)
+            if resolved in pins or not resolved.is_file() or sha(resolved) != digest:
+                raise ValueError(f"M7 encoder artifact differs from its pin: {resolved}")
+            pins[resolved] = digest
+    except (KeyError, TypeError) as error:
+        raise ValueError("invalid M7 encoder pin") from error
+    cli = Path(cli_artifact["path"]).resolve(strict=True)
+    if cli != (prefix / "bin/ffmpeg").resolve(strict=True) or not cli.is_relative_to(prefix):
+        raise ValueError("M7 CLI is outside the supplied encoder prefix")
+    libraries = {path: digest for path, digest in pins.items() if path != cli}
+    required = ("libavcodec.63", "libavformat.63", "libavutil.61", "libx265.217")
+    if any(sum(re.fullmatch(rf"{re.escape(stem)}(?:\.\d+)*\.dylib", path.name) is not None
+               for path in libraries) != 1 for stem in required):
+        raise ValueError("M7 encoder pin lacks its exact shared libav/x265 ABI")
+    return cli, pins, libraries
+
+
+def package_encoder(root, muxer, cli, pins, libraries):
+    executables = [muxer, cli]
+    graph, by_name = dependency_graph(executables, (), libraries)
+    if set(by_name.values()) != set(libraries):
+        raise ValueError("built M7 dependency graph differs from the complete frozen closure")
+    direct = set(graph[muxer].values())
+    for family in ("libavcodec.", "libavformat.", "libavutil."):
+        if not any(path.name.startswith(family) for path in direct):
+            raise ValueError(f"M7 muxer did not link its shared {family[:-1]}")
+    return relocate(root, executables, graph, by_name, library_dir="encoder/lib",
+                    copies={cli: root / "encoder/ffmpeg"}, pins=pins)
+
+
 def build(args):
     ffmpeg, dovi, placebo, provenance = (p.resolve(strict=True) for p in
                                          (args.ffmpeg, args.dovi, args.placebo, args.provenance))
     dependencies = tuple(p.resolve(strict=True) for p in args.dependency_prefix)
     prefixes = (ffmpeg, dovi, placebo, *dependencies)
+    input_prefixes = prefixes
+    encoder_prefix = args.m7_encoder_prefix
+    encoder = None
+    if encoder_prefix is not None:
+        encoder_prefix = encoder_prefix.resolve(strict=True)
+        if any(encoder_prefix.is_relative_to(prefix) or prefix.is_relative_to(encoder_prefix)
+               for prefix in (ffmpeg, dovi, placebo)):
+            raise ValueError("M7 shared and decoder static prefixes must be separate")
+        encoder = read_encoder_pin(args.m7_encoder_pin, encoder_prefix)
+        input_prefixes = (*prefixes, encoder_prefix, *(path.parent for path in encoder[2]))
     root = args.output.resolve()
-    if root.is_relative_to(provenance) or any(root.is_relative_to(prefix) for prefix in prefixes):
+    if root.is_relative_to(provenance) or any(root.is_relative_to(prefix) for prefix in input_prefixes):
         raise ValueError("OUTPUT must be separate from dependency and provenance inputs")
     if not (provenance / "sources").is_dir() or not (provenance / "licenses").is_dir():
         raise ValueError("PROVENANCE must contain sources/ and licenses/ for supplied components")
@@ -231,8 +312,12 @@ def build(args):
     env = {name: value for name, value in os.environ.items() if not name.startswith("DYLD_")}
     env.update(PKG_CONFIG_LIBDIR=pkg_config_path((ffmpeg, placebo, *dependencies)),
                CFLAGS="-O2 -fno-math-errno -arch arm64 -Wl,-headerpad_max_install_names")
-    run("sh", SOURCE / "build.sh", ffmpeg, placebo_pc, dovi, root / "bin", env=env)
-    executables = [root / "bin" / name for name in TOOLS]
+    build_args = ["sh", SOURCE / "build.sh", ffmpeg, placebo_pc, dovi, root / "bin"]
+    if encoder is not None:
+        build_args.append(encoder_prefix)
+    run(*build_args, env=env)
+    executables = [root / "bin" / name for name in TOOLS
+                   if encoder is None or name != "mux_rgb"]
     graph, libraries = dependency_graph(executables, prefixes)
     renderer_libraries = set(graph[root / "bin/segment_decode_render"].values())
     placebo_abi = [path for path in renderer_libraries
@@ -240,6 +325,16 @@ def build(args):
     if len(placebo_abi) != 1 or not placebo_abi[0].is_relative_to(placebo_lib_dir):
         raise ValueError("the renderer must link to ABI 387 libplacebo from PLACEBO")
     receipt = relocate(root, executables, graph, libraries)
+    if encoder is not None:
+        cli, pins, encoder_libraries = encoder
+        receipt.update(package_encoder(root, root / "bin/mux_rgb", cli, pins, encoder_libraries))
+        # Pin identities belong to the original inputs. The checked runtime
+        # manifest hashes the independently relocated, signed artifacts.
+        (sources_dir / "m7-encoder-inputs.json").write_text(json.dumps({
+            "schema": 1,
+            "cli_sha256": pins[cli],
+            "libraries": {path.name: digest for path, digest in sorted(encoder_libraries.items())},
+        }, indent=2) + "\n")
 
     probe = sources_dir / "abi.c"
     probe.write_text(ABI_PROBE)
@@ -256,7 +351,10 @@ def build(args):
     dependencies = {"original_libraries": {name: str(path) for name, path in sorted(libraries.items())},
                     "relocated_links": receipt}
     (sources_dir / "runtime-dependencies.json").write_text(json.dumps(dependencies, indent=2) + "\n")
-    print(run(sys.executable, SOURCE / "bundle-manifest.py", SOURCE, root, "--darwin"), end="")
+    manifest_args = [sys.executable, SOURCE / "bundle-manifest.py", SOURCE, root, "--darwin"]
+    if encoder is not None:
+        manifest_args.append("--m7-encoder")
+    print(run(*manifest_args), end="")
 
 
 def main():
@@ -268,9 +366,17 @@ def main():
     parser.add_argument("--dependency-prefix", type=Path, action="append", default=[],
                         help="permitted transitive dylib prefix (repeatable)")
     parser.add_argument("--provenance", type=Path, required=True,
-                        help="directory of source archives and licensing notices under sources/ and licenses/")
+                        help="sources/ and licenses/ for all supplied decoder and optional M7 encoder components")
+    parser.add_argument("--m7-encoder-prefix", type=Path,
+                        help="separate shared libav/x265 installation with the pinned ffmpeg CLI")
+    parser.add_argument("--m7-encoder-pin", type=Path,
+                        help="native encoder receipt containing the original CLI and complete dylib closure")
     args = parser.parse_args()
+    if (args.m7_encoder_prefix is None) != (args.m7_encoder_pin is None):
+        parser.error("M7 encoder prefix and pin must be supplied together")
     paths = [args.ffmpeg, args.dovi, args.placebo, args.output, args.provenance, *args.dependency_prefix]
+    if args.m7_encoder_prefix is not None:
+        paths += [args.m7_encoder_prefix, args.m7_encoder_pin]
     if sys.platform != "darwin" or not all(path.is_absolute() for path in paths):
         parser.error("requires macOS and absolute paths")
     try:

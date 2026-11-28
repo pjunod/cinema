@@ -1,4 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE 1
+#endif
 // Finite timestamped source segment -> persistent native-plane FEL renderer.
 // No fixture-definition hashes, test variants, production route or publication.
 #include "fel_renderer.h"
@@ -87,7 +90,7 @@ static int64_t source_origin_ticks;
 static const char *source_origin_provenance;
 struct coded_input {
   int64_t pts, duration;
-  char packet_sha[65], rpu_sha[65], base_sha[65];
+  char packet_sha[65], rpu_sha[65], base_vcl_sha[65];
   bool emitted;
 };
 // A window run renders consecutive windows in one process (--window-run).
@@ -504,16 +507,7 @@ static uint16_t *pack(const AVFrame *frame) {
   }
   return out;
 }
-static void hash_bytes(const uint8_t *bytes, size_t size, char hex[65]) {
-  struct AVSHA *sha = av_sha_alloc();
-  uint8_t out[32];
-  need(sha != NULL && av_sha_init(sha, 256) == 0, "SHA256");
-  av_sha_update(sha, bytes, size);
-  av_sha_final(sha, out);
-  av_free(sha);
-  for (int i = 0; i < 32; i++)
-    snprintf(hex + 2 * i, 3, "%02x", out[i]);
-}
+#include "coded_au.h"
 static void print_coded_inputs(void) {
   while (coded_printed[run_current] < coded_count) {
     const struct coded_input *input = &coded_window[coded_printed[run_current]++];
@@ -521,10 +515,10 @@ static void print_coded_inputs(void) {
            "ticks\":%lld,\"packet_sha256\":\"%s\",\"rpu_sha256\":\"%s\","
            "\"base_vcl_sha256\":\"%s\"}\n",
            (long long)input->pts, (long long)input->duration, input->packet_sha,
-           input->rpu_sha, input->base_sha);
+           input->rpu_sha, input->base_vcl_sha);
   }
 }
-// Inside inspect_coded: refuse the current window exactly as before, or
+// Inside inspect_coded_au: refuse the current window exactly as before, or
 // record a later run window's refusal and skip this AU.
 #define CODED_NEED(ok, reason)                                                 \
   do {                                                                         \
@@ -538,65 +532,20 @@ static void print_coded_inputs(void) {
   } while (0)
 // Four-byte hvcC packet framing, one first slice per BL/EL picture and one
 // fresh RPU. This independent coded-stage trace predates either decoder or GPU.
-static void inspect_coded(AVPacket *packet) {
-  need(packet->pts != AV_NOPTS_VALUE && packet->duration > 0,
-       "coded AU needs original PTS/positive duration");
-  // Decode-order references can follow the requested presentation interval.
-  // Their Dolby metadata does not describe any picture this window emits.
-  int run_window = run_current;
-  while (run_window < run_windows &&
-         compare_window(packet->pts, run_ends[run_window]) >= 0)
-    run_window++;
-  if (run_window == run_windows)
-    return;
-  const int in_window = run_window > run_current ||
-                        compare_window(packet->pts, window_start) >= 0;
+static void inspect_coded_au(const AVPacket *packet, int run_window,
+                             bool in_window, bool trace) {
   struct AVSHA *base_sha = in_window ? av_sha_alloc() : NULL;
   need(!in_window || (base_sha && av_sha_init(base_sha, 256) == 0),
        "base-layer source witness SHA256");
-  int bl = 0, el = 0, rpu = 0;
-  size_t at = 0;
-  const uint8_t *rpu_bytes = NULL;
-  size_t rpu_len = 0;
-  while (at < (size_t)packet->size) {
-    CODED_NEED((size_t)packet->size - at >= 4, "coded NAL length prefix");
-    const uint8_t *p = packet->data + at;
-    uint32_t n = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 |
-                 (uint32_t)p[2] << 8 | p[3];
-    at += 4;
-    CODED_NEED(n >= 2 && n <= (size_t)packet->size - at, "coded NAL bounds");
-    p = packet->data + at;
-    int type = (p[0] >> 1) & 63;
-    CODED_NEED(((p[0] & 1) << 5 | (p[1] >> 3)) == 0 && (p[1] & 7) != 0,
-               "coded layer/temporal header");
-    if (type < 32) {
-      CODED_NEED(n >= 3, "base slice header");
-      bl += (p[2] & 128) != 0;
-      // The live P8 copy preserves these base-layer VCL units verbatim.
-      // Include each original four-byte length so boundaries are unambiguous.
-      if (base_sha)
-        av_sha_update(base_sha, p - 4, (size_t)n + 4);
-    }
-    if (type == 63) {
-      CODED_NEED(n >= 4, "enhancement wrapper");
-      int inner = (p[2] >> 1) & 63;
-      CODED_NEED(((p[2] & 1) << 5 | (p[3] >> 3)) == 0 && (p[3] & 7) != 0,
-                 "enhancement layer/temporal header");
-      if (inner < 32) {
-        CODED_NEED(n >= 5, "enhancement slice header");
-        el += (p[4] & 128) != 0;
-      }
-    }
-    if (type == 62) {
-      rpu++;
-      rpu_bytes = p;
-      rpu_len = n;
-    }
-    at += n;
-  }
-  CODED_NEED(bl == 1 && rpu == 1 &&
-                 (base_only ? (source_profile == 7 ? el <= 1 : el == 0)
-                            : el == 1),
+  const char *refusal = NULL;
+  struct coded_picture picture = inspect_coded_picture(
+      packet, base_sha, refit_mode && base_only,
+      run_window > run_current ? &refusal : NULL);
+  CODED_NEED(!refusal, refusal);
+  CODED_NEED(picture.bl == 1 && picture.rpus == 1 &&
+                 (base_only ? (source_profile == 7 ? picture.el <= 1
+                                                   : picture.el == 0)
+                            : picture.el == 1),
              "one required source picture and fresh RPU per coded AU");
   if (in_window) {
     unsigned *count = &coded_counts[run_window];
@@ -609,21 +558,31 @@ static void inspect_coded(AVPacket *packet) {
     input->pts = packet->pts;
     input->duration = packet->duration;
     hash_bytes(packet->data, packet->size, input->packet_sha);
-    hash_bytes(rpu_bytes, rpu_len, input->rpu_sha);
-    uint8_t base_digest[32];
-    char base_hex[65];
-    av_sha_final(base_sha, base_digest);
-    av_free(base_sha);
-    for (int i = 0; i < 32; i++)
-      snprintf(base_hex + 2 * i, 3, "%02x", base_digest[i]);
-    memcpy(input->base_sha, base_hex, sizeof(input->base_sha));
+    hash_bytes(picture.rpu, picture.rpu_size, input->rpu_sha);
+    finish_coded_vcl(base_sha, input->base_vcl_sha);
     // A later run window's inputs are printed into its own observations
     // when that window begins.
-    if (run_window == run_current)
+    if (trace && run_window == run_current)
       print_coded_inputs();
   }
 }
 #undef CODED_NEED
+static void inspect_coded(const AVPacket *packet) {
+  need(packet->pts != AV_NOPTS_VALUE && packet->duration > 0,
+       "coded AU needs original PTS/positive duration");
+  // Decode-order references can follow the requested presentation interval.
+  // Their Dolby metadata does not describe any picture this window emits.
+  int run_window = run_current;
+  while (run_window < run_windows &&
+         compare_window(packet->pts, run_ends[run_window]) >= 0)
+    run_window++;
+  if (run_window == run_windows)
+    return;
+  inspect_coded_au(packet, run_window,
+                   run_window > run_current ||
+                       compare_window(packet->pts, window_start) >= 0,
+                   true);
+}
 static const char *current_decoder_mode(void) {
   return !hw_device       ? "software"
          : hw_fell_back    ? "vaapi-software-fallback"
@@ -1021,7 +980,12 @@ static void send_layer(struct layer *layer, AVPacket *packet) {
 #include "refit_mode.h"
 int main(int argc, char **argv) {
   if (argc >= 2 && (!strcmp(argv[1], "--refit-stats") || !strcmp(argv[1], "--dump-composed") ||
-                    !strcmp(argv[1], "--export-composed-topleft")))
+                    !strcmp(argv[1], "--export-composed-topleft") ||
+                    !strcmp(argv[1], "--m7-sample-fel-v1") ||
+                    !strcmp(argv[1], "--m7-sample-candidate-v1") ||
+                    !strcmp(argv[1], "--m7-census-fel-v1") ||
+                    !strcmp(argv[1], "--m7-census-candidate-v1") ||
+                    !strcmp(argv[1], "--m7-export-full-planes-v1")))
     return refit_main(argc, argv);
   bool held_origin = argc >= 3 && !strcmp(argv[argc - 2], "--held-source-origin");
   struct rational supplied_origin = {0, 1};

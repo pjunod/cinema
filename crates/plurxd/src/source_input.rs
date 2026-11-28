@@ -698,6 +698,10 @@ impl SourceInput {
     pub(crate) fn url(&self) -> &str {
         &self.url
     }
+    /// Byte length of the held source this input serves.
+    pub(crate) fn source_len(&self) -> u64 {
+        self.state.len
+    }
     #[cfg(target_os = "linux")]
     pub(crate) fn source_object_version(&self) -> Option<String> {
         // The fence's lock is held across each positioned read of the source

@@ -433,6 +433,9 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
       AND d.scanner_digest=json_extract(body,'$.payload.scanner_digest')
       AND f.size=json_extract(body,'$.payload.source_size') AND f.mtime=json_extract(body,'$.payload.source_mtime')
       AND CASE
+        WHEN json_extract(body,'$.m7_reopen')=1 THEN d.terminal=1
+          AND prior_job IS NULL AND active_job IS NULL
+          AND json_extract(body,'$.request.scope')='dv-title'
         WHEN json_type(body,'$.native_fel_head_reopen') IS NULL THEN d.terminal=0
         ELSE json_extract(body,'$.native_fel_head_reopen')=1 AND d.terminal=1 AND prior_job IS NULL
           AND json_extract(body,'$.request.scope')='dv-native-fel-head'
@@ -3274,6 +3277,24 @@ pub trait BackgroundJobStore: Send + Sync {
     /// Settled FEL titles whose verdict another FEL identity measured.
     async fn dv_fel_stale_titles(&self, identity: &str, limit: u32)
         -> Result<Vec<i64>, StoreError>;
+    /// Reopen settled Profile 7 enhancement-layer titles whose M7 outcome is
+    /// missing, or `unsupported` under another M7 `identity` or fitted table
+    /// (under `fit_version`), marking each reopen `pending` for both.
+    async fn reopen_stale_dv_m7_titles(
+        &self,
+        identity: &str,
+        fit_version: &str,
+        limit: u32,
+        now_ms: i64,
+    ) -> Result<Vec<i64>, StoreError>;
+    /// The M7 outcome recorded for the file's current title generation.
+    async fn dv_m7_title_outcome(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<super::dv_m7_outcomes::M7TitleOutcomeRecord>, StoreError>;
+    /// Forget the M7 outcomes of the item's files' current title
+    /// generations, so the idle sweep re-evaluates them. Returns how many.
+    async fn clear_dv_m7_title_outcomes(&self, item_id: i64) -> Result<u64, StoreError>;
     async fn dv_title_demands(
         &self,
         scanner: &str,
@@ -3319,6 +3340,54 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: super::dv_title_jobs::PublishTitleJob,
     ) -> Result<JobPublishOutcome, StoreError>;
+    /// Persist a bounded measurement without settling the title attempt.
+    async fn record_dv_m7_receipt(
+        &self,
+        request: super::dv_m7_receipts::RecordM7Receipt,
+    ) -> Result<bool, StoreError>;
+
+    async fn record_dv_m7_title_facts(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        stats: &crate::scan::dv_title::DvTitleStats,
+    ) -> Result<bool, StoreError>;
+
+    async fn anchor_dv_m7_candidate(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        plan: super::dv_m7_attempts::M7CandidatePlan,
+    ) -> Result<super::dv_m7_attempts::M7CandidateAnchor, StoreError>;
+
+    async fn legacy_m7_rate_stop(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        fit_table: [u8; 32],
+    ) -> Result<Option<super::dv_m7_attempts::M7LegacyRateStop>, StoreError>;
+    async fn supersede_m7_rate_stop(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        legacy: &super::dv_m7_attempts::M7LegacyRateStop,
+        fit_table: [u8; 32],
+        plan: super::dv_m7_attempts::M7CandidatePlan,
+    ) -> Result<super::dv_m7_attempts::M7CandidateAnchor, StoreError>;
+    async fn dv_m7_candidate_slots(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+    ) -> Result<Option<super::dv_m7_attempts::M7CandidateLedger>, StoreError>;
+
+    async fn reserve_dv_m7_candidate_slot(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        intent: super::dv_m7_attempts::M7CandidateIntent,
+    ) -> Result<super::dv_m7_attempts::M7CandidateReservation, StoreError>;
+
+    /// Reuse a measurement only for the same current source and experiment.
+    async fn dv_m7_receipt(
+        &self,
+        binding: &crate::transcode::dv_m7_receipt::M7Binding,
+        source_probe: &crate::transcode::dv_m7_receipt::M7SourceProbe,
+    ) -> Result<Option<crate::transcode::dv_m7_receipt::M7Receipt>, StoreError>;
+
     /// Offer a content-analysis pass's complete-title aggregate to the
     /// title's current demand.
     async fn publish_dv_title_from_analysis(
@@ -4446,6 +4515,24 @@ LIMIT 1
     ) -> Result<Vec<i64>, StoreError> {
         super::dv_title_jobs::stale_fel_titles(self, identity, limit).await
     }
+    async fn reopen_stale_dv_m7_titles(
+        &self,
+        identity: &str,
+        fit_version: &str,
+        limit: u32,
+        now_ms: i64,
+    ) -> Result<Vec<i64>, StoreError> {
+        super::dv_title_jobs::reopen_stale_m7(self, identity, fit_version, limit, now_ms).await
+    }
+    async fn dv_m7_title_outcome(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<super::dv_m7_outcomes::M7TitleOutcomeRecord>, StoreError> {
+        super::dv_m7_outcomes::outcome(self, file_id).await
+    }
+    async fn clear_dv_m7_title_outcomes(&self, item_id: i64) -> Result<u64, StoreError> {
+        super::dv_m7_outcomes::clear_item(self, item_id).await
+    }
     async fn dv_title_demands_through(
         &self,
         scanner: &str,
@@ -4505,6 +4592,68 @@ LIMIT 1
     ) -> Result<JobPublishOutcome, StoreError> {
         super::dv_title_jobs::publish(self, request).await
     }
+    async fn record_dv_m7_receipt(
+        &self,
+        request: super::dv_m7_receipts::RecordM7Receipt,
+    ) -> Result<bool, StoreError> {
+        super::dv_m7_receipts::record(self, request).await
+    }
+
+    async fn record_dv_m7_title_facts(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        stats: &crate::scan::dv_title::DvTitleStats,
+    ) -> Result<bool, StoreError> {
+        super::dv_m7_attempts::record_title_facts(self, authority, stats).await
+    }
+
+    async fn anchor_dv_m7_candidate(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        plan: super::dv_m7_attempts::M7CandidatePlan,
+    ) -> Result<super::dv_m7_attempts::M7CandidateAnchor, StoreError> {
+        super::dv_m7_attempts::anchor(self, authority, plan).await
+    }
+
+    async fn legacy_m7_rate_stop(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        fit_table: [u8; 32],
+    ) -> Result<Option<super::dv_m7_attempts::M7LegacyRateStop>, StoreError> {
+        super::dv_m7_attempts::legacy_rate_stop(self, authority, fit_table).await
+    }
+    async fn supersede_m7_rate_stop(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        legacy: &super::dv_m7_attempts::M7LegacyRateStop,
+        fit_table: [u8; 32],
+        plan: super::dv_m7_attempts::M7CandidatePlan,
+    ) -> Result<super::dv_m7_attempts::M7CandidateAnchor, StoreError> {
+        super::dv_m7_attempts::supersede(self, authority, legacy, fit_table, plan).await
+    }
+    async fn dv_m7_candidate_slots(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+    ) -> Result<Option<super::dv_m7_attempts::M7CandidateLedger>, StoreError> {
+        super::dv_m7_attempts::lookup(self, authority).await
+    }
+
+    async fn reserve_dv_m7_candidate_slot(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        intent: super::dv_m7_attempts::M7CandidateIntent,
+    ) -> Result<super::dv_m7_attempts::M7CandidateReservation, StoreError> {
+        super::dv_m7_attempts::reserve(self, authority, intent).await
+    }
+
+    async fn dv_m7_receipt(
+        &self,
+        binding: &crate::transcode::dv_m7_receipt::M7Binding,
+        source_probe: &crate::transcode::dv_m7_receipt::M7SourceProbe,
+    ) -> Result<Option<crate::transcode::dv_m7_receipt::M7Receipt>, StoreError> {
+        super::dv_m7_receipts::lookup(self, binding, source_probe).await
+    }
+
     async fn publish_dv_title_from_analysis(
         &self,
         output: super::dv_title_jobs::AnalysisTitleOutput,

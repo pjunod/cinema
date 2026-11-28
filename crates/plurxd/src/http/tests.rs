@@ -24917,3 +24917,49 @@ fn compatibility_and_federation_dtos_never_read_curation() {
         }
     }
 }
+
+/// Re-evaluate M7: reanalyze's sibling for a title's recorded M7 outcome.
+/// Admin-only, 404 for an item that is not there, a count of the outcomes it
+/// forgot, and a plain 409 on a server with no M7 experiment directory rather
+/// than an action that silently does nothing.
+#[tokio::test]
+async fn reevaluate_m7_is_admin_only_and_says_when_m7_is_not_configured() {
+    let (_, mut state) = test_state();
+    // The fixture's data directory is empty, so it configures no M7; give
+    // this server the experiment directory a daemon derives from its own.
+    let unconfigured = state.clone();
+    state.m7_experiment_dir = Some(crate::test_temp_path(format!(
+        "plurx-m7-{}",
+        uuid::Uuid::new_v4()
+    )));
+    let app = router(state.clone());
+    let admin = setup_admin(&app).await;
+    let s = seed_content(&state).await;
+    let path = format!("/api/v1/items/{}/m7/reevaluate", s.ep);
+    assert_eq!(
+        call(&app, post(&path, None, json!({}))).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(
+            &app,
+            post(
+                "/api/v1/items/999999/m7/reevaluate",
+                Some(&admin),
+                json!({})
+            )
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, report) = call(&app, post(&path, Some(&admin), json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "body: {report:?}");
+    assert_eq!(report["cleared"], 0, "the seeded title has no M7 record");
+
+    assert!(unconfigured.m7_experiment_dir.is_none());
+    let app = router(unconfigured);
+    let (status, body) = call(&app, post(&path, Some(&admin), json!({}))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "M7 is not configured on this server");
+}

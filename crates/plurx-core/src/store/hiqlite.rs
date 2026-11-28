@@ -2425,6 +2425,9 @@ impl HiqliteAuthStore {
         store.install_storage_domain_pending_schema(None).await?;
         store.install_dv_refit_schema(None).await?;
         store.install_analysis_source_scope_schema(None).await?;
+        store.install_dv_m7_attempt_schema(None).await?;
+        store.install_dv_m7_outcome_schema(None).await?;
+        store.install_dv_m7_supersession_schema(None).await?;
         // Last: the lease expand replaces the resource views the managed v7
         // step and the analysis source scope just installed.
         store.install_source_leases_schema(None, true).await?;
@@ -2647,6 +2650,9 @@ impl HiqliteAuthStore {
                         .await?;
                     self.install_dv_refit_schema(admission).await?;
                     self.install_analysis_source_scope_schema(admission).await?;
+                    self.install_dv_m7_attempt_schema(admission).await?;
+                    self.install_dv_m7_outcome_schema(admission).await?;
+                    self.install_dv_m7_supersession_schema(admission).await?;
                     return self.install_source_leases_schema(admission, false).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
@@ -5337,6 +5343,121 @@ impl HiqliteAuthStore {
         result?;
         Err(StoreError::Migration(
             "analysis source scope schema install did not settle".into(),
+        ))
+    }
+
+    async fn has_dv_m7_attempt_schema(&self) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "dv_m7_attempt_schema",
+                super::dv_m7_attempts::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|row| (row.name, row.sql))
+            .collect::<Vec<_>>();
+        super::dv_m7_attempts::has_schema(&shape)
+    }
+
+    async fn install_dv_m7_attempt_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.has_dv_m7_attempt_schema().await? {
+            return Ok(());
+        }
+        admit_schema_migration(admission)?;
+        let result = self
+            .schema_migration_transaction([(super::dv_m7_attempts::SCHEMA, params!())])
+            .await;
+        if self.has_dv_m7_attempt_schema().await? {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "M7 candidate attempt schema install did not settle".into(),
+        ))
+    }
+
+    async fn has_dv_m7_supersession_schema(&self) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "dv_m7_supersession_schema",
+                super::dv_m7_attempts::SUPERSESSION_SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|row| (row.name, row.sql))
+            .collect::<Vec<_>>();
+        super::dv_m7_attempts::has_supersession_schema(&shape)
+    }
+
+    async fn install_dv_m7_supersession_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.has_dv_m7_supersession_schema().await? {
+            return Ok(());
+        }
+        admit_schema_migration(admission)?;
+        let result = self
+            .schema_migration_transaction([(super::dv_m7_attempts::SUPERSESSION_SCHEMA, params!())])
+            .await;
+        if self.has_dv_m7_supersession_schema().await? {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "M7 rate supersession schema install did not settle".into(),
+        ))
+    }
+
+    async fn has_dv_m7_outcome_schema(&self) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "dv_m7_outcome_schema",
+                super::dv_m7_outcomes::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|row| (row.name, row.sql))
+            .collect::<Vec<_>>();
+        super::dv_m7_outcomes::has_schema(&shape)
+    }
+
+    /// Each title generation's M7 outcome: an additive extension whose
+    /// triggers fire on the title-job and F+ tables installed before it.
+    async fn install_dv_m7_outcome_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.has_dv_m7_outcome_schema().await? {
+            return Ok(());
+        }
+        let statements = super::dv_m7_outcomes::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.has_dv_m7_outcome_schema().await? {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "M7 title outcome schema install did not settle".into(),
         ))
     }
 

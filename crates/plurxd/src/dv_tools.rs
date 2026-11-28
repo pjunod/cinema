@@ -18,6 +18,19 @@ struct Artifact {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct M7EncoderManifest {
+    cli: Artifact,
+    libraries: Vec<Artifact>,
+}
+
+#[derive(Clone)]
+struct M7EncoderArtifacts {
+    cli: (PathBuf, String),
+    libraries: Vec<(PathBuf, String)>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Manifest {
     schema: u32,
     graph: String,
@@ -27,11 +40,14 @@ struct Manifest {
     parser_sha256: String,
     source_sha256: String,
     environment: BTreeMap<String, String>,
+    m7_encoder: Option<M7EncoderManifest>,
 }
 #[derive(Clone)]
 pub(crate) struct ToolSet {
     pub(crate) renderer: PathBuf,
     pub(crate) scanner: PathBuf,
+    muxer: Option<(PathBuf, String)>,
+    m7_encoder: Option<M7EncoderArtifacts>,
     pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
     pub(crate) identity: DvBackendIdentity,
     /// The scanner executable's own digest. It is statically linked, so this
@@ -49,15 +65,15 @@ pub(crate) struct ToolSet {
 /// run prints; [`REFIT_MODE_SOURCES`] makes a change to them fail a test
 /// until it is bumped and re-pinned.
 pub(crate) const REFIT_MODE_VERSION: &str = "plurx-refit-mode-v3";
-/// sha256 of `refit_mode.h` followed by `refit_compose.h`, as
-/// [`REFIT_MODE_VERSION`] was last reviewed against. v3: the mapping
-/// cross-check accumulates libdovi's delta-coded pivots (multi-pivot titles
-/// were refused before). The diagnostic-only
-/// TopLeft export addition preserves the v2 statistics, samples and pooling;
-/// its independent representation has its own version in `refit_topleft.h`.
+/// Source hash reviewed for [`REFIT_MODE_VERSION`], computed over
+/// `refit_mode.h` followed by `refit_compose.h`. The v3 mapping cross-check
+/// accumulates libdovi's delta-coded pivots so it can handle multi-pivot titles.
+/// The diagnostic TopLeft export and M7 sample modes preserve the v2
+/// statistics and pooling.
+/// Their representations are versioned in `refit_topleft.h` and `m7_sample_v1.h`.
 #[cfg(test)]
 pub(crate) const REFIT_MODE_SOURCES: &str =
-    "310e490a68f0c80b3219e3d56a8c3de56b149ebcbc483ac91b88a917e20bc03b";
+    "f18bb061740d61d0c704eb102e70f63b0f7d84baaeb41de08a6ba88b9b40a449";
 
 /// Advance with each new title scanner release. All eligible workers must
 /// have the store guard before the first advance.
@@ -82,13 +98,13 @@ pub(crate) const TITLE_SCANNER_PREDECESSORS: &[&str] = &[
     // only the selected video, exactly as before.
     "5e4c9012fec9fd3087d0cf62ac7819fda7b86f57cb4d21de9f3045c153306953",
 ];
-/// sha256 of `scan_title.c`, `movie_source_io.h`, `title_constants.h`,
+/// sha256 of `scan_title.c`, `m7_title_census.h`, `movie_source_io.h`, `title_constants.h`,
 /// `build.sh` (its flags) and `build-dependencies.sh` (the FFmpeg and libdovi
 /// it links statically) concatenated, as [`TITLE_SCANNER_PREDECESSORS`] was
 /// last reviewed against.
 #[cfg(test)]
 pub(crate) const TITLE_SCANNER_SOURCES: &str =
-    "f0ac3422c74a4ef433719d88a046c36d8a71856890afb33085684a66cd2f34fa";
+    "7fe0193a7129a7f21472fba31698e99d9d2384e5d9b93a6903ae761533bf8e26";
 
 #[cfg(test)]
 impl ToolSet {
@@ -112,6 +128,8 @@ impl ToolSet {
         Self {
             renderer: PathBuf::from("/bin/false"),
             scanner: PathBuf::from("/bin/false"),
+            muxer: None,
+            m7_encoder: None,
             renderer_env: Vec::new(),
             identity,
             scanner_sha256: hash(b"/bin/false"),
@@ -153,6 +171,10 @@ fn renderer_source_identity() -> String {
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
         ),
         (
+            "coded_au.h",
+            include_bytes!("../../../tools/dv_processing/coded_au.h"),
+        ),
+        (
             "display_target.h",
             include_bytes!("../../../tools/dv_processing/display_target.h"),
         ),
@@ -187,6 +209,22 @@ fn renderer_source_identity() -> String {
         (
             "hevc-rasl-frame-thread.patch",
             include_bytes!("../../../tools/dv_processing/hevc-rasl-frame-thread.patch"),
+        ),
+        (
+            "m7_limits.h",
+            include_bytes!("../../../tools/dv_processing/m7_limits.h"),
+        ),
+        (
+            "m7_np1_encode.h",
+            include_bytes!("../../../tools/dv_processing/m7_np1_encode.h"),
+        ),
+        (
+            "m7_sample_v1.h",
+            include_bytes!("../../../tools/dv_processing/m7_sample_v1.h"),
+        ),
+        (
+            "m7_title_census.h",
+            include_bytes!("../../../tools/dv_processing/m7_title_census.h"),
         ),
         (
             "movie_source_io.h",
@@ -294,17 +332,113 @@ fn contained(root: &Path, path: &Path) -> Result<PathBuf, String> {
     }
     Ok(resolved)
 }
+fn capture_m7_encoder(root: &Path, manifest: &M7EncoderManifest) -> Option<M7EncoderArtifacts> {
+    if manifest.cli.path != Path::new("encoder/ffmpeg")
+        || !(1..=32).contains(&manifest.libraries.len())
+        || manifest
+            .libraries
+            .iter()
+            .any(|library| library.path.parent() != Some(Path::new("encoder/lib")))
+    {
+        return None;
+    }
+    let verified = |artifact: &Artifact| {
+        let path = contained(root, &artifact.path).ok()?;
+        let bytes = std::fs::metadata(&path).ok()?.len();
+        if path != root.join(&artifact.path) || !(1..=256 * 1024 * 1024).contains(&bytes) {
+            return None;
+        }
+        let sha = hash_file(&path).ok()?;
+        (sha == artifact.sha256).then_some((path, sha))
+    };
+    let cli = verified(&manifest.cli)?;
+    let mut libraries = manifest
+        .libraries
+        .iter()
+        .map(verified)
+        .collect::<Option<Vec<_>>>()?;
+    libraries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    if libraries.windows(2).any(|pair| pair[0].0 == pair[1].0)
+        || ["libavcodec.", "libavformat.", "libavutil.", "libx265."]
+            .iter()
+            .any(|family| {
+                libraries
+                    .iter()
+                    .filter(|(path, _)| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.starts_with(*family))
+                    })
+                    .count()
+                    != 1
+            })
+    {
+        return None;
+    }
+    Some(M7EncoderArtifacts { cli, libraries })
+}
+
 impl ToolSet {
     /// Only parents of the canonical executables accepted by bundle validation.
     /// Never infer trust from the configured bundle root before capture succeeds.
     pub(crate) fn executable_directories(&self) -> Vec<PathBuf> {
         let mut directories: Vec<_> = [&self.renderer, &self.scanner]
             .into_iter()
+            .chain(self.muxer.iter().map(|(path, _)| path))
+            .chain(self.m7_encoder.iter().map(|encoder| &encoder.cli.0))
             .filter_map(|path| path.parent().map(Path::to_path_buf))
             .collect();
         directories.sort();
         directories.dedup();
         directories
+    }
+
+    /// The optional, manifest-verified executable for the bounded M7 encoder.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn muxer(&self) -> Option<(&Path, &str)> {
+        self.muxer
+            .as_ref()
+            .map(|(path, sha)| (path.as_path(), sha.as_str()))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn muxer_is_current(&self) -> bool {
+        let Some((path, expected)) = self.muxer.clone() else {
+            return false;
+        };
+        tokio::task::spawn_blocking(move || hash_file(&path).is_ok_and(|actual| actual == expected))
+            .await
+            .unwrap_or(false)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn m7_encoder(&self) -> Option<(&Path, &str)> {
+        self.m7_encoder
+            .as_ref()
+            .map(|encoder| (encoder.cli.0.as_path(), encoder.cli.1.as_str()))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn m7_encoder_is_current(&self) -> bool {
+        let Some(encoder) = self.m7_encoder.clone() else {
+            return false;
+        };
+        tokio::task::spawn_blocking(move || {
+            std::iter::once(&encoder.cli)
+                .chain(encoder.libraries.iter())
+                .all(|(path, expected)| hash_file(path).is_ok_and(|actual| actual == *expected))
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn verified_encoder_library(&self, canonical_path: &Path) -> Option<&str> {
+        self.m7_encoder
+            .as_ref()?
+            .libraries
+            .iter()
+            .find_map(|(path, sha)| (path.as_path() == canonical_path).then_some(sha.as_str()))
     }
 
     /// The whole processing backend: renderer, libraries, parser and helper
@@ -320,6 +454,33 @@ impl ToolSet {
     #[cfg(unix)]
     pub(crate) fn title_scanner_digest(&self) -> String {
         hash(format!("plurx-dv-title-scanner-v1\0{}", self.scanner_sha256).as_bytes())
+    }
+    /// Every installed artifact an M7 evaluation runs: the processing
+    /// backend (renderer, libraries, parser, helper sources), the title
+    /// scanner, the muxer and the M7 encoder with its libraries, exactly the
+    /// identities M7's bindings already name. The F+ helper that fits the
+    /// table M7 reads is not here: a new table is its own reopen reason.
+    #[cfg(unix)]
+    pub(crate) fn m7_tools_digest(&self) -> String {
+        let mut parts = vec![
+            "plurx-m7-tools-v1".to_owned(),
+            self.backend_digest(),
+            self.title_scanner_digest(),
+            self.muxer
+                .as_ref()
+                .map(|(_, sha)| sha.clone())
+                .unwrap_or_default(),
+        ];
+        if let Some(encoder) = &self.m7_encoder {
+            parts.push(encoder.cli.1.clone());
+            parts.extend(encoder.libraries.iter().map(|(_, sha)| sha.clone()));
+        }
+        let mut body = Vec::new();
+        for part in parts {
+            body.extend_from_slice(&(part.len() as u64).to_be_bytes());
+            body.extend_from_slice(part.as_bytes());
+        }
+        hash(&body)
     }
     /// What an F+ fit's statistics depend on (decision G): the refit mode's
     /// version and the decoder ABI it runs on, not the whole backend digest,
@@ -397,6 +558,17 @@ impl ToolSet {
                 tools.insert(name.clone(), path.clone());
                 artifacts.push((path, actual));
             }
+            // Leave ordinary renderer/scanner eligibility independent of the
+            // optional encoder. Its own caller checks this artifact on use.
+            let muxer = manifest.tools.get("muxer").and_then(|artifact| {
+                let path = contained(&root, &artifact.path).ok()?;
+                let actual = hash_file(&path).ok()?;
+                (actual == artifact.sha256).then_some((path, actual))
+            });
+            let m7_encoder = manifest
+                .m7_encoder
+                .as_ref()
+                .and_then(|encoder| capture_m7_encoder(&root, encoder));
             let mut library_identity = Vec::new();
             for artifact in &manifest.libraries {
                 let path = contained(&root, &artifact.path)?;
@@ -465,6 +637,8 @@ impl ToolSet {
             Ok(Some(Arc::new(Self {
                 renderer: tools.remove("renderer").ok_or("missing renderer")?,
                 scanner: tools.remove("scanner").ok_or("missing scanner")?,
+                muxer,
+                m7_encoder,
                 renderer_env: environment,
                 identity,
                 scanner_sha256,
@@ -484,6 +658,52 @@ impl ToolSet {
         })
         .await
         .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "synthetic bundle fixture and expected artifact lookups"
+)]
+mod m7_encoder_manifest_tests {
+    use super::*;
+
+    #[test]
+    fn encoder_requires_owned_cli_and_exact_critical_library_hashes() {
+        let output = tempfile::tempdir().unwrap();
+        let root = output.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("encoder/lib")).unwrap();
+        let write = |name: &str| {
+            std::fs::write(root.join(name), name).unwrap();
+            Artifact {
+                path: PathBuf::from(name),
+                sha256: hash(name.as_bytes()),
+            }
+        };
+        let mut encoder = M7EncoderManifest {
+            cli: write("encoder/ffmpeg"),
+            libraries: [
+                "encoder/lib/libavcodec.63.dylib",
+                "encoder/lib/libavformat.63.dylib",
+                "encoder/lib/libavutil.61.dylib",
+                "encoder/lib/libx265.217.dylib",
+            ]
+            .map(write)
+            .into(),
+        };
+        assert!(capture_m7_encoder(&root, &encoder).is_some());
+
+        // A separately installed general CLI cannot stand in for the bundle.
+        let owned_cli = std::mem::replace(&mut encoder.cli, write("general-ffmpeg"));
+        assert!(capture_m7_encoder(&root, &encoder).is_none());
+        encoder.cli = owned_cli;
+
+        let one = encoder.libraries.pop().unwrap();
+        assert!(capture_m7_encoder(&root, &encoder).is_none());
+        std::fs::write(root.join(&one.path), b"different").unwrap();
+        encoder.libraries.push(one);
+        assert!(capture_m7_encoder(&root, &encoder).is_none());
     }
 }
 
@@ -614,6 +834,9 @@ mod title_scanner_identity_tests {
         use sha2::{Digest, Sha256};
         let mut sources = Sha256::new();
         sources.update(include_bytes!("../../../tools/dv_processing/scan_title.c"));
+        sources.update(include_bytes!(
+            "../../../tools/dv_processing/m7_title_census.h"
+        ));
         sources.update(include_bytes!(
             "../../../tools/dv_processing/movie_source_io.h"
         ));

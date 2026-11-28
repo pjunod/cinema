@@ -176,6 +176,12 @@ pub enum AnalysisTitleOutcome {
 pub struct PublishTitleJob {
     pub token: JobToken,
     pub output: TitleOutput,
+    /// The M7 evaluation's outcome, recorded with the aggregate in the same
+    /// command. `None` leaves the generation's record as it was: M7 did not
+    /// run (a viewer's or probe-only attempt, a native FEL head rebuild, no
+    /// experiment directory).
+    #[serde(default)]
+    pub m7: Option<super::dv_m7_outcomes::M7TitleOutcome>,
     pub now_ms: i64,
 }
 
@@ -458,6 +464,9 @@ pub(super) async fn publish<T: QueueSql>(
     input: PublishTitleJob,
 ) -> Result<JobPublishOutcome, StoreError> {
     input.token.validate()?;
+    if let Some(m7) = &input.m7 {
+        m7.validate()?;
+    }
     let out = &input.output;
     if input.now_ms < 0
         || out.file_id <= 0
@@ -475,7 +484,18 @@ pub(super) async fn publish<T: QueueSql>(
     }
     let body = serde_json::to_value(input).map_err(|e| StoreError::Task(e.to_string()))?;
     let rows = store
-        .queue_sql(PUBLISH_SQL.into(), encode(&body)?, true, true)
+        .queue_sql(
+            PUBLISH_SQL
+                .replace("__TITLE_JOB_OWNS__", TITLE_JOB_OWNERSHIP)
+                .replace(
+                    "__CURRENT_FIT_TABLE__",
+                    &super::dv_m7_outcomes::CURRENT_FIT_TABLE
+                        .replace("$1", "json_extract(body,'$.m7')"),
+                ),
+            encode(&body)?,
+            true,
+            true,
+        )
         .await?;
     decode(
         rows.first()
@@ -628,12 +648,9 @@ WHERE job.id=json_extract($1,'$.probe') AND job.kind='media_probe' AND job.paylo
     Ok(!rows.is_empty())
 }
 
-const PUBLISH_SQL: &str = r#"
-WITH input AS (SELECT json($1) AS body), observation AS (
- SELECT body,job.id,job.state,job.result_ref,json_extract(body,'$.output') AS output,
- EXISTS(SELECT 1 FROM background_job_attempts a WHERE a.job_id=job.id
-  AND a.fence=job.fence AND a.fence=json_extract(body,'$.token.fence') AND a.claim_id=json_extract(body,'$.token.claim_id')
-  AND a.owner_node_id=json_extract(body,'$.token.node_id') AND a.owner_boot_id=json_extract(body,'$.token.boot_id')) AS same_attempt,
+// Both terminal title publication and the nonterminal M7 write must
+// recognize the same live attempt and source generation.
+pub(super) const TITLE_JOB_OWNERSHIP: &str = r#"
  job.state='running' AND job.kind='dv_title_scan' AND job.payload_version=1
  AND job.owner_node_id=json_extract(body,'$.token.node_id') AND job.owner_boot_id=json_extract(body,'$.token.boot_id')
  AND job.claim_id=json_extract(body,'$.token.claim_id') AND job.fence=json_extract(body,'$.token.fence')
@@ -654,11 +671,24 @@ WITH input AS (SELECT json($1) AS body), observation AS (
   WHERE d.revision=json_extract(body,'$.output.probe_revision') AND d.file_id=json_extract(body,'$.output.file_id')
   AND d.scanner_digest=json_extract(body,'$.output.scanner_digest') AND d.terminal=0
   AND f.size=json_extract(body,'$.output.source_size') AND f.mtime=json_extract(body,'$.output.source_mtime')
-  AND f.video_codec='hevc' AND f.dv_profile IN (5,7,8) AND f.dv_rpu_present=1 AND json_valid(f.probe_json)) AS owns
+  AND f.video_codec='hevc' AND f.dv_profile IN (5,7,8) AND f.dv_rpu_present=1 AND json_valid(f.probe_json))
+"#;
+
+const PUBLISH_SQL: &str = r#"
+WITH input AS (SELECT json($1) AS body), observation AS (
+ SELECT body,job.id,job.state,job.result_ref,json_extract(body,'$.output') AS output,
+ EXISTS(SELECT 1 FROM background_job_attempts a WHERE a.job_id=job.id
+  AND a.fence=job.fence AND a.fence=json_extract(body,'$.token.fence') AND a.claim_id=json_extract(body,'$.token.claim_id')
+  AND a.owner_node_id=json_extract(body,'$.token.node_id') AND a.owner_boot_id=json_extract(body,'$.token.boot_id')) AS same_attempt,
+ __TITLE_JOB_OWNS__ AS owns
  FROM input LEFT JOIN background_jobs job ON job.id=json_extract(body,'$.token.job_id')
 ), verdict AS (
  SELECT *,CASE WHEN state='succeeded' AND same_attempt AND result_ref=output THEN 'already_published'
- WHEN NOT COALESCE(owns,0) THEN 'lost_ownership' ELSE 'published' END AS outcome FROM observation
+ WHEN NOT COALESCE(owns,0) THEN 'lost_ownership'
+ WHEN json_extract(body,'$.m7.observed_fit_table') IS NOT NULL
+  AND json_extract(body,'$.m7.observed_fit_table') IS NOT
+   (SELECT __CURRENT_FIT_TABLE__ FROM files f WHERE f.id=json_extract(body,'$.output.file_id'))
+ THEN 'artifact_conflict' ELSE 'published' END AS outcome FROM observation
 )
 INSERT INTO background_job_commands(id,operation,request_json,result_json)
 SELECT json_extract(body,'$.token.claim_id'),'publish_dv_title',body,
@@ -978,6 +1008,194 @@ ORDER BY d.revision LIMIT json_extract($1,'$.limit')",
     rows.iter()
         .map(|row| decode::<Title>(row).map(|title| title.file_id))
         .collect()
+}
+
+/// Reopen settled Profile 7 enhancement-layer titles whose M7 evaluation is
+/// stale for `identity` (the running M7 build and tools) and the current
+/// fitted F+ table under `fit_version`, each with a queued title job. Returns
+/// the titles reopened; one claimed or changed in between stays as it was.
+///
+/// A title is stale when its generation has no recorded M7 outcome, or when
+/// its outcome is `unsupported` (or the sweep's own `pending`) and was
+/// recorded under another identity or another fitted table. `result`,
+/// `not_applicable` and other `inconclusive` outcomes remain terminal. A
+/// legacy target-bound stop can reopen once under a new M7 identity while
+/// its fitted table still matches. The original outcome is archived. The reopen keeps
+/// the generation, so the title job reuses its stored aggregate instead of
+/// reading the source again, and records `pending` under this identity and
+/// table in the same transaction: the loop-breaker, so a title reopens at most
+/// once per (identity, fitted table) whatever its job then does, including
+/// being cancelled or failing.
+pub(super) async fn reopen_stale_m7<T: QueueSql>(
+    store: &T,
+    identity: &str,
+    fit_version: &str,
+    limit: u32,
+    now_ms: i64,
+) -> Result<Vec<i64>, StoreError> {
+    if !digest(identity)
+        || !super::dv_refit_jobs::valid_fit_version(fit_version)
+        || limit == 0
+        || limit > 128
+        || now_ms < 0
+    {
+        return Err(StoreError::Task("invalid M7 title reopen".into()));
+    }
+    use super::background_jobs::{
+        enqueue_body, BackgroundJobStore, EnqueueJob, JobPayload, JobRequest, ENQUEUE_SQL,
+    };
+    #[derive(Deserialize)]
+    struct Title {
+        file_id: i64,
+        revision: i64,
+        scanner_digest: String,
+        source_size: i64,
+        source_mtime: i64,
+    }
+    let current = super::dv_m7_outcomes::CURRENT_FIT_TABLE;
+    let rate_gate = super::dv_m7_attempts::legacy_rate_gate_sql("o.gate");
+    let legacy_stop = format!(
+        "(o.outcome='inconclusive' AND o.fit_table<>'' AND o.fit_table={current}
+ AND o.identity IS NOT json_extract($1,'$.identity')
+ AND {rate_gate}
+ AND NOT EXISTS(SELECT 1 FROM dv_m7_rate_supersessions_v1 history WHERE history.revision=d.revision))"
+    );
+    let candidates = format!(
+        "FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+ LEFT JOIN dv_m7_title_outcomes_v1 o ON o.revision=d.revision
+WHERE d.terminal=1 AND d.scanner_digest IS NOT NULL
+ AND f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
+ AND json_type(f.probe_json,'$.{field}')='object'
+ AND (o.revision IS NULL OR (o.outcome IN ('unsupported','pending')
+  AND (o.identity IS NOT json_extract($1,'$.identity') OR o.fit_table IS NOT {current})) OR {legacy_stop})
+ AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
+  AND job.state IN ('queued','running','cancelling')
+  AND json_extract(job.payload_json,'$.file_id')=f.id)",
+        field = crate::scan::dv_title::PROBE_FIELD
+    );
+    let rows = store
+        .queue_sql(
+            format!(
+                "SELECT json_object('file_id',f.id,'revision',d.revision,'scanner_digest',d.scanner_digest,
+ 'source_size',f.size,'source_mtime',f.mtime) AS result_json {candidates}
+ORDER BY d.revision LIMIT json_extract($1,'$.limit')"
+            ),
+            encode(&serde_json::json!({
+                "identity": identity, "fit_version": fit_version, "limit": limit,
+            }))?,
+            false,
+            true,
+        )
+        .await?;
+    let titles = rows
+        .iter()
+        .map(|row| decode::<Title>(row))
+        .collect::<Result<Vec<_>, _>>()?;
+    let provided = format!(
+        "WITH provided AS (SELECT json($1) AS body WHERE EXISTS(SELECT 1 {candidates}
+ AND d.file_id=json_extract($1,'$.payload.file_id') AND d.revision=json_extract($1,'$.payload.probe_revision'))), input AS MATERIALIZED ("
+    );
+    let guarded_enqueue = ENQUEUE_SQL.replacen(
+        "WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (",
+        &provided,
+        1,
+    );
+    let mut reopened = Vec::new();
+    for title in titles {
+        // The title's own request identity still names the settled job, whose
+        // receipt would answer a new request with it; the reopened attempt is
+        // a fresh request, enqueued in the same transaction that reopens it.
+        let request = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let enqueue = EnqueueJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            payload: JobPayload::DvTitleScan {
+                file_id: title.file_id,
+                source_size: title.source_size,
+                source_mtime: title.source_mtime,
+                probe_revision: title.revision,
+                scanner_digest: title.scanner_digest.clone(),
+            },
+            dedupe_key: format!(
+                "dv-title-generation:{}:{}:{}",
+                title.file_id, title.revision, title.scanner_digest
+            ),
+            priority: 0,
+            not_before_ms: now_ms,
+            now_ms,
+            request: JobRequest {
+                scope: "dv-title".into(),
+                request_id: request.clone(),
+                request_digest: request,
+                consumer_kind: "dv_title_scan".into(),
+                consumer_ref: title.file_id.to_string(),
+                target_node_id: None,
+                deadline_ms: None,
+                retain_identity: false,
+            },
+        };
+        enqueue.validate()?;
+        let mut body = enqueue_body(store, &enqueue).await?;
+        body["m7_reopen"] = 1.into();
+        body["identity"] = identity.into();
+        body["fit_version"] = fit_version.into();
+        let body = encode(&body)?;
+        let guard = encode(&serde_json::json!({
+            "identity": identity,
+            "fit_version": fit_version,
+            "file": title.file_id,
+            "revision": title.revision,
+            "job": enqueue.id,
+            "now": now_ms,
+        }))?;
+        // Admit only a title that still meets the sweep conditions. The
+        // newly queued job authorizes reopening and marking its generation.
+        store
+            .queue_transaction(vec![
+                (guarded_enqueue.clone(), body),
+                (
+                    "UPDATE dv_title_jobs_demand SET terminal=0
+WHERE revision=json_extract($1,'$.revision') AND file_id=json_extract($1,'$.file') AND terminal=1
+ AND EXISTS(SELECT 1 FROM background_jobs j WHERE j.id=json_extract($1,'$.job')
+  AND j.kind='dv_title_scan' AND j.state='queued')"
+                        .to_owned(),
+                    guard.clone(),
+                ),
+                (
+                    format!(
+                        "INSERT INTO dv_m7_rate_supersessions_v1(revision,file_id,old_identity,new_identity,fit_table,gate,at_ms)
+SELECT d.revision,d.file_id,o.identity,json_extract($1,'$.identity'),o.fit_table,o.gate,o.at_ms
+FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+JOIN dv_m7_title_outcomes_v1 o ON o.revision=d.revision
+WHERE d.revision=json_extract($1,'$.revision') AND d.file_id=json_extract($1,'$.file') AND d.terminal=0
+ AND {legacy_stop} AND EXISTS(SELECT 1 FROM background_jobs j WHERE j.id=json_extract($1,'$.job')
+  AND j.kind='dv_title_scan' AND j.state='queued')"
+                    ),
+                    guard.clone(),
+                ),
+                (
+                    format!(
+                        "INSERT INTO dv_m7_title_outcomes_v1(revision,file_id,identity,fit_table,outcome,gate,at_ms)
+SELECT d.revision,d.file_id,json_extract($1,'$.identity'),{current},'pending',NULL,json_extract($1,'$.now')
+FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+WHERE d.revision=json_extract($1,'$.revision') AND d.file_id=json_extract($1,'$.file') AND d.terminal=0
+ AND EXISTS(SELECT 1 FROM background_jobs j WHERE j.id=json_extract($1,'$.job')
+  AND j.kind='dv_title_scan' AND j.state='queued')
+ON CONFLICT(revision) DO UPDATE SET identity=excluded.identity,fit_table=excluded.fit_table,
+ outcome='pending',gate=NULL,at_ms=excluded.at_ms"
+                    ),
+                    guard,
+                ),
+            ])
+            .await?;
+        if store.background_job(&enqueue.id).await?.is_some() {
+            reopened.push(title.file_id);
+        }
+    }
+    Ok(reopened)
 }
 
 /// How many titles hold a FEL verdict for `identity`, and how many of those

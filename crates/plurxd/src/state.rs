@@ -858,6 +858,8 @@ pub struct AppState {
     pub(crate) clock_observer: crate::clock_offset::ClockObserver,
     pub(crate) copy_analysis: Arc<crate::copy_analysis::CopyAnalysisRegistry>,
     pub(crate) copy_observation_dir: Option<PathBuf>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) m7_experiment_dir: Option<PathBuf>,
     /// Bounded authenticated client for node-local activity snapshots.
     #[allow(dead_code)] // aggregation child #326 is the first consumer
     pub peer_activity: crate::http::internal_activity::PeerActivityClient,
@@ -1244,6 +1246,8 @@ impl AppState {
         } = config;
         let copy_observation_dir = (!data_dir.as_os_str().is_empty())
             .then(|| data_dir.join("copy-ranges").join("observations"));
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let m7_experiment_dir = (!data_dir.as_os_str().is_empty()).then(|| data_dir.join("dv-m7"));
         let cluster = crate::cluster::Cluster::compose(cluster_parts, applied.applied_mark());
         let node_hostname = cluster.own_hostname();
         let clock_observer = crate::clock_offset::ClockObserver::new(cluster.operations().clock());
@@ -1465,6 +1469,8 @@ impl AppState {
             clock_observer,
             copy_analysis,
             copy_observation_dir,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            m7_experiment_dir,
             node_hostname,
             cluster,
             media_pool,

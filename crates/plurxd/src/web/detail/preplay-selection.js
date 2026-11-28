@@ -275,9 +275,17 @@ function unprobedNote(f,itemId){
 // needs it. px-admin/th-admin keep it off the television surfaces.
 function fileAdminActions(f,itemId){
   if(!ME||!ME.is_admin||!f.available||f.probed===false) return '';
+  // M7 evaluates Profile 7 titles only. Its outcome is recorded per title and
+  // re-evaluated on its own when the M7 build or tools change; this is the
+  // way back for a change that cannot see.
+  const m7=Number(f.dv_profile)===7
+    ? `<p class="hint">Evaluate this title's Dolby Vision M7 experiment again. It runs in the background once other title work is done.</p>
+    <button class="ghost sm" onclick="reevaluateM7(${itemId},this)">⟳ Re-evaluate M7</button>`
+    : '';
   return `<details class="setdetails px-admin th-admin"><summary>More actions</summary><div class="setdetails-body">
     <p class="hint">Read this file's media details again with the media tools installed now. Use it when playback says the source no longer matches its stored probe.</p>
     <button class="ghost sm" onclick="reanalyze(${itemId},this)">⟳ Reanalyze</button>
+    ${m7}
   </div></details>`;
 }
 async function reanalyze(itemId,btn){
@@ -288,6 +296,17 @@ async function reanalyze(itemId,btn){
     else if(r.gone) toast("The file isn’t readable at that path any more");
     else toast((r.problems&&r.problems[0])||"ffprobe still can’t read it");
   }catch(e){ toast(e.message||"Reanalyze failed"); }
+  finally{ btn.disabled=false; btn.textContent=label; }
+}
+// Reanalyze's sibling for a title's M7 outcome. The server only forgets the
+// recorded outcome; the idle title sweep does the evaluating, so the answer
+// is "queued", not a result. A server without M7 says so (409).
+async function reevaluateM7(itemId,btn){
+  const label=btn.textContent; btn.disabled=true; btn.textContent="Queuing…";
+  try{
+    await api(`/items/${itemId}/m7/reevaluate`,{method:"POST"});
+    toast("M7 will evaluate this title again in the background");
+  }catch(e){ toast(e.message||"M7 re-evaluation failed"); }
   finally{ btn.disabled=false; btn.textContent=label; }
 }
 // Reanalyze's sibling, for pictures instead of media details. A poster that

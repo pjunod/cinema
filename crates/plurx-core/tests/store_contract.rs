@@ -745,6 +745,11 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "request_dv_fel_head",
     "dv_fel_verdict_counts",
     "dv_fel_stale_titles",
+    // store_contract/dv_refit_jobs.rs: versioned M7 reopen, its record and
+    // the administrator's re-evaluation.
+    "reopen_stale_dv_m7_titles",
+    "dv_m7_title_outcome",
+    "clear_dv_m7_title_outcomes",
     "dv_title_readiness",
     "dv_title_demands",
     "dv_title_demands_through",
@@ -752,6 +757,14 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "bind_dv_title_demand",
     "carry_forward_dv_title_verdicts",
     "publish_dv_title_job",
+    "record_dv_m7_receipt",
+    "record_dv_m7_title_facts",
+    "anchor_dv_m7_candidate",
+    "legacy_m7_rate_stop",
+    "supersede_m7_rate_stop",
+    "dv_m7_candidate_slots",
+    "reserve_dv_m7_candidate_slot",
+    "dv_m7_receipt",
     "publish_dv_title_from_analysis",
     "probe_can_preempt_title",
     // F+ curve fits: demand, the one-write fenced publication, the current
@@ -22813,7 +22826,8 @@ fn contract_inventory_matches_every_store_method() {
     // place. Named in BACKGROUND_JOB_METHODS and exercised on both backends by
     // dv_title_jobs::title_verdicts_carry_forward_only_where_the_successor_reproduces_them.
     // No new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 637, "review the Store method count");
+    // 637 -> 648: M7 outcomes, receipts, candidate attempts and supersession.
+    assert_eq!(declared.len(), 648, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

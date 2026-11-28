@@ -37,6 +37,7 @@ struct PublishedSourceObserver {
 pub(crate) struct SourceObserverPublication {
     ledger: Weak<StdMutex<SourceOwnersState>>,
     identity: Arc<()>,
+    // Read only by `republish`, whose window-run caller is Linux-only.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     epoch: u64,
 }

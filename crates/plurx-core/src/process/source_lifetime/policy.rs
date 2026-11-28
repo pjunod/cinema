@@ -94,6 +94,12 @@ pub fn configure_no_input_probe(command: &mut std::process::Command) {
         configure_no_input_probe_in(&state, command);
     }
 }
+/// The daemon-owned directory a declared child without a working directory of
+/// its own runs in. A child never inherits the daemon's own working directory,
+/// which lies outside every root the verifier accepts.
+pub fn owned_working_directory() -> Option<PathBuf> {
+    STATE.lock().ok()?.roots.as_ref()?.owned.first().cloned()
+}
 fn configure_no_input_probe_in(state: &State, command: &mut std::process::Command) {
     let Some(roots) = state.roots.as_ref() else {
         return;
@@ -409,6 +415,20 @@ fn canonical_argument(path: &Path, cwd: &Path) -> Result<PathBuf, &'static str> 
     let name = path.file_name().ok_or("path_identity")?;
     Ok(parent.join(name))
 }
+fn numeric_ratio(value: &str) -> bool {
+    let number = |part: &str| {
+        let mut pieces = part.splitn(2, '.');
+        let whole = pieces.next().unwrap_or_default();
+        !whole.is_empty()
+            && whole.bytes().all(|byte| byte.is_ascii_digit())
+            && pieces.next().is_none_or(|fraction| {
+                !fraction.is_empty() && fraction.bytes().all(|byte| byte.is_ascii_digit())
+            })
+    };
+    value
+        .split_once('/')
+        .is_some_and(|(numerator, denominator)| number(numerator) && number(denominator))
+}
 fn fd_token(value: &str) -> Option<Result<i32, &'static str>> {
     for prefix in ["/proc/self/fd/", "/dev/fd/", "pipe:"] {
         if let Some(number) = value.strip_prefix(prefix) {
@@ -515,11 +535,14 @@ fn check_fragment(value: &str, cwd: &Path, context: InputContext<'_>) -> Result<
         } else {
             cwd.join(path_value)
         };
-        let path_like = path_value.contains('/')
-            || Path::new(path_value).is_absolute()
-            || path_value.starts_with("./")
-            || path_value.starts_with("../")
-            || candidate.is_file();
+        // A numeric rational such as `24000/1001` is a rate or time base, not
+        // a path, unless a file of that name really exists.
+        let path_like = candidate.is_file()
+            || (!numeric_ratio(path_value)
+                && (path_value.contains('/')
+                    || Path::new(path_value).is_absolute()
+                    || path_value.starts_with("./")
+                    || path_value.starts_with("../")));
         if !path_like {
             continue;
         }
@@ -861,10 +884,20 @@ fn verify_state(
     let mut source_next = false;
     let mut script_next = false;
     let mut format_next = false;
+    // FFmpeg's `fd:` input reads the descriptor named by the preceding
+    // per-input `-fd N` option (stdin when absent), keeping it seekable.
+    let mut fd_next = false;
+    let mut fd_option: Option<&str> = None;
     let mut concat = false;
     let mut lavfi = false;
     for (index, arg) in args.iter().enumerate() {
         let role = roles.get(index).copied().unwrap_or(ArgumentRole::Ordinary);
+        let output_boundary = role == ArgumentRole::FfmpegOutput && !probe;
+        let path_operand = matches!(role, ArgumentRole::Ordinary | ArgumentRole::FfmpegOutput);
+        if fd_next {
+            fd_option = Some(*arg);
+            fd_next = false;
+        }
         if format_next {
             concat = *arg == "concat";
             lavfi = *arg == "lavfi";
@@ -878,7 +911,7 @@ fn verify_state(
         let input =
             source_next || script_next || (probe && !arg.starts_with('-') && input_path.exists());
         if input {
-            if role != ArgumentRole::Ordinary {
+            if !path_operand {
                 return Err(Refusal::configured("argument_profile_input_role"));
             }
             media_input = true;
@@ -892,7 +925,16 @@ fn verify_state(
                 check_argument(arg, &cwd, context).map_err(Refusal::configured)?;
                 return Err(Refusal::unavailable("broker_confinement_unqualified"));
             }
-            if list {
+            if source_next && *arg == "fd:" {
+                let target = fd_option
+                    .map_or(Ok(0), |value| {
+                        value.parse::<i32>().map_err(|_| "invalid_descriptor_token")
+                    })
+                    .map_err(Refusal::configured)?;
+                if !registered_descriptor(target, manifest) {
+                    return Err(Refusal::configured("unregistered_descriptor_token"));
+                }
+            } else if list {
                 check_script(&input_path, &cwd, context, concat).map_err(Refusal::configured)?;
             } else if !arg.contains("://")
                 && fd_token(arg).is_none()
@@ -903,11 +945,17 @@ fn verify_state(
             }
             source_next = false;
             script_next = false;
+            fd_option = None;
         }
         if FILTER_INPUTS.is_match(arg) {
             media_input = true;
         }
-        if role == ArgumentRole::Ordinary {
+        if output_boundary {
+            // FFmpeg collects options per file, so a completed output consumes
+            // its own -fd and cannot affect a later fd: input.
+            fd_option = None;
+        }
+        if path_operand {
             check_argument(arg, &cwd, context).map_err(Refusal::configured)?;
         }
         if matches!(*arg, "-filter_script" | "-filter_complex_script") {
@@ -919,8 +967,11 @@ fn verify_state(
         if *arg == "-f" {
             format_next = true;
         }
+        if *arg == "-fd" {
+            fd_next = true;
+        }
     }
-    if source_next || script_next || format_next {
+    if source_next || script_next || format_next || fd_next {
         return Err(Refusal::configured("missing_option_value"));
     }
     // A live URL proves current ownership, not what a demuxer can open after
@@ -1146,6 +1197,162 @@ mod tests {
         std::fs::write(&media, b"source").expect("media");
         let command = fixture.command("ffmpeg", &["-i", media.to_str().expect("path")]);
         assert!(fixture.verify(&command, SourceAccess::Brokered).is_err());
+    }
+    #[test]
+    fn an_fd_protocol_input_is_checked_against_the_descriptor_named_by_its_fd_option() {
+        let mut fixture = Fixture::new();
+        let media = fixture.data.join("clip.mp4");
+        std::fs::write(&media, b"source").expect("media");
+        fixture.asset(&media);
+        let file = File::open(&media).expect("source");
+        let verify = |args: &[&str], target: i32| {
+            let command = fixture.command("ffmpeg", args);
+            let manifest = fixture.manifest(
+                &command,
+                vec![InheritedFd::duplicate(&file, target).expect("source descriptor")],
+            );
+            verify_state(
+                &fixture.state,
+                &command,
+                SourceAccess::NoSource,
+                Some(&manifest),
+                "policy fixture",
+                &[],
+            )
+            .map_err(|refusal| (refusal.check, refusal.enforce))
+        };
+        // A registered input passes every input check and then meets the
+        // advisory (non-enforcing) parser-confinement verdict.
+        let accepted = Err(("asset_input_confinement_unqualified", false));
+        let args = ["-fd", "6", "-i", "fd:", "-f", "null", "pipe:1"];
+        assert_eq!(verify(&args, 6), accepted);
+        assert_eq!(
+            verify(&args, 7),
+            Err(("unregistered_descriptor_token", true))
+        );
+        assert_eq!(
+            verify(&["-fd", "x", "-i", "fd:", "-f", "null", "pipe:1"], 6),
+            Err(("invalid_descriptor_token", true))
+        );
+        // The option belongs to one input: a second `fd:` falls back to stdin.
+        assert_eq!(
+            verify(
+                &["-fd", "6", "-i", "fd:", "-i", "fd:", "-f", "null", "pipe:1"],
+                6
+            ),
+            accepted
+        );
+        assert_eq!(
+            verify(&["-i", "fd:", "-f", "null", "pipe:1", "-fd"], 6),
+            Err(("missing_option_value", true))
+        );
+    }
+
+    #[test]
+    fn ffmpeg_fd_output_option_ends_at_the_output_operand() {
+        let mut fixture = Fixture::new();
+        let media = fixture.data.join("source.mp4");
+        std::fs::write(&media, b"source").expect("write fixture source");
+        fixture.asset(&media);
+        let command = fixture.command("ffmpeg", &["-fd", "7", "-f", "null", "pipe:1", "-i", "fd:"]);
+        let source = File::open(&media).expect("open fixture source");
+        let mut manifest = fixture.manifest(
+            &command,
+            vec![InheritedFd::duplicate(&source, 6).expect("source descriptor")],
+        );
+        manifest.argument_profile = ArgumentProfile::Ffmpeg { drm_device: None };
+        let refusal = verify_state(
+            &fixture.state,
+            &command,
+            SourceAccess::NoSource,
+            Some(&manifest),
+            "policy fixture",
+            &[],
+        )
+        .expect_err("FFmpeg source input has advisory confinement");
+        assert_eq!(refusal.check, "asset_input_confinement_unqualified");
+        assert!(!refusal.enforce);
+    }
+    #[test]
+    fn m7_np1_child_argv_passes_the_input_checks() {
+        // The argv shapes built in plurxd's m7_candidate/production.rs
+        // (`baseline` and the trace-header proof), with Eclipse's frozen
+        // recipe values. Each must reach the advisory confinement verdict.
+        let mut fixture = Fixture::new();
+        let media = fixture.data.join("composed.yuv");
+        std::fs::write(&media, b"planes").expect("media");
+        fixture.asset(&media);
+        let file = File::open(&media).expect("source");
+        let x265 = "hdr10=1:hdr10-opt=0:aq-mode=2:repeat-headers=1:open-gop=0:bframes=0:level-idc=5.1:high-tier=1:hrd=1:chromaloc=2:scenecut=0:pools=none:frame-threads=1:wpp=0:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):cbqpoffs=-9:crqpoffs=-9:qg-size=32";
+        let baseline = [
+            "-nostdin", "-loglevel", "verbose", "-filter_threads", "1", "-threads", "1",
+            "-f", "rawvideo", "-pixel_format", "yuv420p10le", "-video_size", "3840x2160",
+            "-framerate", "24000/1001", "-fd", "6", "-i", "fd:", "-map", "0:v:0", "-an",
+            "-sn", "-vf",
+            "setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format=yuv420p10le,settb=expr=1/24000,setpts=N*1001",
+            "-c:v", "libx265", "-preset", "slow", "-profile:v", "main10", "-x265-params", x265,
+            "-b:v", "85068k", "-maxrate", "125000k", "-bufsize", "136000k", "-bf", "0",
+            "-flags", "+cgop", "-g", "48", "-keyint_min", "48", "-sc_threshold", "0",
+            "-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace",
+            "bt2020nc", "-color_range", "tv", "-threads:v", "1", "-force_key_frames",
+            "expr:eq(mod(n,48),0)", "-fps_mode", "passthrough", "-enc_time_base", "1:24000",
+            "-frames:v", "48", "-movflags",
+            "+empty_moov+default_base_moof+frag_keyframe+frag_discont",
+            "-video_track_timescale", "24000", "-tag:v", "hvc1", "-f", "mp4", "pipe:1",
+        ];
+        let trace = [
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "verbose",
+            "-xerror",
+            "-fd",
+            "6",
+            "-i",
+            "fd:",
+            "-map",
+            "0:v:0",
+            "-c:v",
+            "copy",
+            "-bsf:v",
+            "trace_headers",
+            "-f",
+            "null",
+            "pipe:1",
+        ];
+        for args in [&baseline[..], &trace[..]] {
+            let command = fixture.command("ffmpeg", args);
+            let manifest = fixture.manifest(
+                &command,
+                vec![InheritedFd::duplicate(&file, 6).expect("source descriptor")],
+            );
+            let refusal = verify_state(
+                &fixture.state,
+                &command,
+                SourceAccess::NoSource,
+                Some(&manifest),
+                "policy fixture",
+                &[],
+            )
+            .expect_err("registered media reaches the advisory confinement verdict");
+            assert_eq!(
+                (refusal.check, refusal.enforce),
+                ("asset_input_confinement_unqualified", false)
+            );
+        }
+        // A real file named like a ratio is still a path and must be registered.
+        std::fs::create_dir(fixture.data.join("24000")).expect("ratio dir");
+        std::fs::write(fixture.data.join("24000/1001"), b"x").expect("ratio file");
+        let command = fixture.command("ffmpeg", &["-framerate", "24000/1001"]);
+        assert_eq!(
+            fixture
+                .verify(&command, SourceAccess::NoSource)
+                .expect_err("unregistered")
+                .check,
+            "unregistered_daemon_file"
+        );
+        assert!(numeric_ratio("1/24000") && numeric_ratio("29.97/1"));
+        assert!(!numeric_ratio("a/b") && !numeric_ratio("1/") && !numeric_ratio("/1"));
     }
     #[test]
     fn data_root_does_not_register_a_media_file_as_an_asset() {

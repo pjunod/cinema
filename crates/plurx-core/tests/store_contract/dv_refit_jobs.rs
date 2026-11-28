@@ -1,12 +1,18 @@
 //! F+ curve fits on every store backend: FEL demand, the one-write fenced
 //! publication, digest-addressed tables and their seven-day retention, the
-//! durable terminal outcome of an identity, the generation rebind, and the
-//! Developer card's counts.
+//! durable terminal outcome of an identity, the generation rebind, the
+//! Developer card's counts, and the versioned M7 reopen those fits feed.
 use super::{for_each_backend, seed_file};
 use plurx_core::{
     domain::{DolbyVisionFacts, MediaFile, ProbeResult},
     scan::dv_title::{DvTitleStats, TitleConstant},
-    store::{background_jobs::*, dv_refit_jobs::*, dv_title_jobs::*, Store},
+    store::{
+        background_jobs::*,
+        dv_m7_outcomes::{M7OutcomeKind, M7TitleOutcome},
+        dv_refit_jobs::*,
+        dv_title_jobs::*,
+        Store,
+    },
     transcode::{
         dv_fel_qualification::FelVerdict,
         dv_refit::{servable, QuantisedCurves, RefitCurves, FIT_VERSION},
@@ -166,6 +172,7 @@ async fn title_with(store: &Arc<dyn Store>, name: &str, profile: i64, fel: bool)
                     },
                 },
             },
+            m7: None,
             now_ms: now(),
         })
         .await
@@ -755,6 +762,678 @@ async fn a_refit_refusal_is_a_recorded_title_without_scenes() {
             })
             .await
             .is_err());
+    })
+    .await;
+}
+
+/// Run the reopened title job of `file` at its current generation and settle
+/// it at `now_ms` with M7 `outcome`, as the title worker does with a stored
+/// aggregate.
+async fn resettle_title(
+    store: &Arc<dyn Store>,
+    file: &MediaFile,
+    now_ms: i64,
+    outcome: Option<M7TitleOutcome>,
+) {
+    let scanner = "a".repeat(64);
+    let demand = store
+        .dv_title_demands(&scanner, 0, now_ms)
+        .await
+        .expect("title demand")
+        .into_iter()
+        .find(|d| d.file_id == file.id)
+        .expect("reopened title demand");
+    let stats = DvTitleStats::from_probe_json(&demand.probe_json).expect("stored aggregate");
+    let job_id = queued_attempt(store, file, now_ms).await;
+    let job = claim(store, &job_id, JobKind::DvTitleScan).await;
+    let published = store
+        .publish_dv_title_job(PublishTitleJob {
+            token: job.token.expect("token"),
+            output: TitleOutput {
+                file_id: file.id,
+                probe_revision: demand.probe_revision,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                scanner_digest: scanner,
+                stats,
+            },
+            m7: outcome,
+            now_ms,
+        })
+        .await
+        .expect("title facts");
+    assert!(matches!(published, JobPublishOutcome::Published { .. }));
+}
+
+/// The title job a reopen queued for `file`, as the title worker finds it.
+async fn queued_attempt(store: &Arc<dyn Store>, file: &MediaFile, now_ms: i64) -> String {
+    let demand = store
+        .dv_title_demands(&"a".repeat(64), 0, now_ms)
+        .await
+        .expect("title demand")
+        .into_iter()
+        .find(|d| d.file_id == file.id)
+        .expect("reopened title demand");
+    let id = demand.active_job_id.expect("a queued attempt");
+    let job = store.background_job(&id).await.expect("job").expect("job");
+    assert_eq!(job.state, JobState::Queued);
+    id
+}
+
+async fn title_settled(store: &Arc<dyn Store>, file: i64) -> bool {
+    store
+        .dv_title_demands(&"a".repeat(64), 0, now() + 60_000)
+        .await
+        .expect("title demand")
+        .into_iter()
+        .all(|d| d.file_id != file)
+}
+
+/// Two M7 identities: a build/tools pair and its successor.
+fn m7(id: char) -> String {
+    id.to_string().repeat(64)
+}
+
+async fn sweep(store: &Arc<dyn Store>, identity: &str) -> Vec<i64> {
+    store
+        .reopen_stale_dv_m7_titles(identity, FIT_VERSION, 16, now())
+        .await
+        .expect("reopen")
+}
+
+fn outcome(identity: &str, kind: M7OutcomeKind, gate: Option<&str>) -> M7TitleOutcome {
+    M7TitleOutcome {
+        identity: identity.into(),
+        fit_version: FIT_VERSION.into(),
+        observed_fit_table: None,
+        outcome: kind,
+        gate: gate.map(str::to_owned),
+    }
+}
+
+async fn record(store: &Arc<dyn Store>, file: i64) -> Option<(String, String, M7OutcomeKind)> {
+    store
+        .dv_m7_title_outcome(file)
+        .await
+        .expect("M7 outcome")
+        .map(|row| (row.identity, row.fit_table, row.outcome))
+}
+
+async fn cancel_queued(store: &Arc<dyn Store>, file: &MediaFile, now_ms: i64) {
+    let job_id = queued_attempt(store, file, now_ms).await;
+    store
+        .cancel_job(CancelJob { job_id, now_ms })
+        .await
+        .expect("cancel")
+        .expect("cancelled");
+}
+
+/// Publish a fitted F+ table for `file` under `helper`; returns its digest.
+async fn land_fit(store: &Arc<dyn Store>, file: &MediaFile, helper: &str, shift: i64) -> String {
+    let found = demand(store, file.id, helper).await.expect("F+ demand");
+    let job = attempt(store, &found, helper).await;
+    let fitted = table_rows(file, &found, helper, 3, RefitVerdict::Fitted, shift);
+    let digest = fitted.0.curve_digest.clone();
+    assert!(matches!(
+        publish(store, &job, fitted).await,
+        JobPublishOutcome::Published { .. }
+    ));
+    digest
+}
+
+#[tokio::test]
+async fn an_unrecorded_settled_title_reopens_once_per_m7_identity() {
+    for_each_backend(|store, backend| async move {
+        let file = title(&store, "m7-reopen", true).await;
+        let (a, b) = (m7('a'), m7('b'));
+        assert!(title_settled(&store, file.id).await, "{backend}: settled");
+        assert_eq!(record(&store, file.id).await, None, "{backend}: no record");
+        for (identity, fit, limit) in [
+            (a.as_str(), FIT_VERSION, 0),
+            (a.as_str(), "not a fit version", 16),
+            ("not-an-identity", FIT_VERSION, 16),
+        ] {
+            assert!(store
+                .reopen_stale_dv_m7_titles(identity, fit, limit, now())
+                .await
+                .is_err());
+        }
+        // No record: the title reopens at its own generation, with its stored
+        // aggregate, and the reopen is marked as this identity's.
+        let (first, second) = tokio::join!(sweep(&store, &a), sweep(&store, &a));
+        assert_eq!(
+            first.into_iter().chain(second).collect::<Vec<_>>(),
+            vec![file.id],
+            "{backend}: concurrent sweeps admit one job"
+        );
+        let reopened = store
+            .dv_title_demands(&"a".repeat(64), 0, now())
+            .await
+            .expect("title demand")
+            .into_iter()
+            .find(|d| d.file_id == file.id)
+            .expect("reopened");
+        assert!(DvTitleStats::from_probe_json(&reopened.probe_json).is_some());
+        assert_eq!(
+            record(&store, file.id).await,
+            Some((a.clone(), String::new(), M7OutcomeKind::Pending)),
+            "{backend}: loop-breaker"
+        );
+        assert!(
+            sweep(&store, &a).await.is_empty(),
+            "{backend}: already open"
+        );
+        // A cancelled reopen settles the title; the loop-breaker keeps the
+        // same identity from reopening it again, but not the next identity.
+        cancel_queued(&store, &file, now()).await;
+        assert!(title_settled(&store, file.id).await, "{backend}: cancelled");
+        assert!(
+            sweep(&store, &a).await.is_empty(),
+            "{backend}: once per identity"
+        );
+        assert_eq!(
+            sweep(&store, &b).await,
+            vec![file.id],
+            "{backend}: new identity"
+        );
+        // A job that settles without recording (M7 skipped) leaves the mark.
+        resettle_title(&store, &file, now(), None).await;
+        assert!(
+            title_settled(&store, file.id).await,
+            "{backend}: settled again"
+        );
+        assert_eq!(
+            record(&store, file.id).await,
+            Some((b.clone(), String::new(), M7OutcomeKind::Pending))
+        );
+        assert!(
+            sweep(&store, &b).await.is_empty(),
+            "{backend}: loop-breaker holds"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_unsupported_title_reopens_when_its_identity_or_fitted_table_changes() {
+    for_each_backend(|store, backend| async move {
+        let file = title(&store, "m7-unsupported", true).await;
+        let (a, b) = (m7('a'), m7('b'));
+        assert_eq!(sweep(&store, &a).await, vec![file.id], "{backend}");
+        resettle_title(
+            &store,
+            &file,
+            now(),
+            Some(outcome(
+                &a,
+                M7OutcomeKind::Unsupported,
+                Some("no fitted scenes"),
+            )),
+        )
+        .await;
+        assert_eq!(
+            record(&store, file.id).await,
+            Some((a.clone(), String::new(), M7OutcomeKind::Unsupported)),
+            "{backend}: recorded with the publication"
+        );
+        assert!(sweep(&store, &a).await.is_empty(), "{backend}: unchanged");
+        // A table that fits nothing is not a fitted table.
+        let found = demand(&store, file.id, &helper()).await.expect("demand");
+        let job = attempt(&store, &found, &helper()).await;
+        let identity_table = table_rows(&file, &found, &helper(), 2, RefitVerdict::Identity, 0);
+        assert!(matches!(
+            publish(&store, &job, identity_table).await,
+            JobPublishOutcome::Published { .. }
+        ));
+        assert!(
+            sweep(&store, &a).await.is_empty(),
+            "{backend}: identity table"
+        );
+        // A later helper's fitted table reopens the title once.
+        let fitted = land_fit(&store, &file, &"e".repeat(64), 1).await;
+        assert_eq!(sweep(&store, &a).await, vec![file.id], "{backend}: new fit");
+        assert_eq!(
+            record(&store, file.id).await,
+            Some((a.clone(), fitted.clone(), M7OutcomeKind::Pending))
+        );
+        resettle_title(
+            &store,
+            &file,
+            now(),
+            Some(outcome(&a, M7OutcomeKind::Unsupported, Some("gate"))),
+        )
+        .await;
+        assert_eq!(
+            record(&store, file.id).await,
+            Some((a.clone(), fitted, M7OutcomeKind::Unsupported)),
+            "{backend}: the publication names the table it saw"
+        );
+        assert!(
+            sweep(&store, &a).await.is_empty(),
+            "{backend}: both unchanged"
+        );
+        // A new M7 build or tool set reopens it again.
+        assert_eq!(
+            sweep(&store, &b).await,
+            vec![file.id],
+            "{backend}: identity"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn results_and_terminal_outcomes_are_never_swept_until_an_administrator_clears_them() {
+    for_each_backend(|store, backend| async move {
+        let (a, b) = (m7('a'), m7('b'));
+        let mut files = Vec::new();
+        for (name, kind, gate) in [
+            ("m7-result", M7OutcomeKind::Result, None),
+            ("m7-not-applicable", M7OutcomeKind::NotApplicable, None),
+            (
+                "m7-inconclusive",
+                M7OutcomeKind::Inconclusive,
+                Some("rate out of band"),
+            ),
+        ] {
+            let file = title(&store, name, true).await;
+            assert!(
+                sweep(&store, &a).await.contains(&file.id),
+                "{backend}: {name}"
+            );
+            resettle_title(&store, &file, now(), Some(outcome(&a, kind, gate))).await;
+            assert_eq!(
+                record(&store, file.id).await.map(|r| r.2),
+                Some(kind),
+                "{backend}: {name}"
+            );
+            files.push(file);
+        }
+        assert!(
+            sweep(&store, &b).await.is_empty(),
+            "{backend}: new identity"
+        );
+        for file in &files {
+            land_fit(&store, file, &helper(), 0).await;
+        }
+        assert!(sweep(&store, &b).await.is_empty(), "{backend}: new fit");
+        // The administrator's re-evaluation forgets the record, so the next
+        // sweep reopens the title under the running identity.
+        let inconclusive = &files[2];
+        assert!(store.clear_dv_m7_title_outcomes(0).await.is_err());
+        assert_eq!(
+            store
+                .clear_dv_m7_title_outcomes(inconclusive.item_id)
+                .await
+                .expect("clear"),
+            1,
+            "{backend}"
+        );
+        assert_eq!(record(&store, inconclusive.id).await, None);
+        assert_eq!(
+            store
+                .clear_dv_m7_title_outcomes(inconclusive.item_id)
+                .await
+                .expect("clear again"),
+            0,
+            "{backend}: nothing left"
+        );
+        assert_eq!(sweep(&store, &b).await, vec![inconclusive.id], "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_m7_record_is_published_with_its_title_and_dies_with_its_generation() {
+    for_each_backend(|store, backend| async move {
+        let file = title(&store, "m7-generation", true).await;
+        let fit = land_fit(&store, &file, &helper(), 0).await;
+        let a = m7('a');
+        assert_eq!(sweep(&store, &a).await, vec![file.id], "{backend}");
+        // A publication that lost its claim stores neither the aggregate nor
+        // the outcome.
+        let scanner = "a".repeat(64);
+        let found = store
+            .dv_title_demands(&scanner, 0, now())
+            .await
+            .expect("title demand")
+            .into_iter()
+            .find(|d| d.file_id == file.id)
+            .expect("reopened");
+        let job_id = queued_attempt(&store, &file, now()).await;
+        let job = claim(&store, &job_id, JobKind::DvTitleScan).await;
+        let mut token = job.token.clone().expect("token");
+        token.claim_id = uuid::Uuid::new_v4().to_string();
+        let stats = DvTitleStats::from_probe_json(&found.probe_json).expect("aggregate");
+        let output = TitleOutput {
+            file_id: file.id,
+            probe_revision: found.probe_revision,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            scanner_digest: scanner.clone(),
+            stats,
+        };
+        let mut result = outcome(&a, M7OutcomeKind::Result, None);
+        result.observed_fit_table = Some(fit.clone());
+        let fenced = store
+            .publish_dv_title_job(PublishTitleJob {
+                token,
+                output: output.clone(),
+                m7: Some(result.clone()),
+                now_ms: now(),
+            })
+            .await
+            .expect("fenced publication");
+        assert!(!matches!(fenced, JobPublishOutcome::Published { .. }));
+        assert_eq!(
+            record(&store, file.id).await.map(|r| r.2),
+            Some(M7OutcomeKind::Pending),
+            "{backend}: a fenced publication records nothing"
+        );
+        // An invalid outcome refuses the whole publication.
+        assert!(store
+            .publish_dv_title_job(PublishTitleJob {
+                token: job.token.clone().expect("token"),
+                output: output.clone(),
+                m7: Some(outcome(&a, M7OutcomeKind::Unsupported, None)),
+                now_ms: now(),
+            })
+            .await
+            .is_err());
+        let mut stale = outcome(&a, M7OutcomeKind::Unsupported, Some("no fitted scenes"));
+        stale.observed_fit_table = Some(String::new());
+        let changed_fit = store
+            .publish_dv_title_job(PublishTitleJob {
+                token: job.token.clone().expect("token"),
+                output: output.clone(),
+                m7: Some(stale),
+                now_ms: now(),
+            })
+            .await
+            .expect("fit changed verdict");
+        assert!(matches!(changed_fit, JobPublishOutcome::ArtifactConflict));
+        assert_eq!(
+            record(&store, file.id).await.map(|r| r.2),
+            Some(M7OutcomeKind::Pending)
+        );
+        let request = PublishTitleJob {
+            token: job.token.clone().expect("token"),
+            output,
+            m7: Some(result),
+            now_ms: now(),
+        };
+        let published = store
+            .publish_dv_title_job(request.clone())
+            .await
+            .expect("publication");
+        assert!(matches!(published, JobPublishOutcome::Published { .. }));
+        let repeat = store
+            .publish_dv_title_job(request)
+            .await
+            .expect("repeat publication");
+        assert!(matches!(repeat, JobPublishOutcome::AlreadyPublished { .. }));
+        let settled = store
+            .background_job(&job_id)
+            .await
+            .expect("job")
+            .expect("job");
+        assert_eq!(settled.state, JobState::Succeeded, "{backend}");
+        assert_eq!(
+            record(&store, file.id).await,
+            Some((a.clone(), fit, M7OutcomeKind::Result)),
+            "{backend}: recorded with the aggregate"
+        );
+        // A reprobe replaces the generation; its record goes with it, so the
+        // new generation is a candidate once it settles.
+        let current = store.get_file(file.id).await.expect("file").expect("file");
+        store
+            .upsert_file(
+                current.item_id,
+                current.path.to_str().expect("path"),
+                current.size,
+                current.mtime,
+                &probe(7, r#"{"streams":[{"index":0,"codec_type":"video"}]}"#),
+            )
+            .await
+            .expect("reprobe");
+        assert_eq!(record(&store, file.id).await, None, "{backend}: reprobe");
+        // A source change does the same.
+        let again = title(&store, "m7-generation-source", true).await;
+        assert_eq!(sweep(&store, &a).await, vec![again.id], "{backend}");
+        assert!(record(&store, again.id).await.is_some());
+        store
+            .upsert_file(
+                again.item_id,
+                again.path.to_str().expect("path"),
+                again.size + 1,
+                again.mtime,
+                &probe(7, r#"{"streams":[{"index":0,"codec_type":"video"}]}"#),
+            )
+            .await
+            .expect("source change");
+        assert_eq!(
+            record(&store, again.id).await,
+            None,
+            "{backend}: source change"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn legacy_m7_rate_stop_can_archive_and_replace_the_fenced_source_ledger_once() {
+    use plurx_core::{
+        store::dv_m7_attempts::{
+            M7CandidateAnchor, M7CandidateAuthority, M7CandidateIntent, M7CandidatePlan,
+            M7CandidateReservation, M7CandidateScope,
+        },
+        transcode::dv_m7_receipt::M7SourceProbe,
+    };
+    for_each_backend(|store, backend| async move {
+        let file = title(&store, "m7-rate-supersession", true).await;
+        let fit = land_fit(&store, &file, &helper(), 0).await;
+        let mut table = [0; 32];
+        hex::decode_to_slice(&fit, &mut table).expect("fit digest");
+        let original = m7('a');
+        let successor = m7('b');
+        let scanner = "a".repeat(64);
+        let source = [31; 32];
+        let legacy_plan = M7CandidatePlan {
+            protocol_sha256: [32; 32],
+            recipe_sha256: [33; 32],
+            maximum_attempts: 4,
+        };
+        let new_plan = M7CandidatePlan {
+            protocol_sha256: [34; 32],
+            recipe_sha256: [35; 32],
+            ..legacy_plan
+        };
+        let attempt = M7CandidateIntent {
+            source_sha256: source,
+            protocol_sha256: legacy_plan.protocol_sha256,
+            recipe_sha256: legacy_plan.recipe_sha256,
+            binding_sha256: [36; 32],
+            slot: 0,
+            target_kbps: 85_068,
+            maximum_attempts: 4,
+        };
+        let authority = |demand: &TitleDemand, token: JobToken, at| M7CandidateAuthority {
+            token,
+            source_probe: M7SourceProbe::from_probe_json(&demand.probe_json).expect("probe"),
+            scope: M7CandidateScope {
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                probe_revision: demand.probe_revision,
+                scanner_digest: scanner.clone(),
+                source_sha256: source,
+            },
+            now_ms: at,
+        };
+
+        assert_eq!(sweep(&store, &original).await, vec![file.id], "{backend}");
+        let old_demand = store
+            .dv_title_demands(&scanner, 0, now())
+            .await
+            .expect("title demands")
+            .into_iter()
+            .find(|demand| demand.file_id == file.id)
+            .expect("title");
+        let job = queued_attempt(&store, &file, now()).await;
+        let token = claim(&store, &job, JobKind::DvTitleScan)
+            .await
+            .token
+            .expect("title claim");
+        let owner = authority(&old_demand, token.clone(), now());
+        assert_eq!(
+            store
+                .anchor_dv_m7_candidate(&owner, legacy_plan)
+                .await
+                .expect("old anchor"),
+            M7CandidateAnchor::Ready,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .reserve_dv_m7_candidate_slot(&owner, attempt.clone())
+                .await
+                .expect("old slot"),
+            M7CandidateReservation::Reserved,
+            "{backend}"
+        );
+        let old_gate = "NP1 did not land a rate-only candidate: OutsideTargetBounds(77504)";
+        let published = store
+            .publish_dv_title_job(PublishTitleJob {
+                token,
+                output: TitleOutput {
+                    file_id: file.id,
+                    probe_revision: old_demand.probe_revision,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                    scanner_digest: scanner.clone(),
+                    stats: DvTitleStats::from_probe_json(&old_demand.probe_json)
+                        .expect("title stats"),
+                },
+                m7: Some(outcome(
+                    &original,
+                    M7OutcomeKind::Inconclusive,
+                    Some(old_gate),
+                )),
+                now_ms: now(),
+            })
+            .await
+            .expect("legacy stop");
+        assert!(matches!(published, JobPublishOutcome::Published { .. }));
+        assert_eq!(
+            store
+                .clear_dv_m7_title_outcomes(file.item_id)
+                .await
+                .expect("reevaluation"),
+            0,
+            "{backend}: the original rate stop must remain available to archive"
+        );
+        assert!(sweep(&store, &original).await.is_empty());
+        assert_eq!(sweep(&store, &successor).await, vec![file.id], "{backend}");
+        assert!(sweep(&store, &successor).await.is_empty());
+        assert_eq!(
+            store
+                .clear_dv_m7_title_outcomes(file.item_id)
+                .await
+                .expect("reevaluation"),
+            0,
+            "{backend}: an open successor needs its pending outcome"
+        );
+
+        let renewed_demand = store
+            .dv_title_demands(&scanner, 0, now())
+            .await
+            .expect("title demands")
+            .into_iter()
+            .find(|demand| demand.file_id == file.id)
+            .expect("title");
+        assert_eq!(renewed_demand.probe_revision, old_demand.probe_revision);
+        let job = queued_attempt(&store, &file, now()).await;
+        let token = claim(&store, &job, JobKind::DvTitleScan)
+            .await
+            .token
+            .expect("renewed claim");
+        let current = authority(&renewed_demand, token, now());
+        let mut legacy = store
+            .legacy_m7_rate_stop(&current, table)
+            .await
+            .expect("lookup")
+            .expect("legacy stop");
+        assert_eq!(legacy.gate, old_gate);
+        assert_eq!(legacy.refused_target(), Some(77_504));
+        assert_eq!(legacy.ledger.slots, vec![attempt.clone()]);
+        assert_eq!(
+            store
+                .supersede_m7_rate_stop(&owner, &legacy, table, new_plan)
+                .await
+                .expect("fence"),
+            M7CandidateAnchor::Fenced,
+            "{backend}"
+        );
+        legacy.ledger.slots[0].target_kbps += 1;
+        assert_eq!(
+            store
+                .supersede_m7_rate_stop(&current, &legacy, table, new_plan)
+                .await
+                .expect("CAS"),
+            M7CandidateAnchor::DifferentProtocol,
+            "{backend}"
+        );
+        legacy.ledger.slots[0] = attempt.clone();
+        assert_eq!(
+            store
+                .supersede_m7_rate_stop(&current, &legacy, table, new_plan)
+                .await
+                .expect("supersede"),
+            M7CandidateAnchor::Ready,
+            "{backend}"
+        );
+        let archived = store
+            .legacy_m7_rate_stop(&current, table)
+            .await
+            .expect("archived lookup")
+            .expect("archive");
+        assert_eq!(archived.gate, old_gate);
+        assert_eq!(archived.ledger.slots, vec![attempt.clone()]);
+        let current_ledger = store
+            .dv_m7_candidate_slots(&current)
+            .await
+            .expect("live lookup")
+            .expect("new ledger");
+        assert_eq!(current_ledger.protocol_sha256, new_plan.protocol_sha256);
+        assert!(current_ledger.slots.is_empty());
+        assert_eq!(
+            store
+                .reserve_dv_m7_candidate_slot(&current, attempt)
+                .await
+                .expect("old slot fence"),
+            M7CandidateReservation::Conflict,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .supersede_m7_rate_stop(&current, &legacy, table, new_plan)
+                .await
+                .expect("retry"),
+            M7CandidateAnchor::Ready,
+            "{backend}"
+        );
+        let third = M7CandidatePlan {
+            protocol_sha256: [37; 32],
+            ..new_plan
+        };
+        assert_eq!(
+            store
+                .supersede_m7_rate_stop(&current, &archived, table, third)
+                .await
+                .expect("once"),
+            M7CandidateAnchor::DifferentProtocol,
+            "{backend}"
+        );
     })
     .await;
 }

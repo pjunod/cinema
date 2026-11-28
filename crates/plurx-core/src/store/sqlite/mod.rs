@@ -1387,6 +1387,12 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v141: source leases contract: the v1 source-owner objects go. A
     // single SQLite process has no older binary to wait for.
     super::source_leases::CONTRACT,
+    // v142: a source-keyed frozen M7 protocol and single-use candidate slots.
+    super::dv_m7_attempts::SCHEMA,
+    // v143: each title generation's M7 outcome, its identity and fitted table.
+    super::dv_m7_outcomes::SCHEMA,
+    // v144: preserve the legacy rate-admission outcome and candidate ledger.
+    super::dv_m7_attempts::SUPERSESSION_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2006,6 +2012,8 @@ impl SqliteStore {
         super::scan_request_v2::verify_sqlite(conn)?;
         super::dv_refit_jobs::verify_sqlite(conn)?;
         super::analysis_source_scope::verify_sqlite(conn)?;
+        super::dv_m7_attempts::verify_sqlite(conn)?;
+        super::dv_m7_outcomes::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

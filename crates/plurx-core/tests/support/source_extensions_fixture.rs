@@ -1000,6 +1000,62 @@ fn verify_current_source_lease_rewind_shape(connection: &rusqlite::Connection) {
     );
 }
 
+/// Rewind the M7 tail on an owned, empty historical fixture.
+fn rewind_empty_m7_to_v141(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture M7 ordinal");
+    if version != 144 {
+        return;
+    }
+    let objects = connection
+        .prepare(
+            "SELECT type, name FROM sqlite_schema WHERE name GLOB 'dv_m7_*' ORDER BY type, name",
+        )
+        .expect("fixture M7 objects")
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("fixture M7 rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete fixture M7 catalog");
+    assert_eq!(
+        objects
+            .iter()
+            .map(|(kind, name)| (kind.as_str(), name.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("table", "dv_m7_candidate_attempts_v1"),
+            ("table", "dv_m7_rate_supersessions_v1"),
+            ("table", "dv_m7_title_outcomes_v1"),
+            ("trigger", "dv_m7_title_outcomes_v1_publish"),
+            ("trigger", "dv_m7_title_outcomes_v1_retire"),
+        ]
+    );
+    let rows: i64 = connection
+        .query_row(
+            "SELECT (SELECT count(*) FROM dv_m7_candidate_attempts_v1)
+                  + (SELECT count(*) FROM dv_m7_title_outcomes_v1)
+                  + (SELECT count(*) FROM dv_m7_rate_supersessions_v1)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count fixture M7 records");
+    assert_eq!(rows, 0, "historical fixture must not discard M7 records");
+    connection
+        .execute_batch(
+            "SAVEPOINT rewind_m7;
+             DROP TRIGGER dv_m7_title_outcomes_v1_publish;
+             DROP TRIGGER dv_m7_title_outcomes_v1_retire;
+             DROP TABLE dv_m7_rate_supersessions_v1;
+             DROP TABLE dv_m7_title_outcomes_v1;
+             DROP TABLE dv_m7_candidate_attempts_v1;
+             PRAGMA user_version=141;
+             RELEASE rewind_m7;",
+        )
+        .expect("empty M7 fixture rewind");
+}
+
 /// Rewind an owned, empty v140/v141 source-lease tail to pre-lease v139:
 /// drop the lease objects and restore the v1 source owners and the four
 /// dependents the expand replaced, from their own published text.
@@ -1209,8 +1265,8 @@ fn rewind_title_v3_to_v138(conn: &rusqlite::Connection) {
 /// the managed v6 view with marker 6. Only views and markers change, so no
 /// queued work or reservation is discarded.
 fn rewind_file_root_scope_to_v136(conn: &rusqlite::Connection) {
-    // Appended extensions rewind in reverse migration order: the lease
-    // tail (v140/v141) restores the exact pre-lease catalog before title v3.
+    // Rewind appended extensions in reverse order.
+    rewind_empty_m7_to_v141(conn);
     rewind_empty_source_leases_to_v139(conn);
     rewind_title_v3_to_v138(conn);
     let ordinal = |conn: &rusqlite::Connection| {

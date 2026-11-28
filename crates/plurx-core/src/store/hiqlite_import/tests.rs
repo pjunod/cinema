@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn sqlite_import_refuses_each_populated_m7_table() {
+    let source = Connection::open_in_memory().expect("source");
+    verify_source_m7_history(&source).expect("backup before M7");
+    let tables = [
+        "dv_m7_candidate_attempts_v1",
+        "dv_m7_title_outcomes_v1",
+        "dv_m7_rate_supersessions_v1",
+    ];
+    for table in tables {
+        source
+            .execute_batch(&format!("CREATE TABLE {table}(id INTEGER PRIMARY KEY)"))
+            .expect("empty M7 table");
+    }
+    verify_source_m7_history(&source).expect("empty M7 backup");
+    for table in tables {
+        source
+            .execute(&format!("INSERT INTO {table} VALUES (1)"), [])
+            .expect("seed M7 record");
+        let error = verify_source_m7_history(&source).expect_err("reject populated M7 backup");
+        assert!(error.to_string().contains(table));
+        source
+            .execute(&format!("DELETE FROM {table}"), [])
+            .expect("reset fixture");
+    }
+}
+
+#[test]
 fn source_guard_validation_rejects_every_malformed_link_and_allows_repairs() {
     let source = Connection::open_in_memory().expect("source");
     source

@@ -25,18 +25,19 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Effort plan: rulings, lanes, status. | open |
 | [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions. | live |
 | [SHARED-LIBRARY-PLAYBACK-RCA.md](SHARED-LIBRARY-PLAYBACK-RCA.md) | Shared-start timeouts, A1 fix, five fleet errors. | open |
-| [SHARED-LIBRARY-PLAYBACK-STATUS.md](SHARED-LIBRARY-PLAYBACK-STATUS.md) | PR #1472 ownership, implementation, retained evidence and merge prerequisites. | built |
-| [SHARED-LIBRARY-DV-HDR-PLAN.md](SHARED-LIBRARY-DV-HDR-PLAN.md) | Shared Dolby Vision and HDR plan; M1–M4 status and acceptance. | in progress |
-| [SHARED-DV-PROCESSED-PLAN.md](SHARED-DV-PROCESSED-PLAN.md) | M4 processed Dolby Vision / FEL design and qualification. | in progress |
+| [SHARED-LIBRARY-PLAYBACK-STATUS.md](SHARED-LIBRARY-PLAYBACK-STATUS.md) | PR #1472 ownership, evidence and merge prerequisites. | built |
+| [SHARED-LIBRARY-DV-HDR-PLAN.md](SHARED-LIBRARY-DV-HDR-PLAN.md) | Shared DV and HDR M1–M4 acceptance. | in progress |
+| [SHARED-DV-PROCESSED-PLAN.md](SHARED-DV-PROCESSED-PLAN.md) | M4 Dolby Vision and FEL qualification. | in progress |
 | [SHARED-SUBTITLE-CUSTODY-AND-START-503.md](SHARED-SUBTITLE-CUSTODY-AND-START-503.md) | S5 caption custody, Start 503 race and qualification. | done |
 | [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold publication and Resume fault repair ledger. | open |
 | [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs. | open |
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
 | [FEL splice](FEL-SERVER-SPLICE-BUILD.md) | Native HLS cutover and rollout. | open |
 | [FEL-PICTURE-QUALITY-INVESTIGATION.md](FEL-PICTURE-QUALITY-INVESTIGATION.md) | FEL quality findings. | open |
-| [FEL-REFERENCE-COMPOSITION-PLAN.md](FEL-REFERENCE-COMPOSITION-PLAN.md) | Independent FEL composer reference, measured deviation, matching composition. | open |
+| [FEL-REFERENCE-COMPOSITION-PLAN.md](FEL-REFERENCE-COMPOSITION-PLAN.md) | FEL reference composer and measured deviation. | open |
 | [FEL-RPU-REFIT-BUILD.md](FEL-RPU-REFIT-BUILD.md) | F+ curves: build plan. | built |
 | [F+ acceptance](FEL-RPU-REFIT-GRADUATION-AND-M7.md) | Physical playback and NP1 trials. | open |
+| [M7 Model B](M7-MODEL-B-GENERAL-COMPOSITION.md) | FEL composition and calibration. | built |
 | [M7 trial](FEL-RPU-REFIT-M7-2026-11-19.json) | Frozen NP1 rejection against served F+. | done |
 | [M6 Q12 qualification](FEL-RPU-REFIT-M6-Q12-2026-11-16.json) · [Q23 history](FEL-RPU-REFIT-M6-2026-11-16.json) | Native evidence. | done |
 | [PLAYBACK-CACHE-BUDGET.md](PLAYBACK-CACHE-BUDGET.md) | Shared playback cache: reservations, eviction and protected readers. | built |

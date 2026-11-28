@@ -183,6 +183,42 @@ pub async fn reanalyze(
     Ok(Json(report))
 }
 
+/// What a per-item M7 re-evaluation did.
+#[derive(serde::Serialize)]
+pub struct M7ReevaluateReport {
+    /// How many of the item's title generations had a recorded M7 outcome
+    /// that is now forgotten. The idle title sweep re-evaluates each of them,
+    /// and any title that had no record yet, under the running M7 identity.
+    pub cleared: u64,
+}
+
+/// POST /api/v1/items/:id/m7/reevaluate (admin) — forget eligible settled
+/// M7 outcomes so the idle sweep can evaluate those titles again.
+///
+/// A settled title's M7 outcome is recorded under the M7 build and tools
+/// that produced it, and the idle sweep re-evaluates refused titles when
+/// those change. A change the identity cannot see (an experiment-directory
+/// repair, a ruling that a terminal `inconclusive` deserves another look) has
+/// no other way back. Active evaluations and legacy rate stops remain
+/// available to the sweep that owns their transitions.
+pub async fn reevaluate_m7(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<M7ReevaluateReport>, ApiError> {
+    if state.store.get_item(id).await?.is_none() {
+        return Err(ApiError::NotFound("item"));
+    }
+    if state.m7_experiment_dir.is_none() {
+        return Err(ApiError::Conflict(
+            "M7 is not configured on this server".into(),
+        ));
+    }
+    let cleared = state.store.clear_dv_m7_title_outcomes(id).await?;
+    tracing::info!(item = id, cleared, "M7 re-evaluation requested");
+    Ok(Json(M7ReevaluateReport { cleared }))
+}
+
 /// A probe repair the cluster's rules refused is not a server fault: answer it
 /// with a code the caller can act on. One node at a time runs the pass, and
 /// only a node that may take cluster-wide leases can run it.

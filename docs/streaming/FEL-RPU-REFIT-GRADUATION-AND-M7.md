@@ -1,8 +1,8 @@
 # F+ graduation and NP1 trials — remaining acceptance
 
-**Status:** open — isolated fit and served baseline acquisition complete;
-the first frozen M7 candidate was rejected; physical graduation and runtime
-comparison integration remain open. **Owner:** Codex. **Updated:** 2026-11-20.
+**Status:** open — isolated playback and runtime qualification are recorded.
+The runtime continuation awaits its landing gate.
+**Owner:** Codex. **Updated:** 2026-11-28.
 
 Companion to [the build ledger](FEL-RPU-REFIT-BUILD.md): that records the
 merged implementation; this records physical graduation and the next trial.
@@ -43,7 +43,7 @@ decoder change.
 | Platform | Retained evidence | Remaining physical evidence |
 |---|---|---|
 | Web | Safari fitted handoff, 60 ms seek and natural 206.864 s completion | Optical mapping and wider browser coverage |
-| Apple | Physical tvOS fitted handoff and 65 ms seek; physical iPhone fitted handoff, 69 ms seek and natural 206.864 s completion | Optical mapping; native macOS coverage; unresolved tvOS cold-entry failure |
+| Apple | Physical fitted handoffs and seeks on tvOS, iPhone, and the Designed for iPad app on Mac | Optical mapping, independent AppKit client coverage, and the earlier unclassified tvOS cold-entry timeout |
 | Android | Physical Lenovo corrected fitted handoff, 911 ms seek and natural 206.864 s completion, zero interruptions and dropped frames | Optical mapping and wider device coverage |
 | Linux player | Installed Player native P7 control and retained fitted P8.1 renderer control both reach natural EOF with zero drops | Bind same-run native FEL composition evidence; optical mapping |
 
@@ -135,6 +135,10 @@ five dropped of 1,399 total video frames at the terminal observation.
 Display output was unverified. This is a scoped browser playback witness,
 not optical mapping proof or native macOS/iOS client coverage. Its earlier
 quality-change decline is retained separately from the successful successor.
+
+The Designed for iPad app on Mac also committed a prepared fitted-Original
+handoff, resumed after a seek, and persisted natural end. The isolated run
+verified the served fitted fragments. Optical output remains unmeasured.
 
 The Lenovo client completed the identity control with zero dropped frames,
 but its fitted handoff retained the predecessor. A separate diagnostic build
@@ -309,16 +313,97 @@ frozen window and new representation; it does not settle historical NP1
 results or generalize to a full title. Runtime title-qualification
 integration is not implemented by this offline trial.
 
+## Automatic maintenance experiment
+
+The maintenance route records a new experiment only after ordinary pending FEL
+recipes are settled. Its versioned protocol selects two calibration exposures
+and one evaluation exposure at early fitted segment boundaries. An independent
+whole-source census proves each disjoint 48-frame interval. Both a film-origin
+generation and a separate nonzero seek materialize real F+ segments through the
+VOD writer. Readback checks the retained base-layer coded bytes, source clock
+and written RPUs against the census. Stable Level 5 metadata determines an
+active region when present. The original source RPUs corroborate it, and
+the verified coded raster supplies the region when Level 5 is absent.
+The managed UHD resource ceiling admits the full raster lattice of 518,400
+sites per frame. The historical Michael trial retains the separately frozen
+active region and its 503,040 sites per frame.
+
+Before the first candidate, the route scores only the paired source FEL and
+actual F+ baseline in the calibration exposures. It takes the larger of 0.05
+and the largest observed four-model mean spread rounded upward to 0.01.
+The spread reflects representation uncertainty. The rounding is a conservative
+policy and the measurement gives no estimate of encoder repeatability. The
+route freezes this margin, the evaluation census, the source mastering
+declaration and the NP1 recipe before examining a candidate. The authored
+rate sits within a one-percent interval ending at the measured selected video
+rate. NP1 recipe revision 2 lets the encoder propose targets from
+`ceil(0.75 × band_low)` through `min(floor(1.10 × band_high), 125000)`
+kb/s. The recipe digest binds both bounds. The previous 83,334 kb/s target
+floor came from the Michael trial tooling and prevented corrections for
+lower-rate titles. The proposal bounds are distinct from the authored
+packet-rate band, which still ends at the measured source rate. The frozen
+Michael result retains its original recipe and evidence.
+
+The whole-title census counts selected coded packet bytes, including FEL
+and RPU. It binds that total to the exact selected-stream presentation extent
+and time base before the recipe is frozen. These bounded exposure measurements
+carry no full-title qualification.
+
+The durable experiment identity combines the raw full-source SHA-256 and the
+frozen protocol SHA-256. The replicated title authority anchors one protocol per
+source and grants each candidate slot once, including across node changes and
+duplicate catalogue entries. The one-time transition from recipe v1 to v2
+requires a recorded target-bound stop, an exact replay of its spent slots,
+and matching source, fitted readback, and calibration evidence. The store
+archives the v1 outcome and reservations before replacing the active protocol.
+A pending slot with missing coded proof cannot supply another candidate trial.
+The title job can expose complete title facts
+to the existing F+ fitter while its M7 work remains queued.
+
+A completed comparison seals the full report, exact binding and bounded pending
+receipt together. An interrupted catalogue write can resume under a new title
+claim using that receipt. Exact current bindings alone permit catalogue reuse.
+The isolated lab imports the sealed historical rejection and the two physical
+repeat proofs without executing the encoder or scorer. File publication,
+authored readback, resource limits and the automatic protocol still require
+integrated qualification.
+
+The managed implementation has now passed 35 focused checks on arm64 macOS
+with Rust 1.97.1: 13 scoring/capture/aggregation cases, 19 daemon lifecycle and
+recovery cases, two Store matrices and the declared/covered Store inventory.
+Both matrices ran with `hiqlite-store,hiqlite-contract-tests`, using both
+SQLite modes and an isolated three-voter Hiqlite fixture. Earlier successful
+bodies were retained through verified source equivalence; only failed fixture
+setup or compilation and previously unrun bodies were retried. These checks
+do not constitute full-workspace qualification or an integrated native-daemon
+playback observation.
+
+The owned macOS encoder bundle also passed finite synthetic interoperability
+controls: the independent CLI, no-ROI and zero-ROI encodes have identical VCL,
+and a 48-frame candidate encodes and reads back with exact clocks. Loader
+observations bind the actual shared libraries to that owned bundle. The input
+frame duration is preserved by the encoder API; returned packet durations are
+still checked exactly. Installed dependencies and the original qualified
+processing bundle are unchanged. Linux processing bundles currently retain
+the decoder-only path; managed candidate encoding there remains unsupported
+until its own encoder closure is packaged and qualified. No result is
+extrapolated from the macOS controls to Linux.
+
+The isolated macOS daemon completed automatic comparison with source-bound
+calibration, held-out scoring and durable receipt publication. Per-title
+results, source identities and trial artifacts are retained in the effort's
+private qualification records.
+
 ## Execution ledger
 
 | Item | State | Next evidence |
 |---|---|---|
 | Original native M6 | Pass retained | No repeat of the 48-point M3 experiment |
 | M5 migration | Source and exact helper/master binding retained | Preserve source/device identities |
-| Physical matrix | tvOS fitted handoff and seek retained; earlier 52-second completion retained; full matrix open | Unresolved cold timeout, mapping, drops and remaining client/device scopes |
+| Physical matrix | The Mac Designed for iPad app, Safari, iPhone, tvOS and Android recorded fitted handoffs. Linux retained native Profile 7 FEL and a separate Profile 8.1 renderer control. | Device and display limitations are listed in the platform matrix. |
 | M7 baseline | Two calibration windows and frozen evaluation192–239 bound and scored once in all four models | Retain source-bound scores |
 | Numeric margin | Frozen at 0.05 with strict shadow-tail limits before candidate work | Apply unchanged to paired outputs |
-| NP1 trials/integration | Three controls retained; frozen candidate rejected in four models; author/readback/rate admitted; integration open | Existing-job comparison integration and exact result reuse |
+| NP1 trials/integration | The isolated runtime completed its comparison and published the source-bound receipt. | Runtime landing gate and Linux encoder packaging. |
 
 Adversarial review happens when the change is ready to merge. Afterwards run
 only the remaining required fast-lane checks, preserving every valid pass.

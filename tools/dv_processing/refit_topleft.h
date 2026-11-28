@@ -4,8 +4,11 @@
 #ifndef PLURX_REFIT_TOPLEFT_H
 #define PLURX_REFIT_TOPLEFT_H
 
-#define REFIT_TOPLEFT_FORMAT "plurx-composed-model-b-topleft-v1"
+// v2 composes any mapping refit_exact.h admits; identity output is unchanged.
+#define REFIT_TOPLEFT_FORMAT "plurx-composed-model-b-topleft-v2"
 #define REFIT_TOPLEFT_FRAMES 48
+
+#include "refit_exact.h"
 
 static inline bool refit_topleft_color(const AVDOVIColorMetadata *color) {
   // This version is bound to the calibrated Michael source's PQ RGB
@@ -28,27 +31,6 @@ static inline bool refit_topleft_color(const AVDOVIColorMetadata *color) {
   for (int i = 0; i < 3; i++) {
     if (color->ycc_to_rgb_offset[i].den != (1 << 28) ||
         color->ycc_to_rgb_offset[i].num != offset[i])
-      return false;
-  }
-  return true;
-}
-
-static inline bool refit_topleft_mapping(const AVDOVIMetadata *data) {
-  const AVDOVIRpuDataHeader *header = av_dovi_get_header(data);
-  const AVDOVIDataMapping *mapping = av_dovi_get_mapping(data);
-  if (header->disable_residual_flag || mapping->mapping_color_space != 0 ||
-      mapping->mapping_chroma_format_idc != 0 || mapping->num_x_partitions != 1 ||
-      mapping->num_y_partitions != 1)
-    return false;
-  for (int i = 0; i < 3; i++) {
-    const AVDOVIReshapingCurve *curve = &mapping->curves[i];
-    const AVDOVINLQParams *nlq = &mapping->nlq[i];
-    if (curve->num_pivots != 2 || curve->pivots[0] != 0 || curve->pivots[1] != 1023 ||
-        curve->mapping_idc[0] != AV_DOVI_MAPPING_POLYNOMIAL ||
-        curve->poly_order[0] != 1 || curve->poly_coef[0][0] != 0 ||
-        curve->poly_coef[0][1] != 8388608 || curve->poly_coef[0][2] != 0 ||
-        nlq->nlq_offset != 512 || nlq->vdr_in_max != 1048576 ||
-        nlq->linear_deadzone_slope != 2048 || nlq->linear_deadzone_threshold != 0)
       return false;
   }
   return true;

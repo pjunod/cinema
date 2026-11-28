@@ -1,12 +1,13 @@
 #!/bin/sh
 # Compile the helpers against explicitly selected dependency installations.
 set -eu
-[ "$#" -eq 4 ] || { echo 'usage: build.sh FFMPEG_PREFIX PLACEBO_PKGCONFIG_DIR DOVI_PREFIX OUTPUT_DIR' >&2; exit 2; }
+[ "$#" -eq 4 ] || [ "$#" -eq 5 ] || { echo 'usage: build.sh FFMPEG_PREFIX PLACEBO_PKGCONFIG_DIR DOVI_PREFIX OUTPUT_DIR [M7_SHARED_FFMPEG_PREFIX]' >&2; exit 2; }
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ffmpeg_prefix=$1
 placebo_pc=$2
 dovi_prefix=$3
 output_dir=$4
+m7_encoder_prefix=${5-}
 mkdir -p "$output_dir"
 : "${CC:=cc}"
 : "${CFLAGS:=-O2 -fno-math-errno}"
@@ -24,8 +25,14 @@ placebo_flags=$(PKG_CONFIG_PATH="$placebo_pc" pkg-config --cflags --libs libplac
 "$CC" $CFLAGS -frounding-math -ffp-contract=off -std=c11 -Wall -Wextra -Werror -I"$dovi_prefix/include" \
     "$source_dir/segment_decode_render.c" "$dovi_prefix/lib/libdovi.a" \
     -o "$output_dir/segment_decode_render" $ffmpeg_flags $placebo_flags -lm -lpthread -ldl
+# Only the muxer can use the separate shared encoder ABI. Decoder tools
+# still use the patched static installation above and below.
+muxer_flags=$ffmpeg_flags
+if [ -n "$m7_encoder_prefix" ]; then
+    muxer_flags=$(PKG_CONFIG_PATH="" PKG_CONFIG_LIBDIR="$m7_encoder_prefix/lib/pkgconfig" pkg-config --cflags --libs libavformat libavcodec libavutil)
+fi
 "$CC" $CFLAGS -frounding-math -std=c11 -Wall -Wextra -Werror "$source_dir/mux_rgb.c" \
-    -o "$output_dir/mux_rgb" $ffmpeg_flags -lm -lpthread -ldl
+    -o "$output_dir/mux_rgb" $muxer_flags -lm -lpthread -ldl
 if [ -f "$source_dir/author_p81.c" ]; then
     "$CC" $CFLAGS -frounding-math -std=c11 -Wall -Wextra -Werror -I"$dovi_prefix/include" \
         "$source_dir/author_p81.c" "$dovi_prefix/lib/libdovi.a" \
