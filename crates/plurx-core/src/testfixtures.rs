@@ -697,7 +697,7 @@ mod tests {
         // The reader: an open handle plus the object version recorded from it,
         // exactly as a fence records one before a producer starts.
         let held = std::fs::File::open(&published).expect("holding the fixture open");
-        let before = crate::fs_secure::std_file_identity(&held).expect("held identity before");
+        let before = crate::fs_secure::local_file_identity(&held).expect("held identity before");
 
         // The second publisher, arriving after the first one finished.
         let built = publish_fixture_if_absent(&published, "fixture.mkv", |temporary| {
@@ -708,7 +708,7 @@ mod tests {
             "an existing fixture wins without another publication"
         );
 
-        let after = crate::fs_secure::std_file_identity(&held).expect("held identity after");
+        let after = crate::fs_secure::local_file_identity(&held).expect("held identity after");
         assert_eq!(
             before, after,
             "publishing must not alter the object identity a reader is holding"

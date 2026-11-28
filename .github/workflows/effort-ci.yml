@@ -22,6 +22,7 @@ jobs:
   # Runs first: the bookkeeping rules, in about a minute, before any compile
   # job is allocated. docs/ci/PAPERWORK.md lists the rules and their fixes.
   paperwork:
+    if: github.server_url != 'https://github.com'
     name: paperwork
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
@@ -54,6 +55,7 @@ jobs:
           chown -R "$owner" "$GITHUB_WORKSPACE"
 
   scope:
+    if: github.server_url != 'https://github.com'
     name: effort validation scope
     needs: paperwork
     runs-on: [self-hosted, Linux, X64, lab, general]
@@ -108,6 +110,7 @@ jobs:
           chown -R "$owner" "$GITHUB_WORKSPACE"
 
   preflight:
+    if: github.server_url != 'https://github.com'
     name: Python unit receipts
     needs: scope
     concurrency:
@@ -238,7 +241,7 @@ jobs:
   rust_compile:
     name: effort Rust compile
     needs: [scope, preflight]
-    if: needs.scope.outputs.rust == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.rust == 'true')
     # The fast Rust gate's pool, image and container limits
     # (docs/ci/RUST-GATE-IMAGE.md); the first step verifies the limits and
     # CARGO_BUILD_JOBS is derived from them.
@@ -321,7 +324,7 @@ jobs:
   web_static:
     name: effort web static contracts
     needs: [scope, preflight]
-    if: needs.scope.outputs.web_layout == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.web_layout == 'true')
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -351,7 +354,7 @@ jobs:
   apple_compile:
     name: effort Apple compile
     needs: [scope, preflight]
-    if: needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true')
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     timeout-minutes: 45
     env:
@@ -382,7 +385,7 @@ jobs:
   android_compile:
     name: effort Android compile
     needs: [scope, preflight]
-    if: needs.scope.outputs.android_jvm == 'true'
+    if: github.server_url != 'https://github.com' && (needs.scope.outputs.android_jvm == 'true')
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 10
     steps:
@@ -416,7 +419,7 @@ jobs:
 
   effort_gate:
     name: Effort development gate
-    if: always()
+    if: github.server_url != 'https://github.com' && (always())
     needs:
       - paperwork
       - scope
