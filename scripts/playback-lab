@@ -4470,7 +4470,10 @@ async function claimLabHlsLayout(driver, layout) {
   await driver.exec(`
     const original = openSession;
     openSession = (file, opts, ...rest) => original(file,
-      opts?.presentation === 'direct' ? opts : {...opts, split_audio: ${layout === "split"}}, ...rest);
+      opts?.presentation === 'direct'
+        ? opts
+        : {...opts, split_audio: ${layout === "split"} && opts?.split_audio !== false},
+      ...rest);
     return true;
   `);
 }

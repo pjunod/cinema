@@ -202,7 +202,7 @@ final class AppModel: ObservableObject {
                 let server = try await makeAPI(savedOrigin).serverInfo()
                 guard generation == authenticationGeneration else { return }
                 guard let actual = server.instanceId,
-                      let expected = settings.instanceId,
+                      let expected = settings.acceptanceExpectedInstanceId,
                       !expected.isEmpty,
                       actual.caseInsensitiveCompare(expected) == .orderedSame
                 else {
