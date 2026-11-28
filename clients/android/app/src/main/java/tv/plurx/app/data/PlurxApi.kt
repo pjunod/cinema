@@ -31,7 +31,8 @@ class StartupAllowance(val remainingMs: Long) :
  */
 interface PlurxApi {
     @Streaming @GET("files/{id}/ai-subtitles")
-    suspend fun aiSubtitleOptions(@Path("id") id: Long): Response<ResponseBody>
+    suspend fun aiSubtitleOptions(@Path("id") id: Long, @Query("target") target: String? = null,
+        @Query("audio_index") audioIndex: Long? = null): Response<ResponseBody>
     @Streaming @POST("files/{id}/ai-subtitles")
     suspend fun aiSubtitleStart(@Path("id") id: Long, @Body body: AISubtitleStart): Response<ResponseBody>
     @Streaming @PUT("ai-subtitles/operations/{id}/viewer")

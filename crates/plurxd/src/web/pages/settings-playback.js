@@ -852,6 +852,15 @@ function aiSubtitleReadiness(readiness){
     <details><summary>Server details</summary>
     ${(readiness.nodes||[]).map(node=>`<div class="tog"><span>${esc(node.label)}${node.cores?` · ${node.cores} cores`:""}${node.gpu?` · ${esc(node.gpu)}`:""}<small>${esc(AI_SUBTITLE_REASONS[node.reason]||"")}</small></span><span>${esc(AI_SUBTITLE_LABELS[node.state]||"Status unavailable")}${node.tested_at_ms&&node.state==="ready"?` · tested ${esc(new Date(node.tested_at_ms).toLocaleDateString())}`:""}</span></div>`).join("")}</details>`;
 }
+function aiSubtitleQualityControl(selected){
+  const details={fast:"Starts faster on busy servers.",balanced:"Uses a wider search for live subtitles.",
+    best:"Uses the larger model for item requests and ahead-of-time work."};
+  return `<fieldset class="tog ai-subtitle-quality"><legend>AI quality</legend>
+    <div class="ai-subtitle-quality-options">${AI_SUBTITLE_QUALITIES.map(([value,label])=>
+      `<label><input type="radio" name="ai-subtitle-quality" value="${value}"${value===selected?" checked":""}>
+        <span>${label}</span></label>`).join("")}</div>
+    <small>${esc(details[selected]||"")}</small></fieldset>`;
+}
 function aiSubtitleSettingsPanel(prefs,settings){
   const language=LANG_CHOICES.some(([code])=>code===prefs.language)
     ?LANG_CHOICES:[...LANG_CHOICES,[prefs.language,prefs.language]];
@@ -868,8 +877,7 @@ function aiSubtitleSettingsPanel(prefs,settings){
     ${togRow("ai-subtitle-audio","Create them from the audio","Creates English subtitles from the soundtrack.",settings.from_audio)}
     ${togSelect("ai-subtitle-when","Do this","",[[0,"When someone turns subtitles on"],[1,"Also ahead of time for new titles"]],Number(settings.ahead_of_time))}
     ${togSelect("ai-subtitle-who","Who can start AI subtitles","",[["everyone","Everyone"],["admins","Admins only"]],settings.who)}
-    ${cardHead("AI quality","")}
-    ${togSelect("ai-subtitle-quality","Quality","",AI_SUBTITLE_QUALITIES,settings.quality)}
+    ${aiSubtitleQualityControl(settings.quality)}
     <div id="ai-subtitle-readiness">${aiSubtitleReadiness(settings.readiness)}</div>
     ${setCardFoot("saveAiSubtitleSettings")}`,{id:"ai-subtitle-settings"})}`;
 }
@@ -907,7 +915,8 @@ async function saveAiSubtitleSettings(button){
     const saved=await api("/ai-subtitles/settings",{method:"PUT",body:{
       version:current.version,expected_revision:current.revision,
       download_match:checked("download"),translate_text:checked("text"),from_audio:checked("audio"),
-      ahead_of_time:value("when")==="1",who:value("who"),quality:value("quality")
+      ahead_of_time:value("when")==="1",who:value("who"),
+      quality:/** @type {HTMLInputElement} */(card.querySelector('input[name="ai-subtitle-quality"]:checked')).value
     }});
     if(!card.isConnected)return;
     SETTINGS_DATA.aiSubtitles={...current,...saved};

@@ -38,10 +38,13 @@ internal fun AISubtitleItemSection(vm: AppViewModel, file: MediaFileDto, enabled
     var busy by remember(file.id, auth) { mutableStateOf(false) }
     fun current() = auth == Session.playbackAuthorization().generation
     val stored = file.subtitle_streams.filter { it.ai && it.track_id != null && it.track_id !in removed }
-    val hasEnglish = file.subtitle_streams.any {
-        it.language in listOf("en", "eng") && !it.forced && it.track_id !in removed
+    val language = file.playback_defaults?.subtitle?.preferred_language?.ifBlank { "en" } ?: "en"
+    val languageName = java.util.Locale.forLanguageTag(language).displayLanguage
+    val hasPreferred = file.subtitle_streams.any {
+        it.language?.let { code -> java.util.Locale.forLanguageTag(code).displayLanguage == languageName } == true &&
+            !it.forced && it.track_id !in removed
     }
-    suspend fun fetch(): AISubtitleOptions = captionRead(vm.api().aiSubtitleOptions(file.id))
+    suspend fun fetch(): AISubtitleOptions = captionRead(vm.api().aiSubtitleOptions(file.id, target = language))
     fun start(route: String, quality: String? = null) {
         busy = true
         scope.launch {
@@ -76,9 +79,9 @@ internal fun AISubtitleItemSection(vm: AppViewModel, file: MediaFileDto, enabled
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { if (current()) status = e.message ?: "Subtitle status unavailable." }
     }
-    if (!hasEnglish || stored.isNotEmpty() || operation?.active == true) {
+    if (!hasPreferred || stored.isNotEmpty() || operation?.active == true) {
         TvTextButton(enabled = enabled, onClick = { opened = !opened }) {
-            Text(if (stored.isNotEmpty()) "Manage English AI subtitles" else "+ English")
+            Text(if (stored.isNotEmpty()) "Manage English AI subtitles" else "+ ${languageName}")
         }
     }
     if (!opened) return
@@ -97,8 +100,8 @@ internal fun AISubtitleItemSection(vm: AppViewModel, file: MediaFileDto, enabled
                 busy = true
                 scope.launch {
                     try {
-                        val found = vm.api().aiSubtitleSearch(file.id, "en").results
-                        if (current()) { matches = found; status = if (found.isEmpty()) "No English matches found." else "" }
+                        val found = vm.api().aiSubtitleSearch(file.id, options.target ?: language).results
+                        if (current()) { matches = found; status = if (found.isEmpty()) "No subtitle matches found." else "" }
                     } catch (e: CancellationException) { throw e }
                     catch (e: Exception) { if (current()) status = e.message ?: "Subtitle search failed." }
                     finally { busy = false }

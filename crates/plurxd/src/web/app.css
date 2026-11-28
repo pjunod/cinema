@@ -4168,3 +4168,26 @@ button.listtoggle.fav.on{border-color:var(--bad);color:var(--bad)}
   border-top: 1px solid var(--line);
   border-radius: 0;
 }
+.ai-subtitle-quality {
+  border: 0;
+  min-width: 0;
+  margin: 16px 0 0;
+}
+.ai-subtitle-quality legend {
+  font-size: inherit;
+  font-weight: 600;
+}
+.ai-subtitle-quality-options {
+  display: inline-flex;
+  gap: 4px;
+}
+.ai-subtitle-quality-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+}
+.ai-subtitle-quality-options input {
+  margin: 0;
+  accent-color: var(--accent);
+}

@@ -1225,8 +1225,10 @@ struct DetailView: View {
                 TrackFactsSection(file: file)
                 TrackChoiceCostNotice(file: file, selection: trackSelection(for: file))
                 if file.videoCodec != nil {
+                    let code = file.playbackDefaults?.subtitle?.preferredLanguage ?? "en"
+                    let language = Locale.current.localizedString(forLanguageCode: code) ?? code
                     NavigationLink((file.subtitleStreams ?? []).contains(where: { $0.ai == true })
-                                   ? "Manage AI subtitles" : "Add English subtitles") {
+                                   ? "Manage AI subtitles" : "Add \(language) subtitles") {
                         AISubtitleItemView(file: file) {
                             detail = try? await model.itemDetail(itemId)
                         }

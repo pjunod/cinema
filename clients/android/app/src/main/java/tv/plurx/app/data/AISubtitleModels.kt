@@ -5,6 +5,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class AISubtitleOptions(
     val allowed: Boolean,
+    val target: String? = null,
     val route: String? = null,
     val label: String? = null,
     val existing_index: Long? = null,

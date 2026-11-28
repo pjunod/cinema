@@ -771,8 +771,27 @@ pub(crate) async fn describe(
     Path(file_id): Path<i64>,
     Query(input): Query<Options>,
 ) -> Result<Json<Value>, ApiError> {
-    english(input.target.as_deref())?;
+    let target = input.target.as_deref().unwrap_or("en");
+    if !crate::online_subtitles::valid_language(target) {
+        return Err(ApiError::BadRequest("Choose a subtitle language".into()));
+    }
     let file = file(&state, file_id).await?;
+    let preferred = crate::subtitle_transcription::normalized_language(target);
+    if preferred != "en" {
+        let existing = file
+            .subtitle_streams
+            .iter()
+            .find(|track| {
+                !track.forced && plurx_core::tracks::lang_matches(&track.language, target)
+            })
+            .map(|track| track.index);
+        return Ok(Json(json!({
+            "target":preferred, "allowed":false, "existing_index":existing,
+            "blocked":null, "route":null, "label":null, "estimate":null,
+            "source":null, "alternatives":[], "operation":null,
+            "search_online":crate::http::subtitle_downloads::configured(&state).await?,
+        })));
+    }
     let current = settings::read(&state).await?.settings;
     let may_start = user.is_admin || current.who == settings::Who::Everyone;
     let existing = selection::existing_english(&file);

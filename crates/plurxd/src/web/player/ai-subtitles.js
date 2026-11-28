@@ -25,16 +25,18 @@ function aiCaptionPlayerFile(){
   return file;
 }
 
-function aiCaptionReadOptions(file,audio=null){
+function aiCaptionReadOptions(file,audio=null,target="en"){
   if(!aiCaptionLocal(file))return Promise.resolve(null);
   const auth=AUTH_GENERATION;
   const cached=AI_CAPTION_OPTIONS.get(file);
-  if(cached?.auth===auth&&cached.audio===audio&&Date.now()-cached.at<15000)return cached.request;
-  const request=api(aiCaptionPath(file)+(audio==null?"":`?audio_index=${encodeURIComponent(audio)}`)).catch(error=>{
+  if(cached?.auth===auth&&cached.audio===audio&&cached.target===target&&Date.now()-cached.at<15000)return cached.request;
+  const query=new URLSearchParams({target});
+  if(audio!=null)query.set("audio_index",String(audio));
+  const request=api(aiCaptionPath(file)+`?${query}`).catch(error=>{
     if(AI_CAPTION_OPTIONS.get(file)?.request===request)AI_CAPTION_OPTIONS.delete(file);
     throw error;
   });
-  AI_CAPTION_OPTIONS.set(file,{auth,audio,request,at:Date.now(),options:null});
+  AI_CAPTION_OPTIONS.set(file,{auth,audio,target,request,at:Date.now(),options:null});
   request.then(options=>{
     const entry=AI_CAPTION_OPTIONS.get(file);
     if(entry?.request===request&&auth===AUTH_GENERATION)entry.options=options;
@@ -55,7 +57,7 @@ function aiCaptionMenu(file){
       <button type="button" onclick="aiCaptionShift(250)">Later by 250 ms</button>`;
   }
   const audio=translationAttachedAudioOrdinal(PLAYER);
-  const entry=AI_CAPTION_OPTIONS.get(file),options=entry?.auth===AUTH_GENERATION&&entry.audio===audio?entry.options:null;
+  const entry=AI_CAPTION_OPTIONS.get(file),options=entry?.auth===AUTH_GENERATION&&entry.audio===audio&&entry.target==="en"?entry.options:null;
   if(!options){
     const owner=PLAYER;
     void aiCaptionReadOptions(file,audio).then(()=>{
@@ -316,17 +318,19 @@ async function aiCaptionUseStored(session,result,current){
 
 function aiCaptionItemMarkup(file){
   if(!aiCaptionLocal(file))return "";
-  const showAdd=!(file.subtitle_streams||[]).some(track=>["en","eng"].includes(track.language)&&!track.forced);
+  const preferred=file.playback_defaults?.subtitle?.preferred_language||"en";
+  const preferredName=langName(preferred)||"English";
+  const showAdd=!(file.subtitle_streams||[]).some(track=>langName(track.language)===preferredName&&!track.forced);
   const stored=(file.subtitle_streams||[]).filter(track=>track.ai&&track.track_id);
   return `<span class="ai-caption-item" data-ai-caption-file="${esc(String(file.id))}">
-    ${showAdd?'<button type="button" class="ghost sm" data-ai-caption-open>+ English</button>':""}
+    ${showAdd?`<button type="button" class="ghost sm" data-ai-caption-open>+ ${esc(preferredName)}</button>`:""}
     ${stored.map(track=>`<button type="button" class="ghost sm" data-ai-caption-track="${track.index}" aria-label="Manage English AI subtitle">English · AI ⋯</button>`).join("")}
     <span data-ai-caption-actions></span><span data-ai-caption-status role="status"></span></span>`;
 }
-async function aiCaptionSearch(file,panel){
+async function aiCaptionSearch(file,panel,language){
   panel.textContent="Searching OpenSubtitles…";
   try{
-    const data=await api(`/files/${file.id}/subtitles/search?language=en`);
+    const data=await api(`/files/${file.id}/subtitles/search?language=${encodeURIComponent(language)}`);
     if(!panel.isConnected)return;
     panel.replaceChildren();
     for(const match of (data.results||[]).slice(0,20)){
@@ -335,7 +339,7 @@ async function aiCaptionSearch(file,panel){
       button.addEventListener("click",()=>void downloadSubtitle(file.id,match.file_id,match.language,button));
       panel.appendChild(button);
     }
-    if(!panel.childElementCount)panel.textContent="No English subtitle matches found.";
+    if(!panel.childElementCount)panel.textContent="No subtitle matches found.";
   }catch(error){if(panel.isConnected)panel.textContent=error.message;}
 }
 
@@ -392,13 +396,14 @@ function aiCaptionBindItem(node,file){
   mount.querySelector("[data-ai-caption-open]")?.addEventListener("click",async()=>{
     panel.replaceChildren();
     try{
-      const options=await aiCaptionReadOptions(file);
+      const preferred=file.playback_defaults?.subtitle?.preferred_language||"en";
+      const options=await aiCaptionReadOptions(file,null,preferred);
       if(!current())return;
       if(options?.allowed&&options.route){
         button(options.label||"AI subtitles",()=>void start("auto"));
         for(const choice of options.alternatives||[])button(choice.label,()=>void start(choice.route));
       }
-      if(options?.search_online&&file.subtitle_search_enabled)button("Search online",()=>aiCaptionSearch(file,panel));
+      if(options?.search_online&&file.subtitle_search_enabled)button("Search online",()=>aiCaptionSearch(file,panel,options.target||preferred));
       if(!panel.childElementCount)status.textContent=options?.blocked?.message||"No subtitle sources are available.";
     }catch(error){if(current())status.textContent=error.message;}
   });

@@ -6,6 +6,7 @@ struct AISubtitleOptions: Decodable {
         let route: String
         let label: String
     }
+    let target: String?
     let allowed: Bool
     let label: String?
     let route: String?
@@ -206,6 +207,7 @@ struct AISubtitleItemView: View {
     private struct Timing: Decodable { let offsetMs: Int }
 
     private var path: String { "files/\(file.id)/ai-subtitles" }
+    private var language: String { file.playbackDefaults?.subtitle?.preferredLanguage ?? "en" }
     private var api: PlurxAPI {
         model.requireAPI().captionOwner(generation: Session.shared.playbackAuthorization.generation)
     }
@@ -254,7 +256,7 @@ struct AISubtitleItemView: View {
 
     @MainActor private func load() async {
         do {
-            let reply: CaptionHTTPReply<AISubtitleOptions> = try await api.caption(path)
+            let reply: CaptionHTTPReply<AISubtitleOptions> = try await api.caption(path, query: [URLQueryItem(name: "target", value: language)])
             let before = operation
             options = reply.value
             operation = reply.value.operation
@@ -283,9 +285,9 @@ struct AISubtitleItemView: View {
         defer { busy = false }
         do {
             let reply: CaptionHTTPReply<Search> = try await api.caption("files/\(file.id)/subtitles/search",
-                query: [URLQueryItem(name: "language", value: "en")])
+                query: [URLQueryItem(name: "language", value: options?.target ?? language)])
             matches = reply.value.results
-            status = matches.isEmpty ? "No English matches found." : ""
+            status = matches.isEmpty ? "No subtitle matches found." : ""
         } catch { status = error.localizedDescription }
     }
 

@@ -342,7 +342,7 @@ internal class ProgressiveCaptions(
         val g = generation
         scope.launch {
             try {
-                val options = captionRead<AISubtitleOptions>(api().aiSubtitleOptions(fileId))
+                val options = captionRead<AISubtitleOptions>(api().aiSubtitleOptions(fileId, audioIndex = sourceAudio()))
                 if (current(g)) aiOptions = options
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (current(g)) status = e.message ?: "AI subtitles are unavailable." }
