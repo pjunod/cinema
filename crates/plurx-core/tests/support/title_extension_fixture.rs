@@ -28,8 +28,11 @@ pub(crate) fn validated_empty_title_rewind(
 ) -> Vec<String> {
     let v1 = title_fixture_shape(1);
     let v2 = title_fixture_shape(2);
+    let v3 = title_fixture_shape(3);
     assert!(
-        (marker_version == 1 && actual == v1) || (marker_version == 2 && actual == v2),
+        (marker_version == 1 && actual == v1)
+            || (marker_version == 2 && actual == v2)
+            || (marker_version == 3 && actual == v3),
         "exact published title shape and matching generation required"
     );
     assert_eq!(marker, 1, "current title marker required");
@@ -49,7 +52,7 @@ pub(crate) fn validated_empty_title_rewind(
 
 pub(crate) fn title_fixture_shape(version: i64) -> Vec<(String, String)> {
     assert!(
-        matches!(version, 1 | 2),
+        matches!(version, 1..=3),
         "published title generation required"
     );
     let expected = rusqlite::Connection::open_in_memory().expect("title generation witness");
@@ -57,10 +60,15 @@ pub(crate) fn title_fixture_shape(version: i64) -> Vec<(String, String)> {
     expected
         .execute_batch(include_str!("../../src/store/dv_title_jobs.sql"))
         .expect("published title v1");
-    if version == 2 {
+    if version >= 2 {
         expected
             .execute_batch(include_str!("../../src/store/dv_title_jobs_v2.sql"))
             .expect("published title v2");
+    }
+    if version >= 3 {
+        expected
+            .execute_batch(include_str!("../../src/store/dv_title_jobs_v3.sql"))
+            .expect("published title v3");
     }
     title_fixture_objects(&expected)
 }
