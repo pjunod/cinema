@@ -16,7 +16,8 @@ pub async fn start(
     super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
 ) -> Result<Json<StartResponse>, ApiError> {
     let legacy = CreateSession {
-        split_audio: None,
+        // A legacy start names its presentation: the muxed copy.
+        split_audio: Some(false),
         processed_upgrade: None,
         source_telemetry: Some(crate::transcode::SourceTelemetry::FilmV1),
         intent: None,

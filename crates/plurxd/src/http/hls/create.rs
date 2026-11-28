@@ -269,7 +269,11 @@ pub struct CreateSession {
     /// With `copy`: this client selects soundtracks itself (hls.js alternate
     /// audio). The server may answer with one shared video-only rendition and
     /// every soundtrack as an alternate audio rendition; the session response
-    /// says which presentation it chose. Absent keeps the muxed copy.
+    /// says which presentation it chose.
+    ///
+    /// The legacy spelling of the caps token `hls-split-av-v1`. Absent defers
+    /// to the token; `false` is the explicit muxed request (a client retrying
+    /// without alternates), and it wins over the token.
     pub split_audio: Option<bool>,
     /// With `copy`: retain Dolby Vision signaling and dynamic metadata because
     /// the decision established that this client supports the source profile.
@@ -715,8 +719,13 @@ impl CreateSession {
         let transport = self
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
+        let split_requested = self.split_audio.unwrap_or_else(|| {
+            self.caps
+                .as_ref()
+                .is_some_and(plurx_core::playback::DeviceCaps::plays_split_av)
+        });
         crate::transcode::SessionRequest {
-            split_audio: self.copy == Some(true) && self.split_audio == Some(true),
+            split_audio: self.copy == Some(true) && split_requested,
             dv_processing_destination: None,
             // The player's per-playback choice; `SessionRequest` never
             // serializes it.
@@ -4650,13 +4659,15 @@ async fn create_with_purpose_attempt(
     {
         vec![state.node_id.clone()]
     } else {
+        let offer_source = source.as_ref().ok_or(ApiError::NotFound("file"))?;
         match MediaOfferRequest::new(
-            source.as_ref().ok_or(ApiError::NotFound("file"))?,
+            offer_source,
             height,
             (request.start_seconds * 1_000.0).round().max(0.0) as i64,
             request.audio_index,
             request.subtitle_burn,
             request.hdr10,
+            crate::transcode::split_copy_eligible(&request, offer_source),
         ) {
             Ok(offer_request) => state
                 .media_pool
