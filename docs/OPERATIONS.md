@@ -3374,6 +3374,9 @@ available encoder and egress. Build skew alone permits placement.
 Strict envelope changes require a `PROTOCOL_VERSION` bump and a dated note
 here. Newest first:
 
+- 2026-11-28: protocol 15 — seals the selected encoded VOD layout and
+  projected child identities. Keep one eligible owner per active ingress
+  cohort until its sessions drain. [Rendition contract](streaming/SPLIT-HLS-RENDITION-CONTRACT.md).
 - 2026-11-27: protocol 14 — records the issued VOD copy layout and soundtrack
   URLs at activation. Drain by cohort before removing the last old owner.
 - 2026-11-27: protocol 13 — an offer for a predicted split copy carries

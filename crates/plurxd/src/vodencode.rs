@@ -1599,6 +1599,27 @@ impl Encoding {
             .ok()
     }
 
+    /// Container-inclusive budget for both roles of one encoded VOD producer.
+    pub(crate) fn projected_vod_peak_bps(
+        &self,
+        plan: &plurx_core::segplan::SegmentPlan,
+    ) -> Option<u64> {
+        let shortest = plan
+            .entries
+            .iter()
+            .map(|entry| entry.duration_ticks)
+            .min()?;
+        if shortest == 0 || plan.timescale == 0 || !self.plan.options().input_has_audio {
+            return None;
+        }
+        let video_rate = u128::from(self.options.video_bitrate_kbps) * 1_000;
+        let audio_rate = u128::from(self.options.audio_budget_kbps()) * 1_000;
+        let burst = video_rate * 2 + 512 * 1024 * 8;
+        let risk = video_rate * 3 + audio_rate * 2;
+        u64::try_from(risk + (burst * u128::from(plan.timescale)).div_ceil(u128::from(shortest)))
+            .ok()
+    }
+
     /// The rate this continuous rendition needs from a link: the encoder's
     /// VBV cap for video, the configured rate for the shared soundtrack. It is
     /// the same figure the candidate catalog advertises for the encode route,
