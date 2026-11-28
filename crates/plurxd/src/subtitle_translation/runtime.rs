@@ -753,8 +753,8 @@ struct OwnedCues {
 /// empty result. At the source's first and last core there is no context on
 /// the outer side, so nothing can be attributed past the file's ends.
 #[cfg(unix)]
-fn signal_core_cues(owned: OwnedCues) -> Result<Vec<TranslationCue>, StoreError> {
-    if owned.recognized == 0 {
+fn signal_core_cues(owned: OwnedCues, vad_empty: bool) -> Result<Vec<TranslationCue>, StoreError> {
+    if owned.recognized == 0 && !vad_empty {
         return Err(failure("output_invalid"));
     }
     Ok(owned.cues)
@@ -1197,17 +1197,28 @@ fn detected_language(output: &[u8]) -> Option<(&str, f32)> {
     })
 }
 
+pub(crate) struct LanguageProbe {
+    pub audio_index: i64,
+    pub threads: usize,
+    pub use_vad: bool,
+}
+
 #[cfg(unix)]
 pub(crate) async fn detect_spoken_language(
     state: &AppState,
     file: &MediaFile,
     source: &VerifiedSource,
-    audio_index: i64,
+    probe: LanguageProbe,
     spec: &artifacts::CatalogModel,
     fence: &JobFence,
     cancel: &CancellationToken,
 ) -> Result<String, StoreError> {
     use plurx_core::store::background_jobs_transcription::{whisper_language, SubtitlePhase};
+    let LanguageProbe {
+        audio_index,
+        threads,
+        use_vad,
+    } = probe;
     let hint = file
         .audio_streams
         .iter()
@@ -1221,6 +1232,19 @@ pub(crate) async fn detect_spoken_language(
     let model = artifacts::open_model_cancellable(&state.subtitle_models.root, spec, cancel)
         .await
         .map_err(StoreError::Task)?;
+    let vad = if use_vad {
+        Some(
+            artifacts::open_model_cancellable(
+                &state.subtitle_models.root,
+                &super::profile::vad_spec(),
+                cancel,
+            )
+            .await
+            .map_err(StoreError::Task)?,
+        )
+    } else {
+        None
+    };
     let clock = selected_clock(
         source,
         audio_index,
@@ -1275,18 +1299,16 @@ pub(crate) async fn detect_spoken_language(
             "--language",
             "auto",
             "--threads",
-            "2",
+            &threads.to_string(),
             "--no-gpu",
             "--model",
             "/dev/fd/5",
             "--file",
             "/dev/fd/3",
         ]);
-        crate::ffmpeg::inherit_file_descriptors(
-            &mut command,
-            &[(&decoded.file, 3), (&model.handle, 5), (&engine.handle, 7)],
-        );
+        configure_recognizer(&mut command, &decoded, &model, &engine, vad.as_ref())?;
         let output = child_output(&mut command, Duration::from_secs(45), 64 * 1024, true).await?;
+        check_vad(vad.as_ref())?;
         if !invocation.unchanged()
             || std_file_identity(&decoded.file).ok() != Some(decoded.identity)
         {
@@ -1317,12 +1339,45 @@ pub(crate) async fn detect_spoken_language(
     _state: &AppState,
     _file: &MediaFile,
     _source: &VerifiedSource,
-    _audio_index: i64,
+    _probe: LanguageProbe,
     _spec: &artifacts::CatalogModel,
     _fence: &JobFence,
     _cancel: &CancellationToken,
 ) -> Result<String, StoreError> {
     Err(failure("engine_unavailable"))
+}
+
+#[cfg(unix)]
+fn configure_recognizer(
+    command: &mut tokio::process::Command,
+    decoded: &DecodedPcm,
+    model: &ManagedModel,
+    engine: &Engine,
+    vad: Option<&ManagedModel>,
+) -> Result<(), StoreError> {
+    let mut descriptors = vec![(&decoded.file, 3), (&model.handle, 5), (&engine.handle, 7)];
+    if let Some(vad) = vad {
+        rewind(&vad.handle)?;
+        command.args(["--vad", "--vad-model", "/dev/fd/9"]);
+        descriptors.push((&vad.handle, 9));
+    }
+    crate::ffmpeg::inherit_file_descriptors(command, &descriptors);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn vad_reports_no_speech(log: &[u8]) -> bool {
+    log.split(|byte| *byte == b'\n').any(|line| {
+        line == b"whisper_vad_segments_from_probs: Final speech segments after filtering: 0"
+    })
+}
+
+#[cfg(unix)]
+fn check_vad(vad: Option<&ManagedModel>) -> Result<(), StoreError> {
+    if vad.is_some_and(|vad| std_file_identity(&vad.handle).ok() != Some(vad.identity)) {
+        return Err(failure("artifact_changed"));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1334,8 +1389,11 @@ async fn infer_window(
     core_index: i64,
     language: &str,
     task: SpeechTask,
+    threads: usize,
     engine: &Engine,
     model: &ManagedModel,
+    vad: Option<&ManagedModel>,
+    fast_decode: bool,
     scratch: &Path,
     fence: &JobFence,
     cancel: &CancellationToken,
@@ -1355,14 +1413,13 @@ async fn infer_window(
         whisper
             .args([
                 "--threads",
-                "2",
+                &threads.to_string(),
                 "--processors",
                 "1",
                 "--no-gpu",
                 "--language",
                 language,
                 "--output-vtt",
-                "--no-prints",
                 "--model",
                 "/dev/fd/5",
                 "--file",
@@ -1370,15 +1427,20 @@ async fn infer_window(
                 "--output-file",
             ])
             .arg(&output_base);
+        if vad.is_none() {
+            whisper.arg("--no-prints");
+        }
+        if fast_decode {
+            whisper.args(["--beam-size", "2", "--best-of", "2"]);
+        }
         if task.is_translation() {
             whisper.arg("--translate");
         }
         constrain_child_file(&mut whisper, 256 * 1024);
-        crate::ffmpeg::inherit_file_descriptors(
-            &mut whisper,
-            &[(&decoded.file, 3), (&model.handle, 5), (&engine.handle, 7)],
-        );
-        child_output(&mut whisper, inference_budget(window)?, 256 * 1024, true).await?;
+        configure_recognizer(&mut whisper, decoded, model, engine, vad)?;
+        let output =
+            child_output(&mut whisper, inference_budget(window)?, 256 * 1024, true).await?;
+        check_vad(vad)?;
         if !invocation.unchanged() {
             return Err(failure("packaged_engine_changed"));
         }
@@ -1386,15 +1448,18 @@ async fn infer_window(
         let vtt = std::str::from_utf8(&bytes)
             .map_err(|_| failure("output_invalid"))?
             .replace("\r\n", "\n");
-        cues = signal_core_cues(owned_cues(
-            &vtt,
-            asset_id,
-            core_index,
-            decoded.clock.anchor_sample,
-            decoded.clock.samples,
-            window.core_begin_ms,
-            window.core_end_ms,
-        )?)?;
+        cues = signal_core_cues(
+            owned_cues(
+                &vtt,
+                asset_id,
+                core_index,
+                decoded.clock.anchor_sample,
+                decoded.clock.samples,
+                window.core_begin_ms,
+                window.core_end_ms,
+            )?,
+            vad.is_some() && vad_reports_no_speech(&output.stderr),
+        )?;
     }
     crate::subtitle_transcription::managed_artifacts_unchanged(engine, model)?;
     if std_file_identity(&decoded.file).ok() != Some(decoded.identity) {
@@ -1488,6 +1553,19 @@ pub(crate) async fn translate_range(
         )
         .await?;
         source.recheck(state, file, &cancel).await?;
+        let vad = if super::profile::uses_vad(&recipe.profile) {
+            Some(
+                artifacts::open_model_cancellable(
+                    &state.subtitle_models.root,
+                    &super::profile::vad_spec(),
+                    &cancel,
+                )
+                .await
+                .map_err(StoreError::Task)?,
+            )
+        } else {
+            None
+        };
         let cues = infer_window(
             &decoded,
             window,
@@ -1495,8 +1573,11 @@ pub(crate) async fn translate_range(
             recipe.core_index,
             &recipe.spoken_language,
             recipe.profile.task,
+            admission.cpu_threads(),
             engine,
             model,
+            vad.as_ref(),
+            super::profile::fast_decode(&recipe.profile),
             scratch.path(),
             fence,
             &cancel,
@@ -1667,6 +1748,22 @@ pub(crate) async fn self_test_translation(
             &cancel,
         )
         .await?;
+        let vad = if selected::model_specs()
+            .iter()
+            .any(|model| model.id == spec.id)
+        {
+            Some(
+                artifacts::open_model_cancellable(
+                    &state.subtitle_models.root,
+                    &selected::vad_spec(),
+                    &cancel,
+                )
+                .await
+                .map_err(StoreError::Task)?,
+            )
+        } else {
+            None
+        };
         let cues = infer_window(
             &decoded,
             window,
@@ -1674,8 +1771,11 @@ pub(crate) async fn self_test_translation(
             0,
             selected::SELF_TEST_LANGUAGE,
             task,
+            admission.cpu_threads(),
             engine,
             model,
+            vad.as_ref(),
+            false,
             scratch.path(),
             fence,
             &cancel,
@@ -1912,19 +2012,31 @@ mod tests {
         let owned = owned_cues(tail, &asset, 2, 55 * RATE, 98_240, 60_000, 61_140)
             .expect("valid recognizer output");
         assert_eq!((owned.cues.len(), owned.recognized), (0, 1));
-        assert!(signal_core_cues(owned)
+        assert!(signal_core_cues(owned, false)
             .expect("context-owned speech")
             .is_empty());
         let silent = owned_cues("WEBVTT\n\n", &asset, 2, 55 * RATE, 98_240, 60_000, 61_140)
             .expect("well-formed empty output");
         assert_eq!(silent.recognized, 0);
-        assert!(signal_core_cues(silent).is_err());
+        assert!(signal_core_cues(silent, false).is_err());
+        let log = b"whisper_vad_segments_from_probs: Final speech segments after filtering: 0\n";
+        assert!(vad_reports_no_speech(log));
+        assert!(!vad_reports_no_speech(
+            b"Final speech segments after filtering: 0\n"
+        ));
+        let silent = OwnedCues {
+            recognized: 0,
+            cues: Vec::new(),
+        };
+        assert!(signal_core_cues(silent, vad_reports_no_speech(log))
+            .expect("verified no-speech coverage")
+            .is_empty());
         // A cue dated past the decoded audio is no neighbour's speech either.
         let past = "WEBVTT\n\n00:00:07.000 --> 00:00:08.000\n invented\n\n";
         let owned = owned_cues(past, &asset, 2, 55 * RATE, 98_240, 60_000, 61_140)
             .expect("valid recognizer output");
         assert_eq!(owned.recognized, 0);
-        assert!(signal_core_cues(owned).is_err());
+        assert!(signal_core_cues(owned, false).is_err());
     }
 
     fn wav(samples: &[i16]) -> std::fs::File {

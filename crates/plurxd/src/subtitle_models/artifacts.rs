@@ -779,6 +779,7 @@ mod local {
                     "/ggerganov/whisper.cpp/resolve/{REVISION}/ggml-{}.bin",
                     spec.id
                 )
+                || *spec == crate::subtitle_translation::profile::vad_spec()
                 || crate::subtitle_text_translation::artifacts::registered_file(spec))
     }
 

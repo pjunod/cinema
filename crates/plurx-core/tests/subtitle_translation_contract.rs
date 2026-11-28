@@ -147,6 +147,7 @@ async fn ai_intent_pins_the_route_and_viewer_release_is_scoped_to_its_playback()
         route: IntentRoute::Audio,
         track_index: 0,
         language: None,
+        speech_profile_id: None,
         playback_id: Some(first.clone()),
         position_ms: 0,
         issued_at_ms: 20_000,

@@ -429,7 +429,7 @@ mod qualification {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "real useful 1x Small playback qualification; explicit speech qualification root/cache/engine/ffmpeg/ffprobe/TMPDIR required"]
     async fn pinned_progressive_worker_covers_advancing_playback_for_both_tasks() {
-        progressive_case(95000, true, profile::profiles()).await;
+        progressive_case(95000, true, profile::legacy_profiles()).await;
     }
     async fn progressive_case(
         duration_ms: i64,

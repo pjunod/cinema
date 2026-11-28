@@ -152,7 +152,7 @@ pub(crate) async fn automatic_loop(state: AppState, shutdown: tokio_util::sync::
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {_ = shutdown.cancelled()=>return,_ = interval.tick()=>{}}
-        if setting(&state, AUTO).await.ok().as_deref() != Some("true") {
+        if !scheduled(&state).await {
             continue;
         }
         let Ok(Some(lease)) = state.jobs.acquire_job("subtitles:automatic".into()).await else {
@@ -169,6 +169,18 @@ pub(crate) async fn automatic_loop(state: AppState, shutdown: tokio_util::sync::
         }
         let _ = lease.release().await;
     }
+}
+
+async fn scheduled(state: &AppState) -> bool {
+    crate::ai_subtitles::settings::read_store(state.store.as_ref())
+        .await
+        .is_ok_and(|snapshot| {
+            let settings = snapshot.settings;
+            settings.download_match
+                && settings.ahead_of_time
+                && !settings.translate_text
+                && !settings.from_audio
+        })
 }
 
 async fn automatic_page(
@@ -201,7 +213,7 @@ async fn automatic_page(
         return Ok(());
     }
     for id in files {
-        if setting(state, AUTO).await? != "true" {
+        if !scheduled(state).await {
             return Ok(());
         }
         let Some(file_lease) = state
@@ -239,6 +251,34 @@ fn missing_language(tracks: &[plurx_core::domain::SubtitleStream], language: &st
     !tracks
         .iter()
         .any(|s| !s.forced && plurx_core::tracks::lang_matches(&s.language, language))
+}
+
+pub(crate) async fn configured(state: &AppState) -> Result<bool, ApiError> {
+    Ok(!setting(state, KEY).await?.trim().is_empty())
+}
+
+pub(crate) async fn try_english_match(state: &AppState, id: i64) -> Result<(), ApiError> {
+    if !configured(state).await? {
+        return Ok(());
+    }
+    let Some(lease) = state
+        .jobs
+        .acquire_job(format!("subtitles:file:{id}"))
+        .await?
+    else {
+        return Ok(());
+    };
+    let lost = lease.loss_token();
+    let provider = provider(state);
+    let result = tokio::select! {
+        _ = lost.cancelled() => Ok(()),
+        result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            let provider = provider.await?;
+            automatic_file(state, id, &["en".to_owned()], &provider, &lease).await
+        }) => result.unwrap_or(Ok(())),
+    };
+    lease.release().await?;
+    result
 }
 
 async fn automatic_file(
