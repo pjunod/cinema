@@ -766,8 +766,8 @@ impl VodServe {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
             None => crate::fragindex::identity_for(file, video),
         };
-        let issued_video = match req.vod_copy_layout.as_ref() {
-            Some(VodCopyLayout::SplitV1 { video, .. }) => Some(video),
+        let issued_video = match (prepared.encoding.is_none(), req.vod_copy_layout.as_ref()) {
+            (true, Some(VodCopyLayout::SplitV1 { video, .. })) => Some(video),
             _ => None,
         };
         let issued_index = issued_video.and_then(|video| video.index_key.as_deref());
