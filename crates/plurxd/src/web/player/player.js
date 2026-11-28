@@ -547,6 +547,11 @@ function abortHlsStartupLoaders(episode,detachMetadata=false){
     episode.native.video.removeEventListener('loadedmetadata',episode.native.metadataListener);
     episode.native.metadataListener=null;
   }
+  if(detachMetadata&&episode.native?.audioListener){
+    episode.native.audioList?.removeEventListener('change',episode.native.audioListener);
+    episode.native.audioListener=null;
+    episode.native.audioList=null;
+  }
 }
 function cancelHlsStartup(player,reason){
   const episode=player&&player.hlsStartup;
@@ -1260,6 +1265,7 @@ function scheduleHlsNetworkRetry(video,player,detail){
   return true;
 }
 function attachHls(video, playlistUrl, startAt){
+  if(PLAYER) PLAYER.selectedAudioRendition=null;
   const attachedPlayer=PLAYER;
   const attachment=beginHlsAttachment(video,attachedPlayer);
   if(!preferNativeHls(video) && window.Hls && Hls.isSupported()){
@@ -1852,25 +1858,107 @@ async function nativeHlsFetch(player,episode,url,{init=false,sourceOwner=null}={
     })()]);
   }finally{clearTimeout(timer);ctl.signal.removeEventListener('abort',abortListener);ctl.abort();episode.loaders.delete(loader);}
 }
-async function nativeHlsPlaylists(player,episode,sourceOwner){
-  episode.manifestState='loading';
-  const master=await nativeHlsFetch(player,episode,tok(episode.playlistUrl),{sourceOwner});
-  let media=master;
-  const lines=master.text.split(/\r?\n/).map(line=>line.trim());
-  const variants=lines.map((line,i)=>line.startsWith('#EXT-X-STREAM-INF:')?i:-1).filter(i=>i>=0);
-  if(variants.length){
-    // The session master has one video variant. Ambiguity needs an explicit
-    // contract, not a guess at an audio/subtitle URI or a different recipe.
-    if(variants.length!==1) throw Object.assign(new Error('Native readiness requires one session video variant.'),{terminal:true});
-    const uri=lines[variants[0]+1];
-    if(!uri||uri.startsWith('#')) throw Object.assign(new Error('The HLS master has no selected media URI.'),{terminal:true});
-    media=await nativeHlsFetch(player,episode,nativeHlsResourceUrl(uri,master.url),{sourceOwner});
+function nativeHlsAttributes(line){
+  const values=Object.create(null);
+  const fields=line.slice(line.indexOf(':')+1);
+  const attr=/([A-Z0-9-]+)=(?:"([^"]*)"|([^",]+))(?:,|$)/gy;
+  for(let offset=0;offset<fields.length;){
+    attr.lastIndex=offset;
+    const match=attr.exec(fields);
+    if(!match||Object.hasOwn(values,match[1]))
+      throw Object.assign(new Error('The HLS master has invalid attributes.'),{terminal:true});
+    values[match[1]]=match[2]??match[3];
+    offset=attr.lastIndex;
   }
+  return values;
+}
+function nativeHlsTimeline(media){
   const times=parseSegTimes(media.text);
   if(!times.length||!times.every(time=>Number.isFinite(time)&&time>0))
     throw Object.assign(new Error('The media playlist contains no usable segments.'),{terminal:true});
+}
+async function nativeHlsPlaylists(player,episode,sourceOwner){
+  episode.manifestState='loading';
+  const master=await nativeHlsFetch(player,episode,tok(episode.playlistUrl),{sourceOwner});
+  let media=master,audio=null,renditions=[];
+  const lines=master.text.split(/\r?\n/).map(line=>line.trim());
+  const variants=lines.map((line,i)=>line.startsWith('#EXT-X-STREAM-INF:')?i:-1).filter(i=>i>=0);
+  if(variants.length){
+    if(variants.length!==1) throw Object.assign(new Error('Native readiness requires one session video variant.'),{terminal:true});
+    const uri=lines[variants[0]+1];
+    if(!uri||uri.startsWith('#')) throw Object.assign(new Error('The HLS master has no selected media URI.'),{terminal:true});
+    const {AUDIO:group}=nativeHlsAttributes(lines[variants[0]]);
+    let audioUri=null;
+    if(group){
+      const choices=lines.filter(line=>line.startsWith('#EXT-X-MEDIA:')).map(nativeHlsAttributes)
+        .filter(attrs=>attrs.TYPE==='AUDIO'&&attrs['GROUP-ID']===group);
+      const defaults=choices.filter(row=>row.DEFAULT==='YES');
+      renditions=choices.map(row=>({
+        stable:row['STABLE-RENDITION-ID'],name:row.NAME,language:row.LANGUAGE,uri:row.URI,
+      }));
+      const identities=new Set(renditions.map(row=>row.stable));
+      if(defaults.length!==1||identities.size!==renditions.length
+        ||renditions.some(row=>!/^a[0-9]+$/.test(row.stable||'')||!row.name||!row.uri))
+        throw Object.assign(new Error('The HLS master has an ambiguous audio group.'),{terminal:true});
+      for(const row of renditions) row.uri=nativeHlsResourceUrl(row.uri,master.url);
+      audioUri=nativeHlsResourceUrl(defaults[0].URI,master.url);
+    }
+    const videoUri=nativeHlsResourceUrl(uri,master.url);
+    if(audioUri===videoUri) throw Object.assign(new Error('The HLS audio URI matches the video URI.'),{terminal:true});
+    media=await nativeHlsFetch(player,episode,videoUri,{sourceOwner});
+    if(audioUri){
+      audio=await nativeHlsFetch(player,episode,audioUri,{sourceOwner});
+      nativeHlsTimeline(audio);
+    }
+  }
+  nativeHlsTimeline(media);
   episode.manifestState='parsed';
-  return media;
+  return {...media,audio,renditions};
+}
+function nativeRenditionForTrack(choices,track,tracks){
+  const exact=choices.find(row=>track.id===row.stable);
+  if(exact) return exact;
+  if(!track.label||tracks.filter(other=>other.label===track.label).length!==1) return null;
+  const named=choices.filter(row=>row.name===track.label);
+  return named.length===1?named[0]:null;
+}
+function observeNativeAudio(video,player,episode){
+  const list=video.audioTracks;
+  if(!list?.addEventListener||!episode.native.audioRenditions?.length) return;
+  const owner=nativeHlsSourceOwner(video,player,episode,episode.native.execution,true);
+  if(!owner.current()) return;
+  if(episode.native.audioList!==list){
+    const observed=()=>{
+      if(!owner.current()) return;
+      const tracks=Array.from(list),enabled=tracks.filter(track=>track.enabled);
+      const selected=enabled.length===1?nativeRenditionForTrack(episode.native.audioRenditions,enabled[0],tracks):null;
+      if(!selected) return;
+      const ordinal=player.audio?.findIndex(track=>'a'+track.index===selected.stable)??-1;
+      player.selectedAudioRendition=selected.stable;
+      if(ordinal>=0&&ordinal!==player.curAudio){
+        player.curAudio=ordinal;
+        if(typeof translationRetire==='function') translationRetire('audio changed');
+        if(typeof rememberPlaybackSelection==='function') rememberPlaybackSelection('audio',player.audio[ordinal].index);
+        if(typeof renderPlayerInfo==='function') renderPlayerInfo();
+      }
+    };
+    episode.native.audioList?.removeEventListener('change',episode.native.audioListener);
+    episode.native.audioList=list;
+    episode.native.audioListener=observed;
+    list.addEventListener('change',observed);
+  }
+  episode.native.audioListener?.();
+}
+function selectNativeAudio(video,player,index){
+  const episode=player.hlsStartup,list=video.audioTracks,wanted=player.audio?.[index];
+  if(episode?.transport!=='native'||!list||!wanted||!episode.native.audioRenditions?.length
+    ||!nativeHlsSourceOwner(video,player,episode,episode.native.execution,true).current()) return false;
+  const tracks=Array.from(list),matches=tracks.filter(track=>
+    nativeRenditionForTrack(episode.native.audioRenditions,track,tracks)?.stable==='a'+wanted.index);
+  if(matches.length!==1) return false;
+  observeNativeAudio(video,player,episode);
+  for(const track of tracks) track.enabled=track===matches[0];
+  return true;
 }
 function armNativeHlsReadiness(video,player,episode,delayMs){
   clearTimeout(episode.retry.timer);
@@ -1913,12 +2001,15 @@ async function runNativeHlsReadiness(video,player,episode){
     if(nativeHlsRecoverAuthority(video,player,episode,execution,sourceOwner)) return;
     if(!sourceOwner.current()||!nativeHlsCurrent(player,episode,execution,intent)) return;
     player.segSrc=media.url;player.segTimes=parseSegTimes(media.text);player._segIdx=null;
+    episode.native.audioRenditions=media.renditions;
+    player.selectedAudioRendition=null;
     clearStreamFailure();episode.latestFailure=null;
     player.controlRenderOverride=null;
     const expectedSource=new URL(tok(episode.playlistUrl),location.href).href;
     const go=()=>{
       if(!video.currentSrc||new URL(video.currentSrc,location.href).href!==expectedSource||video.readyState<1)return;
       video.removeEventListener('loadedmetadata',go);episode.native.metadataListener=null;
+      observeNativeAudio(video,player,episode);
       if(hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player,true)&&episode.native.execution===execution
         &&['active','paused'].includes(episode.state))
         applyPlaybackAttachmentPosition(video,player,episode.attachment,episode.startAt);
@@ -1976,9 +2067,11 @@ async function classifyNativeHlsError(video,player,code,message,sourceOwner=null
     const media=await nativeHlsPlaylists(player,episode,owner);
     if(nativeHlsRecoverAuthority(video,player,episode,execution,owner)) return true;
     if(!current()) throw Object.assign(new Error('Native classification was superseded.'),{cancelled:true});
-    const init=/^#EXT-X-MAP:.*?URI="([^"]+)"/m.exec(media.text);
-    if(!init) throw Object.assign(new Error('The native init shape could not be verified.'),{terminal:true});
-    await nativeHlsFetch(player,episode,nativeHlsResourceUrl(init[1],media.url),{init:true,sourceOwner:owner});
+    for(const member of [media,media.audio].filter(Boolean)){
+      const init=/^#EXT-X-MAP:.*?URI="([^"]+)"/m.exec(member.text);
+      if(!init) throw Object.assign(new Error('The native init shape could not be verified.'),{terminal:true});
+      await nativeHlsFetch(player,episode,nativeHlsResourceUrl(init[1],member.url),{init:true,sourceOwner:owner});
+    }
     if(nativeHlsRecoverAuthority(video,player,episode,execution,owner)) return true;
     if(!current()) return true;
     if(!episode.native.reloadUsed){

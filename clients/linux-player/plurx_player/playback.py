@@ -39,6 +39,37 @@ NATIVE_TARGET = re.compile(
     rf"PQ transport gain {_DV_NUMBER} -> signal {_DV_NUMBER}\.\.{_DV_NUMBER}; "
     r"generation (?P<generation>\d{1,20})")
 NATIVE_TARGET_STATE = "native-dovi-target-state"
+HLS_ATTRIBUTE = re.compile(r'(?:^|,)([A-Z0-9-]+)=("[^"]*"|[^,]+)')
+SPLIT_CHILD = re.compile(r'([a-z]+)/[0-9a-f]{64}/index\.m3u8')
+
+
+def split_audio_names(master):
+    """Associate only unique, referenced rendition names with source IDs."""
+    audio = {}
+    variants = []
+    for line in master.splitlines():
+        if line.startswith("#EXT-X-MEDIA:"):
+            attrs = {key: value.strip('"') for key, value in HLS_ATTRIBUTE.findall(line.partition(":")[2])}
+            if attrs.get("TYPE") != "AUDIO":
+                continue
+            uri = SPLIT_CHILD.fullmatch(attrs.get("URI", ""))
+            stable = re.fullmatch(r"a(0|[1-9][0-9]{0,3})", attrs.get("STABLE-RENDITION-ID", ""))
+            name, group = attrs.get("NAME"), attrs.get("GROUP-ID")
+            if not uri or uri[1] != "audio" or not stable or not name or not group or name in audio:
+                return {}
+            audio[name] = (int(stable[1]), group)
+        elif line.startswith("#EXT-X-STREAM-INF:"):
+            attrs = {key: value.strip('"') for key, value in HLS_ATTRIBUTE.findall(line.partition(":")[2])}
+            variants.append(attrs.get("AUDIO"))
+        elif line and not line.startswith("#") and variants:
+            uri = SPLIT_CHILD.fullmatch(line)
+            if not uri or uri[1] != "video":
+                return {}
+    groups = {group for _, group in audio.values()}
+    if len(groups) != 1 or set(variants) != groups or len({idx for idx, _ in audio.values()}) != len(audio):
+        return {}
+    return {name: idx for name, (idx, _) in audio.items()}
+
 
 
 @dataclass
@@ -142,6 +173,9 @@ class Playback:
         self.eof_handled = False
         self.retryable = False
         self.pending_quality = None
+        self.split_audio_probe = None
+        self.split_audio_names = {}
+        self.observed_split_audio = None
         self.deferred_film_seek = None
         self._seed_context = handoff.get("cinema_context")
 
@@ -297,6 +331,17 @@ class Playback:
 
     def load(self, url, start_local_s):
         self.reset_renderer_facts()
+        self.split_audio_probe = None
+        self.split_audio_names = {}
+        self.observed_split_audio = None
+        self.mpv.set("user-data/cinema-audio-rendition", "")
+        if self.session is not None:
+            sid = self.session["session_id"]
+            path = self.http.path_of(url)
+            if urllib.parse.urlsplit(path).path == f"/api/v1/hls/{sid}/master.m3u8":
+                result = Future()
+                self.split_audio_probe = (url, sid, result)
+                Thread(target=self._probe_split_audio, args=(path, result), daemon=True).start()
         if (self.mode == "direct" or self.sidecar) and not self._auth_header:
             # Over the private IPC socket, never argv: `ps` shows argv to everyone.
             self.mpv.set("http-header-fields", [f"Authorization: Bearer {self.http.token}"])
@@ -393,6 +438,33 @@ class Playback:
                     self.mpv.set("aid", indices.index(self.audio) + 1)
         except MpvError as error:
             self.log(f"track selection failed: {error}")
+
+    def _probe_split_audio(self, path, result):
+        result.set_result(split_audio_names(self.http.read_hls_master(path)))
+
+    def observe_split_audio(self):
+        if self.split_audio_probe is None or self.session is None or self.loading:
+            return
+        url, sid, result = self.split_audio_probe
+        if not result.done() or self.session["session_id"] != sid or self.mpv.get("path") != url:
+            return
+        if not self.split_audio_names:
+            self.split_audio_names = result.result()
+            if not self.split_audio_names:
+                self.split_audio_probe = None
+                return
+        tracks = [track for track in self.mpv.get("track-list", []) if track.get("type") == "audio"]
+        selected = [track.get("title") for track in tracks if track.get("selected")]
+        if len(selected) != 1 or sum(track.get("title") == selected[0] for track in tracks) != 1:
+            return
+        source = self.split_audio_names.get(selected[0])
+        if source is None or source == self.observed_split_audio:
+            return
+        if self.observed_split_audio is not None:
+            self.requested_audio = source
+        self.audio = source
+        self.observed_split_audio = source
+        self.mpv.set("user-data/cinema-audio-rendition", f"a{source}")
 
     def position_ms(self):
         """mpv time plus the session origin; the last known value when mpv has none."""
@@ -1009,6 +1081,7 @@ class Playback:
             if self.mpv.closed:
                 return
             self.refresh_tone_mapping(start_probe=False)
+            self.observe_split_audio()
             now = self.clock()
             if self.pending_quality is not None and now >= self.pending_quality["deadline"]:
                 self.settle_quality("The quality change timed out; restored the previous quality")

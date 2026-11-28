@@ -3773,7 +3773,7 @@ struct PlaybackStatsView: View {
             guard let status, status.id == controller.currentSessionId else { return nil }
             return status.dolbyVisionRefit?.label.map { ContractFieldValue(value: $0) }
         case "decode_audio":
-            return nil
+            return controller.selectedSplitAudioRendition.map { ContractFieldValue(value: $0) }
         case "source_read":
             return ContractFieldValue(value: "Unavailable", tone: .muted)
         case "server_ready":

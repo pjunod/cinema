@@ -53,6 +53,41 @@ final class GrowingPlaylistPreparationTests: XCTestCase {
         }
     }
 
+    func testSplitMasterWaitsForTheDefaultAudioAndVideo() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PreparationHTTP.self]
+        let transport = URLSession(configuration: configuration)
+        defer { PreparationHTTP.onRequest = nil; transport.invalidateAndCancel() }
+        let url = try XCTUnwrap(URL(string: "http://media.test/hls/session/master.m3u8"))
+        let audio = String(repeating: "a", count: 64)
+        let video = String(repeating: "b", count: 64)
+        let waitingForAudio = expectation(description: "default audio requested")
+        let waitingForVideo = expectation(description: "video requested")
+        PreparationHTTP.onRequest = { request in
+            switch request.request.url?.path {
+            case "/hls/session/master.m3u8":
+                let master = """
+                #EXTM3U
+                #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Default",DEFAULT=YES,STABLE-RENDITION-ID="a0",URI="audio/\(audio)/index.m3u8"
+                #EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio"
+                video/\(video)/index.m3u8
+                """
+                request.finish(body: Data(master.utf8))
+            case "/hls/session/audio/\(audio)/index.m3u8":
+                waitingForAudio.fulfill()
+                request.finish(body: Data("#EXTM3U\n#EXTINF:1,\nsegment/0.m4s\n".utf8))
+            case "/hls/session/video/\(video)/index.m3u8":
+                waitingForVideo.fulfill()
+                request.finish(body: Data("#EXTM3U\n#EXTINF:1,\nsegment/0.m4s\n".utf8))
+            default:
+                XCTFail("unexpected playlist")
+                request.finish(status: 404, body: Data())
+            }
+        }
+        try await GrowingPlaylistPreparation.wait(for: url, using: transport)
+        await fulfillment(of: [waitingForAudio, waitingForVideo], timeout: 3)
+    }
+
     func testOnlySuccessfulPlaylistResponseAllowsNativePreparation() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [PreparationHTTP.self]

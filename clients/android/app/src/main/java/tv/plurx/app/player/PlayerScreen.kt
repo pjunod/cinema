@@ -2431,7 +2431,10 @@ private fun PlayerInfo(
     // show that.
     val surfaceRevision = controller.surfaceRevision
     val surfaceHistory = remember(surfaceRevision) { controller.surfaceHistory }
-    val selectedAudio = player.audioFormat?.let(::audioLabel)
+    val selectedAudio = player.audioFormat?.let { format ->
+        val playing = audioLabel(format)
+        controller.confirmedSplitAudio?.let { "$playing · a$it" } ?: playing
+    }
         ?: plan.audio.firstOrNull { it.index == controller.selectedAudio }?.let(::serverAudioLabel)
         ?: plan.audio.firstOrNull { it.default }?.let(::serverAudioLabel)
     val selectedSubtitle = controller.progressiveCaptions.selected?.let {

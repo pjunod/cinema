@@ -275,6 +275,9 @@ function requestSplitAudio(me,idx,alternate){
   me.hls.audioTrack=alternate;
 }
 function splitAudioSwitched(me,hls,trackId){
+  if(me?.hls===hls){
+    me.selectedAudioRendition=hls.audioTracks?.[trackId]?.attrs?.['STABLE-RENDITION-ID']||null;
+  }
   const want=me&&me.requestedAudio;
   if(!want||want.hls!==hls||me.hls!==hls||want.track!==trackId) return;
   me.requestedAudio=null;
@@ -308,6 +311,7 @@ async function switchAudio(idx){
   if(!me||!v||idx===me.curAudio) return;
   const alternate=splitAudioTrackFor(me,idx);
   if(alternate>=0){ requestSplitAudio(me,idx,alternate); return; }
+  if(typeof selectNativeAudio==='function'&&selectNativeAudio(v,me,idx)) return;
   endWait(false); // cancel a timer armed for the stream this switch replaces
   if(typeof translationRetire==="function")translationRetire("audio changed");
   me.curAudio=idx;

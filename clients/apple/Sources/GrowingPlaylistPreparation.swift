@@ -40,6 +40,13 @@ enum GrowingPlaylistPreparation {
                 $0.trimmingCharacters(in: .whitespaces)
             }.filter { !$0.isEmpty }
             if lines.contains(where: { $0.hasPrefix("#EXT-X-STREAM-INF:") }) {
+                if let audio = SplitHLSAudio.renditions(in: text).first(where: \.isDefault) {
+                    guard let child = URL(string: audio.uri, relativeTo: response.url ?? next)?.absoluteURL,
+                          ["http", "https"].contains(child.scheme?.lowercased() ?? "") else {
+                        throw PlaybackPreparationError.failed
+                    }
+                    pending.append(child)
+                }
                 for (index, line) in lines.enumerated() where line.hasPrefix("#EXT-X-STREAM-INF:") {
                     guard index + 1 < lines.count, !lines[index + 1].hasPrefix("#"),
                           let child = URL(string: lines[index + 1], relativeTo: response.url ?? next)?.absoluteURL,

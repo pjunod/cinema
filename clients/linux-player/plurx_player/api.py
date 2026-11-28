@@ -66,6 +66,18 @@ class Http:
     def url(self, path):
         return self.origin + self.path_of(path)
 
+    def read_hls_master(self, path):
+        """Read a bounded capability-authenticated playlist from this server."""
+        request = urllib.request.Request(
+            self.url(path), headers={"Accept": "application/vnd.apple.mpegurl",
+                                     "User-Agent": self.user_agent})
+        try:
+            with self._opener.open(request, timeout=2.0) as response:
+                raw = response.read(65_537)
+                return raw.decode("utf-8") if response.status == 200 and len(raw) <= 65_536 else ""
+        except (urllib.error.URLError, OSError, ValueError):
+            return ""
+
     def request(self, method, path, body=None, auth=True, timeout=None):
         """Return ``(status, json_or_none)``; raise ApiError only when nothing answered."""
         headers = {"Accept": "application/json", "User-Agent": self.user_agent}

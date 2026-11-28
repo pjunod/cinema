@@ -1457,6 +1457,7 @@ class Controller internal constructor(
         }
 
         override fun onTracksChanged(tracks: Tracks) {
+            confirmSplitAudio(tracks)
             applyTextSelection()
             applyAudioSelection()
             completeRecipeExecution()
@@ -2383,21 +2384,81 @@ class Controller internal constructor(
         continuousAttempt = null
     }
 
+    private data class PendingSplitAudio(
+        val epoch: Long,
+        val session: String,
+        val player: ExoPlayer,
+        val sequence: Long,
+        val recipe: PlaybackRecipeOwnership.Claim,
+        val option: SplitHlsAudio.Option,
+    )
+    private var pendingSplitAudio: PendingSplitAudio? = null
+    var confirmedSplitAudio by mutableStateOf<Long?>(null)
+        private set
+
+    private fun splitAudioOptions(tracks: Tracks = player.currentTracks): List<SplitHlsAudio.Option> {
+        val session = sessionId ?: return emptyList()
+        val master = (player.currentManifest as? HlsManifest)?.multivariantPlaylist ?: return emptyList()
+        val origin = Session.playbackAuthorization().origin
+        fun owns(url: String) = preparedPlaylistOwnership(url, origin, session) == PreparedPlaylistOwnership.Owned
+        if (!owns(master.baseUri)) return emptyList()
+        return SplitHlsAudio.options(master, tracks, ::owns)
+    }
+
+    private fun confirmSplitAudio(tracks: Tracks) {
+        val observed = splitAudioOptions(tracks).singleOrNull { it.selected }
+        confirmedSplitAudio = observed?.sourceIndex
+        val pending = pendingSplitAudio ?: return
+        if (player !== pending.player || sessionId != pending.session || mediaMutationEpoch != pending.epoch ||
+            !playbackIntent.isCurrent(pending.sequence) || currentRecipe() != pending.recipe
+        ) {
+            pendingSplitAudio = null
+            return
+        }
+        if (observed?.sourceIndex != pending.option.sourceIndex ||
+            observed.group != pending.option.group || observed.index != pending.option.index
+        ) return
+        val transport = recipeOwnership.attachedTransport ?: return
+        pendingSplitAudio = null
+        recipeOwnership.attach(pending.recipe, transport)
+        armTrackSelections(pending.recipe)
+        markIntentExecuted(pending.sequence, pending.recipe, inPlace = true)
+    }
+
     fun switchAudio(index: Long) {
         if (!playbackControlBootstrapFence.isActive()) return
         if (index == selectedAudio) return
         val position = positionForPlaybackIntent()
+        val inheritedSeek = playbackIntent.needsSeekForInPlaceSelection()
+        val attached = recipeOwnership.attached
+        val attachedSession = sessionId
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
         progressiveCaptions.off()
         selectedAudio = index
         refreshAutoCatalogForViewerRecipe()
         val pending = playbackIntent.beginSeek(position, position)
-        currentRecipe()
+        val recipe = currentRecipe()
         sampleTargetPresentationDeadline()
         val publicationEpoch = mediaMutationEpoch
+        val incumbent = player
         scope.launch {
-            if (publishIntent(pending, publicationEpoch = publicationEpoch)) restartAt(position, "audio")
+            if (!publishIntent(pending, publicationEpoch = publicationEpoch)) return@launch
+            val sameMedia = attached?.recipe?.copy(audioIndex = index)?.hasSameMedia(recipe.recipe) == true
+            val alternate = if (!inheritedSeek && sameMedia && attachedSession != null &&
+                sessionId == attachedSession && player === incumbent && recipeOwnership.attached == attached
+            ) splitAudioOptions().singleOrNull { it.sourceIndex == index } else null
+            if (alternate == null || attachedSession == null) {
+                restartAt(position, "audio")
+                return@launch
+            }
+            pendingSplitAudio = PendingSplitAudio(publicationEpoch, attachedSession, incumbent,
+                pending.sequence, recipe, alternate)
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setOverrideForType(TrackSelectionOverride(alternate.group, alternate.index))
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                .build()
+            confirmSplitAudio(player.currentTracks)
         }
     }
 
