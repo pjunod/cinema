@@ -33,6 +33,12 @@ fn demand_wants(d: &Value, core: i64, width: i64) -> bool {
     let ahead = (d["playback_rate"].as_f64().unwrap_or(1.0) as i64 + 1).min(2);
     core >= current && core <= current + ahead
 }
+#[derive(Clone, Copy)]
+enum SpeechDemand {
+    Viewer,
+    Finish,
+}
+
 async fn interested(
     state: &AppState,
     source: &JobPayload,
@@ -51,6 +57,13 @@ async fn interested(
             .is_some_and(|row| row["interested"] == true));
         }
     }
+    Ok(speech_demand(state, source).await?.is_some())
+}
+
+async fn speech_demand(
+    state: &AppState,
+    source: &JobPayload,
+) -> Result<Option<SpeechDemand>, StoreError> {
     let (op, epoch, core) = match source {
         JobPayload::SubtitleTranslationPrepare {
             operation_id,
@@ -62,7 +75,7 @@ async fn interested(
             recipe.operation_epoch,
             Some((recipe.core_index, i64::from(recipe.profile.core_ms))),
         ),
-        _ => return Ok(true),
+        _ => return Ok(None),
     };
     let demands = read(
         state,
@@ -72,9 +85,29 @@ async fn interested(
         },
     )
     .await?;
-    Ok(demands
+    if demands
         .iter()
-        .any(|d| core.is_none_or(|(index, width)| demand_wants(d, index, width))))
+        .any(|d| core.is_none_or(|(index, width)| demand_wants(d, index, width)))
+    {
+        return Ok(Some(SpeechDemand::Viewer));
+    }
+    Ok(read(
+        state,
+        TranslationQuery::Operation {
+            operation_id: op.clone(),
+        },
+    )
+    .await?
+    .first()
+    .is_some_and(|row| {
+        row["finish_requested"] == true
+            && number(&row["operation_epoch"]) == Some(epoch)
+            && !matches!(
+                row["state"].as_str(),
+                Some("complete" | "failed" | "stopped")
+            )
+    })
+    .then_some(SpeechDemand::Finish))
 }
 
 /// Whether this node's current boot holds the source binding the store
@@ -235,8 +268,55 @@ pub(crate) async fn reconcile_producer(
     Ok(())
 }
 
-/// Enqueue at most one missing core for operations a viewer currently wants.
-/// Returns whether any operation had live demand.
+async fn queue_range(
+    state: &AppState,
+    recipe: RangeRecipe,
+    producer_preparation_job_id: String,
+    range_revision: i64,
+    priority: u8,
+) -> Result<(), StoreError> {
+    recipe.validate()?;
+    let now = crate::state::clock_ms();
+    let id = uuid::Uuid::new_v4().to_string();
+    let digest = plurx_core::store::subtitle_translation::digest(
+        &serde_json::to_value(&recipe)
+            .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?,
+    )?;
+    let dedupe_key = format!(
+        "translation-range:{}:{}:{}:{range_revision}",
+        recipe.operation_id, recipe.operation_epoch, recipe.core_index
+    );
+    state
+        .store
+        .enqueue_job(EnqueueJob {
+            id: id.clone(),
+            payload: JobPayload::SubtitleTranslationRange {
+                file_id: recipe.source.file_id,
+                recipe,
+                producer_preparation_job_id,
+                target_node_id: state.node_id.clone(),
+            },
+            dedupe_key,
+            priority,
+            not_before_ms: now,
+            now_ms: now,
+            request: JobRequest {
+                scope: "subtitle-translation-range".into(),
+                request_id: id,
+                request_digest: digest.clone(),
+                consumer_kind: "subtitle_translation_range".into(),
+                consumer_ref: digest,
+                target_node_id: Some(state.node_id.clone()),
+                deadline_ms: None,
+                retain_identity: false,
+            },
+        })
+        .await?;
+    Ok(())
+}
+
+/// Enqueue one missing core, serving any playhead window before finishing a
+/// track in the background.
 async fn schedule(state: &AppState) -> Result<bool, StoreError> {
     let after = state
         .subtitle_models
@@ -277,10 +357,8 @@ async fn schedule(state: &AppState) -> Result<bool, StoreError> {
         ops.rotate_left(turn % len);
     }
 
+    let mut finish = None;
     for op in ops {
-        let Some(asset) = op["asset_id"].as_str() else {
-            continue;
-        };
         let operation_id = op["operation_id"]
             .as_str()
             .ok_or_else(|| StoreError::Task("translation operation identity".into()))?
@@ -301,13 +379,41 @@ async fn schedule(state: &AppState) -> Result<bool, StoreError> {
         else {
             continue;
         };
-        let Some(held) = state.subtitle_models.translation.cached(&file).await else {
-            continue;
+        let binding = op["asset_id"]
+            .as_str()
+            .zip(state.subtitle_models.translation.cached(&file).await);
+        let (asset, held) = match binding {
+            Some((asset, held)) if bound_this_boot(state, asset, &operation_id, epoch).await? => {
+                (asset, held)
+            }
+            _ => {
+                if let Some(requested_by) = number(&op["finish_requested_by"]) {
+                    // A restarted producer re-attests this operation through
+                    // the same fenced source preparation as a viewer retry.
+                    reconcile_producer(state, &operation_id, requested_by).await?;
+                }
+                continue;
+            }
         };
-        if !bound_this_boot(state, asset, &operation_id, epoch).await? {
-            continue;
-        }
         let duration = number(&op["duration_ms"]).unwrap_or(0);
+        let make_recipe = |core_index| {
+            Ok::<_, StoreError>(RangeRecipe {
+                asset_id: asset.into(),
+                operation_id: operation_id.clone(),
+                operation_epoch: epoch,
+                source: source.clone(),
+                source_sha256: held.sha256().into(),
+                profile: profile.clone(),
+                audio_index: number(&op["audio_index"])
+                    .ok_or_else(|| StoreError::Task("translation audio identity".into()))?,
+                spoken_language: op["spoken_language"].as_str().unwrap_or_default().into(),
+                duration_ms: duration,
+                core_index,
+            })
+        };
+        let preparation_job = op["preparation_job_id"]
+            .as_str()
+            .ok_or_else(|| StoreError::Task("translation producer missing".into()))?;
         let demands = read(
             state,
             TranslationQuery::LiveDemands {
@@ -349,67 +455,42 @@ async fn schedule(state: &AppState) -> Result<bool, StoreError> {
                 }) {
                     continue;
                 }
-                let recipe = RangeRecipe {
-                    asset_id: asset.into(),
-                    operation_id: operation_id.clone(),
-                    operation_epoch: epoch,
-                    source: source.clone(),
-                    source_sha256: held.sha256().into(),
-                    profile: profile.clone(),
-                    audio_index: number(&op["audio_index"])
-                        .ok_or_else(|| StoreError::Task("translation audio identity".into()))?,
-                    spoken_language: op["spoken_language"].as_str().unwrap_or_default().into(),
-                    duration_ms: duration,
-                    core_index: index,
-                };
-                recipe.validate()?;
-                let now = crate::state::clock_ms();
-                let id = uuid::Uuid::new_v4().to_string();
-                let digest = plurx_core::store::subtitle_translation::digest(
-                    &serde_json::to_value(&recipe)
-                        .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?,
-                )?;
-                state
-                    .store
-                    .enqueue_job(EnqueueJob {
-                        id: id.clone(),
-                        payload: JobPayload::SubtitleTranslationRange {
-                            file_id: source.file_id,
-                            recipe,
-                            producer_preparation_job_id: op["preparation_job_id"]
-                                .as_str()
-                                .ok_or_else(|| {
-                                    StoreError::Task("translation producer missing".into())
-                                })?
-                                .into(),
-                            target_node_id: state.node_id.clone(),
-                        },
-                        dedupe_key: format!(
-                            "translation-range:{operation_id}:{epoch}:{index}:{}",
-                            prior
-                                .first()
-                                .and_then(|r| number(&r["range_revision"]))
-                                .unwrap_or(0)
-                        ),
-                        priority: 1,
-                        not_before_ms: now,
-                        now_ms: now,
-                        request: JobRequest {
-                            scope: "subtitle-translation-range".into(),
-                            request_id: id,
-                            request_digest: digest.clone(),
-                            consumer_kind: "subtitle_translation_range".into(),
-                            consumer_ref: digest,
-                            target_node_id: Some(state.node_id.clone()),
-                            deadline_ms: None,
-                            retain_identity: false,
-                        },
-                    })
-                    .await?;
-                // Bound scheduling and prioritize the first absent core.
+                queue_range(
+                    state,
+                    make_recipe(index)?,
+                    preparation_job.into(),
+                    prior
+                        .first()
+                        .and_then(|r| number(&r["range_revision"]))
+                        .unwrap_or(0),
+                    1,
+                )
+                .await?;
                 return Ok(true);
             }
         }
+        if finish.is_none() {
+            let rows = read(
+                state,
+                TranslationQuery::FinishCore {
+                    operation_id: operation_id.clone(),
+                    operation_epoch: epoch,
+                },
+            )
+            .await?;
+            if let Some(row) = rows.first() {
+                let index = number(&row["core_index"])
+                    .ok_or_else(|| StoreError::Task("translation core identity".into()))?;
+                finish = Some((
+                    make_recipe(index)?,
+                    preparation_job.to_owned(),
+                    number(&row["range_revision"]).unwrap_or(0),
+                ));
+            }
+        }
+    }
+    if let Some((recipe, preparation_job, revision)) = finish {
+        queue_range(state, recipe, preparation_job, revision, 0).await?;
     }
     Ok(demanded)
 }
@@ -663,7 +744,7 @@ pub(crate) async fn worker_pass(
         if shutdown.is_cancelled() || !authority.may_execute_job(source.kind()).await {
             continue;
         }
-        if !interested(state, &source, None).await? {
+        let Some(demand) = speech_demand(state, &source).await? else {
             state
                 .store
                 .cancel_job(plurx_core::store::background_jobs::CancelJob {
@@ -672,7 +753,7 @@ pub(crate) async fn worker_pass(
                 })
                 .await?;
             continue;
-        }
+        };
         if !super::workers_public(state)
             .await
             .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?
@@ -688,9 +769,13 @@ pub(crate) async fn worker_pass(
         {
             continue;
         }
-        let admission = match state.transcode.admit_progressive_speech(shutdown).await {
-            Some(a) if state.transcode.speech_capacity_available(&a) => a,
-            _ => continue,
+        let admission = match demand {
+            SpeechDemand::Viewer => state.transcode.admit_progressive_speech(shutdown).await,
+            SpeechDemand::Finish => state.transcode.admit_speech().await,
+        };
+        let Some(admission) = admission.filter(|a| state.transcode.speech_capacity_available(a))
+        else {
+            continue;
         };
         let now = crate::state::clock_ms();
         let kind = source.kind();

@@ -3145,9 +3145,15 @@ pub(crate) async fn subtitle_vtt_for_file_revision(
         if revision.len() > 192 {
             return Err(ApiError::BadRequest("invalid subtitle revision".into()));
         }
-        let cached = crate::subtitles::read_cached_revision(&state.subs_dir, file, index, revision)
-            .await
-            .map_err(|_| ApiError::Internal("subtitle cache read failed".into()))?;
+        let cached = crate::subtitles::read_cached_revision(
+            &state.subs_dir,
+            file,
+            index,
+            revision,
+            Some(&state.subtitle_source_access()),
+        )
+        .await
+        .map_err(|_| ApiError::Internal("subtitle cache read failed".into()))?;
         return Ok(match cached {
             Some((bytes, complete)) => {
                 let mut response = vtt_response(bytes);

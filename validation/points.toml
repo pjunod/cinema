@@ -1975,6 +1975,7 @@ paths = [
   "crates/plurx-core/src/store/subtitle_translation_retarget.sql",
   "crates/plurx-core/src/store/subtitle_translation_continuity.sql",
   "crates/plurx-core/src/store/subtitle_translation_authority.sql",
+  "crates/plurx-core/src/store/subtitle_translation_finish.sql",
   "crates/plurx-core/src/store/ai_subtitles.rs",
   "crates/plurxd/src/ai_subtitles/**",
   "crates/plurx-core/src/store/shared_caption_read.rs",

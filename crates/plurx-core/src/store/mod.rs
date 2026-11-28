@@ -312,6 +312,7 @@ mod subtitle_managed_schema;
 pub mod subtitle_text_translation;
 mod subtitle_text_translation_schema;
 mod subtitle_translation_schema;
+mod subtitle_translation_tracks;
 pub mod watched_drain;
 
 #[cfg(feature = "hiqlite-contract-tests")]

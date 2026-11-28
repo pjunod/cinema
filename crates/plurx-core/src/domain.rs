@@ -694,6 +694,10 @@ pub struct SubtitleTranscription {
     pub pipeline_digest: String,
     pub adapter: String,
     pub generated_at_ms: i64,
+    /// Completed progressive assets can serve their segments as a stored
+    /// track when the rendered WebVTT exceeds the replicated row's cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progressive_asset_id: Option<String>,
     /// Exact qualified engine used for this managed caption. Historical and
     /// Advanced captions retain their original JSON without this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]

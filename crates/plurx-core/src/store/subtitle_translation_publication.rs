@@ -41,6 +41,8 @@ const OWNS: &str = r#"job.id=json_extract($1,'$.token.job_id') AND job.state='ru
 const CURRENT: &str = r#"op.id=json_extract($1,'$.recipe.operation_id')
  AND op.operation_epoch=json_extract($1,'$.recipe.operation_epoch') AND op.stopped=0
  AND op.state NOT IN ('stopped','failed')
+ AND EXISTS(SELECT 1 FROM settings cfg WHERE cfg.key='subtitles.ai.v1'
+ AND CASE WHEN json_valid(cfg.value) THEN json_extract(cfg.value,'$.version')=1 AND json_type(cfg.value,'$.from_audio')='true' ELSE 0 END)
  AND op.target_node_id=json_extract($1,'$.token.node_id')
  AND op.target_node_id=json_extract($1,'$.source.target_node_id')
  AND (json_extract($1,'$.source.kind')='subtitle_translation_prepare'
@@ -52,9 +54,10 @@ const CURRENT: &str = r#"op.id=json_extract($1,'$.recipe.operation_id')
  AND op.duration_ms=json_extract($1,'$.recipe.duration_ms')
  AND EXISTS(SELECT 1 FROM files f WHERE f.id=op.file_id AND f.size=json_extract($1,'$.recipe.source.source_size')
   AND f.mtime=json_extract($1,'$.recipe.source.source_mtime') AND f.probe_json IS NOT NULL)
- AND EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id
+ AND (EXISTS(SELECT 1 FROM subtitle_translation_finish_demands finish WHERE finish.operation_id=op.id)
+ OR EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id
   WHERE d.operation_id=op.id AND d.operation_epoch=op.operation_epoch AND d.released=0
-  AND d.expires_at_ms>json_extract($1,'$.now_ms') AND (u.is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END)))"#;
+  AND d.expires_at_ms>json_extract($1,'$.now_ms') AND (u.is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))))"#;
 // Unique (asset,core) rows with valid bounds and accepted snapshot revisions
 // prove every expected core is readable. A range control row or cached count
 // alone does not: neither establishes immutable bytes in the visible manifest.
@@ -212,8 +215,9 @@ pub(super) async fn publish<T: QueueSql>(
  AND op.view_revision<9223372036854775807 AND op.asset_id=json_extract($1,'$.recipe.asset_id') AND EXISTS(SELECT 1 FROM subtitle_translation_source_bindings b
  WHERE b.operation_id=op.id AND b.operation_epoch=op.operation_epoch AND b.node_id=json_extract($1,'$.token.node_id')
  AND b.boot_id=json_extract($1,'$.token.boot_id') AND b.source_sha256=json_extract($1,'$.recipe.source_sha256'))
- AND EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id WHERE d.operation_id=op.id AND d.operation_epoch=op.operation_epoch
- AND d.released=0 AND d.expires_at_ms>json_extract($1,'$.now_ms') AND (u.is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))))"#
+ AND (EXISTS(SELECT 1 FROM subtitle_translation_finish_demands finish WHERE finish.operation_id=op.id)
+ OR EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id WHERE d.operation_id=op.id AND d.operation_epoch=op.operation_epoch
+ AND d.released=0 AND d.expires_at_ms>json_extract($1,'$.now_ms') AND (u.is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END)))))"#
     );
     store.queue_transaction(vec![
  (format!(r#"INSERT INTO subtitle_translation_segments(asset_id,core_index,segment_id,publication_id,digest,body,start_ms,end_ms,accepted_revision,created_at_ms)
@@ -227,6 +231,8 @@ pub(super) async fn publish<T: QueueSql>(
  AND s.core_index=json_extract($1,'$.recipe.core_index') AND s.publication_id=json_extract($1,'$.publication_id') AND s.accepted_revision=subtitle_translation_assets.manifest_revision+1)"#.into(),body.clone()),
  (format!(r#"UPDATE subtitle_translation_operations AS op SET view_revision=view_revision+1,{progress},updated_at_ms=json_extract($1,'$.now_ms')
  WHERE {CURRENT} AND {continuation} AND EXISTS(SELECT 1 FROM background_jobs job WHERE {OWNS}) AND EXISTS(SELECT 1 FROM subtitle_translation_segments s WHERE s.asset_id=op.asset_id AND s.core_index=json_extract($1,'$.recipe.core_index') AND s.publication_id=json_extract($1,'$.publication_id'))"#),body.clone()),
- (success_sql(),body.clone()),(SETTLE_WAITERS.into(),body.clone())]).await?;
+ (success_sql(),body.clone()),(SETTLE_WAITERS.into(),body.clone()),
+ (super::subtitle_translation_tracks::store_inline(),body.clone()),
+ (super::subtitle_translation_tracks::store_asset_reference(),body.clone())]).await?;
     settled(store, body).await
 }

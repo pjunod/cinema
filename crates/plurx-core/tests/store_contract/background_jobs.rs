@@ -5256,6 +5256,7 @@ async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop
                         "whisper.cpp"
                     }
                     .into(),
+                    progressive_asset_id: None,
                     execution: managed.then(|| plurx_core::domain::SubtitleExecution {
                         engine_sha256: "e".repeat(64),
                         platform: "macos-arm64".into(),
@@ -5932,6 +5933,7 @@ async fn managed_caption_execution_provenance_survives_publish_reopen_and_legacy
         pipeline_digest: "b".repeat(64),
         adapter: "whisper.cpp-1.9.2-cpu-v1".into(),
         generated_at_ms: 1001,
+        progressive_asset_id: None,
         execution: Some(SubtitleExecution {
             engine_sha256: "e".repeat(64),
             platform: "macos-arm64".into(),
@@ -6112,6 +6114,7 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
                 position_ms: 0,
                 playback_rate: 1.0,
                 paused: false,
+                finish: false,
                 continuity_id: Some(continuity.clone()),
             },
         };

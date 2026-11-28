@@ -1382,6 +1382,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_job_turns::AI_AUTHORITY_MIGRATION,
     // v140: translation continuity capture follows `subtitles.ai.v1` authority.
     super::subtitle_translation_schema::AUTHORITY_MIGRATION,
+    // v141: each new AI audio start can finish independently of live viewers.
+    super::subtitle_translation_schema::FINISH_MIGRATION,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1473,13 +1475,16 @@ fn item_from_row(row: &Row<'_>, base: usize) -> rusqlite::Result<Item> {
 // failure records the file with `ProbeResult::default()`, leaving the raw JSON
 // null and every media column empty. Selected as a column so callers can tell
 // "we have no details" from "the details say nothing".
-const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, \
+const FILE_COLS: &str = concat!(
+    "id, item_id, path, size, mtime, duration_ms, container, video_codec, \
      video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, \
      subtitle_streams, scanned_at, hdr_format, audio_offset_ms, \
      (probe_json IS NOT NULL), \
      dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, \
      video_codec_tag, field_order, \
-     max_cll, max_fall, mastering_max_luminance, luminance_source, downloaded_subtitles";
+     max_cll, max_fall, mastering_max_luminance, luminance_source, ",
+    super::downloaded_subtitles::file_track_projection!()
+);
 
 fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
     let path: String = row.get(2)?;
@@ -1883,8 +1888,17 @@ impl SqliteStore {
             if version == 140 {
                 super::subtitle_translation_schema::verify_authority_predecessor(&tx)?;
             }
+            if version == 141 {
+                super::subtitle_translation_schema::verify_finish_predecessor(&tx)?;
+            }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
+            if version == 141 {
+                tx.execute(
+                    super::subtitle_translation_schema::SUPERSEDE_LEGACY_JOBS,
+                    [],
+                )?;
+            }
         }
         if version == 133 {
             super::delegation::verify_sqlite(&tx)?;

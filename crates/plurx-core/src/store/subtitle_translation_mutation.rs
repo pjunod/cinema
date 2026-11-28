@@ -31,6 +31,8 @@ pub enum TranslationAction {
         position_ms: i64,
         playback_rate: f64,
         paused: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        finish: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         continuity_id: Option<String>,
     },
@@ -54,6 +56,10 @@ pub enum TranslationAction {
         playback_id: String,
     },
     Stop {
+        operation_id: String,
+        expected_operation_epoch: i64,
+    },
+    ReleaseViewer {
         operation_id: String,
         expected_operation_epoch: i64,
     },
@@ -94,8 +100,11 @@ pub enum TranslationAction {
 impl TranslationMutation {
     pub fn validate(&self) -> Result<(), StoreError> {
         let bad = || StoreError::Task("invalid translation mutation".into());
+        let server_action = matches!(&self.action, TranslationAction::Create { finish: true, playback_id, .. } if playback_id.is_empty())
+            || matches!(&self.action, TranslationAction::Retarget { .. });
         if !super::subtitle_translation::valid_digest(&self.request_digest)
-            || self.user_id <= 0
+            || self.user_id < 0
+            || (self.user_id == 0 && !server_action)
             || uuid::Uuid::parse_str(&self.request_id).is_err()
             || self.now_ms < 0
             || self.now_ms.checked_add(604800000).is_none()
@@ -132,6 +141,7 @@ impl TranslationMutation {
                 playback_id,
                 position_ms,
                 playback_rate,
+                finish,
                 ..
             } => {
                 source.validate()?;
@@ -142,7 +152,11 @@ impl TranslationMutation {
                     || !(1..=14400000).contains(duration_ms)
                     || target_node_id.is_empty()
                     || target_node_id.len() > 128
-                    || !window(position_ms, playback_rate, playback_id)
+                    || !(window(position_ms, playback_rate, playback_id)
+                        || (*finish
+                            && playback_id.is_empty()
+                            && *position_ms == 0
+                            && *playback_rate == 1.0))
                 {
                     return Err(bad());
                 }
@@ -183,6 +197,10 @@ impl TranslationMutation {
                 }
             }
             TranslationAction::Stop {
+                operation_id,
+                expected_operation_epoch,
+            }
+            | TranslationAction::ReleaseViewer {
                 operation_id,
                 expected_operation_epoch,
             } => {
@@ -256,17 +274,31 @@ const MUTATE: &str = r#"WITH input AS MATERIALIZED(SELECT json($1) body), prior 
  (SELECT body_digest FROM subtitle_translation_requests WHERE user_id=json_extract(body,'$.user_id') AND request_id=json_extract(body,'$.request_id')) previous_digest FROM input),
  selected AS MATERIALIZED(SELECT *,COALESCE(json_extract(body,'$.action.operation_id'),(SELECT id FROM subtitle_translation_operations WHERE recipe_key=json_extract(body,'$.recipe_key')),json_extract(body,'$.allocated_operation_id')) op_id FROM prior),
  classified AS MATERIALIZED(SELECT *,CASE
- WHEN NOT EXISTS(SELECT 1 FROM users WHERE id=json_extract(body,'$.user_id') AND (is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))) THEN 'forbidden'
+ WHEN json_extract(body,'$.user_id')!=0 AND NOT EXISTS(SELECT 1 FROM users WHERE id=json_extract(body,'$.user_id') AND (is_admin=1 OR json_extract(body,'$.action.action') IN ('release','release_viewer') OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))) THEN 'forbidden'
+ WHEN json_extract(body,'$.user_id')=0 AND json_extract(body,'$.action.action')='create'
+ AND NOT EXISTS(SELECT 1 FROM settings cfg WHERE cfg.key='subtitles.ai.v1' AND CASE WHEN json_valid(cfg.value) THEN json_extract(cfg.value,'$.version')=1 AND json_type(cfg.value,'$.ahead_of_time')='true' ELSE 0 END) THEN 'disabled'
+ WHEN json_extract(body,'$.user_id')=0 AND json_extract(body,'$.action.action')='retarget'
+ AND NOT EXISTS(SELECT 1 FROM subtitle_translation_finish_demands finish WHERE finish.operation_id=op_id AND finish.requested_by=0)
+ THEN 'forbidden'
  WHEN previous IS NOT NULL AND previous_digest!=json_extract(body,'$.body_digest') THEN 'request_conflict'
  WHEN previous IS NOT NULL THEN 'replay'
  WHEN json_extract(body,'$.intent_expires_at_ms')<=json_extract(body,'$.now_ms') OR json_extract(body,'$.intent_expires_at_ms')>json_extract(body,'$.now_ms')+300000 THEN 'intent_expired'
- WHEN (SELECT count(*) FROM subtitle_translation_requests)>=CASE WHEN json_extract(body,'$.action.action') IN ('stop','release') THEN 16384 ELSE 16352 END OR (SELECT count(*) FROM subtitle_translation_requests WHERE user_id=json_extract(body,'$.user_id'))>=CASE WHEN json_extract(body,'$.action.action') IN ('stop','release') THEN 1024 ELSE 1016 END
- OR (SELECT COALESCE(sum(length(CAST(outcome_json AS BLOB))),0) FROM subtitle_translation_requests)+2048>=CASE WHEN json_extract(body,'$.action.action') IN ('stop','release') THEN 8388608 ELSE 8323072 END
- OR (SELECT COALESCE(sum(length(CAST(outcome_json AS BLOB))),0) FROM subtitle_translation_requests WHERE user_id=json_extract(body,'$.user_id'))+2048>=CASE WHEN json_extract(body,'$.action.action') IN ('stop','release') THEN 524288 ELSE 507904 END THEN 'receipt_quota'
- WHEN json_extract(body,'$.action.action') NOT IN ('stop','release') AND (SELECT count(*) FROM subtitle_translation_requests WHERE user_id=json_extract(body,'$.user_id') AND created_at_ms>json_extract(body,'$.now_ms')-60000)>=60 THEN 'rate_limited'
+ WHEN (SELECT count(*) FROM subtitle_translation_requests)>=CASE WHEN json_extract(body,'$.action.action') IN ('stop','release','release_viewer') THEN 16384 ELSE 16352 END OR (SELECT count(*) FROM subtitle_translation_requests WHERE user_id=json_extract(body,'$.user_id'))>=CASE WHEN json_extract(body,'$.action.action') IN ('stop','release','release_viewer') THEN 1024 ELSE 1016 END
+ OR (SELECT COALESCE(sum(length(CAST(outcome_json AS BLOB))),0) FROM subtitle_translation_requests)+2048>=CASE WHEN json_extract(body,'$.action.action') IN ('stop','release','release_viewer') THEN 8388608 ELSE 8323072 END
+ OR (SELECT COALESCE(sum(length(CAST(outcome_json AS BLOB))),0) FROM subtitle_translation_requests WHERE user_id=json_extract(body,'$.user_id'))+2048>=CASE WHEN json_extract(body,'$.action.action') IN ('stop','release','release_viewer') THEN 524288 ELSE 507904 END THEN 'receipt_quota'
+ WHEN json_extract(body,'$.action.action') NOT IN ('stop','release','release_viewer') AND (SELECT count(*) FROM subtitle_translation_requests WHERE user_id=json_extract(body,'$.user_id') AND created_at_ms>json_extract(body,'$.now_ms')-60000)>=60 THEN 'rate_limited'
  WHEN json_extract(body,'$.action.action') IN ('create','retry_operation','retry_range','retarget') AND NOT EXISTS(SELECT 1 FROM settings WHERE key='subtitles.ai.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.version')=1 AND json_type(value,'$.from_audio')='true' ELSE 0 END) THEN 'disabled'
+ WHEN json_extract(body,'$.action.action')='create' AND json_type(body,'$.action.finish')='true'
+ AND NOT EXISTS(SELECT 1 FROM subtitle_translation_finish_demands WHERE operation_id=op_id)
+ AND NOT EXISTS(SELECT 1 FROM subtitle_translation_operations WHERE id=op_id AND state='complete')
+ AND ((SELECT count(*) FROM subtitle_translation_finish_demands finish JOIN subtitle_translation_operations op ON op.id=finish.operation_id
+       WHERE op.stopped=0 AND op.state NOT IN ('failed','complete'))>=16
+   OR (json_extract(body,'$.user_id')>0 AND NOT EXISTS(SELECT 1 FROM users WHERE id=json_extract(body,'$.user_id') AND is_admin=1)
+       AND (SELECT count(*) FROM subtitle_translation_finish_demands finish JOIN subtitle_translation_operations op ON op.id=finish.operation_id
+       WHERE finish.requested_by=json_extract(body,'$.user_id') AND op.stopped=0 AND op.state NOT IN ('failed','complete'))>=2))
+ THEN 'demand_quota'
  WHEN json_extract(body,'$.action.action')='create' AND NOT EXISTS(SELECT 1 FROM files WHERE id=json_extract(body,'$.action.source.file_id') AND size=json_extract(body,'$.action.source.source_size') AND mtime=json_extract(body,'$.action.source.source_mtime') AND probe_json IS NOT NULL) THEN 'source_changed'
- WHEN json_extract(body,'$.action.action') IN ('create','retry_operation','retry_range') AND NOT EXISTS(SELECT 1 FROM subtitle_translation_demands WHERE operation_id=op_id AND operation_epoch=(SELECT operation_epoch FROM subtitle_translation_operations WHERE id=op_id) AND user_id=json_extract(body,'$.user_id') AND playback_id=json_extract(body,'$.action.playback_id') AND released=0 AND expires_at_ms>json_extract(body,'$.now_ms')) AND (
+ WHEN json_extract(body,'$.action.action') IN ('create','retry_operation','retry_range') AND json_extract(body,'$.action.playback_id')!='' AND NOT EXISTS(SELECT 1 FROM subtitle_translation_demands WHERE operation_id=op_id AND operation_epoch=(SELECT operation_epoch FROM subtitle_translation_operations WHERE id=op_id) AND user_id=json_extract(body,'$.user_id') AND playback_id=json_extract(body,'$.action.playback_id') AND released=0 AND expires_at_ms>json_extract(body,'$.now_ms')) AND (
  (SELECT count(*) FROM subtitle_translation_demands WHERE released=0 AND expires_at_ms>json_extract(body,'$.now_ms'))>=16 OR
  (SELECT count(*) FROM subtitle_translation_demands WHERE released=0 AND expires_at_ms>json_extract(body,'$.now_ms') AND user_id=json_extract(body,'$.user_id'))>=4 OR
  (SELECT count(*) FROM subtitle_translation_demands WHERE released=0 AND expires_at_ms>json_extract(body,'$.now_ms') AND operation_id=op_id)>=4) THEN 'demand_quota'
@@ -277,7 +309,7 @@ const MUTATE: &str = r#"WITH input AS MATERIALIZED(SELECT json($1) body), prior 
  WHEN json_extract(body,'$.action.action')='stop' AND EXISTS(SELECT 1 FROM subtitle_translation_operations WHERE id=op_id AND stopped=1) THEN 'already_stopped'
  WHEN json_extract(body,'$.action.action') IN ('create','demand') AND EXISTS(SELECT 1 FROM subtitle_translation_operations WHERE id=op_id AND (stopped=1 OR state='failed')) THEN 'stopped'
  WHEN json_extract(body,'$.action.action') IN ('demand','release') AND NOT EXISTS(SELECT 1 FROM subtitle_translation_demands WHERE id=json_extract(body,'$.action.demand_id') AND operation_id=op_id AND operation_epoch=json_extract(body,'$.action.expected_operation_epoch') AND generation=json_extract(body,'$.action.expected_generation') AND generation<9223372036854775807 AND user_id=json_extract(body,'$.user_id') AND playback_id=json_extract(body,'$.action.playback_id') AND released=0) THEN 'demand_conflict'
- WHEN json_extract(body,'$.action.action')='retarget' AND NOT EXISTS(SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id WHERE op.id=op_id AND op.operation_epoch=json_extract(body,'$.action.expected_operation_epoch') AND op.view_revision=json_extract(body,'$.action.expected_view_revision') AND op.preparation_job_id=json_extract(body,'$.action.expected_preparation_job_id') AND op.target_node_id=json_extract(body,'$.action.expected_target_node_id') AND op.stopped=0 AND op.state NOT IN ('failed','stopped','complete') AND f.size=json_extract(op.source_json,'$.source_size') AND f.mtime=json_extract(op.source_json,'$.source_mtime') AND f.probe_json IS NOT NULL AND EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id WHERE d.operation_id=op.id AND d.operation_epoch=op.operation_epoch AND d.user_id=json_extract(body,'$.user_id') AND d.released=0 AND d.expires_at_ms>json_extract(body,'$.now_ms') AND (u.is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))) AND NOT __READABLE_OPERATION__) THEN 'state_conflict'
+ WHEN json_extract(body,'$.action.action')='retarget' AND NOT EXISTS(SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id WHERE op.id=op_id AND op.operation_epoch=json_extract(body,'$.action.expected_operation_epoch') AND op.view_revision=json_extract(body,'$.action.expected_view_revision') AND op.preparation_job_id=json_extract(body,'$.action.expected_preparation_job_id') AND op.target_node_id=json_extract(body,'$.action.expected_target_node_id') AND op.stopped=0 AND op.state NOT IN ('failed','stopped','complete') AND f.size=json_extract(op.source_json,'$.source_size') AND f.mtime=json_extract(op.source_json,'$.source_mtime') AND f.probe_json IS NOT NULL AND (EXISTS(SELECT 1 FROM subtitle_translation_finish_demands finish WHERE finish.operation_id=op.id AND finish.requested_by=json_extract(body,'$.user_id')) OR EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id WHERE d.operation_id=op.id AND d.operation_epoch=op.operation_epoch AND d.user_id=json_extract(body,'$.user_id') AND d.released=0 AND d.expires_at_ms>json_extract(body,'$.now_ms') AND (u.is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END)))) AND NOT __READABLE_OPERATION__) THEN 'state_conflict'
  WHEN json_extract(body,'$.action.action')='retry_operation' AND NOT EXISTS(SELECT 1 FROM subtitle_translation_operations WHERE id=op_id AND view_revision=json_extract(body,'$.action.expected_view_revision') AND state=json_extract(body,'$.action.expected_state') AND (stopped=1 OR (state='failed' AND retryable=1))) THEN 'state_conflict'
  WHEN json_extract(body,'$.action.action')='retry_range' AND NOT EXISTS(SELECT 1 FROM subtitle_translation_operations op JOIN subtitle_translation_ranges r ON r.operation_id=op.id AND r.operation_epoch=op.operation_epoch WHERE op.id=op_id AND op.state='partial' AND op.stopped=0 AND r.core_index=json_extract(body,'$.action.core_index') AND r.range_revision=json_extract(body,'$.action.expected_range_revision') AND r.state='failed' AND r.retryable=1 AND r.attempts<3 AND r.range_revision<9223372036854775807) THEN 'range_conflict'
  ELSE 'accepted' END outcome FROM selected)
@@ -317,6 +349,22 @@ pub(super) async fn mutate<T: QueueSql>(
         ),
         encode(&body)?,
     ));
+    if matches!(
+        &input.action,
+        TranslationAction::Create { finish: true, .. }
+    ) {
+        statements.push((
+            r#"INSERT INTO subtitle_translation_finish_demands(operation_id,requested_by)
+ SELECT op.id,json_extract($1,'$.user_id')
+ FROM subtitle_translation_commands c
+ JOIN subtitle_translation_operations op ON op.id=json_extract(c.result_json,'$.operation_id')
+ WHERE c.id=json_extract($1,'$.command_id') AND json_extract(c.result_json,'$.outcome')='accepted'
+  AND op.stopped=0 AND op.state NOT IN ('failed','complete')
+ ON CONFLICT(operation_id) DO NOTHING"#
+                .into(),
+            encode(&body)?,
+        ));
+    }
     let preparation = match &input.action {
         TranslationAction::Create {
             source,
@@ -336,7 +384,7 @@ pub(super) async fn mutate<T: QueueSql>(
         }),
         TranslationAction::RetryOperation { operation_id, .. }
         | TranslationAction::Retarget { operation_id, .. } => {
-            let rows=store.queue_sql("SELECT json_object('source',json(source_json),'profile',json(profile_json),'audio_index',audio_index,'spoken_language',spoken_language,'duration_ms',duration_ms,'target_node_id',target_node_id) AS result_json FROM subtitle_translation_operations WHERE id=json_extract($1,'$.operation_id') AND EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.user_id') AND (is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END)))".into(),encode(&json!({"operation_id":operation_id,"user_id":input.user_id}))?,false,true).await?;
+            let rows=store.queue_sql("SELECT json_object('source',json(source_json),'profile',json(profile_json),'audio_index',audio_index,'spoken_language',spoken_language,'duration_ms',duration_ms,'target_node_id',target_node_id) AS result_json FROM subtitle_translation_operations WHERE id=json_extract($1,'$.operation_id') AND (json_extract($1,'$.user_id')=0 OR EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.user_id') AND (is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))))".into(),encode(&json!({"operation_id":operation_id,"user_id":input.user_id}))?,false,true).await?;
             let mut facts = rows
                 .first()
                 .map(|r| decode::<PreparationFacts>(r))
@@ -387,7 +435,12 @@ pub(super) async fn mutate<T: QueueSql>(
                 target_node_id: target_node_id.clone(),
             },
             dedupe_key: format!("translation-prep-{}", input.request_id),
-            priority: 1,
+            priority: u8::from(
+                input.user_id != 0
+                    && !matches!(
+                        &input.action, TranslationAction::Create { playback_id, .. } if playback_id.is_empty()
+                    ),
+            ),
             not_before_ms: input.now_ms,
             now_ms: input.now_ms,
             request: JobRequest {

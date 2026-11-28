@@ -3806,6 +3806,10 @@ fn spawn_background_loops(
         state.clone(),
         background_shutdown.clone(),
     ));
+    tokio::spawn(subtitle_translation::schedule::run(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(http::subtitle_downloads::automatic_loop(
         state.clone(),
         background_shutdown.clone(),

@@ -223,6 +223,7 @@ async fn seed_operation(f: &Fixture, language: &str) -> (CreateRequest, Value) {
                 position_ms: 0,
                 playback_rate: 1.0,
                 paused: false,
+                finish: false,
                 continuity_id: None,
             },
         })
@@ -628,7 +629,7 @@ async fn create_replays_before_source_or_settings_changes_but_rechecks_current_a
 }
 
 #[tokio::test]
-async fn create_reuses_an_existing_recipe_and_demand_release_stop_retry_keep_epoch_fences() {
+async fn create_reuses_the_recipe_and_stop_releases_only_the_requesting_viewer() {
     let f = fixture().await;
     let (_, original) = seed_operation(&f, "de").await;
     let request = create_input(&f, "de");
@@ -698,6 +699,17 @@ async fn create_reuses_an_existing_recipe_and_demand_release_stop_retry_keep_epo
     )
     .await;
     assert_eq!(released["outcome"], "released");
+    f.state
+        .store
+        .put_setting(
+            "subtitles.ai.v1",
+            &crate::ai_subtitles::settings::TEST_ADMINS_ALL_ON.replace("admins", "everyone"),
+        )
+        .await
+        .expect("allow viewer demand");
+    let other = seed_operation_as(&f, &f.viewer, "de").await;
+    assert_eq!(other["operation_id"], op);
+    assert_eq!(other["outcome"], "accepted");
     let mut stop_body = envelope_value();
     stop_body["expected_operation_epoch"] = created["operation_epoch"].clone();
     let stopped = body(
@@ -711,8 +723,8 @@ async fn create_reuses_an_existing_recipe_and_demand_release_stop_retry_keep_epo
         .expect("stop root"),
     )
     .await;
-    assert_eq!(stopped["state"], "stopped");
-    assert_eq!(stopped["operation_epoch"], "2");
+    assert_eq!(stopped["outcome"], "viewer_released");
+    assert_eq!(stopped["operation_epoch"], "1");
     let stopped_replay = body(
         stop(
             AuthUser(f.admin.clone()),
@@ -735,43 +747,24 @@ async fn create_reuses_an_existing_recipe_and_demand_release_stop_retry_keep_epo
         .expect("viewer operation"),
     )
     .await;
-    assert_eq!(observed["state"], "stopped");
+    assert_eq!(observed["operation_epoch"], "1");
+    assert_eq!(observed["state"], "checking_source");
     assert!(observed.get("target_node_id").is_none());
-    let mut retry_body = envelope_value();
-    retry_body["scope"] = json!("operation");
-    retry_body["expected_operation_epoch"] = stopped["operation_epoch"].clone();
-    retry_body["expected_view_revision"] = stopped["view_revision"].clone();
-    retry_body["expected_state"] = json!("stopped");
-    retry_body["playback_id"] = json!(uuid::Uuid::new_v4().to_string());
-    retry_body["position_ms"] = json!(0);
-    retry_body["playback_rate"] = json!(1.0);
-    retry_body["paused"] = json!(false);
-    let resumed = body(
-        retry(
-            AuthUser(f.admin.clone()),
-            State(f.state.clone()),
-            ApiPath(op.clone()),
-            Json(input(retry_body.clone())),
-        )
+    let active = f
+        .state
+        .store
+        .read_subtitle_translation(TranslationRead {
+            user_id: 0,
+            now_ms: crate::state::clock_ms(),
+            query: TranslationQuery::LiveDemands {
+                operation_id: op,
+                operation_epoch: 1,
+            },
+        })
         .await
-        .expect("explicit retry"),
-    )
-    .await;
-    assert_eq!(resumed["outcome"], "resumed");
-    assert_eq!(resumed["operation_epoch"], "3");
-    retry_body["request_id"] = json!(uuid::Uuid::new_v4().to_string());
-    refused(
-        retry(
-            AuthUser(f.admin.clone()),
-            State(f.state.clone()),
-            ApiPath(op),
-            Json(input(retry_body)),
-        )
-        .await,
-        StatusCode::CONFLICT,
-        "epoch_conflict",
-    )
-    .await;
+        .expect("viewer demands after Stop");
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0]["user_id"], f.viewer.id);
 }
 
 #[tokio::test]
@@ -908,19 +901,23 @@ async fn manifest_leases_reuse_etags_but_a_new_stop_view_cannot_be_hidden_by_not
         .await
         .expect("empty body")
         .is_empty());
-    let mut stop_input = envelope_value();
-    stop_input["expected_operation_epoch"] = json!("1");
-    body(
-        stop(
-            AuthUser(f.admin.clone()),
-            State(f.state.clone()),
-            ApiPath(recipe.operation_id.clone()),
-            Json(input(stop_input)),
-        )
+    let stopped = f
+        .state
+        .store
+        .mutate_subtitle_translation(TranslationMutation {
+            user_id: f.admin.id,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            request_digest: "d".repeat(64),
+            now_ms: crate::state::clock_ms(),
+            intent_expires_at_ms: crate::state::clock_ms() + 60_000,
+            action: TranslationAction::Stop {
+                operation_id: recipe.operation_id.clone(),
+                expected_operation_epoch: 1,
+            },
+        })
         .await
-        .expect("stop"),
-    )
-    .await;
+        .expect("administrative root stop");
+    assert_eq!(stopped["state"], "stopped");
     let changed = body(
         manifest(
             AuthUser(f.viewer.clone()),
@@ -1487,6 +1484,7 @@ async fn seed_operation_as(f: &Fixture, user: &User, language: &str) -> Value {
                 position_ms: 0,
                 playback_rate: 1.0,
                 paused: false,
+                finish: false,
                 continuity_id: None,
             },
         })

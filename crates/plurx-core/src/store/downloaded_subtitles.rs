@@ -8,6 +8,25 @@ pub(crate) const SCHEMA: &str =
 pub const MAX_DOWNLOADED_SUBTITLE_BYTES: usize = 256 * 1024;
 pub const MAX_DOWNLOADED_SUBTITLES: usize = 8;
 
+// Only read the small track descriptors here. Loading a MediaFile never
+// renders or fetches the segments behind an asset-backed track.
+macro_rules! file_track_projection {
+    () => {
+        r#"CASE WHEN EXISTS(SELECT 1 FROM subtitle_translation_stored_tracks track
+          WHERE track.file_id=files.id AND track.source_size=files.size AND track.source_mtime=files.mtime)
+        THEN (SELECT json_group_array(json(caption)) FROM (
+          SELECT value AS caption, CAST(key AS INTEGER) AS ordinal, '' AS asset_id
+            FROM json_each(files.downloaded_subtitles)
+          UNION ALL
+          SELECT caption_json, 2147483647, track.asset_id FROM subtitle_translation_stored_tracks track
+            WHERE track.file_id=files.id AND track.source_size=files.size AND track.source_mtime=files.mtime
+          ORDER BY ordinal,asset_id
+        ))
+        ELSE files.downloaded_subtitles END AS downloaded_subtitles"#
+    };
+}
+pub(super) use file_track_projection;
+
 pub fn valid_downloaded_vtt(vtt: &str) -> bool {
     if vtt.len() > MAX_DOWNLOADED_SUBTITLE_BYTES
         || !vtt.starts_with("WEBVTT\n")

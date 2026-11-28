@@ -457,12 +457,15 @@ struct IdRow {
     id: i64,
 }
 
-const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, \
+const FILE_COLS: &str = concat!(
+    "id, item_id, path, size, mtime, duration_ms, container, video_codec, \
      video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, \
      subtitle_streams, scanned_at, hdr_format, audio_offset_ms, \
      dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, \
      (probe_json IS NOT NULL) AS probed, video_codec_tag, field_order, \
-     max_cll, max_fall, mastering_max_luminance, luminance_source, downloaded_subtitles";
+     max_cll, max_fall, mastering_max_luminance, luminance_source, ",
+    super::downloaded_subtitles::file_track_projection!()
+);
 
 /// The planning snapshot's one statement: the file row, its probe, the
 /// selected settings, `playback_input_generation` and the item title. The

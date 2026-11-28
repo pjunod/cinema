@@ -587,7 +587,7 @@
         "table": "review \u00a73 citation crates/plurx-core/src/store/sqlite/mod.rs:1255",
         "scope": "item",
         "item": "const MIGRATIONS",
-        "item_sha256": "6b44ad2cbef124be9874007afde46c08577773a484eb382aaec62764c81f510d"
+        "item_sha256": "97f8089922f717d1e5e60605f15a27692898ee2601596625fe026f929cd09537"
       },
       {
         "anchor": "async fn insert_item_fenced(",
@@ -835,7 +835,7 @@
         "anchor": "/// Exact shapes: original=0, producer-retarget=1, claim-continuity=2,",
         "scope": "item",
         "item": "fn version",
-        "item_sha256": "c92c41ed922488d70c4d7248ba83c9b4e9485634bd1228bd86ca7cf6507a1441"
+        "item_sha256": "162b79d16b1b4b77e5f44b3d8e6bffffa1fc3f2ea89903d8825bbf8954bcbf98"
       },
       {
         "table": "caption retarget queue effects remain kind-scoped outside selected library model",
@@ -844,6 +844,14 @@
         "scope": "item",
         "item": "trigger subtitle_translation_mutate",
         "item_sha256": "524a9e9a41bc7a7e916fd31c5397bae3795f0732ee442326fe1e08ddde42a549"
+      },
+      {
+        "table": "caption finish demand and viewer release effects remain kind-scoped outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_finish.sql",
+        "anchor": "last_error_code='producer_retargeted'",
+        "scope": "item",
+        "item": "trigger subtitle_translation_mutate",
+        "item_sha256": "5eea831521c9739d4ad33eb75f203b3548ec635577037a34d06f40ab20acd637"
       },
       {
         "table": "caption claim-continuity effects remain kind-scoped outside selected library model",
@@ -1563,7 +1571,7 @@
         "anchor": "macro_rules! claim_maintenance_reader {",
         "scope": "item",
         "item": "macro_rules! claim_maintenance_reader",
-        "item_sha256": "3918a760c519dd5cc50cdf1490cb402d5b7cb42fb9b6985da8c8999335733838"
+        "item_sha256": "02ce7fa1d2f3799fe888eb80d8f24f9833ff1a733f29f18788fdabbc406f12d3"
       },
       {
         "table": "C3 shared job lease bounds; compatibility aliases retain exact values",
