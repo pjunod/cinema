@@ -9,9 +9,12 @@ fn invalid_parser_initialization_removes_the_immutable_snapshot() {
     let artifact = root.path().join("invalid.wasm");
     // Valid magic followed by an invalid section; initialization must fail
     // with a parser error or unsupported signing, and both paths clean up.
-    std::fs::write(&artifact, b"\0asm\x01\0\0\0\xff").expect("malformed parser");
+    let bytes = b"\0asm\x01\0\0\0\xff";
+    std::fs::write(&artifact, bytes).expect("malformed parser");
     let source = std::fs::File::open(artifact).expect("held source");
-    assert!(snapshot_executable_in(&source, Some(&snapshots)).is_err());
+    let snapshot = snapshot_executable_in(&source, Some(&snapshots)).expect("snapshot");
+    let digest = hex::encode(Sha256::digest(bytes));
+    assert!(compile_macos_parser(snapshot, &digest).is_err());
     assert_eq!(
         std::fs::read_dir(&snapshots)
             .expect("snapshot entries")

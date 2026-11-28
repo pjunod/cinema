@@ -78,6 +78,8 @@ const MAX_VERSION_BYTES: usize = 64 * 1024;
 // v5 adds independently collected HEVC progressive/frame-only PTL evidence.
 const PROBE_SCHEMA_VERSION: u32 = 5;
 const IDENTITY_DEADLINE: Duration = Duration::from_secs(10);
+#[cfg(target_os = "macos")]
+const COLD_PARSER_COMPILE_DEADLINE: Duration = Duration::from_secs(30);
 /// How long a bound probe identity is trusted on its `fstat` tuples alone
 /// (DECODE-FACTS-GATE-AND-FALLBACK §3.3, M3).
 ///
@@ -955,8 +957,6 @@ struct ExecutableSnapshot {
     file: std::fs::File,
     #[cfg(target_os = "macos")]
     parser: Option<Arc<macos_wasm::Parser>>,
-    #[cfg(target_os = "macos")]
-    parser_image_digest: Option<String>,
     // Non-Linux fixtures execute an owned temporary path. macOS production
     // instead uses the compiled immutable parser above, never this pathname.
     #[cfg(not(target_os = "linux"))]
@@ -1036,12 +1036,10 @@ impl DecodeProbeIdentity {
             held_probe_file_identity_within(Arc::clone(&executable_file), IDENTITY_DEADLINE, None)
                 .await?;
         let snapshot_source = Arc::clone(&executable_file);
-        let executable_snapshot = Arc::new(
-            run_bounded_identity_task(IDENTITY_DEADLINE, None, move || {
-                snapshot_executable(&snapshot_source)
-            })
-            .await?,
-        );
+        let executable_snapshot = run_bounded_identity_task(IDENTITY_DEADLINE, None, move || {
+            snapshot_executable(&snapshot_source)
+        })
+        .await?;
         let snapshot_file = held_probe_file_identity_within(
             Arc::new(
                 executable_snapshot
@@ -1053,16 +1051,23 @@ impl DecodeProbeIdentity {
             None,
         )
         .await?;
-        #[cfg(target_os = "macos")]
-        if launch_mode.is_production()
-            && executable_snapshot.parser_image_digest.as_deref()
-                != Some(before.content_digest.as_str())
-        {
-            return Err(DecodeFactError::ProbeChanged);
-        }
         if snapshot_file.content_digest != before.content_digest {
             return Err(DecodeFactError::ProbeChanged);
         }
+        #[cfg(target_os = "macos")]
+        let executable_snapshot = if launch_mode.is_production() {
+            let expected_digest = before.content_digest.clone();
+            // Cold Cranelift compilation is a one-time startup operation.
+            // Keep the identity hashes, version call, and every guest probe
+            // on their existing deadlines.
+            run_bounded_identity_task(COLD_PARSER_COMPILE_DEADLINE, None, move || {
+                compile_macos_parser(executable_snapshot, &expected_digest)
+            })
+            .await?
+        } else {
+            executable_snapshot
+        };
+        let executable_snapshot = Arc::new(executable_snapshot);
         if launch_mode.is_production() {
             require_direct_probe_executable(executable_snapshot.as_file())?;
         }
@@ -3404,16 +3409,14 @@ fn snapshot_executable_in(
         .set_permissions(std::fs::Permissions::from_mode(0o700))
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
     // Install the cleanup owner before setting immutability on the exact
-    // copied object. Reopening readonly and initializing the parser can both
-    // fail; neither may leave an immutable file outside its cleanup owner.
+    // copied object. A failed reopen or parser preparation must still
+    // release the immutable file through its cleanup owner.
     let (file, path) = temporary.into_parts();
     let mut snapshot = ExecutableSnapshot {
         file,
         _path: path,
         #[cfg(target_os = "macos")]
         parser: None,
-        #[cfg(target_os = "macos")]
-        parser_image_digest: None,
     };
     #[cfg(target_os = "macos")]
     {
@@ -3427,33 +3430,42 @@ fn snapshot_executable_in(
     }
     snapshot.file = std::fs::File::open(snapshot.path())
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::fs::FileExt;
+    Ok(snapshot)
+}
 
-        let size = snapshot
-            .file
-            .metadata()
-            .map_err(|e| DecodeFactError::ProbeIdentity(e.to_string()))?
-            .len();
-        let mut magic = [0; 8];
-        if snapshot.file.read_exact_at(&mut magic, 0).is_ok() && magic == *b"\0asm\x01\0\0\0" {
-            if size > 32 * 1024 * 1024 {
-                return Err(DecodeFactError::ProbeIdentity(
-                    "source parser exceeds image bound".into(),
-                ));
-            }
-            let mut bytes = vec![0; size as usize];
-            snapshot
-                .file
-                .read_exact_at(&mut bytes, 0)
-                .map_err(|e| DecodeFactError::ProbeIdentity(e.to_string()))?;
-            snapshot.parser_image_digest = Some(hex::encode(Sha256::digest(&bytes)));
-            snapshot.parser = Some(Arc::new(
-                macos_wasm::Parser::new(&bytes).map_err(DecodeFactError::ProbeIdentity)?,
-            ));
-        }
+#[cfg(target_os = "macos")]
+fn compile_macos_parser(
+    mut snapshot: ExecutableSnapshot,
+    expected_digest: &str,
+) -> Result<ExecutableSnapshot, DecodeFactError> {
+    use std::os::unix::fs::FileExt;
+
+    let started = std::time::Instant::now();
+    let size = snapshot
+        .file
+        .metadata()
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?
+        .len();
+    if size > 32 * 1024 * 1024 {
+        return Err(DecodeFactError::ProbeIdentity(
+            "source parser exceeds image bound".into(),
+        ));
     }
+    let mut bytes = vec![0; size as usize];
+    snapshot
+        .file
+        .read_exact_at(&mut bytes, 0)
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    if hex::encode(Sha256::digest(&bytes)) != expected_digest {
+        return Err(DecodeFactError::ProbeChanged);
+    }
+    snapshot.parser = Some(Arc::new(
+        macos_wasm::Parser::new(&bytes).map_err(DecodeFactError::ProbeIdentity)?,
+    ));
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "compiled the pinned macOS source parser"
+    );
     Ok(snapshot)
 }
 
