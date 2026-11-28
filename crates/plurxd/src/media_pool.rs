@@ -362,6 +362,7 @@ pub(crate) struct BudgetedCatalogRequest {
 pub(crate) struct CreateStartupBudget {
     pub deadline: tokio::time::Instant,
     calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    local_resolver_calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
     binding: std::sync::Arc<std::sync::Mutex<Option<PlanningBinding>>>,
     /// The ONE advisory-evidence deadline of this create, minted on first use
     /// and shared by every later advisory read of the same request.
@@ -447,6 +448,7 @@ impl CreateStartupBudget {
             deadline: now + Duration::from_millis(remaining_ms.min(10_000)),
             viewer_end: now + Duration::from_millis(remaining_ms.min(VIEWER_REMAINING_CEILING_MS)),
             calls: Default::default(),
+            local_resolver_calls: Default::default(),
             binding: Default::default(),
             advisory: Default::default(),
             source_link: Default::default(),
@@ -488,6 +490,10 @@ impl CreateStartupBudget {
     }
     pub(crate) fn calls(&self) -> u32 {
         self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub(crate) fn local_resolver_calls(&self) -> u32 {
+        self.local_resolver_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
     /// Open the first phase: `counts` is the request's operation snapshot as
     /// the measured window starts.
@@ -825,6 +831,14 @@ pub(crate) fn create_replanned() -> bool {
 
 tokio::task_local! { static CREATE_STARTUP_BUDGET: CreateStartupBudget; }
 
+pub(crate) fn note_local_catalog_resolution() {
+    let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
+        budget
+            .local_resolver_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
 /// Completion and bounded causes survive aggregation; empty rows alone are
 /// never proof that discovery completed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -834,6 +848,29 @@ pub(crate) struct QualityCatalogResult {
     pub authority_refused: bool,
     pub complete: bool,
     pub causes: Vec<CatalogCause>,
+    /// Measurements from this node's completed resolver invocation. Worker
+    /// responses and cached peer observations carry only catalog descriptions.
+    #[serde(skip)]
+    pub local_measurements: Option<LocalCatalogMeasurements>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LocalCatalogMeasurements {
+    pub binding: PlanningBinding,
+    pub outputs: Vec<crate::vodserve::retained::MeasuredCandidateOutput>,
+    pub create_receipts: Option<CreateReceiptMeasurements>,
+}
+
+/// Discovery-time evidence eligible under the response's decoder snapshot.
+/// Dispatch still chooses which audio byte identity and copy recipe to report.
+#[derive(Clone, Debug)]
+pub(crate) struct CreateReceiptMeasurements {
+    pub audio_index: Option<i64>,
+    pub audio_offset_ms: i64,
+    pub subtitle_burn: Option<i64>,
+    pub copy_contract: Option<(bool, bool, bool)>,
+    pub copy_matches_default: bool,
+    pub outputs: Vec<crate::vodserve::retained::CatalogMeasuredOutput>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -2036,6 +2073,7 @@ impl MediaPool {
                                             complete: false,
                                             causes: vec![CatalogCause::PeerProtocol],
                                             authority_refused: false,
+                                            local_measurements: None,
                                         }
                                     })
                                 } else {
@@ -2418,6 +2456,7 @@ impl QualityCatalogResult {
             authority_refused: cause == CatalogCause::AuthorityRefused,
             complete: false,
             causes: vec![cause],
+            local_measurements: None,
         }
     }
 }
@@ -2517,7 +2556,14 @@ pub(crate) async fn local_quality_catalog(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .extend(described);
         state.transcode.before_quality_catalog_ordinary().await;
-        state
+        let receipt_caps = matches!(source, CatalogSource::Plan(_))
+            .then(|| {
+                crate::playback_control::DecoderCapsSnapshot::from_device_caps(&request.caps, 1)
+                    .ok()
+            })
+            .flatten()
+            .map(|caps| caps.device_caps());
+        let resolved = state
             .transcode
             .quality_catalog_from_snapshot_with_probe_policy(
                 snapshot,
@@ -2532,15 +2578,19 @@ pub(crate) async fn local_quality_catalog(
                 Some(&progress),
                 None,
                 !matches!(source, CatalogSource::Stored(_)),
+                receipt_caps.as_ref(),
             )
             .await;
-        Ok(())
+        Ok(resolved)
     };
-    let (complete, causes) = match tokio::time::timeout_at(deadline, work).await {
-        Ok(Ok(())) => (true, Vec::new()),
-        Ok(Err(cause)) => (false, vec![cause]),
-        Err(_) => (false, vec![CatalogCause::LocalDeadline]),
+    // A deadline can leave usable catalog rows in progress. Receipts require
+    // a completed local observation, so partial rows carry no measurements.
+    let (outputs, causes) = match tokio::time::timeout_at(deadline, work).await {
+        Ok(Ok(resolved)) => (Some(resolved), Vec::new()),
+        Ok(Err(cause)) => (None, vec![cause]),
+        Err(_) => (None, vec![CatalogCause::LocalDeadline]),
     };
+    let complete = outputs.is_some();
     let binding = binding
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2568,6 +2618,13 @@ pub(crate) async fn local_quality_catalog(
         authority_refused: causes.contains(&CatalogCause::AuthorityRefused),
         complete,
         causes,
+        local_measurements: binding.zip(outputs).map(|(binding, resolved)| {
+            LocalCatalogMeasurements {
+                binding,
+                outputs: resolved.measured_candidate_outputs,
+                create_receipts: resolved.create_receipts,
+            }
+        }),
     }
 }
 
@@ -3115,6 +3172,7 @@ mod tests {
             complete: true,
             authority_refused: false,
             causes: Vec::new(),
+            local_measurements: None,
             candidates: vec![WorkerQualityCandidate {
                 node_id: "worker".into(),
                 binding: Some(binding.clone()),

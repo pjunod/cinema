@@ -890,6 +890,7 @@ fn processed_requalification_replaces_hint_once_and_refuses_full_recipe_collisio
     let mut catalog = crate::media_pool::QualityCatalogResult {
         candidates: vec![hint.clone(), hint.clone()], complete: false,
         causes: vec![crate::media_pool::CatalogCause::LocalDeadline], authority_refused: false,
+        local_measurements: None,
     };
     let mut partial_ordinary = hint.clone();
     partial_ordinary.candidate = crate::transcode::continuous_test_candidate_context(
@@ -946,6 +947,7 @@ fn a_recipe_two_workers_offer_is_listed_once_in_the_start_response() {
     let catalog = crate::media_pool::QualityCatalogResult {
         candidates: vec![local.clone(), peer_twin, peer_own.clone(), peer_partial],
         complete: true, causes: Vec::new(), authority_refused: false,
+        local_measurements: None,
     };
     let listed = public_quality_candidates(Some(&catalog), "node-a");
     assert_eq!(listed, vec![local.candidate.clone(), peer_own.candidate],

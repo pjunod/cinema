@@ -661,6 +661,7 @@ impl TranscodeManager {
 pub(crate) struct ResolvedQualityCatalog {
     pub(crate) candidates: Vec<QualityCandidate>,
     pub(crate) measured_candidate_outputs: Vec<crate::vodserve::retained::MeasuredCandidateOutput>,
+    pub(crate) create_receipts: Option<crate::media_pool::CreateReceiptMeasurements>,
     /// Actual selected construction availability, never a public permission.
     pub(crate) selected_unavailable: Option<String>,
 }
@@ -886,6 +887,12 @@ impl TranscodeManager {
         self.vod
             .measured_candidate_cost(candidate, &resolved, source)
     }
+    pub(crate) fn note_catalog_measurements_used(
+        &self,
+        outputs: &[crate::vodserve::retained::MeasuredCandidateOutput],
+    ) {
+        self.vod.note_catalog_measurements_used(outputs);
+    }
     /// Companion PUBLIC descriptor projection from the same actual resolution.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn quality_candidates_with_measured_outputs(
@@ -909,6 +916,7 @@ impl TranscodeManager {
                 selected_unavailable: None,
                 candidates: Vec::new(),
                 measured_candidate_outputs: Vec::new(),
+                create_receipts: None,
             };
         };
         let identities = (
@@ -923,6 +931,7 @@ impl TranscodeManager {
                 selected_unavailable: None,
                 candidates: Vec::new(),
                 measured_candidate_outputs: Vec::new(),
+                create_receipts: None,
             };
         }
         self.quality_catalog_from_snapshot_progress(
@@ -1002,6 +1011,7 @@ impl TranscodeManager {
             progress,
             selected,
             true,
+            None,
         )
         .await
     }
@@ -1021,7 +1031,9 @@ impl TranscodeManager {
         progress: Option<&std::sync::Mutex<Vec<QualityCandidate>>>,
         selected: Option<&QualityCandidate>,
         source_probes_allowed: bool,
+        receipt_caps: Option<&plurx_core::playback::DeviceCaps>,
     ) -> ResolvedQualityCatalog {
+        crate::media_pool::note_local_catalog_resolution();
         let scan_deadline = crate::media_pool::create_stage_deadline(
             crate::media_pool::QUALITY_CATALOG_DEADLINE.min(DECODE_PLAN_PROBE_BUDGET),
         );
@@ -1046,6 +1058,7 @@ impl TranscodeManager {
         catalog_file.audio_offset_ms = audio_offset_ms;
         let file = &catalog_file;
         let reorder_frames = Self::vod_reorder_from_snapshot(snapshot);
+        let requested_audio_index = audio;
         let audio = Self::candidate_audio_from_snapshot(snapshot, audio);
         let probe: serde_json::Value = match snapshot.probe_json.as_deref() {
             Some(encoded) => match serde_json::from_str(encoded) {
@@ -1055,6 +1068,7 @@ impl TranscodeManager {
                         selected_unavailable: None,
                         candidates: Vec::new(),
                         measured_candidate_outputs: Vec::new(),
+                        create_receipts: None,
                     }
                 }
             },
@@ -1066,6 +1080,7 @@ impl TranscodeManager {
                 selected_unavailable: None,
                 candidates: Vec::new(),
                 measured_candidate_outputs: Vec::new(),
+                create_receipts: None,
             };
         };
         let audio_claim = retained_claim.cloned().or(audio_claim);
@@ -1090,8 +1105,8 @@ impl TranscodeManager {
             quality_rc: self.rate_control_snapshot().quality_rc,
         };
         let mut result = Vec::new();
-        let copy_decision =
-            Self::catalog_copy_decision(snapshot, file, caps, crate::ffmpeg::has_dovi_rpu().await);
+        let strip_dovi = crate::ffmpeg::has_dovi_rpu().await;
+        let copy_decision = Self::catalog_copy_decision(snapshot, file, caps, strip_dovi);
         // Discovery has no retained Copy tuple. Resolve its canonical selected
         // track with the same sink/route/offset contract as session creation;
         // decide() alone still inspects the source's default audio track.
@@ -1165,6 +1180,16 @@ impl TranscodeManager {
             .as_ref()
             .and_then(|facts| facts.frame_rate().value())
             .map(|rate| (rate.numerator(), rate.denominator()));
+        let mut create_receipts =
+            receipt_caps.map(|_| crate::media_pool::CreateReceiptMeasurements {
+                audio_index: requested_audio_index,
+                audio_offset_ms,
+                subtitle_burn: subtitle,
+                copy_contract: None,
+                copy_matches_default: false,
+                outputs: Vec::new(),
+            });
+        let mut receipt_encodes = std::collections::HashSet::new();
         if let (Some(width), Some(height)) = (
             file.width.and_then(|value| u32::try_from(value).ok()),
             file.height.and_then(|value| u32::try_from(value).ok()),
@@ -1177,6 +1202,23 @@ impl TranscodeManager {
                 && subtitle.is_none()
                 && copy_decoder_compatible(file, caps, coded_rate);
             if compatible {
+                if let (Some(caps), Some(receipts)) = (receipt_caps, create_receipts.as_mut()) {
+                    let decision = Self::catalog_copy_decision(snapshot, file, caps, strip_dovi);
+                    if decision.method != plurx_core::playback::PlaybackMethod::Transcode
+                        && copy_decoder_compatible(file, caps, coded_rate)
+                    {
+                        let fallback = (
+                            audio_claim
+                                .as_ref()
+                                .map_or(decision.transcode_audio, |_| resolved_copy_audio),
+                            decision.preserve_dolby_vision,
+                            decision.convert_dolby_vision,
+                        );
+                        let contract = (copy_audio, copy_dv, copy_conversion);
+                        receipts.copy_contract = Some(contract);
+                        receipts.copy_matches_default = contract == fallback;
+                    }
+                }
                 let recipe_digest = copy_candidate_recipe_digest(
                     file,
                     audio,
@@ -1464,6 +1506,9 @@ impl TranscodeManager {
                 complete_cache,
                 sustainable,
             };
+            if receipt_caps.is_some_and(|caps| encoded_client_compatible(caps, &plan, facts)) {
+                receipt_encodes.insert(candidate.recipe_digest);
+            }
             if let Some(progress) = progress {
                 progress
                     .lock()
@@ -1477,6 +1522,16 @@ impl TranscodeManager {
         // the actual recipe and reacquires an exact private artifact.
         let mut measured_candidate_outputs = Vec::new();
         for candidate in &mut result {
+            let receipt_encode = receipt_encodes.contains(&candidate.recipe_digest);
+            // The response decoder snapshot can project extra transfers,
+            // such as mapping a Dolby Vision constraint to PQ. Its eligible
+            // row can carry a receipt without becoming playable in discovery.
+            let response_candidate =
+                (receipt_encode && !candidate.decoder_compatible).then(|| QualityCandidate {
+                    decoder_compatible: true,
+                    ..candidate.clone()
+                });
+            let measured_candidate = response_candidate.as_ref().unwrap_or(candidate);
             let kind = match candidate.route {
                 CandidateRoute::Remux => SessionKind::Copy {
                     aac: copy_audio,
@@ -1547,14 +1602,44 @@ impl TranscodeManager {
                 block_budget_secs: None,
                 transport: None,
             };
-            let proof = if let Some(source) = copy_source.as_ref() {
-                self.measured_candidate_cost(candidate, &request, Some(source))
+            let proof = if let Some((source, receipts)) = copy_source
+                .as_ref()
+                .zip(create_receipts.as_mut())
+                .filter(|(_, receipts)| {
+                    candidate.route == CandidateRoute::Remux && receipts.copy_contract.is_some()
+                }) {
+                let (proof, outputs) =
+                    self.vod
+                        .catalog_remux_costs(measured_candidate, &request, source);
+                receipts.outputs.extend(outputs);
+                proof
+            } else if let Some(source) = copy_source.as_ref() {
+                self.measured_candidate_cost(measured_candidate, &request, Some(source))
                     .await
             } else {
                 None
             };
             if let Some(proof) = proof {
                 let measured = proof.public_descriptor();
+                if let Some((receipts, audio)) = create_receipts
+                    .as_mut()
+                    .zip(request.audio_delivery.as_ref())
+                    .filter(|_| receipt_encode)
+                {
+                    // The encoded recipe digest already includes the resolved
+                    // audio plan. The response still matches the artifact's
+                    // independently attested byte identity.
+                    receipts
+                        .outputs
+                        .push(crate::vodserve::retained::CatalogMeasuredOutput {
+                            audio_identity: audio.byte_identity(),
+                            canonical_audio: true,
+                            output: measured.clone(),
+                        });
+                }
+                if !candidate.decoder_compatible {
+                    continue;
+                }
                 candidate.average_bps = Some(measured.average_bps);
                 candidate.peak_bps = Some(measured.peak_bps);
                 candidate.complete_cache = true;
@@ -1597,6 +1682,7 @@ impl TranscodeManager {
             selected_unavailable,
             candidates: result,
             measured_candidate_outputs,
+            create_receipts,
         }
     }
 
@@ -4121,6 +4207,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
                         None,
                         None,
                         false,
+                        None,
                     )
                     .await;
                 assert!(stored

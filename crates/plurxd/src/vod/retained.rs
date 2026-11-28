@@ -19,7 +19,7 @@ pub(crate) struct MeasuredCandidateCostProof {
 }
 
 /// Advisory PUBLIC HTTP sidecar only. Never a worker envelope or authority.
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct MeasuredCandidateOutput {
     pub(crate) candidate_id: plurx_core::playback::candidate::CandidateId,
     pub(crate) recipe_digest: [u8; 32],
@@ -29,6 +29,13 @@ pub(crate) struct MeasuredCandidateOutput {
     pub(crate) qualification: &'static str,
     pub(crate) average_bps: u64,
     pub(crate) peak_bps: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CatalogMeasuredOutput {
+    pub(crate) audio_identity: String,
+    pub(crate) canonical_audio: bool,
+    pub(crate) output: MeasuredCandidateOutput,
 }
 
 impl MeasuredCandidateCostProof {
@@ -57,13 +64,85 @@ impl MeasuredCandidateCostProof {
 }
 
 impl VodServe {
+    /// Publishing a carried measurement is a use of that exact output. The
+    /// registry may have removed it since discovery; this touch never restores
+    /// an artifact or remeasures its bytes.
+    pub(crate) fn note_catalog_measurements_used(&self, outputs: &[MeasuredCandidateOutput]) {
+        let used: HashMap<_, _> = outputs
+            .iter()
+            .filter_map(|output| {
+                Some((
+                    uuid::Uuid::parse_str(&output.artifact_id).ok()?,
+                    &output.output_identity,
+                ))
+            })
+            .collect();
+        let mut state = self
+            .shared
+            .retained_artifacts
+            .state
+            .lock()
+            .expect("retained registry lock");
+        for entry in state.entries.values_mut() {
+            if used
+                .get(&entry.artifact.id)
+                .is_some_and(|identity| entry.artifact.facts().output_identity == identity.as_str())
+            {
+                entry.used = Instant::now();
+                entry.idle_since = None;
+            }
+        }
+    }
+
     pub(crate) fn measured_candidate_cost(
         &self,
         candidate: &plurx_core::playback::candidate::QualityCandidate,
         request: &SessionRequest,
         source: &crate::fragment_index_cluster::SourceFence,
     ) -> Option<MeasuredCandidateCostProof> {
-        let context = request.candidate_context.as_ref()?;
+        let audio = request.audio_delivery.as_ref()?;
+        if !audio.valid_snapshot() {
+            return None;
+        }
+        let audio_identity = audio.byte_identity();
+        self.observe_candidate_costs(candidate, request, source, Some(&audio_identity), false)
+            .0
+    }
+
+    /// Collect the remux recipe's exact retained audio identities in one
+    /// observation. The selected delivery keeps the ordinary cost-read
+    /// renewal semantics. Merely observing another delivery does not use it.
+    pub(crate) fn catalog_remux_costs(
+        &self,
+        candidate: &plurx_core::playback::candidate::QualityCandidate,
+        request: &SessionRequest,
+        source: &crate::fragment_index_cluster::SourceFence,
+    ) -> (
+        Option<MeasuredCandidateCostProof>,
+        Vec<CatalogMeasuredOutput>,
+    ) {
+        let audio_identity = request
+            .audio_delivery
+            .as_ref()
+            .filter(|audio| audio.valid_snapshot())
+            .map(|audio| audio.byte_identity());
+        self.observe_candidate_costs(candidate, request, source, audio_identity.as_deref(), true)
+    }
+
+    fn observe_candidate_costs(
+        &self,
+        candidate: &plurx_core::playback::candidate::QualityCandidate,
+        request: &SessionRequest,
+        source: &crate::fragment_index_cluster::SourceFence,
+        selected_audio: Option<&str>,
+        collect_all_audio: bool,
+    ) -> (
+        Option<MeasuredCandidateCostProof>,
+        Vec<CatalogMeasuredOutput>,
+    ) {
+        let Some(context) = request.candidate_context.as_ref() else {
+            return (None, Vec::new());
+        };
         if !source.unchanged_in_place()
             || !candidate.identity_matches()
             || !candidate.decoder_compatible
@@ -77,7 +156,7 @@ impl VodServe {
                 .as_ref()
                 .is_some_and(|owner| Some(owner) != self.shared.cluster_node_id.as_ref())
         {
-            return None;
+            return (None, Vec::new());
         }
         let mut state = self
             .shared
@@ -85,10 +164,18 @@ impl VodServe {
             .state
             .lock()
             .expect("retained registry lock");
-        let entry = state.entries.values_mut().find_map(|entry| {
+        let mut selected = None;
+        let mut outputs = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for entry in state.entries.values_mut() {
             let artifact = &entry.artifact;
-            let binding = artifact.candidate.as_ref()?;
-            (binding.candidate_id == candidate.id
+            let (Some(binding), Some(actual_audio)) = (
+                artifact.candidate.as_ref(),
+                artifact.audio_delivery.as_ref(),
+            ) else {
+                continue;
+            };
+            if !(binding.candidate_id == candidate.id
                 && binding.kind == request.kind
                 && binding.normalized_geometry == context.normalized_geometry
                 && binding.profile == context.profile
@@ -100,30 +187,42 @@ impl VodServe {
                 && binding.audio_offset_ms == request.audio_offset_ms
                 && binding.subtitle_burn == request.subtitle_burn
                 && artifact.source_version == source.object_version()
-                && artifact
-                    .audio_delivery
-                    .as_ref()
-                    .zip(request.audio_delivery.as_ref())
-                    .is_some_and(|(actual, requested)| {
-                        actual.valid_snapshot()
-                            && requested.valid_snapshot()
-                            && actual.byte_identity() == requested.byte_identity()
-                    }))
-            .then_some(entry)
-        })?;
-        let binding = entry.artifact.candidate.clone()?;
-        let proof = MeasuredCandidateCostProof {
-            artifact: Arc::clone(&entry.artifact),
-            binding,
-        };
-        if !proof.artifact_facts().valid() {
-            return None;
+                && actual_audio.valid_snapshot())
+            {
+                continue;
+            }
+            let audio_identity = actual_audio.byte_identity();
+            let is_selected = selected_audio == Some(audio_identity.as_str());
+            if !collect_all_audio && !is_selected {
+                continue;
+            }
+            if collect_all_audio && !seen.insert(audio_identity.clone()) {
+                continue;
+            }
+            let proof = MeasuredCandidateCostProof {
+                artifact: Arc::clone(artifact),
+                binding: binding.clone(),
+            };
+            if proof.artifact_facts().valid() {
+                if collect_all_audio {
+                    outputs.push(CatalogMeasuredOutput {
+                        audio_identity,
+                        canonical_audio: is_selected,
+                        output: proof.public_descriptor(),
+                    });
+                }
+                if is_selected {
+                    // A validated cost read is use of the exact retained output.
+                    entry.used = Instant::now();
+                    entry.idle_since = None;
+                    selected = Some(proof);
+                }
+            }
+            if !collect_all_audio {
+                break;
+            }
         }
-        // A validated cost read is actual use of this exact retained output,
-        // just like acquisition. Invalid claims must not renew its idle grace.
-        entry.used = Instant::now();
-        entry.idle_since = None;
-        Some(proof)
+        (selected, outputs)
     }
 }
 
@@ -3442,7 +3541,15 @@ mod tests {
             .measured_candidate_cost(&candidate, &request, source)
             .expect("real measured bytes remain available");
         assert_eq!(next.artifact_facts(), facts);
+        let descriptor = next.public_descriptor();
         drop(next);
+        registry.test_expire_artifact(&facts);
+        serve.note_catalog_measurements_used(&[descriptor]);
+        registry.collect(temp.path()).await;
+        assert!(
+            directory.exists(),
+            "publishing a catalog measurement renews the exact output"
+        );
         registry.test_expire_artifact(&facts);
         for _ in 0..4 {
             registry.collect(temp.path()).await;
@@ -3685,6 +3792,7 @@ mod tests {
                 .is_none(),
             "complete_cache and planned numbers are not measurement"
         );
+        let (_, early_catalog) = serve.catalog_remux_costs(&candidate, &request, source);
         let sink = RenditionSink {
             retirement: tokio_util::sync::CancellationToken::new(),
             shared: Arc::clone(&serve.shared),
@@ -3714,6 +3822,25 @@ mod tests {
         assert_eq!(descriptor.recipe_digest, digest);
         assert_eq!(descriptor.qualification, "complete_full_mux_rfc8216_v1");
         assert_eq!(descriptor.artifact_id, proof.artifact_facts().artifact_id);
+        let (catalog_proof, current_catalog) =
+            serve.catalog_remux_costs(&candidate, &request, source);
+        assert!(
+            early_catalog.is_empty(),
+            "the earlier catalog missed late publication"
+        );
+        assert_eq!(current_catalog.len(), 1);
+        assert!(current_catalog[0].canonical_audio);
+        assert_eq!(
+            current_catalog[0].output.artifact_id,
+            descriptor.artifact_id
+        );
+        let catalog_descriptor = catalog_proof
+            .expect("matched audio proof")
+            .public_descriptor();
+        assert_eq!(
+            serde_json::to_value(catalog_descriptor).expect("encoded catalog proof"),
+            serde_json::to_value(&descriptor).expect("encoded legacy proof"),
+        );
         assert!(serve
             .shared
             .retained_artifacts
