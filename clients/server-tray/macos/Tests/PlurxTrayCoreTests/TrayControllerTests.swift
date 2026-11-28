@@ -7,10 +7,15 @@ import XCTest
 final class FakeControl: ControlInvoking, @unchecked Sendable {
     private let lock = NSLock()
     private var scripted: [String: [Result<ControlResult, ControlFailure>]] = [:]
+    private var nextStartPause: (@Sendable () async -> Void)?
     private(set) var calls: [ControlCommand] = []
 
     func on(_ command: ControlCommand, _ results: Result<ControlResult, ControlFailure>...) {
         lock.withLock { scripted[key(command), default: []] += results }
+    }
+
+    func pauseNextStart(_ pause: @escaping @Sendable () async -> Void) {
+        lock.withLock { nextStartPause = pause }
     }
 
     private func key(_ command: ControlCommand) -> String {
@@ -18,17 +23,21 @@ final class FakeControl: ControlInvoking, @unchecked Sendable {
     }
 
     func run(_ command: ControlCommand) async -> Result<ControlResult, ControlFailure> {
-        lock.withLock {
+        let (result, pause): (Result<ControlResult, ControlFailure>, (@Sendable () async -> Void)?) = lock.withLock {
             calls.append(command)
+            let pause = command == .start ? nextStartPause : nil
+            if command == .start { nextStartPause = nil }
             let k = key(command)
             guard var queue = scripted[k], !queue.isEmpty else {
-                return .failure(.launch("unscripted \(k)"))
+                return (.failure(.launch("unscripted \(k)")), pause)
             }
             let next = queue.removeFirst()
             // The last scripted answer repeats, like a stable server.
             scripted[k] = queue.isEmpty ? [next] : queue
-            return next
+            return (next, pause)
         }
+        await pause?()
+        return result
     }
 
     var commands: [ControlCommand] { lock.withLock { calls } }
@@ -449,9 +458,21 @@ final class TrayControllerTests: XCTestCase {
         control.on(.status, .success(status(.stopped)))
         control.on(.start, .success(.operation(.start, .starting)))
         await controller.refresh()
-        async let first: Void = controller.perform(.start)
-        async let second: Void = controller.perform(.start)
-        _ = await (first, second)
+        let entered = XCTestExpectation(description: "first Start reached the controller")
+        let (release, continuation) = AsyncStream<Void>.makeStream()
+        control.pauseNextStart {
+            entered.fulfill()
+            for await _ in release {}
+        }
+        let first = Task { await controller.perform(.start) }
+        let didEnter = await XCTWaiter.fulfillment(of: [entered], timeout: 10)
+        XCTAssertEqual(didEnter, .completed)
+        if didEnter == .completed {
+            XCTAssertEqual(controller.snapshot.busy, .start)
+            await controller.perform(.start)
+        }
+        continuation.finish()
+        await first.value
         XCTAssertEqual(control.commands.filter { $0 == .start }.count, 1)
     }
 }
