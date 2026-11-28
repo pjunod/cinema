@@ -2028,6 +2028,18 @@ impl VodServe {
                 ));
             }
         }
+        if current_split
+            && split
+            && private_media.iter().any(|child| {
+                child.rendition.closed.load(Acquire)
+                    || child.rendition.failure().is_some()
+                    || self.source_changed(&child.rendition)
+            })
+        {
+            return Err(refuse_split(
+                "split media changed before session attachment",
+            ));
+        }
         if let Some(previous_readers) = previous_readers.as_mut() {
             previous_readers.remove(&session_id);
             if previous_readers.is_empty() {
