@@ -1126,6 +1126,37 @@ class Controller internal constructor(
         progressiveCaptions.select(selection)
     }
 
+    internal fun toggleAISubtitles(route: String = "auto", language: String? = null, onStoredTrack: (Long) -> Unit) {
+        if (!playbackControlBootstrapFence.isActive()) return
+        if (progressiveCaptions.aiSelected && route == "auto") {
+            progressiveCaptions.off()
+            return
+        }
+        if (!switchSubtitle(null, clearProgressive = false)) return
+        progressiveCaptions.startAI(route, language) { id, embeddedIndex ->
+            scope.launch {
+                try {
+                    val fresh = vm.api().decisionV2ForContext(fileContext, emptyMap(), tv.plurx.app.data.DecisionCapsReq(decisionCaps))
+                    if (!progressiveCaptions.aiSelected ||
+                        Session.playbackAuthorization().generation != diagnosticAuthorizationGeneration) return@launch
+                    val track = fresh.subtitles.singleOrNull { track -> id?.let { track.downloaded_subtitle_id == it } ?: (track.index == embeddedIndex) }
+                    if (track == null) {
+                        raiseDegradedNotice("The completed subtitle track is unavailable.")
+                        return@launch
+                    }
+                    aiCompletedTrack = track
+                    progressiveCaptions.off()
+                    selectedSubtitle = track.index
+                    onStoredTrack(track.index)
+                    replan(positionForPlaybackIntent(), "ai-subtitles", playbackIntent.desiredQuality)
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) { raiseDegradedNotice(e.message ?: "Could not load the completed subtitle.") }
+            }
+        }
+    }
+
+    private var aiCompletedTrack: SubTrack? = null
+
     private val pgsOverlay = AndroidPGSOverlayController(
         api = { vm.api() },
         scope = scope,
@@ -3101,7 +3132,7 @@ class Controller internal constructor(
         }).build()
 
     private fun trackFor(index: Long?): SubTrack? =
-        index?.let { i -> plan.subtitles.firstOrNull { it.index == i } }
+        index?.let { i -> aiCompletedTrack?.takeIf { it.index == i } ?: plan.subtitles.firstOrNull { it.index == i } }
 
     /**
      * Record that the current selections still have to reach the player.
@@ -7089,17 +7120,11 @@ internal fun TrackMenu(
     onServerAudio: (Long) -> Unit,
     onServerSubtitle: (Long?) -> Unit,
     progressiveCaptions: ProgressiveCaptions,
-    onGenerateCaptions: (ProgressiveCaptionSelection) -> Unit,
-    subtitleTextTranslation: SubtitleTextTranslation,
-    onUseTranslatedCaption: (Long) -> Unit,
+    onAISubtitles: (String, String?) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    LaunchedEffect(progressiveCaptions, subtitleTextTranslation) {
-        progressiveCaptions.loadOptions(); subtitleTextTranslation.loadOptions()
-    }
-    var textSource by remember { mutableStateOf<tv.plurx.app.data.SubtitleTextSource?>(null) }
-    var textSourceLanguage by remember { mutableStateOf("") }
-    var captionLanguageTask by remember { mutableStateOf<CaptionMenuTask?>(null) }
+    LaunchedEffect(progressiveCaptions) { progressiveCaptions.loadAIOptions() }
+    var choosingSpokenLanguage by remember { mutableStateOf(false) }
     val tracks = player.currentTracks
     val audio = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
     val text = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
@@ -7225,98 +7250,30 @@ internal fun TrackMenu(
                 }
             }
 
-            Text("Generate captions", style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(top = 14.dp, bottom = 4.dp))
-            CaptionMenuTask.entries.forEach { task ->
-                val profile = progressiveCaptions.options?.let { options -> runCatching {
-                    captionPreferredProfile(options.models, options.default_profile_id, task.wireValue,
-                        progressiveCaptions.selected?.profileId)
-                }.getOrNull() }
-                TrackRow(task.label, progressiveCaptions.selected?.task == task.wireValue, enabled = profile != null) {
-                    val known = progressiveCaptions.options?.audio_tracks?.singleOrNull { it.audio_ordinal == selectedServerAudio }
-                        ?.normalized_language?.takeIf { it in profile!!.input_languages }
-                    if (known != null) { onGenerateCaptions(ProgressiveCaptionSelection(task.wireValue, known, profile!!.profile_id)); onDismiss() }
-                    else captionLanguageTask = task
+            if (progressiveCaptions.aiSelected || progressiveCaptions.aiOptions?.let {
+                    it.allowed && it.existing_index == null && it.route != null
+                } == true) {
+                val label = if (progressiveCaptions.aiSelected) "Stop AI subtitles" else "AI subtitles"
+                TrackRow(label, progressiveCaptions.aiSelected, true) {
+                    onAISubtitles("auto", null)
+                    onDismiss()
                 }
-            }
-            captionLanguageTask?.let { task ->
-                Text("Choose the language spoken in the selected audio track", style = MaterialTheme.typography.bodySmall)
-                val languageProfile = progressiveCaptions.options?.let { options -> runCatching {
-                    captionPreferredProfile(options.models, options.default_profile_id, task.wireValue,
-                        progressiveCaptions.selected?.profileId)
-                }.getOrNull() }
-                languageProfile?.input_languages?.forEach { language ->
-                    TrackRow(languageName(language) ?: language, false, true) {
-                        onGenerateCaptions(ProgressiveCaptionSelection(task.wireValue, language, languageProfile.profile_id)); onDismiss()
-                    }
-                }
-            }
-            Text(progressiveCaptions.status, color = Muted, style = MaterialTheme.typography.bodySmall)
-            if (progressiveCaptions.selected != null) {
-                if (progressiveCaptions.options?.permissions?.stop == true) {
-                    TrackRow("Stop generation for everyone", false, true, onClick = progressiveCaptions::stop)
-                    val op = progressiveCaptions.operation
-                    val target = op?.let { runCatching { captionRetryTarget(it) }.getOrNull() }
-                    if (progressiveCaptions.hasPendingRetry) TrackRow("Resolve previous retry", false, true,
-                        onClick = progressiveCaptions::retry)
-                    else if (target != null) TrackRow("Resume / retry generation", false, true) { progressiveCaptions.retry(target) }
-                    else if (op == null) TrackRow("Retry generation request", false, true, onClick = progressiveCaptions::retry)
-                    op?.let { observed -> observed.failed_ranges.forEach { range ->
-                        if (observed.state == "partial" && range.retryable) {
-                            val rangeTarget = captionRetryTarget(observed, range)
-                            TrackRow("Retry failed range ${range.core_index + 1}", false, true) { progressiveCaptions.retry(rangeTarget) }
-                        } else if (!range.retryable) {
-                            Text("Range ${range.core_index + 1}: ${captionRangeFailureMessage(range.reason)}")
-                        }
-                    } }
-                    if (op?.failed_ranges_next_cursor != null) TrackRow("More failed ranges", false, true,
-                        onClick = progressiveCaptions::loadMoreFailedRanges)
-                }
-                TrackRow("Caption delay: ${progressiveCaptions.offsetMs} ms (−250 ms)", false, true) {
-                    progressiveCaptions.setOffset(progressiveCaptions.offsetMs - 250)
-                }
-                TrackRow("Caption delay: +250 ms", false, true) {
-                    progressiveCaptions.setOffset(progressiveCaptions.offsetMs + 250)
-                }
-                TrackRow("Reset caption delay", false, true) { progressiveCaptions.setOffset(0) }
-            }
-
-            Text("Translate an existing subtitle to English", style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(top = 14.dp, bottom = 4.dp))
-            subtitleTextTranslation.options?.subtitles?.forEach { source ->
-                TrackRow(source.title ?: source.language ?: "Subtitle ${source.index}", false,
-                    source.text_eligible && subtitleTextTranslation.options?.permissions?.create == true && !subtitleTextTranslation.busy) {
-                    val language = source.language?.takeIf { it.matches(Regex("[a-zA-Z]{2,3}")) }
-                    if (language != null) subtitleTextTranslation.translate(source.index, language)
-                    else { textSource = source; textSourceLanguage = "" }
-                }
-            }
-            textSource?.let { source ->
-                Text("Choose the language of this text subtitle", style = MaterialTheme.typography.bodySmall)
-                val languages = subtitleTextTranslation.options?.input_languages.orEmpty()
-                if (languages.isNotEmpty()) languages.forEach { language ->
-                    TrackRow(languageName(language) ?: language, false, true) {
-                        subtitleTextTranslation.translate(source.index, language); textSource = null
-                    }
-                } else {
-                    androidx.compose.material3.OutlinedTextField(value = textSourceLanguage,
-                        onValueChange = { textSourceLanguage = it.take(3) }, label = { Text("Source language code (2–3 letters)") })
-                    TrackRow("Translate this text subtitle", false, textSourceLanguage.matches(Regex("[a-zA-Z]{2,3}"))) {
-                        subtitleTextTranslation.translate(source.index, textSourceLanguage); textSource = null
-                    }
-                }
-            }
-            Text(subtitleTextTranslation.status, color = Muted, style = MaterialTheme.typography.bodySmall)
-            if (subtitleTextTranslation.options?.subtitles?.any { !it.text_eligible } == true) {
-                Text("Bitmap subtitles cannot use text translation. Generate or translate captions from audio instead.",
+                Text(if (progressiveCaptions.aiSelected) progressiveCaptions.status
+                    else progressiveCaptions.aiOptions?.label.orEmpty(),
                     color = Muted, style = MaterialTheme.typography.bodySmall)
-            }
-            if (subtitleTextTranslation.busy) TrackRow("Stop subtitle text translation", false, true,
-                onClick = subtitleTextTranslation::stop)
-            if (subtitleTextTranslation.job?.retryable == true) TrackRow("Retry subtitle text translation", false, !subtitleTextTranslation.submitting,
-                onClick = subtitleTextTranslation::retry)
-            if (subtitleTextTranslation.canUse) TrackRow("Use English translated subtitle", false, true) {
-                subtitleTextTranslation.use(onUseTranslatedCaption)
+                if (progressiveCaptions.aiSelected) {
+                    if (progressiveCaptions.aiRoute == "text") {
+                        TrackRow("Use the audio instead", false, true) { onAISubtitles("audio", null); onDismiss() }
+                    }
+                    TrackRow("Wrong language?", false, true) { choosingSpokenLanguage = !choosingSpokenLanguage }
+                    if (choosingSpokenLanguage) {
+                        listOf("en", "de", "es", "fr", "it", "pt", "ja", "ko", "zh", "ar", "tr").forEach { language ->
+                            TrackRow(languageName(language) ?: language, false, true) { onAISubtitles("audio", language); onDismiss() }
+                        }
+                    }
+                    TrackRow("Earlier by 250 ms", false, true) { progressiveCaptions.setOffset(progressiveCaptions.offsetMs - 250) }
+                    TrackRow("Later by 250 ms", false, true) { progressiveCaptions.setOffset(progressiveCaptions.offsetMs + 250) }
+                }
             }
 
             if (audio.isEmpty() && text.isEmpty() && serverAudio.isEmpty() && serverSubtitles.isEmpty()) {
@@ -7390,7 +7347,8 @@ internal fun serverAudioLabel(track: AudioTrack): String = listOfNotNull(
     track.codec.uppercase(),
 ).distinct().joinToString(" · ").ifBlank { "Audio" }
 
-internal fun serverSubtitleLabel(track: SubTrack): String = listOfNotNull(
+internal fun serverSubtitleLabel(track: SubTrack): String =
+    if (track.ai) (languageName(track.language) ?: "English") + " · AI" else listOfNotNull(
     languageName(track.language),
     track.title,
     if (isForcedSubtitle(track)) "Forced" else null,

@@ -1,9 +1,11 @@
 //! AI subtitles: one settings document and the authorization every start
 //! route shares. The queue SQL enforces the same `who` rule at claim time.
+pub(crate) mod preferences;
 pub(crate) mod readiness;
 pub(crate) mod routes;
 mod selection;
 pub(crate) mod settings;
+pub(crate) mod timing;
 
 use crate::{
     http::{

@@ -4718,6 +4718,21 @@ final class PlayerController: ObservableObject {
 
     /// Explicit local caption output is chosen by the player UI before entry.
     func selectProgressiveCaptions(_ task: CaptionTask) {
+        prepareProgressiveCaptionSelection {
+            self.progressiveCaptions.request(task)
+        }
+    }
+
+    func selectAISubtitles(route: String = "auto", language: String? = nil) {
+        if progressiveCaptions.selected && route == "auto" { selectSubtitle(nil); return }
+        prepareProgressiveCaptionSelection {
+            self.progressiveCaptions.requestAI(route: route, language: language) { [weak self] id, embeddedIndex in
+                self?.useStoredAISubtitle(id, embeddedIndex: embeddedIndex)
+            }
+        }
+    }
+
+    private func prepareProgressiveCaptionSelection(_ select: @escaping () -> Bool) {
         guard started, !player.isExternalPlaybackActive else {
             showPlaybackNotice("Return playback to this device to show progressive captions.")
             return
@@ -4739,7 +4754,31 @@ final class PlayerController: ObservableObject {
                 showPlaybackNotice("Captions were not selected because subtitle removal did not attach. Try again after the stream change finishes.")
                 return
             }
-            if progressiveCaptions.request(task) { player.allowsExternalPlayback = false }
+            if select() { player.allowsExternalPlayback = false }
+        }
+    }
+
+    private func useStoredAISubtitle(_ id: String?, embeddedIndex: Int?) {
+        guard started, let model, let context = fileContext else { return }
+        let attempt = snapshotAttempt(), lifecycle = lifecycleGeneration
+        Task {
+            do {
+                let quality: PlaybackQuality = selectedHeight.map(Self.initialQuality(height:)) ?? (selectedQualityIsOriginal ? .original : .auto)
+                let refreshed = try await requestPlaybackDecision(model, context,
+                    PrePlaySelection(audioIndex: selectedAudio, subtitleIndex: PrePlaySelection.subtitleOff), quality)
+                guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
+                      attemptStillCurrent(attempt, fence: .translatedCaptionDecision),
+                      refreshed.decision.fileId == fileId,
+                      let track = refreshed.decision.subtitles?.first(where: { track in
+                          id.map { track.downloadedSubtitleId == $0 } ?? (track.index == embeddedIndex)
+                      }) else { return }
+                decision?.subtitles = refreshed.decision.subtitles
+                selectSubtitle(track.index)
+            } catch {
+                if isCurrentLifecycle(lifecycle), attemptStillCurrent(attempt, fence: .translatedCaptionFailure) {
+                    showPlaybackNotice(error.localizedDescription)
+                }
+            }
         }
     }
 

@@ -750,13 +750,20 @@ pub async fn item_detail(
     // page, which alone put the route over its one-read bar. The same read
     // carries the rest of what Play's verdict takes from settings, for the
     // per-device lines below.
-    let display = state.transcode.detail_display_from(
-        state
-            .catalogue
-            .display_settings(&crate::transcode::TranscodeManager::DETAIL_DISPLAY_SETTING_KEYS)
-            .await,
+    let preference_key = crate::ai_subtitles::preferences::key(user.id);
+    let mut keys = crate::transcode::TranscodeManager::DETAIL_DISPLAY_SETTING_KEYS.to_vec();
+    keys.push(&preference_key);
+    let settings = state.catalogue.display_settings(&keys).await;
+    let personal = settings
+        .as_ref()
+        .ok()
+        .and_then(|values| values.get(&preference_key))
+        .and_then(|raw| crate::ai_subtitles::preferences::decode(raw));
+    let display = state.transcode.detail_display_from(settings);
+    let playback_prefs = personal.map_or_else(
+        || display.prefs.clone(),
+        |personal| personal.apply(display.prefs.clone()),
     );
-    let playback_prefs = display.prefs.clone();
     let convert_setting = display.dv_convert;
     let availability = state
         .detail_availability

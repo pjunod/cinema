@@ -40,6 +40,10 @@ final class CaptionNetworkTasks {
 @MainActor
 final class ProgressiveCaptionSession: ObservableObject {
     @Published private(set) var options: CaptionOptions?
+    @Published private(set) var aiOptions: AISubtitleOptions?
+    private var aiOperation: AISubtitleOperation?
+    var aiRoute: String? { aiOperation?.route }
+    private var aiPlaybackId: String?
     @Published private(set) var status = "Choose a spoken language and caption action."
     @Published private(set) var coverageStatus = ""
     @Published private(set) var operation: CaptionOperation?
@@ -108,6 +112,13 @@ final class ProgressiveCaptionSession: ObservableObject {
 
     func configure(api: PlurxAPI, fileId: Int, sourceAudioIndex: Int?,
                    now: @escaping () -> (Int, Int, Double, Bool), current: @escaping () -> Bool) {
+        if self.fileId == fileId, self.sourceAudioIndex == sourceAudioIndex, aiPlaybackId != nil,
+           authGeneration == Session.shared.playbackAuthorization.generation {
+            self.now = now
+            isPlaybackCurrent = current
+            mediaChanged(seek: true)
+            return
+        }
         retire()
         self.authGeneration = Session.shared.playbackAuthorization.generation
         self.api = api.captionOwner(generation: authGeneration)
@@ -124,8 +135,113 @@ final class ProgressiveCaptionSession: ObservableObject {
         let captured = generation
         action = networkTasks.run { [weak self] in
             guard let self else { return }
-            do { try await self.loadOptions(captured) }
-            catch { self.fail(error, captured) }
+            do {
+                let query = sourceAudioIndex.map { [URLQueryItem(name: "audio_index", value: String($0))] } ?? []
+                let reply: CaptionHTTPReply<AISubtitleOptions> = try await api.captionOwner(generation: self.authGeneration)
+                    .caption("files/\(fileId)/ai-subtitles", query: query)
+                if self.current(captured) { self.aiOptions = reply.value }
+            } catch { self.fail(error, captured) }
+        }
+    }
+
+    func requestAI(route: String = "auto", language: String? = nil, complete: @escaping (String?, Int?) -> Void) -> Bool {
+        guard let api, let sample = now?(), aiOptions?.allowed == true,
+              aiOptions?.existingIndex == nil else { return false }
+        deselect()
+        selected = true
+        status = "Preparing AI subtitles…"
+        let playback = UUID().uuidString.lowercased()
+        aiPlaybackId = playback
+        let captured = generation, file = fileId
+        // Keep the start receipt alive through a track change so the
+        // superseded viewer can release its own demand.
+        networkTasks.run(cleanup: true) { [weak self] in
+            guard let self else { return }
+            do {
+                var body: [String: CaptionValue] = [
+                    "request_id": .string(UUID().uuidString.lowercased()), "route": .string(route),
+                    "target": .string("en"), "playback_id": .string(playback),
+                    "position_ms": .integer(min(14_399_999, max(0, sample.position)))
+                ]
+                if let language { body["spoken_language"] = .string(language) }
+                if let audio = self.sourceAudioIndex { body["audio_index"] = .integer(audio) }
+                let reply: CaptionHTTPReply<AISubtitleOperation> = try await api.caption(
+                    "files/\(file)/ai-subtitles", method: "POST", body: body)
+                guard self.current(captured), self.aiPlaybackId == playback else {
+                    self.releaseAI(api: api, id: reply.value.id, playback: playback)
+                    return
+                }
+                self.aiOperation = reply.value
+                if reply.value.state == "complete" && reply.value.route == "download" {
+                    complete(reply.value.trackId, reply.value.trackIndex)
+                    return
+                }
+                self.loop = self.networkTasks.run { [weak self] in
+                    await self?.pollAI(api: api, captured: captured, playback: playback, complete: complete)
+                }
+            } catch {
+                if self.aiPlaybackId == playback { self.fail(error, captured); self.deselect() }
+            }
+        }
+        return true
+    }
+
+    private func releaseAI(api: PlurxAPI, id: String, playback: String) {
+        networkTasks.run(cleanup: true) {
+            _ = try? await api.captionBytes("ai-subtitles/operations/\(id)/viewer",
+                method: "DELETE", query: [URLQueryItem(name: "playback_id", value: playback)])
+        }
+    }
+
+    private func pollAI(api: PlurxAPI, captured: Int, playback: String, complete: @escaping (String?, Int?) -> Void) async {
+        guard let operation = aiOperation else { return }
+        let path = "ai-subtitles/operations/\(operation.id)"
+        while current(captured), selected, aiPlaybackId == playback, let sample = now?() {
+            let position = min(14_399_999, max(0, seekDemandPosition ?? sample.position))
+            let traversal = windowGeneration
+            let began = ProcessInfo.processInfo.systemUptime
+            do {
+                if aiOperation?.active == true, began - lastHeartbeat >= 10 {
+                    let reply: CaptionHTTPReply<AISubtitleOperation> = try await api.caption(path + "/viewer", method: "PUT",
+                        body: ["playback_id": .string(playback), "position_ms": .integer(position),
+                               "playback_rate": .number(max(0.25, min(4, sample.rate)))])
+                    guard current(captured), aiPlaybackId == playback else { return }
+                    if traversal == windowGeneration { aiOperation = reply.value; lastHeartbeat = began }
+                }
+                let reply: CaptionHTTPReply<AISubtitleWindow> = try await api.caption(path + "/cues", query: [
+                    URLQueryItem(name: "from_ms", value: String(max(0, position - 10_000))),
+                    URLQueryItem(name: "to_ms", value: String(min(14_400_000, position + 35_000)))
+                ], maximumBytes: 262_144)
+                guard current(captured), aiPlaybackId == playback else { return }
+                if traversal == windowGeneration {
+                    let result = reply.value
+                    if result.state == "complete", let track = result.trackId {
+                        complete(track, nil)
+                        return
+                    }
+                    if result.state == "failed" || result.state == "stopped" {
+                        status = result.state == "failed" ? "AI subtitles could not finish." : "AI subtitles stopped."
+                        deselect()
+                        return
+                    }
+                    cues = Array(result.cues.prefix(1024)).enumerated().compactMap { index, cue in
+                        guard cue.startMs >= 0, cue.endMs > cue.startMs, cue.endMs <= 14_400_000,
+                              CaptionValidation.text(cue.text) else { return nil }
+                        return CaptionCue(cueId: "\(cue.startMs)-\(cue.endMs)-\(index)",
+                                          startMs: cue.startMs, endMs: cue.endMs, text: cue.text)
+                    }
+                    ranges = result.readyFromMs.map { [CaptionRange(startMs: $0, endMs: result.readyToMs)] } ?? []
+                    publishWindow()
+                }
+            } catch {
+                guard current(captured), aiPlaybackId == playback else { return }
+                if let error = error as? CaptionServiceError, error.status == 401 || error.status == 403 {
+                    deselect()
+                    return
+                }
+                status = "Reconnecting to AI subtitles…"
+            }
+            try? await Task.sleep(for: .seconds(2))
         }
     }
 
@@ -276,6 +392,10 @@ final class ProgressiveCaptionSession: ObservableObject {
     }
 
     func deselect() {
+        if let api, let id = aiOperation?.id, let playback = aiPlaybackId, aiOperation?.route != "download" {
+            releaseAI(api: api, id: id, playback: playback)
+        }
+        aiOperation = nil; aiPlaybackId = nil; lastHeartbeat = 0
         networkTasks.cancelWork()
         discontinueTraversal()
         selected = false; window = nil; seekDemandPosition = nil
@@ -289,7 +409,7 @@ final class ProgressiveCaptionSession: ObservableObject {
         if authGeneration != Session.shared.playbackAuthorization.generation { networkTasks.cancelAll() }
         generation += 1; deselect()
         if let authObserver { Session.shared.removeAuthorizationObserver(authObserver) }
-        authObserver = nil; options = nil; operation = nil; api = nil; now = nil; isPlaybackCurrent = nil
+        authObserver = nil; options = nil; aiOptions = nil; operation = nil; api = nil; now = nil; isPlaybackCurrent = nil
         operationId = nil; assetId = nil; demandId = nil; demandGeneration = nil; cues = []; ranges = []; lease = nil
         assetPage = []; nextAssetCursor = nil; failurePage = nil
         intents = [:]; chosenProfile = nil; chosenLanguage = nil; contentRevision = nil; serverClock = nil

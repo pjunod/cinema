@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-27, plurx has 447 routes declared by the ordinary listener's
+As of 2026-11-27, plurx has 454 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 447 routes across the registered routers.
+plurx has 454 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -2731,6 +2731,8 @@ stay admin-only.
 
 | Method | Path | Credential | Meaning |
 |---|---|---|---|
+| GET, PUT | `/api/v1/files/{id}/subtitles/{index}/timing` | bearer; PUT checks `who` | Read or shift a stored AI track by `offset_ms` within ±15 seconds. The `track_id` query binds the action to the stable track. |
+| GET, PUT | `/api/v1/ai-subtitles/preferences` | bearer | Read or save the current account's subtitle `language` and `mode` (`auto`, `always`, or `off`). Accounts without a saved preference follow the server defaults. |
 | GET | `/api/v1/ai-subtitles/settings` | bearer | The document, its `revision` and each node's `readiness` for it. Before the first save the document is derived from the older text translation, speech translation and managed transcription switches. |
 | PUT | `/api/v1/ai-subtitles/settings` | admin bearer | Replace the document; the body is every field plus `expected_revision`. A stale revision is `409 configuration_conflict`. |
 | GET | `/api/v1/files/{id}/ai-subtitles` | bearer | Describe the existing English track or the available AI route for this file. The optional `target` defaults to `en`. |

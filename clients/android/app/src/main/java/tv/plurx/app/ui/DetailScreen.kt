@@ -950,6 +950,11 @@ private fun TrackFactsCard(
         subtitleNotice = preplaySubtitleNotice(cost),
         onTracks = onTracks,
     )
+    if (file.video_codec != null) {
+        AISubtitleItemSection(vm, file, enabled) { index ->
+            onTracks(tracks.copy(subtitle = SubtitleChoice(index)))
+        }
+    }
 }
 
 @Composable

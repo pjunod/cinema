@@ -30,9 +30,7 @@ async function savePlaybackDefaults(btn){
   if(btn) btn.disabled=true;
   try{
     cacheSettings(await api("/settings",{method:"PUT",body:{
-      default_audio_lang:document.getElementById("pal").value,
-      default_sub_lang:document.getElementById("psl").value,
-      sub_mode:document.getElementById("psm").value}}));
+      default_audio_lang:document.getElementById("pal").value}}));
     toast("Playback defaults saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
@@ -834,4 +832,88 @@ async function saveJellyfinCompatibility(btn){
     cacheSettings(await api("/settings",{method:"PUT",body:{jellyfin_compatibility_enabled:(/** @type {HTMLInputElement} */ (document.getElementById("jellyfin-compatibility-enabled"))).checked}}));
     toast("Jellyfin compatibility saved");if(btn)setCardSaved(btn);
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
+}
+
+const AI_SUBTITLE_MODES=[["auto","Auto · only for foreign audio"],["always","Always"],["off","Off"]];
+const AI_SUBTITLE_QUALITIES=[["fast","Fast"],["balanced","Balanced"],["best","Best"]];
+const AI_SUBTITLE_LABELS={ready:"Ready",downloading:"Preparing",failed:"Failed",unsupported:"Unavailable",unknown:"Status unavailable"};
+const AI_SUBTITLE_REASONS={
+  engine_unavailable:"This server has no compatible subtitle engine.",
+  insufficient_memory:"This server needs more available memory.",
+  insufficient_disk:"This server needs more disk space.",
+  model_download_failed:"The model download failed. The server will retry.",
+  model_self_test_failed:"The model did not pass its test. The server will retry."
+};
+function aiSubtitleReadiness(readiness){
+  const counts=readiness?.summary;
+  if(!counts?.nodes)return "<p>Server readiness is unavailable.</p>";
+  return `<div class="tog"><span>Ready on ${counts.ready} of ${counts.nodes} servers</span>
+    <button type="button" class="ghost sm" onclick="refreshAiSubtitleReadiness()">Refresh status</button></div>
+    <details><summary>Server details</summary>
+    ${(readiness.nodes||[]).map(node=>`<div class="tog"><span>${esc(node.label)}${node.cores?` · ${node.cores} cores`:""}${node.gpu?` · ${esc(node.gpu)}`:""}<small>${esc(AI_SUBTITLE_REASONS[node.reason]||"")}</small></span><span>${esc(AI_SUBTITLE_LABELS[node.state]||"Status unavailable")}${node.tested_at_ms&&node.state==="ready"?` · tested ${esc(new Date(node.tested_at_ms).toLocaleDateString())}`:""}</span></div>`).join("")}</details>`;
+}
+function aiSubtitleSettingsPanel(prefs,settings){
+  const language=LANG_CHOICES.some(([code])=>code===prefs.language)
+    ?LANG_CHOICES:[...LANG_CHOICES,[prefs.language,prefs.language]];
+  const personal=setCard(`${cardHead("Defaults","Applies to playback on your account.")}
+    ${togSelect("subtitle-preferred-language","Subtitle language","",language,prefs.language)}
+    ${togSelect("subtitle-preferred-mode","Show subtitles","",AI_SUBTITLE_MODES,prefs.mode)}
+    ${setCardFoot("saveAiSubtitlePreferences")}`,{id:"subtitle-preferences"});
+  if(!ME?.is_admin)return setHead("Subtitles","")+personal;
+  return `${setHead("Subtitles","")}${personal}
+    ${setCard(`${cardHead("When a title has no English subtitles","")}
+    ${togRow("ai-subtitle-download","Download a match","From OpenSubtitles.",settings.download_match)}
+    <div class="tog"><span>OpenSubtitles account</span><button type="button" class="ghost sm" onclick="openSubtitleProvider(this)">Account</button></div><div id="subtitle-provider-form"></div>
+    ${togRow("ai-subtitle-text","Translate its other subtitles","Uses a text track the title already has.",settings.translate_text)}
+    ${togRow("ai-subtitle-audio","Create them from the audio","Creates English subtitles from the soundtrack.",settings.from_audio)}
+    ${togSelect("ai-subtitle-when","Do this","",[[0,"When someone turns subtitles on"],[1,"Also ahead of time for new titles"]],Number(settings.ahead_of_time))}
+    ${togSelect("ai-subtitle-who","Who can start AI subtitles","",[["everyone","Everyone"],["admins","Admins only"]],settings.who)}
+    ${cardHead("AI quality","")}
+    ${togSelect("ai-subtitle-quality","Quality","",AI_SUBTITLE_QUALITIES,settings.quality)}
+    <div id="ai-subtitle-readiness">${aiSubtitleReadiness(settings.readiness)}</div>
+    ${setCardFoot("saveAiSubtitleSettings")}`,{id:"ai-subtitle-settings"})}`;
+}
+async function refreshAiSubtitleReadiness(){
+  const mount=document.getElementById("ai-subtitle-readiness");
+  if(!mount)return;
+  try{
+    const settings=await api("/ai-subtitles/settings");
+    if(!mount.isConnected)return;
+    const open=mount.querySelector("details")?.open;
+    mount.innerHTML=aiSubtitleReadiness(settings.readiness);
+    const details=mount.querySelector("details");if(details)details.open=!!open;
+  }catch(error){if(mount.isConnected)toast(error.message);}
+}
+async function saveAiSubtitlePreferences(button){
+  const card=button.closest(".setcard"), edit=card.dataset.revision;
+  button.disabled=true;
+  try{
+    const saved=await api("/ai-subtitles/preferences",{method:"PUT",body:{
+      language:/** @type {HTMLSelectElement} */(document.getElementById("subtitle-preferred-language")).value,
+      mode:/** @type {HTMLSelectElement} */(document.getElementById("subtitle-preferred-mode")).value
+    }});
+    if(!card.isConnected)return;
+    SETTINGS_DATA.subtitlePreferences=saved;
+    if(card.dataset.revision===edit)setCardSaved(button);
+  }catch(error){if(card.isConnected){button.disabled=false;toast(error.message);}}
+}
+async function saveAiSubtitleSettings(button){
+  const card=button.closest(".setcard"), edit=card.dataset.revision;
+  const current=SETTINGS_DATA.aiSubtitles;
+  button.disabled=true;
+  try{
+    const value=id=>/** @type {HTMLSelectElement} */(document.getElementById("ai-subtitle-"+id)).value;
+    const checked=id=>/** @type {HTMLInputElement} */(document.getElementById("ai-subtitle-"+id)).checked;
+    const saved=await api("/ai-subtitles/settings",{method:"PUT",body:{
+      version:current.version,expected_revision:current.revision,
+      download_match:checked("download"),translate_text:checked("text"),from_audio:checked("audio"),
+      ahead_of_time:value("when")==="1",who:value("who"),quality:value("quality")
+    }});
+    if(!card.isConnected)return;
+    SETTINGS_DATA.aiSubtitles={...current,...saved};
+    if(card.dataset.revision===edit)setCardSaved(button);
+    void refreshAiSubtitleReadiness();
+  }catch(error){
+    if(card.isConnected){button.disabled=false;toast(error.message);}
+  }
 }

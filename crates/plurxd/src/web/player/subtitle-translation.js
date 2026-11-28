@@ -63,6 +63,7 @@ function translationHidePresentation(state){
   track.mode="disabled";try{while(track.cues?.length)track.removeCue(track.cues[0]);}catch(error){void error;}
 }
 function translationAttachmentWillChange(player){
+  if(typeof aiCaptionAttachmentWillChange==="function")aiCaptionAttachmentWillChange(player);
   const state=SUBTITLE_TRANSLATION;if(!state)return;
   if(!translationSameSourceAudio(state,player)){translationRetire("playback source or audio changed");return;}
   if(state.handoffTarget===player)return;
@@ -74,6 +75,7 @@ function translationAttachmentWillChange(player){
   translationHidePresentation(state);
 }
 function translationAttachmentDidBegin(player,token){
+  if(typeof aiCaptionAttachmentDidBegin==="function")aiCaptionAttachmentDidBegin(player,token);
   const state=SUBTITLE_TRANSLATION;if(!state)return;
   if(!translationSameSourceAudio(state,player)){translationRetire("playback source or audio changed");return;}
   state.player=player;state.audioChoice=player.curAudio;state.attachment=token;state.handoffTarget=null;state.positionReady=false;state.rebinding=true;state.sourceValidated=false;
@@ -91,6 +93,7 @@ function translationAttachmentDidBegin(player,token){
   })();
 }
 function translationAttachmentPositionReady(player,token){
+  if(typeof aiCaptionAttachmentPositionReady==="function")aiCaptionAttachmentPositionReady(player,token);
   const state=SUBTITLE_TRANSLATION;if(!state||state.player!==player||state.attachment!==token||!state.current()||!token?.captionPositionReady||!state.sourceValidated)return;
   state.positionReady=true;state.rebinding=false;
   if(state.createIntent){state.resumeProducerAfterHandoff=true;if(!state.starting){state.resumeProducerAfterHandoff=false;void translationStart(state);}}
@@ -840,6 +843,7 @@ async function translationSetupPoll(setup,operation,profile){
   if(again&&setup.current()&&setup.operation===operation)setup.timer=setTimeout(()=>translationSetupPoll(setup,operation,profile),profile.limits.poll_max_ms);
 }
 function translationReset(){
+  if(typeof aiCaptionRetirePlayback==="function")aiCaptionRetirePlayback();
   translationRetire("account ended");const setup=TRANSLATION_SETUP;if(setup){setup.retired=true;clearTimeout(setup.timer);for(const controller of setup.controllers)controller.abort();TRANSLATION_SETUP=null;}
 }
 function translationMenuChoice(){

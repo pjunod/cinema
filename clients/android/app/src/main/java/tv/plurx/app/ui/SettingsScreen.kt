@@ -64,7 +64,6 @@ private val LANGS = listOf(
     "ger" to "German", "ita" to "Italian", "por" to "Portuguese", "kor" to "Korean",
     "chi" to "Chinese", "rus" to "Russian", "hin" to "Hindi", "ara" to "Arabic",
 )
-private val SUB_LANGS = listOf("off" to "Off") + LANGS
 
 internal fun appVersionLabel(versionName: String, versionCode: Int): String =
     "$versionName ($versionCode)"
@@ -83,7 +82,6 @@ fun SettingsScreen(
     val formFactor = currentFormFactor()
     val side = formFactor.horizontalPadding()
     var audio by rememberEntryPresentation("settings:audio") { mutableStateOf(LANGS.firstOrNull { it.first == vm.audioLang } ?: LANGS.first()) }
-    var sub by rememberEntryPresentation("settings:sub") { mutableStateOf(SUB_LANGS.firstOrNull { it.first == vm.subLang } ?: SUB_LANGS.first()) }
     var confirmingSignOut by rememberEntryPresentation("settings:confirmingSignOut") { mutableStateOf(false) }
     var diagnosticSignOutConfirmation by rememberEntryPresentation("settings:diagnosticSignOutConfirmation") { mutableStateOf(false) }
     val diagnosticState by tv.plurx.app.diagnostics.DiagnosticRuntime.state.collectAsStateWithLifecycle()
@@ -160,11 +158,7 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodySmall)
                 ChoicePicker("Audio language", audio, LANGS, { it.second }, onSelect = {
                     audio = it
-                    vm.setLanguages(audio.first, sub.first)
-                })
-                ChoicePicker("Subtitle language", sub, SUB_LANGS, { it.second }, onSelect = {
-                    sub = it
-                    vm.setLanguages(audio.first, sub.first)
+                    vm.setLanguages(audio.first, vm.subLang)
                 })
                 ChoicePicker(
                     "Subtitle switching",
@@ -173,8 +167,6 @@ fun SettingsScreen(
                     { it.label },
                     vm::setSubtitleReadiness,
                 )
-                CaptionGenerationSettings(vm)
-                SubtitleTextTranslationSettings(vm)
                 PreferenceSwitch("Autoplay next episode", preferences.autoplayNext, vm::setAutoplayNext)
                 PreferenceSwitch("Skip intros and credits", preferences.autoSkip, vm::setAutoSkip)
                 // Graduated from Developer: a finished, device-local switch with
@@ -242,12 +234,14 @@ fun SettingsScreen(
             // the single column a phone shows.
             if (formFactor == FormFactor.Compact) {
                 playback()
+                AISubtitleSettingsSection(vm)
                 downloads()
                 appearance()
             } else {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(32.dp)) {
                     Column(sectionModifier, verticalArrangement = Arrangement.spacedBy(28.dp)) {
                         playback()
+                        AISubtitleSettingsSection(vm)
                         downloads()
                     }
                     Column(sectionModifier) { appearance() }
@@ -507,5 +501,91 @@ private fun PreferenceSwitch(label: String, checked: Boolean, onCheckedChange: (
     ) {
         Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = null)
+    }
+}
+
+@Composable
+private fun AISubtitleSettingsSection(vm: AppViewModel) {
+    var prefs by remember { mutableStateOf<tv.plurx.app.data.AISubtitlePreferences?>(null) }
+    var settings by remember { mutableStateOf<tv.plurx.app.data.AISubtitleSettings?>(null) }
+    var status by remember { mutableStateOf("") }
+    var saving by remember { mutableStateOf(false) }
+    var details by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val auth = tv.plurx.app.data.Session.playbackAuthorization().generation
+    fun current() = tv.plurx.app.data.Session.playbackAuthorization().generation == auth
+    LaunchedEffect(vm, auth) {
+        try {
+            val api = vm.api()
+            val personal = api.aiSubtitlePreferences()
+            if (current()) prefs = personal
+            if (api.me().is_admin && current()) {
+                val value = api.aiSubtitleSettings()
+                if (current()) settings = value
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (e: Exception) { if (current()) status = e.message ?: "Subtitle preferences are unavailable." }
+    }
+    SettingsSection("Subtitles", "Applies to playback on your account.") {
+        prefs?.let { value ->
+            val languages = if (LANGS.any { it.first == value.language }) LANGS else LANGS + (value.language to value.language)
+            ChoicePicker("Subtitle language", languages.first { it.first == value.language }, languages, { it.second },
+                onSelect = { prefs = value.copy(language = it.first) })
+            val modes = listOf("auto" to "Auto · only for foreign audio", "always" to "Always", "off" to "Off")
+            ChoicePicker("Show subtitles", modes.firstOrNull { it.first == value.mode } ?: modes.first(),
+                modes, { it.second }, onSelect = { prefs = value.copy(mode = it.first) })
+            TextButton(enabled = !saving, onClick = {
+                saving = true
+                scope.launch {
+                    try {
+                        val saved = vm.api().saveAISubtitlePreferences(value)
+                        if (current()) {
+                            prefs = saved
+                            vm.setLanguages(vm.audioLang, if (saved.mode == "off") "off" else saved.language)
+                            status = "Subtitle defaults saved."
+                        }
+                    } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                    catch (e: Exception) { if (current()) status = e.message ?: "Could not save subtitle defaults." }
+                    finally { saving = false }
+                }
+            }) { Text("Save defaults") }
+        }
+        settings?.let { value ->
+            Text("When a title has no English subtitles", style = MaterialTheme.typography.titleMedium)
+            PreferenceSwitch("Download a match", value.download_match) { settings = value.copy(download_match = it) }
+            PreferenceSwitch("Translate its other subtitles", value.translate_text) { settings = value.copy(translate_text = it) }
+            PreferenceSwitch("Create them from the audio", value.from_audio) { settings = value.copy(from_audio = it) }
+            PreferenceSwitch("Also ahead of time for new titles", value.ahead_of_time) { settings = value.copy(ahead_of_time = it) }
+            val audience = listOf("everyone" to "Everyone", "admins" to "Admins only")
+            ChoicePicker("Who can start AI subtitles", audience.firstOrNull { it.first == value.who } ?: audience.first(),
+                audience, { it.second }, onSelect = { settings = value.copy(who = it.first) })
+            val quality = listOf("fast" to "Fast", "balanced" to "Balanced", "best" to "Best")
+            ChoicePicker("AI quality", quality.firstOrNull { it.first == value.quality } ?: quality[1],
+                quality, { it.second }, onSelect = { settings = value.copy(quality = it.first) })
+            value.readiness?.let { readiness ->
+                TextButton(onClick = { details = !details }) {
+                    Text("Ready on ${readiness.summary.ready} of ${readiness.summary.nodes} servers")
+                }
+                if (details) readiness.nodes.forEach { node ->
+                    LabeledValueRow(node.label, node.state.replaceFirstChar(Char::uppercase))
+                }
+            }
+            TextButton(enabled = !saving, onClick = {
+                saving = true
+                scope.launch {
+                    try {
+                        val api = vm.api()
+                        val saved = api.saveAISubtitleSettings(value.update())
+                        if (current()) {
+                            settings = saved.copy(readiness = api.aiSubtitleSettings().readiness)
+                            status = "AI subtitle settings saved."
+                        }
+                    } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                    catch (e: Exception) { if (current()) status = e.message ?: "Could not save AI subtitle settings." }
+                    finally { saving = false }
+                }
+            }) { Text("Save server settings") }
+        }
+        if (status.isNotEmpty()) Text(status, color = Muted)
     }
 }

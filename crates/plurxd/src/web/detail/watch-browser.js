@@ -128,7 +128,7 @@ function watchLedgerHtml(){
   const audioOffered=offered("audio"),subOffered=offered("subs");
   const selA=watchSelectedAudio(f),selS=watchSelectedSub(f);
   const audioLabel=(a,on)=>watchTrackChip(audioFactLabel(a),on,playing&&audioOffered.has(a.index)?`data-watch-audio="${a.index}"`:null,playing?"Not offered for this playback":"Starts when playback does");
-  const subLabel=(s,on)=>watchTrackChip(subFactLabel(s),on,playing&&subOffered.has(s.index)?`data-watch-sub="${s.index}"`:null,playing?"Not offered for this playback":"Starts when playback does");
+  const subLabel=(s,on)=>watchTrackChip(subFactLabel(s)+(s.ai?" · AI":""),on,playing&&subOffered.has(s.index)?`data-watch-sub="${s.index}"`:null,playing?"Not offered for this playback":"Starts when playback does");
   const translated=typeof translationSelected==="function"&&translationSelected(PLAYER);
   const offChip=on=>watchTrackChip("Off",on&&!translated,playing?'data-watch-sub="-1"':null);
   const delivery=watchDeliveryRow(f);
@@ -136,14 +136,14 @@ function watchLedgerHtml(){
   return `<dl class="watch-ledger">
     ${vid?`<dt>Video</dt><dd>${esc(vid)}</dd>`:""}
     <dt>Audio</dt><dd>${auds.length?watchTrackRow("audio",auds,selA,audioLabel,null):"None"}</dd>
-    ${(subs.length||f.video_codec)?`<dt>Subtitles</dt><dd>${translated?watchTrackChip(watchAiCaptionLabel(),true,null):""}${watchTrackRow("subs",subs,selS,subLabel,offChip)}</dd>`:""}
-    ${watchCanGenerateSubtitles(f)||watchTranslationAction(f)?`<dt>Captions</dt><dd>${watchGenerationAction(f)}${watchTranslationAction(f)}${watchTextTranslationAction(f)}</dd>`:""}
+    ${(subs.length||f.video_codec)?`<dt>Subtitles</dt><dd>${translated?watchTrackChip(watchAiCaptionLabel(),true,null):""}${watchTrackRow("subs",subs,selS,subLabel,offChip)}${typeof aiCaptionItemMarkup==="function"?aiCaptionItemMarkup(f):""}${watchTranslationAction(f)}</dd>`:""}
     ${delivery?`<dt>Delivery</dt><dd>${delivery}</dd>`:""}
     <dt>File</dt><dd><span class="watch-fn">${esc(f.filename||"")}</span>${file?`<span class="watch-fmeta">${esc(file)}</span>`:""}</dd></dl>`;
 }
 // One binder for every place the ledger renders — the side panel, the wide
 // band and the ⓘ dialog — so a chip is a control wherever it appears.
 function watchBindLedger(node){
+  if(typeof aiCaptionBindItem==="function")aiCaptionBindItem(node,watchCurrentFile());
   node.querySelectorAll("[data-watch-audio]").forEach(b=>b.addEventListener("click",()=>{
     const want=Number(b.dataset.watchAudio);const i=(PLAYER?.audio||[]).findIndex(t=>t.index===want);
     if(i>=0&&i!==PLAYER.curAudio)switchAudio(i);
@@ -408,8 +408,8 @@ function watchAiCaptionLabel(){
 }
 function watchTranslationAction(file){
   if(!ME||!file?.available||!file.video_codec)return "";
-  const shared=playbackFileContextForFile(file).source_ref.kind!=="local";
-  return `<button type="button" class="ghost sm" data-watch-translate="${esc(String(file.id))}">${shared?"Available AI captions":"Generate or translate speech"}</button>`;
+  if(playbackFileContextForFile(file).source_ref.kind==="local")return "";
+  return `<button type="button" class="ghost sm" data-watch-translate="${esc(String(file.id))}">Available AI captions</button>`;
 }
 function watchTextTranslationAction(file){
   return ME&&file?.available&&file.video_codec&&playbackFileContextForFile(file).source_ref.kind==="local"?`<button type="button" class="ghost sm" data-watch-text-translate="${esc(String(file.id))}">Translate existing subtitles</button>`:"";

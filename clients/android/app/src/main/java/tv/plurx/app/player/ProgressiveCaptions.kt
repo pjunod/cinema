@@ -250,6 +250,13 @@ internal suspend fun captionPollingLifecycle(current: () -> Boolean, read: suspe
 internal class CaptionWindow {
     var cues: List<CaptionCue> = emptyList(); private set
     fun clear() { cues = emptyList() }
+    fun replaceAI(next: List<AISubtitleCue>) {
+        require(next.size <= 1024 && next.sumOf { it.text.toByteArray().size + 128 } <= 524_288)
+        cues = next.mapIndexedNotNull { index, cue ->
+            if (cue.start_ms < 0 || cue.end_ms <= cue.start_ms || cue.end_ms > 14_400_000) null
+            else CaptionCue("${cue.start_ms}-${cue.end_ms}-${index}", cue.start_ms, cue.end_ms, cue.text)
+        }.sortedBy { it.start_ms }
+    }
     fun replace(segments: List<CaptionSegment>, positionMs: Long, durationMs: Long) {
         val low = (positionMs - 30_000).coerceAtLeast(0)
         val high = (positionMs + 90_000).coerceAtMost(durationMs)
@@ -277,6 +284,12 @@ internal class ProgressiveCaptions(
     private val player: () -> ExoPlayer,
     private val authorized: () -> Boolean,
 ) {
+    var aiOptions: AISubtitleOptions? by mutableStateOf(null); private set
+    var aiSelected by mutableStateOf(false); private set
+    private var aiPlayback: String? = null
+    private var aiOperation: AISubtitleOperation? = null
+    val aiRoute: String? get() = aiOperation?.route
+    private var aiTraversal = 0L
     var options: CaptionOptions? by mutableStateOf(null); private set
     var text: String by mutableStateOf(""); private set
     var status: String by mutableStateOf("Captions Off"); private set
@@ -323,6 +336,103 @@ internal class ProgressiveCaptions(
     private fun now() = serverNow + (SystemClock.elapsedRealtime() - observedAt).coerceAtLeast(0)
     private fun expires() = now() + 60_000
     private fun observe(time: Long) { serverNow = if (serverNow > 0) maxOf(now(), time) else time; observedAt = SystemClock.elapsedRealtime() }
+
+    fun loadAIOptions() {
+        if (!current(generation)) return
+        val g = generation
+        scope.launch {
+            try {
+                val options = captionRead<AISubtitleOptions>(api().aiSubtitleOptions(fileId))
+                if (current(g)) aiOptions = options
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { if (current(g)) status = e.message ?: "AI subtitles are unavailable." }
+        }
+    }
+
+    fun startAI(route: String = "auto", language: String? = null, complete: (String?, Long?) -> Unit) {
+        if (!current(generation) || aiOptions?.allowed != true || aiOptions?.existing_index != null) return
+        off()
+        val g = generation
+        val playback = UUID.randomUUID().toString()
+        val transport = api()
+        aiPlayback = playback
+        aiSelected = true
+        status = "Preparing AI subtitles…"
+        val request = AISubtitleStart(UUID.randomUUID().toString(), route = route, playback_id = playback,
+            position_ms = position().coerceAtMost(14_399_999), audio_index = sourceAudio(), spoken_language = language)
+        // Read the start receipt even if this controller gives up its viewer.
+        cleanupScope.launch {
+            try {
+                if (!current(g)) return@launch
+                val answer = captionRead<AISubtitleOperation>(transport.aiSubtitleStart(fileId, request))
+                if (!current(g) || aiPlayback != playback) {
+                    releaseAI(transport, answer.id, playback)
+                    return@launch
+                }
+                aiOperation = answer
+                if (answer.state == "complete" && answer.route == "download") {
+                    complete(answer.track_id, answer.track_index)
+                    return@launch
+                }
+                job = scope.launch { pollAI(transport, answer.id, playback, g, complete) }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { if (current(g)) { off(); status = e.message ?: "AI subtitles could not start." } }
+        }
+    }
+
+    private suspend fun pollAI(transport: PlurxApi, id: String, playback: String, g: Long, complete: (String?, Long?) -> Unit) {
+        while (current(g) && aiPlayback == playback) {
+            val at = position().coerceAtMost(14_399_999)
+            val traversal = aiTraversal
+            try {
+                val began = SystemClock.elapsedRealtime()
+                if (aiOperation?.active == true && began - lastHeartbeat >= 10_000) {
+                    val reply = captionRead<AISubtitleOperation>(transport.aiSubtitleViewer(id, AISubtitleViewer(playback, at, rate())))
+                    if (!current(g)) return
+                    if (traversal == aiTraversal) { aiOperation = reply; lastHeartbeat = began }
+                }
+                val reply = captionRead<AISubtitleWindow>(transport.aiSubtitleCues(id,
+                    (at - 10_000).coerceAtLeast(0), (at + 35_000).coerceAtMost(14_400_000)), 262_144)
+                if (!current(g)) return
+                if (traversal == aiTraversal) {
+                    val stored = reply.track_id
+                    if (reply.state == "complete" && stored != null) { complete(stored, null); return }
+                    if (reply.state == "stopped" || reply.state == "failed") {
+                        off(); status = if (reply.state == "failed") "AI subtitles could not finish." else "AI subtitles stopped."
+                        return
+                    }
+                    window.replaceAI(reply.cues)
+                    status = if (reply.ready_to_ms > at) "Working" else "Preparing AI subtitles…"
+                    reconcile()
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (!current(g)) return
+                if (refusalStatusOf(e) in listOf(401, 403)) { off(); return }
+                status = "Reconnecting to AI subtitles…"
+            }
+            delay(2_000)
+        }
+    }
+
+    private fun releaseAI(transport: PlurxApi, id: String, playback: String) {
+        cleanupScope.launch {
+            if (!authorized()) return@launch
+            try { transport.aiSubtitleRelease(id, playback) }
+            catch (e: CancellationException) { throw e }
+            catch (_: Exception) { /* The viewer demand also has a server TTL. */ }
+        }
+    }
+
+    private fun retireAI() {
+        val playback = aiPlayback
+        val operation = aiOperation
+        if (authorized() && playback != null && operation != null && operation.route != "download") releaseAI(api(), operation.id, playback)
+        aiPlayback = null
+        aiOperation = null
+        aiSelected = false
+        lastHeartbeat = 0
+    }
 
     fun loadOptions() {
         if (!current(generation)) return
@@ -635,6 +745,7 @@ internal class ProgressiveCaptions(
 
     fun viewerSeek() {
         if (!current(generation)) return
+        if (aiSelected) { aiTraversal++; lastHeartbeat = 0; clearCues() }
         intent.continuity.viewerSeekRequested(); renewalWake.trySend(Unit)
     }
     fun executionAttached() {
@@ -662,7 +773,7 @@ internal class ProgressiveCaptions(
     /** Called by the existing player's seek, rate, pause and item events. */
     fun reconcile() {
         boundary?.cancel(); boundary = null
-        if (!current(generation) || selected == null) { text = ""; return }
+        if (!current(generation) || (selected == null && !aiSelected)) { text = ""; return }
         val g = generation
         val at = position() - intent.offsetMs
         text = window.textAt(at)
@@ -814,6 +925,7 @@ internal class ProgressiveCaptions(
     }
     fun off() {
         if (!active || !intent.producer.owns(owner)) return
+        retireAI()
         intent.endTraversal()
         intent.captionChoiceChanged()
         intent.selection = null; intent.operationId = null; intent.stopped = false; intent.audioOrdinal = null
@@ -840,6 +952,7 @@ internal class ProgressiveCaptions(
         if (intent.producer.owns(owner) && !preserveRetained) intent.producer.retireDemand()
     }
     fun release() {
+        retireAI()
         active = false; generation++; actions.invalidate(); job?.cancel(); job = null; clearCues()
         heartbeatAttempt.clear(); receipt = null; intent.producer.release(owner)
     }

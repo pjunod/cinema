@@ -2561,7 +2561,7 @@ async fn decision_for_file(
     // Select tracks before evaluating compatibility. The container's default
     // audio is only a fallback; the execution plan must describe the codec
     // selected by the same language policy exposed to the clients below.
-    let prefs = state.transcode.lang_prefs().await;
+    let prefs = crate::ai_subtitles::preferences::playback(state, user).await;
     let prefer_original = prefers_original_audio(&file.audio_streams);
     let policy_audio = policy_audio_index(&file, &prefs);
     let selected_audio = effective_audio_selection(&file, q.audio, policy_audio)?;
@@ -3168,7 +3168,9 @@ pub(crate) async fn subtitle_vtt_for_file_revision(
         .map_err(|_| ApiError::Internal("subtitle cache read failed".into()))?;
         return Ok(match cached {
             Some((bytes, complete)) => {
-                let mut response = vtt_response(bytes);
+                let mut response = vtt_response(
+                    crate::ai_subtitles::timing::shifted(state, file, index, bytes).await?,
+                );
                 response.headers_mut().insert(
                     HeaderName::from_static("x-plurx-subtitle-complete"),
                     HeaderValue::from_static(if complete { "true" } else { "false" }),
@@ -3197,7 +3199,9 @@ pub(crate) async fn subtitle_vtt_for_file_revision(
         tracing::warn!(file_id = id, index, "subtitle extraction failed: {why}");
         ApiError::Internal("subtitle extraction failed".into())
     })?;
-    Ok(vtt_response(bytes))
+    Ok(vtt_response(
+        crate::ai_subtitles::timing::shifted(state, file, index, bytes).await?,
+    ))
 }
 
 fn vtt_response(bytes: Vec<u8>) -> Response {

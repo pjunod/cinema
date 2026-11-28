@@ -4137,3 +4137,34 @@ button.listtoggle.fav.on{border-color:var(--bad);color:var(--bad)}
 .swatch input:checked+span{border-color:var(--text)}
 .swatch input:focus-visible+span{outline:2px solid var(--accent);outline-offset:2px}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+
+#ptimeline::after {
+  content: "";
+  position: absolute;
+  left: var(--ai-caption-start, 0%);
+  width: calc(var(--ai-caption-progress, 0%) - var(--ai-caption-start, 0%));
+  height: 2px;
+  bottom: 0;
+  background: #64c790;
+  pointer-events: none;
+}
+.ai-caption-item,
+.ai-caption-item [data-ai-caption-actions] {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+#subtitle-preferences,
+#ai-subtitle-settings {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+#subtitle-preferences > .tog,
+#ai-subtitle-settings > .tog {
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+}
