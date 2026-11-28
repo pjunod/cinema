@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-27, plurx has 454 routes declared by the ordinary listener's
+As of 2026-11-27, plurx has 438 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 454 routes across the registered routers.
+plurx has 438 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -2523,15 +2523,7 @@ No user credentials are forwarded and all discovery responses are uncacheable.
 | GET | `/api/v1/files/{id}/subs/{subtitle}` | bearer | One subtitle stream as WebVTT; optional `revision` reads only the already-ready representation named by playback control |
 | GET | `/api/v1/subtitle-provider` | admin bearer | Configured flags, account username, automatic mode and language codes; never the API key or password |
 | PUT | `/api/v1/subtitle-provider` | admin bearer | Update optional `api_key`, `username`, `password`, `automatic` and `languages`; omitted fields are retained, empty secrets clear them |
-| GET | `/api/v1/subtitle-transcription` | admin bearer | Legacy Advanced command/path settings and local advisory readiness |
-| PUT | `/api/v1/subtitle-transcription` | admin bearer | Explicit last-writer-wins activation of Advanced mode using the legacy settings shape |
-| GET, PUT | `/api/v1/subtitle-transcription/managed` | admin bearer | Read authoritative mode/settings or atomically save version 1 with the opaque `expected_revision` |
-| GET | `/api/v1/subtitle-transcription/models` | admin bearer | Server-owned catalog, supported languages and bounded current worker observations |
-| POST | `/api/v1/subtitle-transcription/models/{id}/install` | admin bearer | Version 1 `{node_ids}`: bounded per-node Install jobs, including automatic verification |
-| POST | `/api/v1/subtitle-transcription/models/{id}/verify` | admin bearer | Version 1 `{node_ids}`: durable per-node verification jobs |
 | GET | `/api/v1/subtitle-transcription/jobs/{id}` | admin bearer | Safe exact-job stage, attempt, reason and successful result identity; no paths, raw payload or child stderr |
-| GET | `/api/v1/files/{id}/subtitles/transcribe` | admin bearer | Exact source revision, audio choices/languages and revision-bound published caption/track facts |
-| POST | `/api/v1/files/{id}/subtitles/transcribe` | admin bearer | Enqueue versioned exact-source/audio/language/model generation; return the enqueue outcome, exact job ID and artifact/source identity |
 | GET | `/api/v1/files/{id}/subtitles/search` | bearer | Required `language` query (for example `en`); movie/episode candidates with provider file ID, release, language, file match, translation and accessibility flags, plus downloaded IDs |
 | POST | `/api/v1/files/{id}/subtitles/download` | bearer | Accept `{language, provider_file_id}`, revalidate against search results, acquire and return `{subtitle_index, already_downloaded}` |
 | GET | `/api/v1/files/{id}/subs/{index}/overlay.json` | bearer | The `pgs-v1` overlay manifest |
@@ -2556,63 +2548,9 @@ defaults to false; `languages` accepts one to three language codes, default
 `["en"]`. A successful acquisition appends an ordinary `webvtt` subtitle
 ordinal. Caption bodies are not included in file metadata responses.
 
-Offline transcription is optional and disabled by default. Managed mode uses
-the packaged CPU engine and a server-owned model catalog; Install downloads
-and verifies the selected model on each accepted current worker. Its request
-is `{"version":1,"node_ids":["<current-worker-id>"]}`. One to sixteen distinct
-current identities are permitted. The response's `operations` array contains
-per-node outcomes and exact job IDs; partial refusal is not blanket success.
-Cached bytes alone are not an accepted installation or readiness. Model status
-`unverified_cache` requires a fresh explicit Install or Test. Automatic
-verification requires a prior successful receipt for the exact current model
-file identity; it cannot resurrect a cancelled first install or replacement.
-Its queued jobs retain boot/model/engine identity and retire when obsolete.
-Successful verification is bound to the current boot and held engine/model.
-Restart requalifies previously accepted unchanged installations before ready. The API exposes
-Install and Verify, not model removal or arbitrary download URLs/paths.
-
-The managed settings document has `version`, opaque `revision`, `mode`
-(`managed` or `advanced`), saved `enabled`, `interval_mins`, `language`,
-`model_id` and `advanced:{command,model_path}`. PUT sends version 1 and
-`expected_revision` instead of `revision`. Save does not require a ready worker.
-A stale revision or competing legacy write returns a conflict without changing
-either configuration. `effective_enabled`, `mode_status` and `reason` explain
-admission independently of the saved enable choice. Switching to Managed
-atomically pauses the legacy configuration while retaining its command/path.
-The legacy PUT explicitly activates Advanced mode with last-writer-wins
-semantics; unmodified older servers remain competing administrators. Their
-legacy writes can cause a visible configuration conflict and prevent new
-managed admission until reviewed. New admission is protected only when a
-current server observes the legacy write. Older binaries do not enforce the managed configuration; simultaneous
-old/new operation has these explicit limitations rather than global atomicity.
-
-A generation request is
-`{"version":1,"audio_index":0,"language":"en","model_id":"base.en","source_size":"…","source_mtime":"…"}`.
-Copy the exact decimal source strings and audio ordinal from GET options;
-Advanced uses `model_id:"advanced"`. Unknown versions/fields, stale sources,
-unsupported model languages and disagreement with a known audio-language tag
-are refused. Untagged audio requires an explicit spoken-language choice.
-The empty-object compatibility request uses the configured known language;
-Advanced retains its existing empty-object path. Accepted work keeps its
-selected identity when later defaults change or generation is disabled.
-
-Clients inspect `outcome` before announcing acceptance and poll the returned
-exact job. A succeeded state alone is not a selectable track: match its
-successful `result_ref`/artifact with the revision-bound `captions` and
-`subtitle_streams` from GET options. File IDs, source size and mtime are JSON
-strings; caption bodies are absent. Generated captions use the ordinary VTT
-route/picker and persist source/model provenance plus the actual managed
-engine digest/platform. They remain Off until the viewer explicitly selects
-them. Activity owns Stop for queued or running work.
-
-A zero-minute interval permits manual requests only. Positive intervals scan
-bounded pages for the configured known language; a configuration revision
-change starts a fresh sweep without rewriting existing requests. CPU inference
-uses two threads with GPU execution disabled. Finite probed sources and
-inference are bounded to four hours; audio conversion has a separate 30-minute
-limit. Managed output rejects wholly digital-zero decoded audio and intersects
-cue times with the exact decoded PCM duration. These checks do not establish
-recognition accuracy or translate foreign speech into English.
+AI subtitle generation and translation use the unified routes below. Older
+whole-file jobs are superseded at upgrade. Their status remains readable
+through the job endpoint and existing completed captions remain ordinary tracks.
 
 `{subtitle}` accepts **both** spellings: the handler strips a trailing `.vtt`
 if present and parses the remainder as an integer, so `/subs/0` (legacy) and
@@ -2662,22 +2600,12 @@ codeless 503 on `overlay.json` as a wait, for older servers.
 
 ### Progressive English translation
 
-The speech API exposes same-language transcription and English translation
-for the selected attached audio ordinal on web and native clients. Source
-clock normalization is independent of direct, remux or encoded delivery.
-The two registered Small profiles produce independent30second cores with5seconds
-of left/right context. Transcription and English translation each require their
-own qualification; saved Small choices and immutable profile identities remain
-valid. The optional `default_profile_id` discovery hint reflects the saved
-profile/task choice and defaults to Small English translation when unset.
-Discovery does not grant producer authority or override the saved enable choice.
+Progressive speech operations transcribe English audio or translate other
+speech into English. Existing operations and cached assets keep their read
+and lifecycle routes. The unified API below starts new operations.
 
 | Method | Path | Credential | Meaning |
 |---|---|---|---|
-| GET, PUT | `/api/v1/subtitle-translation` | admin bearer | Saved enable/model/profile/language preferences with opaque revision CAS. Readiness never rejects Save. |
-| GET | `/api/v1/subtitle-translation/models` | admin bearer | The two immutable Small task profiles, bounds, saved-choice hint and independent speech-task qualification. |
-| GET | `/api/v1/files/{id}/subtitle-translation/options` | bearer | Current source revision, supported profile and bounded cached asset list; no work. |
-| POST | `/api/v1/files/{id}/subtitle-translation` | bearer; `who` (see AI subtitles) | Durable operation, finish demand and expiring playback demand before source hashing. Repeating the same request replays its result. |
 | GET | `/api/v1/files/{id}/subtitle-translation/assets` | bearer | Explicit cursor page of cached assets. |
 | GET | `/api/v1/subtitle-translation/operations/{id}` | bearer | Closed live operation, source-check and current-job observation. |
 | PUT, DELETE | `/api/v1/subtitle-translation/operations/{id}/demands/{demand}` | bearer; `who` (see AI subtitles) | Renew or release one viewer's versioned interest. |
@@ -2703,16 +2631,9 @@ Exact replay
 includes the original UUID; a client resolves an uncertain renewal before
 sending the next generation with its new traversal identity.
 
-Existing model Install/Test routes also accept strict version 2 translation
-requests with request UUID, intent expiry, purpose, profile ID and named workers.
-Their version 2 responses identify `purpose: "translation"`, `model_id` and
-`profile_id` alongside per-worker `operations`, so setup can follow accepted jobs.
-Version 1 and version 2 enqueue the same per-node model operation: one model
-receipt per node qualifies the model for whole-file transcription and for both
-speech profiles. A multilingual model's self-test is the German clip
-translated to English; an English-only model's is the English clip. Model job
-phases include `waiting_for_capacity` while a claimed test holds a FIFO place
-for the shared heavy-background slot; this consumes no CPU admission. Work mutations require AI subtitles authority (an admin, or any user while
+Model self-tests count toward readiness only for the current boot and exact
+engine and model files. Multilingual models translate the German fixture
+into English. English-only models use the English fixture. Work mutations require AI subtitles authority (an admin, or any user while
 `who` is `everyone`) and an unexpired
 first-use intent; retained exact receipts replay without starting fresh work.
 Responses carry a fresh `X-Translation-Server-Now-Ms` even when receipt bodies
@@ -2726,8 +2647,8 @@ reads it whenever it admits AI subtitle work: `translate_text` admits text trans
 work is admitted (`everyone`) or only an admin's (`admins`). A non-admin holds
 at most two active AI subtitle operations or jobs at once; a further new start
 answers `429` with code `ai_subtitles_busy`, and a start refused by `who`
-answers `403` with code `ai_subtitles_admins_only`. Model install and verify
-stay admin-only.
+answers `403` with code `ai_subtitles_admins_only`. Needed models install and
+verify automatically after an administrator enables the route.
 
 | Method | Path | Credential | Meaning |
 |---|---|---|---|
@@ -2781,12 +2702,6 @@ existing import grant; it does not start work on the Source.
 
 | Method | Path | Credential | Meaning |
 |---|---|---|---|
-| GET, PUT | `/api/v1/subtitle-text-translation/config` | bearer; admin for PUT | Saved enable/model preferences and revision. |
-| GET | `/api/v1/subtitle-text-translation/models` | bearer | Model catalog and worker availability. |
-| POST | `/api/v1/subtitle-text-translation/models/install` | admin bearer | Enqueue model installation. |
-| POST | `/api/v1/subtitle-text-translation/models/verify` | admin bearer | Enqueue model verification. |
-| GET | `/api/v1/files/{id}/subtitle-text-translation/options` | bearer | Current subtitle tracks, supported models and available results. |
-| POST | `/api/v1/files/{id}/subtitles/{index}/translation` | bearer; `who` (see AI subtitles) | Create a durable text translation job. |
 | GET | `/api/v1/subtitle-text-translation/jobs/{id}` | bearer | Observe a translation job. |
 | POST | `/api/v1/subtitle-text-translation/jobs/{id}/retry` | bearer; `who` (see AI subtitles); admin for a model job | Retry a failed job. |
 | GET | `/api/v1/shared/imports/{import}/files/{locator}/captions` | import grant | Cursor page of committed captions for shared playback. |

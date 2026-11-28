@@ -20,6 +20,7 @@ use plurx_core::{
         subtitle_translation_read::{TranslationQuery, TranslationRead},
     },
 };
+#[cfg(test)]
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::VecDeque, sync::Arc};
@@ -230,6 +231,7 @@ pub(crate) struct SourceClock {
     pub(crate) origin_samples: i64,
     pub(crate) audio_start_samples: i64,
     pub(crate) duration_ms: i64,
+    #[cfg(test)]
     pub(crate) source_index: Option<i64>,
 }
 fn rational_samples(numerator: i128, denominator: i128) -> Result<i64, &'static str> {
@@ -331,6 +333,7 @@ pub(crate) fn source_clock(
         origin_samples,
         audio_start_samples,
         duration_ms,
+        #[cfg(test)]
         source_index: audio["index"].as_i64().filter(|n| *n >= 0),
     })
 }
@@ -485,6 +488,7 @@ pub(crate) async fn authorize_asset_source(
         .await
 }
 
+#[cfg(test)]
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ModelRequest {
@@ -498,6 +502,7 @@ struct ModelRequest {
 /// The version 2 (translation purpose) model setup request. It enqueues the
 /// same one model operation as version 1, whose receipt qualifies every
 /// speech profile of the model.
+#[cfg(test)]
 pub(crate) async fn model_operation(
     state: &AppState,
     id: &str,

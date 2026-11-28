@@ -3719,6 +3719,8 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn settle_job(&self, request: SettleJob) -> Result<bool, StoreError>;
     async fn fail_fragment_job(&self, request: FragmentJobFailure) -> Result<bool, StoreError>;
     async fn cancel_job(&self, request: CancelJob) -> Result<Option<BackgroundJob>, StoreError>;
+    /// Fence a bounded batch of retired whole-file transcription jobs.
+    async fn supersede_whole_file_subtitle_jobs(&self, now_ms: i64) -> Result<bool, StoreError>;
     /// Cancel a viewer's complete-output preparation only while queued and
     /// with only its original waiter, in the same transaction as the update.
     async fn cancel_unshared_output_job(&self, request: CancelJob) -> Result<bool, StoreError>;
@@ -5533,6 +5535,54 @@ LIMIT 1
               RETURNING {JOB_JSON} AS result_json"
         ), encode(&request)?, true, true).await?;
         rows.first().map(|row| decode(row)).transpose()
+    }
+
+    async fn supersede_whole_file_subtitle_jobs(&self, now_ms: i64) -> Result<bool, StoreError> {
+        if now_ms < 0 {
+            return Err(invalid("invalid subtitle job retirement timestamp"));
+        }
+        let candidates = self
+            .queue_sql(
+                "SELECT json_quote(id) AS result_json FROM background_jobs
+                 WHERE state IN ('running','queued')
+                   AND kind IN ('subtitle_transcribe','subtitle_transcribe_managed')
+                   AND revision < 9223372036854775807
+                 ORDER BY state DESC, not_before_ms, priority DESC, created_at_ms, id
+                 LIMIT json_extract($1, '$.limit')"
+                    .to_owned(),
+                encode(&serde_json::json!({"limit":64}))?,
+                false,
+                false,
+            )
+            .await?;
+        let ids: Vec<String> = candidates
+            .iter()
+            .map(|row| decode(row))
+            .collect::<Result<_, _>>()?;
+        if ids.is_empty() {
+            return Ok(false);
+        }
+        // Running readers keep their cleanup tokens until the normal cancellation
+        // path settles them. The write rechecks kind and state after selection.
+        let rows = self
+            .queue_sql(
+                "UPDATE background_jobs
+                 SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE 'cancelling' END,
+                     revision = revision + 1,
+                     updated_at_ms = MAX(updated_at_ms, json_extract($1, '$.now_ms')),
+                     last_error_code = 'superseded'
+                 WHERE id IN (SELECT value FROM json_each($1, '$.ids'))
+                   AND state IN ('queued','running')
+                   AND kind IN ('subtitle_transcribe','subtitle_transcribe_managed')
+                   AND revision < 9223372036854775807
+                 RETURNING 'true' AS result_json"
+                    .to_owned(),
+                encode(&serde_json::json!({"ids":ids,"now_ms":now_ms}))?,
+                true,
+                true,
+            )
+            .await?;
+        Ok(!rows.is_empty())
     }
 
     async fn cancel_unshared_output_job(&self, request: CancelJob) -> Result<bool, StoreError> {

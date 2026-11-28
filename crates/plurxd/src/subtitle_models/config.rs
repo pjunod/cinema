@@ -1,15 +1,15 @@
 //! One authoritative subtitle setup, with CAS for current UIs and an explicit
 //! last-writer-wins Advanced transition for the legacy endpoint. Worker readiness
 //! is deliberately absent from validation: it cannot rewrite an operator choice.
+#[cfg(test)]
 use super::artifacts::CatalogModel;
-use crate::{http::error::ApiError, subtitle_transcription::Settings};
-use plurx_core::{
-    error::StoreError,
-    store::{
-        background_jobs_transcription::{whisper_language, SubtitleConfigurationWrite},
-        Store,
-    },
-};
+#[cfg(test)]
+use crate::http::error::ApiError;
+use crate::subtitle_transcription::Settings;
+use plurx_core::store::background_jobs_transcription::whisper_language;
+#[cfg(test)]
+use plurx_core::store::background_jobs_transcription::SubtitleConfigurationWrite;
+use plurx_core::{error::StoreError, store::Store};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -41,6 +41,7 @@ pub(crate) struct Advanced {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(test)]
 pub(crate) struct UpdateRequest {
     pub version: u8,
     pub expected_revision: String,
@@ -83,6 +84,7 @@ struct Saved {
     legacy_snapshot: Settings,
 }
 
+#[cfg(test)]
 fn language(value: &str) -> Result<String, ApiError> {
     let value = crate::subtitle_transcription::normalized_language(value);
     if !whisper_language(&value) {
@@ -130,8 +132,11 @@ fn invalid_saved() -> StoreError {
 
 struct Loaded {
     snapshot: Snapshot,
+    #[cfg(test)]
     legacy: Settings,
+    #[cfg(test)]
     managed_revision: String,
+    #[cfg(test)]
     legacy_raw: Option<String>,
 }
 
@@ -152,6 +157,7 @@ fn composite_revision(revision: &str, raw: Option<&str>) -> Result<String, Store
     Ok(format!("{revision}.{:x}", Sha256::digest(canonical)))
 }
 
+#[cfg(test)]
 fn valid_revision(value: &str) -> bool {
     let Some((revision, digest)) = value.split_once('.') else {
         return false;
@@ -198,8 +204,11 @@ fn loaded(rows: std::collections::BTreeMap<String, String>) -> Result<Loaded, St
         snapshot.revision = composite_revision("0", legacy_raw.as_deref())?;
         return Ok(Loaded {
             snapshot,
+            #[cfg(test)]
             legacy,
+            #[cfg(test)]
             managed_revision: "0".into(),
+            #[cfg(test)]
             legacy_raw,
         });
     };
@@ -219,7 +228,7 @@ fn loaded(rows: std::collections::BTreeMap<String, String>) -> Result<Loaded, St
         }
         None => false,
     };
-    let (mut snapshot, legacy) = if saved.mode == Mode::Advanced {
+    let (mut snapshot, _legacy) = if saved.mode == Mode::Advanced {
         // An older binary is an explicit competing Advanced writer. Preserve
         // its actual choices; this is compatibility, not a second active mode.
         if let Some(actual) = legacy {
@@ -237,8 +246,11 @@ fn loaded(rows: std::collections::BTreeMap<String, String>) -> Result<Loaded, St
     snapshot.revision = composite_revision(&managed_revision, legacy_raw.as_deref())?;
     Ok(Loaded {
         snapshot,
-        legacy,
+        #[cfg(test)]
+        legacy: _legacy,
+        #[cfg(test)]
         managed_revision,
+        #[cfg(test)]
         legacy_raw,
     })
 }
@@ -252,12 +264,14 @@ pub(crate) async fn read(store: &dyn Store) -> Result<Snapshot, StoreError> {
 /// [`read`] parses them. A save made here raises the settings floor and is
 /// read back from the authority until this replica holds it; every
 /// configuration write keeps its compare-and-swap against [`read`].
+#[cfg(test)]
 pub(crate) async fn read_applied(
     applied: &plurx_core::store::AppliedView,
 ) -> Result<Snapshot, StoreError> {
     loaded(applied.setting_values(&[MANAGED_KEY, LEGACY_KEY]).await?).map(|loaded| loaded.snapshot)
 }
 
+#[cfg(test)]
 async fn write(
     store: &dyn Store,
     saved: Saved,
@@ -290,6 +304,7 @@ async fn write(
     Ok(response)
 }
 
+#[cfg(test)]
 pub(crate) async fn save(
     store: &dyn Store,
     request: UpdateRequest,
@@ -369,6 +384,7 @@ pub(crate) async fn save(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn activate_advanced(
     store: &dyn Store,
     mut legacy: Settings,

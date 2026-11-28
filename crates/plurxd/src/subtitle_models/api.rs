@@ -1,6 +1,7 @@
 //! Administrator-only, revision-bound subtitle setup and progress projections.
 //! Caption bodies, paths, payloads and claim authority never enter these DTOs.
-use super::config::{self, Mode, Snapshot, UpdateRequest};
+#[cfg(test)]
+use super::config::{Mode, Snapshot};
 use crate::{
     http::{error::ApiError, extract::AdminUser},
     state::AppState,
@@ -9,73 +10,15 @@ use axum::{
     extract::{Path as ApiPath, State},
     Json,
 };
-use plurx_core::{
-    domain::MediaFile,
-    store::{
-        background_jobs::{BackgroundJob, JobAttemptObservation, JobPayload, JobState},
-        background_jobs_transcription::artifact_key,
-    },
+#[cfg(test)]
+use plurx_core::domain::MediaFile;
+use plurx_core::store::{
+    background_jobs::{BackgroundJob, JobAttemptObservation, JobPayload, JobState},
+    background_jobs_transcription::artifact_key,
 };
 use serde_json::{json, Value};
 
-pub async fn settings(
-    _admin: AdminUser,
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
-    encode(config::read(state.store.as_ref()).await?)
-}
-
-pub async fn update_settings(
-    _admin: AdminUser,
-    State(state): State<AppState>,
-    Json(request): Json<UpdateRequest>,
-) -> Result<Json<Value>, ApiError> {
-    encode(config::save(state.store.as_ref(), request, &super::catalog().models).await?)
-}
-
-fn encode(value: impl serde::Serialize) -> Result<Json<Value>, ApiError> {
-    serde_json::to_value(value)
-        .map(Json)
-        .map_err(|_| ApiError::Internal("Could not encode subtitle observations".into()))
-}
-
-pub async fn models(
-    _admin: AdminUser,
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
-    let mut value = super::catalog_public();
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| ApiError::Internal("Subtitle catalog is unavailable".into()))?;
-    object.insert(
-        "workers".into(),
-        json!(super::workers_public(&state).await?),
-    );
-    Ok(Json(value))
-}
-
-pub async fn options(
-    _admin: AdminUser,
-    State(state): State<AppState>,
-    ApiPath(id): ApiPath<i64>,
-) -> Result<Json<Value>, ApiError> {
-    let (file, configuration) =
-        tokio::try_join!(state.store.get_file(id), config::read(state.store.as_ref()))?;
-    let file = file.ok_or(ApiError::NotFound("file"))?;
-    let languages = match configuration.mode {
-        Mode::Managed => super::catalog()
-            .models
-            .iter()
-            .find(|model| model.id == configuration.model_id)
-            .map(|model| model.languages.clone())
-            .unwrap_or_default(),
-        Mode::Advanced => {
-            crate::subtitle_transcription::model_languages(&configuration.advanced.model_path).await
-        }
-    };
-    Ok(Json(file_options(&file, &configuration, languages)))
-}
-
+#[cfg(test)]
 fn file_options(file: &MediaFile, configuration: &Snapshot, languages: Vec<String>) -> Value {
     let captions = file
         .subtitle_streams
@@ -177,6 +120,7 @@ fn subtitle_payload(job: &BackgroundJob) -> Result<JobPayload, ApiError> {
 fn safe_reason(reason: Option<&str>) -> Option<&'static str> {
     Some(match reason? {
         "disabled" => "disabled",
+        "superseded" => "superseded",
         "missing_model" | "model_not_installed" => "missing_model",
         "insufficient_disk"
         | "model_disk_reservation_unavailable"
