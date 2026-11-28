@@ -142,8 +142,10 @@ macro_rules! text_admission {
     ($payload:literal, $now:literal) => { concat!(r#"((json_extract("#,$payload,r#",'$.kind')='subtitle_text_model_operation'
     AND (json_extract("#,$payload,r#",'$.admin_user_id')=0 OR EXISTS(SELECT 1 FROM users WHERE id=json_extract("#,$payload,r#",'$.admin_user_id') AND is_admin=1))) OR (
     json_extract("#,$payload,r#",'$.kind')!='subtitle_text_model_operation'
-    AND ((json_extract("#,$payload,r#",'$.admin_user_id')=0 AND EXISTS(SELECT 1 FROM settings ai_schedule WHERE ai_schedule.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_schedule.value) THEN json_extract(ai_schedule.value,'$.version')=1 AND json_type(ai_schedule.value,'$.ahead_of_time')='true' ELSE 0 END))
-        OR EXISTS(SELECT 1 FROM users WHERE id=json_extract("#,$payload,r#",'$.admin_user_id') AND (is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))))
+    AND ((json_extract("#,$payload,r#",'$.admin_user_id')=0 AND EXISTS(SELECT 1 FROM settings ai_schedule WHERE ai_schedule.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_schedule.value) THEN json_extract(ai_schedule.value,'$.version')=1 AND json_type(ai_schedule.value,'$.ahead_of_time')='true' ELSE 0 END)
+      AND NOT EXISTS(SELECT 1 FROM subtitle_translation_schedule_exclusions skip WHERE skip.file_id=json_extract("#,$payload,r#",'$.file_id')
+        AND skip.source_size=json_extract("#,$payload,r#",'$.source_size') AND skip.source_mtime=json_extract("#,$payload,r#",'$.source_mtime')))
+    OR EXISTS(SELECT 1 FROM users WHERE id=json_extract("#,$payload,r#",'$.admin_user_id') AND (is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))))
     AND EXISTS(SELECT 1 FROM files WHERE id=json_extract("#,$payload,r#",'$.file_id') AND size=json_extract("#,$payload,r#",'$.source_size') AND mtime=json_extract("#,$payload,r#",'$.source_mtime') AND probe_json IS NOT NULL)
     AND EXISTS(SELECT 1 FROM settings WHERE key='subtitles.ai.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.version')=1 AND json_type(value,'$.translate_text')='true' ELSE 0 END)))"#) };
 }
@@ -2921,6 +2923,10 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         viewer: super::ai_subtitles::Viewer,
     ) -> Result<bool, StoreError>;
+    async fn ai_subtitle_excluded_from_schedule(
+        &self,
+        source: super::subtitle_translation::SourceRevision,
+    ) -> Result<bool, StoreError>;
     async fn delete_ai_subtitle_track(
         &self,
         source: super::subtitle_translation::SourceRevision,
@@ -3897,6 +3903,12 @@ impl<T: QueueSql> BackgroundJobStore for T {
         viewer: super::ai_subtitles::Viewer,
     ) -> Result<bool, StoreError> {
         super::ai_subtitles::viewer(self, viewer).await
+    }
+    async fn ai_subtitle_excluded_from_schedule(
+        &self,
+        source: super::subtitle_translation::SourceRevision,
+    ) -> Result<bool, StoreError> {
+        super::ai_subtitles::excluded_from_schedule(self, source).await
     }
     async fn delete_ai_subtitle_track(
         &self,

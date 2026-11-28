@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-27, plurx has 438 routes declared by the ordinary listener's
+As of 2026-11-27, plurx has 439 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 438 routes across the registered routers.
+plurx has 439 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -2658,10 +2658,11 @@ verify automatically after an administrator enables the route.
 | PUT | `/api/v1/ai-subtitles/settings` | admin bearer | Replace the document; the body is every field plus `expected_revision`. A stale revision is `409 configuration_conflict`. |
 | GET | `/api/v1/files/{id}/ai-subtitles` | bearer | Describe the existing English track or the available AI route for this file. The optional `target` defaults to `en`. Pass `audio_index` for the soundtrack in the player. |
 | POST | `/api/v1/files/{id}/ai-subtitles` | bearer with `who` checked | Start or join work with a stable `request_id`. The `auto` route can return a completed hash-matched download before using text or audio. Specify `text` or `audio` to choose a route. Audio accepts `audio_index`, a `spoken_language` override, and `quality`. Best uses the background model for item requests. |
+| GET | `/api/v1/ai-subtitles/operations/{id}` | bearer | Read the current account’s exact operation, including progress and stored-track identity. |
 | GET | `/api/v1/ai-subtitles/operations/{id}/cues` | bearer | Read up to 90 seconds of accepted cues and report the contiguous coverage around the requested position. |
 | PUT, DELETE | `/api/v1/ai-subtitles/operations/{id}/viewer` | bearer | Update or release this account's playback demand. PUT takes `position_ms`, `playback_rate`, and optional `playback_id`. DELETE takes optional `playback_id` as a query parameter. |
 | POST | `/api/v1/ai-subtitles/operations/{id}/stop` | bearer | Release the viewer's playback demand. Other viewers and the saved-track finish demand are independent. |
-| DELETE | `/api/v1/files/{id}/subtitles/{index}` | bearer; `who` | Delete the AI track at the displayed index when the required `track_id` query parameter matches its stable identity. |
+| DELETE | `/api/v1/files/{id}/subtitles/{index}` | bearer; `who` | Delete the AI track at the displayed index when the required `track_id` query parameter matches its stable identity. Ahead-of-time processing skips that media revision after deletion. A new explicit request can recreate the track. |
 
 The document is `{"version":1,"download_match":bool,"translate_text":bool,
 "from_audio":bool,"ahead_of_time":bool,"who":"everyone"|"admins",
@@ -2672,13 +2673,10 @@ release a save also rewrites `subtitles.translation.config.v1` (`enabled` from
 previous release admits the same work during a rolling upgrade.
 
 Every node installs, by itself, what the saved document needs: with
-`from_audio` the speech model of the current `quality` (every tier uses
-`small` for now), with `translate_text` the text model. A node does so when
-its packaged engine is qualified, its model store has more than twice the
-model's size free and its memory is more than twice the model's size. The
-install is the same fenced job an admin's Install runs, so a missing,
-changed or never-accepted model file repairs itself, and only a successful
-test counts. A failed attempt is retried after 15 minutes, then 1 hour, then
+`from_audio` installs Small and Silero speech detection. Best also installs
+Large v3 for background work. `translate_text` installs the pinned Marian
+bundle. Installation uses the same fenced job as repair. A node verifies
+the exact current model and engine before reporting ready. A failed attempt is retried after 15 minutes, then 1 hour, then
 every 6 hours.
 
 The GET response's `readiness` is `{"nodes":[{"node_id","label","cores",

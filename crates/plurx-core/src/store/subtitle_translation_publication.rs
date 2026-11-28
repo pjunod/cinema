@@ -212,7 +212,9 @@ pub(super) async fn bind<T: QueueSql>(
  profile_json=json(json_extract($1,'$.recipe.profile')),spoken_language=json_extract($1,'$.recipe.spoken_language'),
  {progress},view_revision=view_revision+1,updated_at_ms=json_extract($1,'$.now_ms')
  WHERE {before} AND op.view_revision<9223372036854775807 AND (op.asset_id IS NULL OR op.asset_id=json_extract($1,'$.recipe.asset_id')) AND NOT EXISTS(SELECT 1 FROM subtitle_translation_source_bindings b WHERE b.operation_id=op.id AND b.operation_epoch=op.operation_epoch AND b.source_sha256!=json_extract($1,'$.recipe.source_sha256')) AND op.preparation_job_id=json_extract($1,'$.token.job_id') AND EXISTS(SELECT 1 FROM subtitle_translation_assets a WHERE a.id=json_extract($1,'$.recipe.asset_id') AND a.operation_id=json_extract($1,'$.recipe.operation_id') AND a.retired_at_ms IS NULL) AND EXISTS(SELECT 1 FROM background_jobs job WHERE {OWNS})"#),body.clone()),
- (success_sql(),body.clone()),(SETTLE_WAITERS.into(),body.clone())]).await?;
+ (success_sql(),body.clone()),(SETTLE_WAITERS.into(),body.clone()),
+ (super::subtitle_translation_tracks::store_inline(),body.clone()),
+ (super::subtitle_translation_tracks::store_asset_reference(),body.clone())]).await?;
     settled(store, body).await
 }
 

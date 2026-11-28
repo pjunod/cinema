@@ -18,6 +18,13 @@ CREATE TABLE subtitle_translation_stored_tracks(
 CREATE INDEX subtitle_translation_stored_tracks_file
 ON subtitle_translation_stored_tracks(file_id,source_size,source_mtime,asset_id);
 -- next statement
+-- Explicit deletion suppresses maintenance creation for this media revision.
+CREATE TABLE subtitle_translation_schedule_exclusions(
+ file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+ source_size INTEGER NOT NULL,
+ source_mtime INTEGER NOT NULL
+) STRICT;
+-- next statement
 DROP TRIGGER subtitle_translation_mutate;
 -- next statement
 CREATE TRIGGER subtitle_translation_mutate AFTER INSERT ON subtitle_translation_commands

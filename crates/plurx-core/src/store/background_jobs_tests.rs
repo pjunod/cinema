@@ -140,6 +140,17 @@ async fn whole_file_subtitle_retirement_fences_legacy_jobs_and_keeps_other_work(
         .supersede_whole_file_subtitle_jobs(1003)
         .await
         .expect("repeat"));
+    store
+        .maintain_translation_cache(1004)
+        .await
+        .expect("ordinary cache maintenance");
+    let running = store
+        .background_job(&ids[1])
+        .await
+        .expect("read retained job")
+        .expect("job");
+    assert_eq!(running.state, JobState::Cancelling);
+    assert!(running.token.is_some());
 }
 
 #[tokio::test]

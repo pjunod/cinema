@@ -48,7 +48,7 @@ pub struct GrantCaptionRead {
 }
 const SCOPE: &str = r#"a.file_id=json_extract($1,'$.principal.file_id') AND a.retired_at_ms IS NULL
  AND EXISTS(SELECT 1 FROM files f WHERE f.id=a.file_id AND f.size=json_extract(a.source_json,'$.source_size') AND f.mtime=json_extract(a.source_json,'$.source_mtime') AND f.probe_json IS NOT NULL)"#;
-const LEASE: &str = r#"l.asset_id=a.id AND l.id=json_extract($1,'$.lease_id') AND l.grant_id=json_extract($1,'$.principal.grant_id')
+const LEASE: &str = r#"l.asset_id=a.id AND a.id=json_extract($1,'$.asset_id') AND l.id=json_extract($1,'$.lease_id') AND l.grant_id=json_extract($1,'$.principal.grant_id')
  AND l.principal=json_extract($1,'$.principal.binding_sha256') AND l.file_id=a.file_id AND l.expires_at_ms>json_extract($1,'$.now_ms')"#;
 const ASSET: &str = r#"json_object('asset_id',a.id,'file_id',CAST(a.file_id AS TEXT),'content_revision',a.source_sha256,
  'profile_id',a.profile_id,'model_id',json_extract(a.profile_json,'$.model_id'),'model_sha256',json_extract(a.profile_json,'$.model_sha256'),

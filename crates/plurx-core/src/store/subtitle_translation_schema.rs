@@ -9,10 +9,10 @@ pub(crate) const CONTINUITY_MIGRATION: &str = include_str!("subtitle_translation
 pub(crate) const AUTHORITY_MIGRATION: &str = include_str!("subtitle_translation_authority.sql");
 pub(crate) const FINISH_MIGRATION: &str = include_str!("subtitle_translation_finish.sql");
 pub(crate) const SUPERSEDE_LEGACY_JOBS: &str = r#"UPDATE background_jobs
- SET state='cancelled',last_error_code='superseded',
-     owner_node_id=NULL,owner_boot_id=NULL,claim_id=NULL,lease_expires_ms=NULL,revision=revision+1
+ SET state=CASE WHEN state='queued' THEN 'cancelled' ELSE 'cancelling' END,
+     last_error_code='superseded',revision=revision+1
  WHERE kind IN ('subtitle_transcribe','subtitle_transcribe_managed')
- AND state IN ('queued','running','cancelling') AND revision<9223372036854775807"#;
+ AND state IN ('queued','running') AND revision<9223372036854775807"#;
 pub(crate) const SCHEMA_PRE_AUTHORITY: &str = concat!(
     include_str!("subtitle_translation.sql"),
     "\n-- next statement\n",

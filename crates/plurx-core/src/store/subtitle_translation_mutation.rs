@@ -223,7 +223,11 @@ impl TranslationMutation {
                     || *expected_operation_epoch <= 0
                     || *expected_view_revision <= 0
                     || !matches!(expected_state.as_str(), "stopped" | "failed")
-                    || !window(position_ms, playback_rate, playback_id)
+                    || !(window(position_ms, playback_rate, playback_id)
+                        || (playback_id.is_empty()
+                            && *position_ms == 0
+                            && *playback_rate == 1.0
+                            && continuity.is_none()))
                 {
                     return Err(bad());
                 }
@@ -312,6 +316,16 @@ const MUTATE: &str = r#"WITH input AS MATERIALIZED(SELECT json($1) body), prior 
  WHEN json_extract(body,'$.action.action') IN ('demand','release') AND NOT EXISTS(SELECT 1 FROM subtitle_translation_demands WHERE id=json_extract(body,'$.action.demand_id') AND operation_id=op_id AND operation_epoch=json_extract(body,'$.action.expected_operation_epoch') AND generation=json_extract(body,'$.action.expected_generation') AND generation<9223372036854775807 AND user_id=json_extract(body,'$.user_id') AND playback_id=json_extract(body,'$.action.playback_id') AND released=0) THEN 'demand_conflict'
  WHEN json_extract(body,'$.action.action')='retarget' AND NOT EXISTS(SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id WHERE op.id=op_id AND op.operation_epoch=json_extract(body,'$.action.expected_operation_epoch') AND op.view_revision=json_extract(body,'$.action.expected_view_revision') AND op.preparation_job_id=json_extract(body,'$.action.expected_preparation_job_id') AND op.target_node_id=json_extract(body,'$.action.expected_target_node_id') AND op.stopped=0 AND op.state NOT IN ('failed','stopped','complete') AND f.size=json_extract(op.source_json,'$.source_size') AND f.mtime=json_extract(op.source_json,'$.source_mtime') AND f.probe_json IS NOT NULL AND (EXISTS(SELECT 1 FROM subtitle_translation_finish_demands finish WHERE finish.operation_id=op.id AND finish.requested_by=json_extract(body,'$.user_id')) OR EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id WHERE d.operation_id=op.id AND d.operation_epoch=op.operation_epoch AND d.user_id=json_extract(body,'$.user_id') AND d.released=0 AND d.expires_at_ms>json_extract(body,'$.now_ms') AND (u.is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END)))) AND NOT __READABLE_OPERATION__) THEN 'state_conflict'
  WHEN json_extract(body,'$.action.action')='retry_operation' AND NOT EXISTS(SELECT 1 FROM subtitle_translation_operations WHERE id=op_id AND view_revision=json_extract(body,'$.action.expected_view_revision') AND state=json_extract(body,'$.action.expected_state') AND (stopped=1 OR (state='failed' AND retryable=1))) THEN 'state_conflict'
+ WHEN json_extract(body,'$.action.action')='retry_operation' AND json_extract(body,'$.action.playback_id')=''
+  AND NOT EXISTS(SELECT 1 FROM subtitle_translation_finish_demands WHERE operation_id=op_id) THEN 'state_conflict'
+ WHEN json_extract(body,'$.action.action')='retry_operation'
+  AND EXISTS(SELECT 1 FROM subtitle_translation_finish_demands WHERE operation_id=op_id)
+  AND ((SELECT count(*) FROM subtitle_translation_finish_demands finish JOIN subtitle_translation_operations op ON op.id=finish.operation_id
+       WHERE op.stopped=0 AND op.state NOT IN ('failed','complete'))>=16
+   OR (NOT EXISTS(SELECT 1 FROM users WHERE id=json_extract(body,'$.user_id') AND is_admin=1)
+       AND (SELECT count(*) FROM subtitle_translation_finish_demands finish JOIN subtitle_translation_operations op ON op.id=finish.operation_id
+       WHERE finish.requested_by=json_extract(body,'$.user_id') AND op.stopped=0 AND op.state NOT IN ('failed','complete'))>=2))
+ THEN 'demand_quota'
  WHEN json_extract(body,'$.action.action')='retry_range' AND NOT EXISTS(SELECT 1 FROM subtitle_translation_operations op JOIN subtitle_translation_ranges r ON r.operation_id=op.id AND r.operation_epoch=op.operation_epoch WHERE op.id=op_id AND op.state='partial' AND op.stopped=0 AND r.core_index=json_extract(body,'$.action.core_index') AND r.range_revision=json_extract(body,'$.action.expected_range_revision') AND r.state='failed' AND r.retryable=1 AND r.attempts<3 AND r.range_revision<9223372036854775807) THEN 'range_conflict'
  ELSE 'accepted' END outcome FROM selected)
  INSERT INTO subtitle_translation_commands(id,operation,request_json,result_json)
@@ -362,6 +376,17 @@ pub(super) async fn mutate<T: QueueSql>(
  WHERE c.id=json_extract($1,'$.command_id') AND json_extract(c.result_json,'$.outcome')='accepted'
   AND op.stopped=0 AND op.state NOT IN ('failed','complete')
  ON CONFLICT(operation_id) DO NOTHING"#
+                .into(),
+            encode(&body)?,
+        ));
+    }
+    if matches!(&input.action, TranslationAction::RetryOperation { .. }) {
+        statements.push((
+            r#"UPDATE subtitle_translation_finish_demands
+ SET requested_by=json_extract($1,'$.user_id')
+ WHERE operation_id=json_extract($1,'$.action.operation_id')
+ AND EXISTS(SELECT 1 FROM subtitle_translation_commands c WHERE c.id=json_extract($1,'$.command_id')
+    AND json_extract(c.result_json,'$.outcome')='accepted')"#
                 .into(),
             encode(&body)?,
         ));
@@ -439,7 +464,7 @@ pub(super) async fn mutate<T: QueueSql>(
             priority: u8::from(
                 input.user_id != 0
                     && !matches!(
-                        &input.action, TranslationAction::Create { playback_id, .. } if playback_id.is_empty()
+                        &input.action, TranslationAction::Create { playback_id, .. } | TranslationAction::RetryOperation { playback_id, .. } if playback_id.is_empty()
                     ),
             ),
             not_before_ms: input.now_ms,

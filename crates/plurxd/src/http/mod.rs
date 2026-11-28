@@ -555,6 +555,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/decision"
         | "/api/v1/files/{id}/hls/startup-decision"
         | "/api/v1/subtitle-translation/operations/{id}"
+        | "/api/v1/ai-subtitles/operations/{id}"
         | "/api/v1/ai-subtitles/operations/{id}/cues"
         | "/api/v1/ai-subtitles/operations/{id}/viewer"
         | "/api/v1/ai-subtitles/operations/{id}/stop"
@@ -2008,6 +2009,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/files/{id}/ai-subtitles",
             get(crate::ai_subtitles::routes::describe).post(crate::ai_subtitles::routes::start),
+        )
+        .route(
+            "/ai-subtitles/operations/{id}",
+            get(crate::ai_subtitles::routes::status),
         )
         .route(
             "/ai-subtitles/operations/{id}/cues",

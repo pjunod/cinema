@@ -24,7 +24,8 @@ pub(super) const RENDER_VTT: &str = r#"('WEBVTT'||char(10,10)||COALESCE((
 const COMPLETED: &str = r#"WITH completed AS MATERIALIZED (
  SELECT a.id,a.file_id,a.audio_index,a.profile_id,a.profile_json,
    CASE WHEN json_extract(a.profile_json,'$.task')='transcribe' THEN a.spoken_language ELSE 'en' END AS language,
-   f.size,f.mtime
+   f.size,f.mtime,
+   (SELECT body FROM subtitle_translation_segments s WHERE s.asset_id=a.id ORDER BY core_index DESC LIMIT 1) AS provenance_body
  FROM subtitle_translation_assets a
  JOIN subtitle_translation_operations op ON op.id=a.operation_id AND op.asset_id=a.id
  JOIN subtitle_translation_finish_demands finish ON finish.operation_id=op.id
@@ -32,8 +33,17 @@ const COMPLETED: &str = r#"WITH completed AS MATERIALIZED (
     AND f.mtime=json_extract(a.source_json,'$.source_mtime') AND f.probe_json IS NOT NULL
  WHERE a.id=json_extract($1,'$.recipe.asset_id') AND op.state='complete' AND op.stopped=0
  AND op.operation_epoch=json_extract($1,'$.recipe.operation_epoch') AND a.retired_at_ms IS NULL
- AND EXISTS(SELECT 1 FROM subtitle_translation_segments s WHERE s.asset_id=a.id
-   AND s.core_index=json_extract($1,'$.recipe.core_index') AND s.publication_id=json_extract($1,'$.publication_id'))
+ AND (
+   EXISTS(SELECT 1 FROM subtitle_translation_segments s WHERE s.asset_id=a.id
+     AND s.core_index=json_extract($1,'$.recipe.core_index') AND s.publication_id=json_extract($1,'$.publication_id'))
+   OR (json_extract($1,'$.source.kind')='subtitle_translation_prepare'
+     AND EXISTS(SELECT 1 FROM background_jobs j JOIN background_job_attempts attempt ON attempt.job_id=j.id AND attempt.fence=j.fence
+       WHERE j.id=op.preparation_job_id AND j.id=json_extract($1,'$.token.job_id')
+       AND j.state='succeeded' AND j.result_ref=a.id AND j.fence=json_extract($1,'$.token.fence')
+       AND attempt.claim_id=json_extract($1,'$.token.claim_id')
+       AND attempt.owner_node_id=json_extract($1,'$.token.node_id')
+       AND attempt.owner_boot_id=json_extract($1,'$.token.boot_id')))
+ )
 )"#;
 
 const TRACK_PRESENT: &str = r#"EXISTS(SELECT 1 FROM json_each(file.downloaded_subtitles) existing
@@ -51,8 +61,8 @@ fn caption_json(vtt: &str, progressive_asset: &str) -> String {
    'model_sha256',json_extract(a.profile_json,'$.model_sha256'),'pipeline_digest',a.profile_id,
    'adapter',json_extract(a.profile_json,'$.adapter_contract'),'generated_at_ms',json_extract($1,'$.now_ms'),
    'progressive_asset_id',{progressive_asset},
-   'execution',json_object('engine_sha256',json_extract(json_extract($1,'$.segment_body'),'$.provenance.engine_sha256'),
-      'platform',json_extract(json_extract($1,'$.segment_body'),'$.provenance.platform'))))"#
+   'execution',json_object('engine_sha256',json_extract(a.provenance_body,'$.provenance.engine_sha256'),
+      'platform',json_extract(a.provenance_body,'$.provenance.platform'))))"#
     )
 }
 
