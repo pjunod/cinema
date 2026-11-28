@@ -20,6 +20,28 @@ struct SplitChild {
 }
 
 impl VodServe {
+    /// Whether this node holds a live shared video-only copy of `file`, so a
+    /// split copy placed here reuses it instead of packaging the video again
+    /// (P62 S2 §4). Retained generations on disk are not consulted; placement
+    /// still converges on one node through the split copy's placement key.
+    pub(crate) async fn holds_split_video(&self, file: &plurx_core::domain::MediaFile) -> bool {
+        self.shared
+            .renditions
+            .lock()
+            .await
+            .values()
+            .any(|rendition| {
+                let recipe = &rendition.recipe;
+                recipe.audio_excluded
+                    && recipe.encoding.is_none()
+                    && recipe.file.id == file.id
+                    && recipe.file.size == file.size
+                    && recipe.file.mtime == file.mtime
+                    && !rendition.closed.load(Relaxed)
+                    && rendition.failure().is_none()
+            })
+    }
+
     /// The session's live rendition is the shared video of a split copy.
     pub(super) async fn split_copy_session(&self, session_id: &str) -> bool {
         let sessions = self.shared.sessions.lock().await;
@@ -38,7 +60,8 @@ impl VodServe {
         &self,
         session_id: &str,
         deadline: Instant,
-    ) -> Option<VodPublication<Option<Vec<u8>>>> {
+    ) -> Option<VodPublication<Option<plurx_core::transcode::split_master::SplitPresentation>>>
+    {
         if !self.split_copy_session(session_id).await {
             return None;
         }
@@ -157,12 +180,7 @@ impl VodServe {
                     audio,
                     source_index,
                     language: stream.language.clone(),
-                    name: stream
-                        .title
-                        .clone()
-                        .filter(|title| !title.trim().is_empty())
-                        .or_else(|| stream.language.clone())
-                        .unwrap_or_else(|| format!("Track {}", soundtracks.len() + 1)),
+                    title: stream.title.clone(),
                 });
             }
             let default = requested_audio
@@ -184,8 +202,7 @@ impl VodServe {
                 }
             }
             family
-                .master_playlist(&video_budget, &audio_budgets, default)
-                .map(String::into_bytes)
+                .presentation(&video_budget, &audio_budgets, default)
                 .map(Some)
                 .map_err(fail)
         }

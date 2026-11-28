@@ -1906,7 +1906,10 @@ async fn plan_preparation_with_candidate(
     .then_some(selection.subtitle.track)
     .flatten();
     let body = CreateSession {
-        split_audio: None,
+        // A server-built successor never reads the per-start caps token from
+        // the retained caps: it is muxed here, and `preserve_prepared_audio`
+        // carries a split predecessor's alternates onto a successor copy.
+        split_audio: Some(false),
         processed_upgrade: None,
         source_telemetry: Some(crate::transcode::SourceTelemetry::FilmV1),
         playback_id: predecessor.request.playback_id.clone(),
@@ -2106,6 +2109,7 @@ async fn prepared_relocation_owner(
         candidate.audio_index,
         candidate.subtitle_burn,
         candidate.hdr10,
+        crate::transcode::split_copy_eligible(candidate, source),
     )
     .ok()?;
     state
@@ -3102,12 +3106,13 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             .as_ref()
             .map(|context| context.candidate_id),
         quality_candidates: candidate.quality_catalog.as_ref().map(|catalog| {
-            catalog
-                .candidates
-                .iter()
-                .filter(|entry| entry.dispatch_supported && !entry.partial)
-                .map(|entry| entry.candidate.clone())
-                .collect()
+            plurx_core::playback::candidate::unique_public_candidates(
+                catalog
+                    .candidates
+                    .iter()
+                    .filter(|entry| entry.dispatch_supported && !entry.partial)
+                    .map(|entry| entry.candidate.clone()),
+            )
         }),
         session_id: staged_session_id.clone(),
         playlist_url,

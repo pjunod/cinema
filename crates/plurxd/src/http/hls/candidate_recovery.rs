@@ -913,13 +913,11 @@ fn incumbent_candidate(
         .quality_candidates
         .filter(|candidates| candidates.len() <= 64)
         .ok_or(Miss::CandidateMismatch)?;
-    let mut matches = candidates
-        .into_iter()
-        .filter(|candidate| candidate.id == id);
-    let candidate = matches.next().ok_or(Miss::CandidateMismatch)?;
-    if matches.next().is_some() {
-        return Err(Miss::CandidateMismatch);
-    }
+    // One public row; a response stored before the catalogue repeated no ID
+    // may list worker twins of the same recipe, which address that one row.
+    let candidate = plurx_core::playback::candidate::single_public_row(&candidates, id)
+        .cloned()
+        .ok_or(Miss::CandidateMismatch)?;
     if !candidate.identity_matches() {
         return Err(Miss::CandidateIdentity);
     }

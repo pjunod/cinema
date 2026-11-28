@@ -1148,13 +1148,9 @@ fn measured_link_prior(
     if response.session_id != route.session_id {
         return None;
     }
-    let mut matches = response
-        .quality_candidates?
-        .into_iter()
-        .filter(|candidate| candidate.id == id);
-    let candidate = matches.next()?;
-    if matches.next().is_some()
-        || !candidate.identity_matches()
+    let candidates = response.quality_candidates?;
+    let candidate = plurx_core::playback::candidate::single_public_row(&candidates, id)?;
+    if !candidate.identity_matches()
         || candidate.recipe_digest != value.binding.recipe_digest
         || candidate.route != value.binding.route
         || candidate.target_height == 0

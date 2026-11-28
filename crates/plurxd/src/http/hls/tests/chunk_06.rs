@@ -924,6 +924,37 @@ fn processed_requalification_replaces_hint_once_and_refuses_full_recipe_collisio
     assert_eq!(catalog.candidates.len(), 2, "collision refusal leaves the prior catalog untouched");
 }
 
+/// file62 on Cinema: two workers with the same encoder offered the same 2160p
+/// HDR10 recipe, so the start response listed its ID twice and recovery's
+/// incumbent bind, which needs exactly one row, refused the verified processed
+/// upgrade as `candidate_mismatch`. The public list keeps one row per ID (with
+/// equal evidence, the local worker's) and still lists each worker's distinct
+/// recipes.
+#[test]
+fn a_recipe_two_workers_offer_is_listed_once_in_the_start_response() {
+    use plurx_core::playback::candidate::CandidateId;
+    let row = |node: &str, seed: u8, partial: bool| crate::media_pool::WorkerQualityCandidate {
+        node_id: node.into(),
+        candidate: crate::transcode::continuous_test_candidate_context(
+            CandidateId::for_recipe_digest([seed; 32]), [seed; 32], 720).selected_candidate,
+        binding: None, partial, dispatch_supported: true,
+    };
+    let local = row("node-a", 7, false);
+    let peer_twin = row("node-b", 7, false);
+    let peer_own = row("node-b", 9, false);
+    let peer_partial = row("node-b", 11, true);
+    let catalog = crate::media_pool::QualityCatalogResult {
+        candidates: vec![local.clone(), peer_twin, peer_own.clone(), peer_partial],
+        complete: true, causes: Vec::new(), authority_refused: false,
+    };
+    let listed = public_quality_candidates(Some(&catalog), "node-a");
+    assert_eq!(listed, vec![local.candidate.clone(), peer_own.candidate],
+        "one row per ID, the local worker's on equal evidence; a peer's partial row stays out");
+    assert_eq!(listed.iter().filter(|candidate| candidate.id == local.candidate.id).count(), 1,
+        "recovery binds the incumbent's single row");
+    assert!(public_quality_candidates(None, "node-a").is_empty());
+}
+
 #[tokio::test]
 async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
@@ -2225,16 +2256,50 @@ fn native_hls_master_advertises_selection_language_names_and_forced_metadata() {
 }
 
 #[test]
-fn continuous_master_keeps_verified_variants_and_one_common_subtitle_group() {
+fn split_master_renders_verified_variants_with_one_common_subtitle_group() {
+    use plurx_core::transcode::split_master::{
+        SplitAudio, SplitBandwidth, SplitBudget, SplitPresentation, SplitVideo, VideoRange,
+    };
     let file = hls_file(vec![
         sub("subrip", "eng", "Regular", false, false),
         sub("webvtt", "eng", "SDH", false, false),
         sub("hdmv_pgs_subtitle", "eng", "Bitmap", false, false),
     ]);
-    let original = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",URI=\"audio/exact/index.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,CODECS=\"avc1.640032,mp4a.40.2\",AUDIO=\"audio\"\nvideo/low/index.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,CODECS=\"avc1.640032,mp4a.40.2\",AUDIO=\"audio\"\nvideo/high/index.m3u8\n";
+    let budget = |peak_bps| {
+        Some(SplitBudget {
+            peak_bps,
+            average_bps: None,
+        })
+    };
+    let video = |c: char, height: u32, peak| SplitVideo {
+        rendition_id: c.to_string().repeat(64),
+        codec: "avc1.640032".into(),
+        supplemental_codecs: None,
+        width: Some(height * 16 / 9),
+        height: Some(height),
+        frame_rate: None,
+        video_range: VideoRange::Sdr,
+        budget: budget(peak),
+    };
+    let presentation = SplitPresentation {
+        variants: vec![video('b', 1080, 2_000_000), video('a', 720, 1_000_000)],
+        audio: vec![SplitAudio {
+            rendition_id: "c".repeat(64),
+            source_index: 0,
+            title: None,
+            language: Some("eng".into()),
+            default: true,
+            channels: Some(2),
+            codec: "mp4a.40.2".into(),
+            budget: budget(128_000),
+        }],
+        bandwidth: SplitBandwidth::PerRole,
+        subtitles: String::new(),
+        independent_segments: false,
+    };
+    let bare = presentation.master_text().expect("bare master");
     let master = String::from_utf8(
-        continuous_master_with_subtitles(original.as_bytes().to_vec(), &file, Some(1))
-            .expect("caption family"),
+        split_master_with_subtitles(presentation.clone(), &file, Some(1)).expect("caption family"),
     )
     .expect("UTF-8");
     assert_eq!(master.matches("TYPE=AUDIO").count(), 1);
@@ -2243,7 +2308,11 @@ fn continuous_master_keeps_verified_variants_and_one_common_subtitle_group() {
     assert!(master.contains("DEFAULT=YES"));
     assert!(!master.contains("subs/2/"));
     assert!(!master.contains("40000000") && !master.contains("3840x2160"));
-    for line in original
+    assert!(
+        master.find("TYPE=SUBTITLES").expect("subtitles")
+            < master.find("#EXT-X-STREAM-INF").expect("variant")
+    );
+    for line in bare
         .lines()
         .filter(|line| !line.starts_with("#EXT-X-STREAM-INF:"))
     {
@@ -2251,10 +2320,73 @@ fn continuous_master_keeps_verified_variants_and_one_common_subtitle_group() {
     }
     let none = hls_file(vec![]);
     assert_eq!(
-        continuous_master_with_subtitles(original.as_bytes().to_vec(), &none, None)
-            .expect("no native captions"),
-        original.as_bytes()
+        split_master_with_subtitles(presentation, &none, None).expect("no native captions"),
+        bare.as_bytes()
     );
+}
+
+/// The native Safari split, pinned: Safari's in-band sample entries, the
+/// converted Dolby Vision range, the projected init's audio facts and the
+/// source stream's labels, under the copy's combined budget.
+#[test]
+fn native_split_master_is_written_from_proved_facts() {
+    let mut file = hls_file(vec![]);
+    file.audio_streams = vec![
+        plurx_core::domain::AudioStream {
+            index: 0,
+            language: Some("fre".into()),
+            ..Default::default()
+        },
+        plurx_core::domain::AudioStream {
+            index: 1,
+            language: Some("eng".into()),
+            title: Some("Main \"Mix\"".into()),
+            ..Default::default()
+        },
+    ];
+    let mut context = hls_context("hvc1.2.4.L153.B0,mp4a.40.2", Some("dvh1.08.06/db1p"));
+    context.bandwidth = Some(plurx_core::transcode::OutputBandwidth {
+        peak_bps: 50_000_000,
+        average_bps: 30_000_000,
+    });
+    let ids = crate::copyseg::NativeSplitInitIds {
+        video: "a".repeat(64),
+        audio: "b".repeat(64),
+        audio_codec: "mp4a.40.2",
+        audio_channels: 6,
+    };
+    let master = native_split_presentation(&file, &context, &ids, Some(1))
+        .master_text()
+        .expect("native master");
+    assert_eq!(
+        master,
+        format!(
+            "#EXTM3U\n#EXT-X-VERSION:10\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Main 'Mix'\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"6\",STABLE-RENDITION-ID=\"a1\",URI=\"audio/{b}/index.m3u8\"\n\
+#EXT-X-STREAM-INF:BANDWIDTH=50000000,AVERAGE-BANDWIDTH=30000000,RESOLUTION=3840x2160,FRAME-RATE=23.976,CODECS=\"hev1.2.4.L153.B0,mp4a.40.2\",SUPPLEMENTAL-CODECS=\"dvhe.08.06/db1p\",VIDEO-RANGE=PQ,AUDIO=\"audio\"\n\
+video/{a}/index.m3u8\n",
+            a = "a".repeat(64),
+            b = "b".repeat(64),
+        )
+    );
+    // No bound budget: the source bitrate stands in, as before.
+    context.bandwidth = None;
+    let master = native_split_presentation(&file, &context, &ids, None)
+        .master_text()
+        .expect("fallback master");
+    assert!(master.contains("BANDWIDTH=40000000,AVERAGE-BANDWIDTH=40000000,"));
+    assert!(master.contains("NAME=\"fre\",LANGUAGE=\"fr\""));
+    assert!(master.contains("STABLE-RENDITION-ID=\"a0\""));
+    // A half-known raster is no RESOLUTION, never a refused master.
+    file.height = None;
+    let master = native_split_presentation(&file, &context, &ids, Some(1))
+        .master_text()
+        .expect("raster-free master");
+    assert!(!master.contains("RESOLUTION="));
+    file.height = Some(0);
+    assert!(native_split_presentation(&file, &context, &ids, Some(1))
+        .master_text()
+        .is_ok());
 }
 
 #[tokio::test]

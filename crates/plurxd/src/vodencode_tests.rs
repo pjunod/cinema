@@ -1142,11 +1142,12 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         .continuous_master_before(&parent, Instant::now() + Duration::from_secs(30))
         .await
         .expect("continuous parent");
-    let master_bytes = master
+    let master_text = master
         .result
         .expect("verified family")
-        .expect("master bytes");
-    let master_text = String::from_utf8(master_bytes.clone()).expect("master UTF-8");
+        .expect("master presentation")
+        .master_text()
+        .expect("master text");
     assert_eq!(master_text.matches("#EXT-X-STREAM-INF:").count(), 2);
     assert_eq!(master_text.matches("#EXT-X-MEDIA:TYPE=AUDIO").count(), 1);
     assert!(!master_text.contains("AVERAGE-BANDWIDTH"));
@@ -1185,8 +1186,10 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
             .expect("same parent")
             .result
             .expect("stable family")
-            .expect("master"),
-        master_bytes
+            .expect("master")
+            .master_text()
+            .expect("master text"),
+        master_text
     );
     let description = serve
         .continuous_family_description_before(&parent, Instant::now() + Duration::from_secs(5))
