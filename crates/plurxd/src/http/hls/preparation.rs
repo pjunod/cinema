@@ -3106,12 +3106,13 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             .as_ref()
             .map(|context| context.candidate_id),
         quality_candidates: candidate.quality_catalog.as_ref().map(|catalog| {
-            catalog
-                .candidates
-                .iter()
-                .filter(|entry| entry.dispatch_supported && !entry.partial)
-                .map(|entry| entry.candidate.clone())
-                .collect()
+            plurx_core::playback::candidate::unique_public_candidates(
+                catalog
+                    .candidates
+                    .iter()
+                    .filter(|entry| entry.dispatch_supported && !entry.partial)
+                    .map(|entry| entry.candidate.clone()),
+            )
         }),
         session_id: staged_session_id.clone(),
         playlist_url,

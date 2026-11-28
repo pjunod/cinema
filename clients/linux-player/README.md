@@ -167,6 +167,12 @@ package has one launcher orig tarball plus the Debian tarball; historical
 renderer patches and CPU controls remain source only. `SHA256SUMS` covers the
 binary and source artifacts; `.buildinfo` records the build environment.
 
+A Debian changelog update merged to Forgejo main builds and verifies the
+package there. The workflow attaches the binary, Debian source, checksums
+and build information to `plurx-player-deb-<version>` for the project APT
+publisher. The release identifies the source commit. Reusing a version
+with different bytes fails the release job.
+
 Verification checks checksums (including a negative self-test), lintian,
 installation, package ownership/file list, scheme registration, default binary,
 PQ rendering under gpu-next/Vulkan, Cinema's actual Lua/IPC interfaces, isolated

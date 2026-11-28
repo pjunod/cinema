@@ -924,6 +924,37 @@ fn processed_requalification_replaces_hint_once_and_refuses_full_recipe_collisio
     assert_eq!(catalog.candidates.len(), 2, "collision refusal leaves the prior catalog untouched");
 }
 
+/// file62 on Cinema: two workers with the same encoder offered the same 2160p
+/// HDR10 recipe, so the start response listed its ID twice and recovery's
+/// incumbent bind, which needs exactly one row, refused the verified processed
+/// upgrade as `candidate_mismatch`. The public list keeps one row per ID (with
+/// equal evidence, the local worker's) and still lists each worker's distinct
+/// recipes.
+#[test]
+fn a_recipe_two_workers_offer_is_listed_once_in_the_start_response() {
+    use plurx_core::playback::candidate::CandidateId;
+    let row = |node: &str, seed: u8, partial: bool| crate::media_pool::WorkerQualityCandidate {
+        node_id: node.into(),
+        candidate: crate::transcode::continuous_test_candidate_context(
+            CandidateId::for_recipe_digest([seed; 32]), [seed; 32], 720).selected_candidate,
+        binding: None, partial, dispatch_supported: true,
+    };
+    let local = row("node-a", 7, false);
+    let peer_twin = row("node-b", 7, false);
+    let peer_own = row("node-b", 9, false);
+    let peer_partial = row("node-b", 11, true);
+    let catalog = crate::media_pool::QualityCatalogResult {
+        candidates: vec![local.clone(), peer_twin, peer_own.clone(), peer_partial],
+        complete: true, causes: Vec::new(), authority_refused: false,
+    };
+    let listed = public_quality_candidates(Some(&catalog), "node-a");
+    assert_eq!(listed, vec![local.candidate.clone(), peer_own.candidate],
+        "one row per ID, the local worker's on equal evidence; a peer's partial row stays out");
+    assert_eq!(listed.iter().filter(|candidate| candidate.id == local.candidate.id).count(), 1,
+        "recovery binds the incumbent's single row");
+    assert!(public_quality_candidates(None, "node-a").is_empty());
+}
+
 #[tokio::test]
 async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
