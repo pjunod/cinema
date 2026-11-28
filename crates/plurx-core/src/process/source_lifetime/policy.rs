@@ -1252,14 +1252,13 @@ mod tests {
     fn ffmpeg_fd_output_option_ends_at_the_output_operand() {
         let mut fixture = Fixture::new();
         let media = fixture.data.join("source.mp4");
-        std::fs::write(&media, b"source").unwrap();
+        std::fs::write(&media, b"source").expect("write fixture source");
         fixture.asset(&media);
         let command = fixture.command("ffmpeg", &["-fd", "7", "-f", "null", "pipe:1", "-i", "fd:"]);
+        let source = File::open(&media).expect("open fixture source");
         let mut manifest = fixture.manifest(
             &command,
-            vec![
-                InheritedFd::duplicate(&File::open(&media).unwrap(), 6).expect("source descriptor")
-            ],
+            vec![InheritedFd::duplicate(&source, 6).expect("source descriptor")],
         );
         manifest.argument_profile = ArgumentProfile::Ffmpeg { drm_device: None };
         let refusal = verify_state(
@@ -1270,7 +1269,7 @@ mod tests {
             "policy fixture",
             &[],
         )
-        .unwrap_err();
+        .expect_err("FFmpeg source input has advisory confinement");
         assert_eq!(refusal.check, "asset_input_confinement_unqualified");
         assert!(!refusal.enforce);
     }

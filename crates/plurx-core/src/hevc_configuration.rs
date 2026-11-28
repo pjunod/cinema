@@ -636,8 +636,8 @@ mod tests {
                 .map(|range| (range, packets))
         };
         assert_eq!(
-            inspect(Trace::for_m7_authored_clip(), &with_notice).unwrap(),
-            inspect(Trace::default(), &input).unwrap()
+            inspect(Trace::for_m7_authored_clip(), &with_notice).expect("authored trace"),
+            inspect(Trace::default(), &input).expect("baseline trace")
         );
         assert!(inspect(Trace::default(), &with_notice).is_err());
         for refusal in [
