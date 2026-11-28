@@ -215,7 +215,9 @@ pub(super) async fn execute(
                     .await
                     .is_ok_and(|source| source == expected_source)
         },
-        execute_owned(context, input, &cancel),
+        // Admission wraps the comparison in several generic futures. Keep
+        // the comparison state boxed so those wrappers fit on the runtime stack.
+        Box::pin(execute_owned(context, input, &cancel)),
     )
     .await
 }
