@@ -83,7 +83,7 @@
         "table": "proposal \u00a74.1 queue protocol trait",
         "scope": "item",
         "item": "trait BackgroundJobStore",
-        "item_sha256": "d9d8e900ab977e784c32f4dab326e5a61ca037f98e39432f6c82bed05915086b"
+        "item_sha256": "c391c9ec2fc3503b0a2588dc514fc236d418a6c159e0391f649082bead5f9935"
       },
       {
         "anchor": "pub struct JobToken {",
@@ -99,7 +99,7 @@
         "table": "proposal \u00a74.1 shared queue adapter",
         "scope": "item",
         "item": "impl<T: QueueSql> BackgroundJobStore for T",
-        "item_sha256": "72bc00a15abcdca4c78735c09001228777e47f835021dc64cf57bfb120e2bff4"
+        "item_sha256": "6b4973f393ecd97c9e7fd3e264264c6b155ca33998d527f37f883938eccdc7a4"
       },
       {
         "anchor": "            || self.now_ms.saturating_sub(self.dispatched_at_ms) >= CLAIM_RESOLUTION_WINDOW_MS",

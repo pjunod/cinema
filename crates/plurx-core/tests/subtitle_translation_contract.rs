@@ -73,13 +73,27 @@ async fn automatic_language_is_resolved_by_fenced_preparation_before_asset_publi
     };
     let (_dir, store, _) = fixture();
     let mut request = create(1000);
-    let TranslationAction::Create { finish, spoken_language, .. } = &mut request.action else {
+    let TranslationAction::Create {
+        finish,
+        spoken_language,
+        ..
+    } = &mut request.action
+    else {
         unreachable!()
     };
     *finish = true;
     *spoken_language = "auto".into();
-    let receipt = store.mutate_subtitle_translation(request).await.expect("auto start");
-    let job = claim(&store, receipt["job_id"].as_str().expect("prepare job"), JobKind::SubtitleTranslationPrepare, 1100).await;
+    let receipt = store
+        .mutate_subtitle_translation(request)
+        .await
+        .expect("auto start");
+    let job = claim(
+        &store,
+        receipt["job_id"].as_str().expect("prepare job"),
+        JobKind::SubtitleTranslationPrepare,
+        1100,
+    )
+    .await;
     let proof = BindTranslationSource {
         token: job.token.clone().expect("attempt"),
         source: job.supported_payload().expect("auto prepare"),
@@ -88,13 +102,24 @@ async fn automatic_language_is_resolved_by_fenced_preparation_before_asset_publi
         resolved_language: Some("en".into()),
         now_ms: 1200,
     };
-    assert!(store.bind_translation_source(proof.clone()).await.expect("fenced source binding"));
-    assert!(store.bind_translation_source(proof).await.expect("exact retry"));
-    let rows = store.read_subtitle_translation(TranslationRead {
-        user_id: 1,
-        now_ms: 1300,
-        query: TranslationQuery::Operation { operation_id: receipt["operation_id"].as_str().unwrap().into() },
-    }).await.unwrap();
+    assert!(store
+        .bind_translation_source(proof.clone())
+        .await
+        .expect("fenced source binding"));
+    assert!(store
+        .bind_translation_source(proof)
+        .await
+        .expect("exact retry"));
+    let rows = store
+        .read_subtitle_translation(TranslationRead {
+            user_id: 1,
+            now_ms: 1300,
+            query: TranslationQuery::Operation {
+                operation_id: receipt["operation_id"].as_str().unwrap().into(),
+            },
+        })
+        .await
+        .unwrap();
     assert_eq!(rows[0]["spoken_language"], "en");
     assert_eq!(rows[0]["output_language"], "en");
     assert_eq!(rows[0]["task"], "transcribe");
@@ -116,34 +141,81 @@ async fn ai_intent_pins_the_route_and_viewer_release_is_scoped_to_its_playback()
     let second = uuid::Uuid::new_v4().to_string();
     let request_id = uuid::Uuid::new_v4().to_string();
     let initial = Intent {
-        id: uuid::Uuid::new_v4().to_string(), digest: "f".repeat(64),
-        source: recipe.source.clone(), route: IntentRoute::Audio, track_index: 0,
-        language: None, playback_id: Some(first.clone()), position_ms: 0,
-        issued_at_ms: 20_000, producer_id: None,
+        id: uuid::Uuid::new_v4().to_string(),
+        digest: "f".repeat(64),
+        source: recipe.source.clone(),
+        route: IntentRoute::Audio,
+        track_index: 0,
+        language: None,
+        playback_id: Some(first.clone()),
+        position_ms: 0,
+        issued_at_ms: 20_000,
+        producer_id: None,
     };
-    let reserved = store.ai_subtitle_intent(1, 20_000, IntentAccess::Reserve {
-        request_id: request_id.clone(), intent: initial.clone(),
-    }).await.unwrap().expect("reserved intent");
+    let reserved = store
+        .ai_subtitle_intent(
+            1,
+            20_000,
+            IntentAccess::Reserve {
+                request_id: request_id.clone(),
+                intent: initial.clone(),
+            },
+        )
+        .await
+        .unwrap()
+        .expect("reserved intent");
     assert_eq!(reserved.route, IntentRoute::Audio);
-    let replayed = store.ai_subtitle_intent(1, 20_000, IntentAccess::Reserve {
-        request_id: request_id.clone(),
-        intent: Intent { route: IntentRoute::Text, id: uuid::Uuid::new_v4().to_string(), ..initial.clone() },
-    }).await.unwrap().expect("original intent");
+    let replayed = store
+        .ai_subtitle_intent(
+            1,
+            20_000,
+            IntentAccess::Reserve {
+                request_id: request_id.clone(),
+                intent: Intent {
+                    route: IntentRoute::Text,
+                    id: uuid::Uuid::new_v4().to_string(),
+                    ..initial.clone()
+                },
+            },
+        )
+        .await
+        .unwrap()
+        .expect("original intent");
     assert_eq!(replayed.id, initial.id);
     assert_eq!(replayed.route, IntentRoute::Audio);
-    assert!(store.ai_subtitle_intent(2, 20_000, IntentAccess::Operation { id: initial.id }).await.unwrap().is_none());
+    assert!(store
+        .ai_subtitle_intent(2, 20_000, IntentAccess::Operation { id: initial.id })
+        .await
+        .unwrap()
+        .is_none());
     let update = |playback_id: String, time, window| Viewer {
-        operation_id: recipe.operation_id.clone(), playback_id, user_id: 1,
-        now_ms: time, window,
+        operation_id: recipe.operation_id.clone(),
+        playback_id,
+        user_id: 1,
+        now_ms: time,
+        window,
     };
     for playback in [&first, &second] {
-        assert!(store.ai_subtitle_viewer(update(playback.clone(), 20_000, Some((0, 1.0)))).await.unwrap());
+        assert!(store
+            .ai_subtitle_viewer(update(playback.clone(), 20_000, Some((0, 1.0))))
+            .await
+            .unwrap());
     }
-    assert!(store.ai_subtitle_viewer(update(first, 20_001, None)).await.unwrap());
-    let demands = store.read_subtitle_translation(TranslationRead {
-        user_id: 0, now_ms: 20_002,
-        query: TranslationQuery::LiveDemands { operation_id: recipe.operation_id, operation_epoch: recipe.operation_epoch },
-    }).await.unwrap();
+    assert!(store
+        .ai_subtitle_viewer(update(first, 20_001, None))
+        .await
+        .unwrap());
+    let demands = store
+        .read_subtitle_translation(TranslationRead {
+            user_id: 0,
+            now_ms: 20_002,
+            query: TranslationQuery::LiveDemands {
+                operation_id: recipe.operation_id,
+                operation_epoch: recipe.operation_epoch,
+            },
+        })
+        .await
+        .unwrap();
     assert_eq!(demands.len(), 1);
     assert_eq!(demands[0]["playback_id"], second);
 }

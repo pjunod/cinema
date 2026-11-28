@@ -2518,7 +2518,7 @@ pub(super) async fn decision_for_source_file(
     // Source Start prepares a missing non-Dolby HEVC index under its owned
     // admission. Keep the common capability plan: an absent index does not
     // require video encoding or an HDR10 encoder for HDR10 copy delivery.
-    decision_for_file(
+    let mut result = decision_for_file(
         state,
         file,
         q,
@@ -2527,7 +2527,12 @@ pub(super) async fn decision_for_source_file(
         (None, None),
         PlanningReadPolicy::StoredSourceEvidence,
     )
-    .await
+    .await?;
+    // The Source export envelope is a closed protocol on older peers.
+    for track in &mut result.subtitles {
+        track.ai = false;
+    }
+    Ok(result)
 }
 
 async fn decision_for_file(
