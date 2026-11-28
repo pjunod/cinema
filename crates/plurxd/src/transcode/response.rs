@@ -40,6 +40,16 @@ impl MediaResponseOwner {
         }
     }
 
+    pub(crate) fn allows_rolling_scalar(&self) -> bool {
+        match &self.0 {
+            MediaResponseOwnerKind::Rolling { session, .. } => session
+                .native_split
+                .as_ref()
+                .is_none_or(|split| split.allows_scalar()),
+            MediaResponseOwnerKind::Vod(_) => true,
+        }
+    }
+
     /// Conservative timing from this attachment's immutable media evidence.
     pub(crate) fn prepared_frame_rate(&self) -> Option<f64> {
         match &self.0 {

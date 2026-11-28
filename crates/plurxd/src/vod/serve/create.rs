@@ -1285,16 +1285,15 @@ impl VodServe {
             retained_capture: prepared.retained_capture.clone(),
             ..VodRecipeRequest::from(prepared.request)
         });
-        let started = self
-            .attach_vod_session(
-                prepared,
-                file,
-                settings,
-                attribution,
-                session_id.clone(),
-                &fences,
-            )
-            .await;
+        let started = Box::pin(self.attach_vod_session(
+            prepared,
+            file,
+            settings,
+            attribution,
+            session_id.clone(),
+            &fences,
+        ))
+        .await;
         if let Some(requested) = encoded_split.as_ref() {
             let now = Instant::now();
             let owner_deadline = fences
@@ -1332,9 +1331,15 @@ impl VodServe {
                     %error,
                     "split copy refused before publication; preparing muxed copy"
                 );
-                return self
-                    .attach_vod_session(fallback, file, settings, attribution, session_id, &fences)
-                    .await;
+                return Box::pin(self.attach_vod_session(
+                    fallback,
+                    file,
+                    settings,
+                    attribution,
+                    session_id,
+                    &fences,
+                ))
+                .await;
             }
         }
         started
@@ -2465,6 +2470,7 @@ impl ReservedSourceVodRendition {
         Ok(SourcePendingStartInfo {
             info: crate::transcode::StartInfo {
                 vod_copy_layout: None,
+                rolling_hls_layout: None,
                 processed_dv_profile: self
                     .rendition
                     .recipe
@@ -3826,6 +3832,7 @@ mod principal_demand_tests {
         let request = SessionRequest {
             split_audio: false,
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             source_telemetry: None,
             quality_catalog: None,
             candidate_context: None,

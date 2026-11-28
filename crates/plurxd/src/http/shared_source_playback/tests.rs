@@ -3065,6 +3065,7 @@ async fn sharing_source_bound_invocation_projects_the_complete_start_response() 
     let incarnation = incarnation_id.to_string();
     let info = crate::transcode::StartInfo {
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         processed_dv_profile: None,
         processed_fel: None,
         degraded_processing: None,

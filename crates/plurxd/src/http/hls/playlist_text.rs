@@ -201,13 +201,8 @@ fn native_subtitle_media(
     out
 }
 
-/// The native Safari split, described for the one split master writer.
-///
-/// The video is the converted Dolby Vision copy: the split only runs with
-/// `convert_dolby_vision`, whose Profile 8.1 output is PQ, so that is the
-/// range proved. Audio codec and channels come from the projected init. Both
-/// roles are projected from one muxed copy, so the copy's budget is the
-/// presentation's combined budget (S5 gives each role its own).
+/// Build the rolling master from the codec, color and raster of the
+/// committed projected inits. Both roles share one producer budget.
 pub(super) fn native_split_presentation(
     file: &MediaFile,
     context: &crate::transcode::HlsContext,
@@ -242,20 +237,34 @@ pub(super) fn native_split_presentation(
         .zip(file.height)
         .and_then(|(width, height)| Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?)))
         .filter(|(width, height)| *width > 0 && *height > 0);
+    let (codec, supplemental_codecs, raster, video_range) = match &ids.video_facts {
+        Some(facts) => (
+            facts.codec.clone(),
+            facts.supplemental_codecs.clone(),
+            Some((u32::from(facts.width), u32::from(facts.height))),
+            facts.range,
+        ),
+        None => (
+            codec,
+            context
+                .supplemental_codecs
+                .as_ref()
+                .map(|codecs| codecs.replacen("dvh1.", "dvhe.", 1)),
+            raster,
+            VideoRange::Pq,
+        ),
+    };
     SplitPresentation {
         variants: vec![SplitVideo {
             rendition_id: ids.video.clone(),
             codec,
-            supplemental_codecs: context
-                .supplemental_codecs
-                .as_ref()
-                .map(|codecs| codecs.replacen("dvh1.", "dvhe.", 1)),
+            supplemental_codecs,
             width: raster.map(|(width, _)| width),
             height: raster.map(|(_, height)| height),
             frame_rate: context
                 .frame_rate
                 .filter(|rate| rate.is_finite() && *rate > 0.0),
-            video_range: VideoRange::Pq,
+            video_range,
             budget: None,
         }],
         audio: vec![SplitAudio {

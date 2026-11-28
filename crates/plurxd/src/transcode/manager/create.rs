@@ -1165,8 +1165,10 @@ impl TranscodeManager {
         } else {
             let (vod_lookup_at, vod_settings, live_recovery_enabled) =
                 vod_policy.expect("VOD startup policy");
-            let vod = self
-                .try_vod_session(
+            // VOD attaches probe and rendition subgraphs under this same
+            // create worker. Keep their future states off its poll stack.
+            let vod = Box::pin(
+                self.try_vod_session(
                     vod_settings,
                     req,
                     priority,
@@ -1185,8 +1187,9 @@ impl TranscodeManager {
                     retained_capture,
                     planned_source,
                     plan,
-                )
-                .await;
+                ),
+            )
+            .await;
             tracing::info!(
                 target: "plurxd::transcode",
                 file_id = req.file_id,
@@ -1460,13 +1463,18 @@ impl TranscodeManager {
             },
             None => (req, None),
         };
+        let audio_index = req
+            .rolling_hls_layout
+            .as_ref()
+            .and_then(RollingHlsLayout::audio_index)
+            .or(req.audio_index);
         let mut started = match req.kind {
             SessionKind::Transcode { height } => {
                 self.start_with_audio_offset(
                     req.file_id,
                     height,
                     req.start_seconds,
-                    req.audio_index,
+                    audio_index,
                     req.subtitle_burn,
                     req.audio_offset_ms,
                     user_name,
@@ -1483,6 +1491,13 @@ impl TranscodeManager {
                     req.audio_delivery.as_ref(),
                     req.retain_output,
                     req.source_telemetry == Some(crate::transcode::SourceTelemetry::FilmV1),
+                    req.split_audio
+                        && req
+                            .candidate_context
+                            .as_ref()
+                            .and_then(|context| context.canonical_caps.as_ref())
+                            .is_some_and(|caps| caps.plays_split_av()),
+                    req.rolling_hls_layout.as_ref(),
                     plan,
                 )
                 .await
@@ -1496,7 +1511,7 @@ impl TranscodeManager {
                 self.start_copy_with_audio_offset(
                     req.file_id,
                     req.start_seconds,
-                    req.audio_index,
+                    audio_index,
                     req.audio_offset_ms,
                     CopySessionOptions {
                         convert_dolby_vision,
@@ -1517,6 +1532,8 @@ impl TranscodeManager {
                     native_fel_transport(req)
                         && (initial_native_fel
                             || (req.start_seconds == 0.0 && replacement_deadline.is_none())),
+                    req.split_audio,
+                    req.rolling_hls_layout.as_ref(),
                     plan,
                     #[cfg(target_os = "linux")]
                     prepared_native_fel,
@@ -4633,7 +4650,7 @@ impl TranscodeManager {
         for batch in requests.chunks(4) {
             let mut preparations = Vec::with_capacity(batch.len());
             for audio in batch {
-                preparations.push(self.prepare_vod_encoding(audio, file));
+                preparations.push(Box::pin(self.prepare_vod_encoding(audio, file)));
             }
             let outcomes = futures_util::future::join_all(preparations).await;
             for (request, outcome) in batch.iter().zip(outcomes) {
@@ -5440,6 +5457,7 @@ impl TranscodeManager {
         }
         Ok(StartInfo {
             vod_copy_layout: start.vod_copy_layout,
+            rolling_hls_layout: None,
             processed_dv_profile,
             processed_fel,
             degraded_processing,
