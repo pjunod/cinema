@@ -245,6 +245,29 @@ pub(crate) async fn pass_with(
     Ok(rows)
 }
 
+/// Let an explicit quality override install the selected model on its worker.
+pub(crate) async fn ensure_speech(
+    state: &AppState,
+    spec: &CatalogModel,
+) -> Result<Requirement, StoreError> {
+    let observation = state.subtitle_models.local_observation().await;
+    let (status, tested) = observation
+        .as_ref()
+        .and_then(|worker| worker.models.iter().find(|model| model.model_id == spec.id))
+        .map_or(("unknown", None), |model| {
+            (model.status.as_str(), model.verified_at_ms)
+        });
+    step(
+        state,
+        Target::Speech(spec),
+        status,
+        tested,
+        &Facts::local(state).await,
+        crate::state::clock_ms(),
+    )
+    .await
+}
+
 /// The text bundle's status from metadata and this boot's receipt, in the
 /// speech models' vocabulary. It never hashes the bundle.
 async fn text_status(state: &AppState) -> Result<(&'static str, Option<i64>), StoreError> {

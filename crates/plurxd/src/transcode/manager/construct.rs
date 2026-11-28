@@ -1314,6 +1314,14 @@ impl TranscodeManager {
     /// threads. It shares the heavy lane and the normal resource pool, but an
     /// already-running hardware/video session does not make spare CPU unusable.
     pub(crate) async fn admit_speech(&self) -> Option<FragmentAdmission> {
+        self.admit_background_speech_with_limit(2).await
+    }
+
+    pub(crate) async fn admit_background_progressive_speech(&self) -> Option<FragmentAdmission> {
+        self.admit_background_speech_with_limit(4).await
+    }
+
+    async fn admit_background_speech_with_limit(&self, limit: usize) -> Option<FragmentAdmission> {
         if self.admissions.live_is_waiting()
             || self
                 .offline_waiting
@@ -1324,11 +1332,11 @@ impl TranscodeManager {
         let heavy = Arc::clone(&self.background_heavy)
             .try_acquire_owned()
             .ok()?;
-        self.admit_speech_with_heavy(heavy).await
+        self.admit_speech_with_heavy(heavy, limit).await
     }
 
     /// A currently demanded progressive caption operation asks background work
-    /// to yield, while retaining the ordinary two-thread and heavy-lane bounds.
+    /// to yield, while reserving only the available software budget.
     /// Model installation and self-tests continue to use speculative admission.
     pub(crate) async fn admit_progressive_speech(
         &self,
@@ -1352,13 +1360,16 @@ impl TranscodeManager {
             }
             if let Ok(heavy) = Arc::clone(&self.background_heavy).try_acquire_owned() {
                 // Never use the lone-job oversized exception for inference.
-                if self.admissions.software_in_use().checked_add(2)? <= budget {
+                let threads = budget
+                    .saturating_sub(self.admissions.software_in_use())
+                    .min(8);
+                if threads >= 2 {
                     if let Some(permit) = self.admissions.try_admit_bundle(
                         0,
                         budget,
                         &TranscodeResourceEstimate {
                             hardware_slot: false,
-                            cpu_threads: 2,
+                            cpu_threads: threads,
                             decoder_threads: None,
                         },
                         Priority::Live,
@@ -1368,7 +1379,7 @@ impl TranscodeManager {
                             playback_qualification: false,
                             maintenance: false,
                             _heavy: Some(heavy),
-                            threads: 2,
+                            threads,
                             _permit: Some(permit),
                             extension: std::sync::Mutex::new(None),
                         };
@@ -1406,17 +1417,20 @@ impl TranscodeManager {
         if cancel.is_cancelled() {
             return None;
         }
-        self.admit_speech_with_heavy(heavy).await
+        self.admit_speech_with_heavy(heavy, 2).await
     }
 
     async fn admit_speech_with_heavy(
         &self,
         heavy: tokio::sync::OwnedSemaphorePermit,
+        limit: usize,
     ) -> Option<FragmentAdmission> {
-        let threads = 2;
         let budget = self.software_budget().await;
+        let threads = budget
+            .checked_sub(self.admissions.software_in_use())?
+            .min(limit);
         // This work may never use the pool's lone-job oversized exception.
-        if self.admissions.software_in_use().checked_add(threads)? > budget
+        if threads < 2
             || self.admissions.live_is_waiting()
             || self
                 .offline_waiting
@@ -1459,7 +1473,7 @@ impl TranscodeManager {
     }
 
     pub(crate) fn speech_capacity_available(&self, admission: &FragmentAdmission) -> bool {
-        admission.threads == 2
+        (2..=8).contains(&admission.threads)
             && !self.admissions.live_is_waiting()
             && !self
                 .offline_waiting

@@ -581,7 +581,11 @@ async fn execute(
                     state,
                     &file,
                     &held,
-                    audio_index,
+                    runtime::LanguageProbe {
+                        audio_index,
+                        threads: admission.cpu_threads(),
+                        use_vad: profile::uses_vad(selected),
+                    },
                     &spec,
                     fence,
                     cancel,
@@ -793,11 +797,15 @@ pub(crate) async fn worker_pass(
                 })
             })
         {
+            if selected.model_id == "large-v3-q5_0" {
+                let spec = profile::model_spec_for(&selected)?;
+                crate::subtitle_models::self_install::ensure_speech(state, &spec).await?;
+            }
             continue;
         }
         let admission = match demand {
             SpeechDemand::Viewer => state.transcode.admit_progressive_speech(shutdown).await,
-            SpeechDemand::Finish => state.transcode.admit_speech().await,
+            SpeechDemand::Finish => state.transcode.admit_background_progressive_speech().await,
         };
         let Some(admission) = admission.filter(|a| state.transcode.speech_capacity_available(a))
         else {
@@ -1008,7 +1016,7 @@ mod receipt_tests {
             verified_at_ms: 1234,
         };
         let receipts = [receipt];
-        for selected in profile::profiles() {
+        for selected in profile::legacy_profiles() {
             let status = |boot: &str| {
                 super::super::profile_capability(
                     &selected,

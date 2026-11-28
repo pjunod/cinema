@@ -29,6 +29,8 @@ pub struct Intent {
     pub route: IntentRoute,
     pub track_index: i64,
     pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_profile_id: Option<String>,
     pub playback_id: Option<String>,
     pub position_ms: i64,
     pub issued_at_ms: i64,
@@ -195,7 +197,11 @@ pub(super) async fn intent<T: QueueSql>(
                     .language
                     .as_ref()
                     .is_none_or(|language| language.len() <= 16)
-                && intent.playback_id.as_deref().is_none_or(uuid) =>
+                && intent.playback_id.as_deref().is_none_or(uuid)
+                && intent
+                    .speech_profile_id
+                    .as_deref()
+                    .is_none_or(super::subtitle_translation::valid_digest) =>
         {
             intent.source.validate()?;
             body["request_id"] = request_id.into();
@@ -210,6 +216,8 @@ pub(super) async fn intent<T: QueueSql>(
    AND EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.user_id'))
    AND (SELECT count(*) FROM subtitle_translation_requests)<16352
    AND (SELECT count(*) FROM subtitle_translation_requests WHERE user_id=json_extract($1,'$.user_id'))<1016
+   AND (SELECT COALESCE(sum(length(CAST(outcome_json AS BLOB))),0) FROM subtitle_translation_requests)+2048<8323072
+   AND (SELECT COALESCE(sum(length(CAST(outcome_json AS BLOB))),0) FROM subtitle_translation_requests WHERE user_id=json_extract($1,'$.user_id'))+2048<507904
  ON CONFLICT(user_id,request_id) DO NOTHING"#.into(),
                 encode(&body)?, true, false,
             ).await?;

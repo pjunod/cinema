@@ -153,6 +153,7 @@ pub(crate) async fn workers_public(state: &AppState) -> Result<Vec<Value>, ApiEr
         .read()
         .await
         .clone();
+    let vad = artifacts::model_identity(&state.subtitle_models.root, &profile::vad_spec()).await;
     let mut capabilities = Vec::new();
     for selected in profile::profiles() {
         let spec = profile::model_spec_for(&selected)?;
@@ -171,7 +172,11 @@ pub(crate) async fn workers_public(state: &AppState) -> Result<Vec<Value>, ApiEr
                 .as_ref()
                 .map(crate::subtitle_models::EngineIdentity::of)
                 .map_err(String::as_str),
-            &models[&spec.sha256],
+            if profile::uses_vad(&selected) && vad.is_err() {
+                &vad
+            } else {
+                &models[&spec.sha256]
+            },
             &receipts,
             failures.contains(&spec.id),
             WorkerBoot {
@@ -396,6 +401,10 @@ pub(crate) async fn eligible_worker(
             "Install and test the translation model in Settings",
         ));
     }
+    source_worker(state, file).await
+}
+
+pub(crate) async fn source_worker(state: &AppState, file: &MediaFile) -> Result<String, ApiError> {
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
         crate::fragment_index_cluster::open_source_playback_fence(file, None),

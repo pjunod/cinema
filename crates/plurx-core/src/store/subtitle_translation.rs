@@ -130,7 +130,10 @@ impl TranslationProfile {
             || !identifier(&self.model_id)
             || !valid_digest(&self.model_sha256)
             || self.adapter_contract != "whisper.cpp-1.9.2-cpu-v1"
-            || self.pipeline_revision != "translation-window-v1"
+            || !matches!(
+                self.pipeline_revision.as_str(),
+                "translation-window-v1" | "translation-window-v2" | "translation-window-v2-fast"
+            )
             || self.timeline_contract != "source-audio-clock-v1"
             || !(1_000..=30_000).contains(&self.core_ms)
             || self.left_context_ms > 5_000

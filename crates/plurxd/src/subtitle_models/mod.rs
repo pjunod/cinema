@@ -216,7 +216,7 @@ pub(crate) async fn workers_public(state: &AppState) -> Result<Vec<Value>, Store
                         v.node_id == *node_id
                             && v.expires_at_ms > crate::state::clock_ms()
                             && v.observed_at_ms <= crate::state::clock_ms().saturating_add(5000)
-                            && v.models.len() <= 4
+                            && v.models.len() <= 5
                             && v.waits.len() <= 32
                             && v.requirements.as_ref().is_none_or(|rows| {
                                 rows.len() <= 4
@@ -663,7 +663,7 @@ impl WorkerObservation {
             && self.observed_at_ms >= 0
             && self.expires_at_ms >= self.observed_at_ms
             && self.expires_at_ms.saturating_sub(self.observed_at_ms) <= 60_000
-            && self.models.len() <= 4
+            && self.models.len() <= 5
             && self.waits.len() <= 32
             && self.cores.is_none_or(|cores| (1..=4096).contains(&cores))
             && self.requirements.as_ref().is_none_or(|rows| {
@@ -773,6 +773,12 @@ async fn refresh_local(state: &AppState) -> Result<(), StoreError> {
     let inspected = artifacts::inspect_engine().await;
     let engine = inspected.as_ref().ok();
     let receipts = state.store.subtitle_model_receipts(&state.node_id).await?;
+    let vad_available = artifacts::model_identity(
+        &state.subtitle_models.root,
+        &crate::subtitle_translation::profile::vad_spec(),
+    )
+    .await
+    .is_ok();
     let mut models = Vec::new();
     for spec in &catalog().models {
         let opened = if state.subtitle_models.root.is_absolute() {
@@ -809,7 +815,13 @@ async fn refresh_local(state: &AppState) -> Result<(), StoreError> {
                     )
                     .is_some()
                 });
-        let status = if opened.is_ok() && !accepted {
+        let needs_vad = crate::subtitle_translation::profile::model_specs()
+            .iter()
+            .any(|progressive| progressive.id == spec.id);
+        let verified = verified && (!needs_vad || vad_available);
+        let status = if needs_vad && !vad_available {
+            "missing"
+        } else if opened.is_ok() && !accepted {
             "unverified_cache"
         } else if failed {
             "verification_failed"
@@ -838,7 +850,7 @@ async fn refresh_local(state: &AppState) -> Result<(), StoreError> {
                 None
             },
         });
-        if !verified && !failed {
+        if !verified && !failed && (!needs_vad || vad_available) {
             if let Some((model, engine)) = opened.as_ref().ok().zip(engine) {
                 requalify_accepted_model(state, spec, *model, engine.identity, receipt).await?;
             }
@@ -1516,6 +1528,18 @@ pub(crate) async fn worker_pass(
                 };
                 let model = match action {
                     ModelAction::Install => {
+                        if crate::subtitle_translation::profile::model_specs()
+                            .iter()
+                            .any(|progressive| progressive.id == spec.id)
+                        {
+                            artifacts::install_model(
+                                &state.subtitle_models.root,
+                                &crate::subtitle_translation::profile::vad_spec(),
+                                &cancel,
+                            )
+                            .await
+                            .map_err(StoreError::Task)?;
+                        }
                         artifacts::install_model(&state.subtitle_models.root, spec, &cancel)
                             .await
                             .map_err(StoreError::Task)?

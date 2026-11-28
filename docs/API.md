@@ -2731,12 +2731,12 @@ stay admin-only.
 
 | Method | Path | Credential | Meaning |
 |---|---|---|---|
-| GET, PUT | `/api/v1/files/{id}/subtitles/{index}/timing` | bearer; PUT checks `who` | Read or shift a stored AI track by `offset_ms` within ±15 seconds. The `track_id` query binds the action to the stable track. |
+| GET, PUT | `/api/v1/files/{id}/subtitles/{index}/timing` | bearer with `who` checked for PUT | Read or shift a stored AI track by `offset_ms` within ±15 seconds. The `track_id` query binds the action to the stable track. |
 | GET, PUT | `/api/v1/ai-subtitles/preferences` | bearer | Read or save the current account's subtitle `language` and `mode` (`auto`, `always`, or `off`). Accounts without a saved preference follow the server defaults. |
 | GET | `/api/v1/ai-subtitles/settings` | bearer | The document, its `revision` and each node's `readiness` for it. Before the first save the document is derived from the older text translation, speech translation and managed transcription switches. |
 | PUT | `/api/v1/ai-subtitles/settings` | admin bearer | Replace the document; the body is every field plus `expected_revision`. A stale revision is `409 configuration_conflict`. |
-| GET | `/api/v1/files/{id}/ai-subtitles` | bearer | Describe the existing English track or the available AI route for this file. The optional `target` defaults to `en`. |
-| POST | `/api/v1/files/{id}/ai-subtitles` | bearer; `who` | Start or join English AI subtitles with a stable `request_id`. The route is automatic unless explicitly set to `text` or `audio`. Audio accepts a spoken-language override and an optional playback position. |
+| GET | `/api/v1/files/{id}/ai-subtitles` | bearer | Describe the existing English track or the available AI route for this file. The optional `target` defaults to `en`. Pass `audio_index` for the soundtrack in the player. |
+| POST | `/api/v1/files/{id}/ai-subtitles` | bearer with `who` checked | Start or join work with a stable `request_id`. The `auto` route can return a completed hash-matched download before using text or audio. Specify `text` or `audio` to choose a route. Audio accepts `audio_index`, a `spoken_language` override, and `quality`. Best uses the background model for item requests. |
 | GET | `/api/v1/ai-subtitles/operations/{id}/cues` | bearer | Read up to 90 seconds of accepted cues and report the contiguous coverage around the requested position. |
 | PUT, DELETE | `/api/v1/ai-subtitles/operations/{id}/viewer` | bearer | Update or release this account's playback demand. PUT takes `position_ms`, `playback_rate`, and optional `playback_id`. DELETE takes optional `playback_id` as a query parameter. |
 | POST | `/api/v1/ai-subtitles/operations/{id}/stop` | bearer | Release the viewer's playback demand. Other viewers and the saved-track finish demand are independent. |

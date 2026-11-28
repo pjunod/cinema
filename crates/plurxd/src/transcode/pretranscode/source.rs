@@ -668,6 +668,10 @@ pub(crate) struct FragmentExtension {
 }
 
 impl FragmentAdmission {
+    pub(crate) fn cpu_threads(&self) -> usize {
+        self.threads
+    }
+
     /// The admission a targeted library request runs under: `stat` and
     /// `ffprobe` on the files a caller named, holding no heavy-lane permit
     /// and no CPU or GPU reservation, so it is never refused because the

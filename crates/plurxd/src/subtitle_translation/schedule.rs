@@ -1,4 +1,5 @@
 use super::{profile, selected_file_capability, AppState};
+use crate::ai_subtitles::{selection, settings::Settings};
 use crate::http::error::ApiError;
 use plurx_core::{
     domain::{AudioStream, MediaFile},
@@ -24,10 +25,16 @@ pub(crate) async fn start_finish_only(
     task: SpeechTask,
     requester: i64,
 ) -> Result<Value, ApiError> {
-    if !plurx_core::store::background_jobs_transcription::whisper_language(&language) {
+    if !(plurx_core::store::background_jobs_transcription::whisper_language(&language)
+        || (requester == 0 && language == "auto"))
+    {
         return Err(ApiError::BadRequest("Unsupported spoken language".into()));
     }
-    let profile = profile::for_task(task);
+    let quality = crate::ai_subtitles::settings::read(state)
+        .await?
+        .settings
+        .quality;
+    let profile = profile::for_quality(task, quality);
     let clock = selected_file_capability(state, file, audio.index)
         .await
         .map_err(|reason| ApiError::BadRequest(reason.into()))?;
@@ -86,7 +93,9 @@ async fn sweep(state: &AppState, shutdown: &CancellationToken) -> Result<(), Sto
     let settings = crate::ai_subtitles::settings::read_store(state.store.as_ref())
         .await
         .map_err(|_| StoreError::Task("ai_subtitles_settings_unavailable".into()))?;
-    if !settings.settings.from_audio || !settings.settings.ahead_of_time {
+    if !(settings.settings.from_audio || settings.settings.translate_text)
+        || !settings.settings.ahead_of_time
+    {
         return Ok(());
     }
     if !state
@@ -104,7 +113,7 @@ async fn sweep(state: &AppState, shutdown: &CancellationToken) -> Result<(), Sto
     else {
         return Ok(());
     };
-    let result = sweep_with_lease(state, &lease, shutdown).await;
+    let result = sweep_with_lease(state, &lease, shutdown, &settings.settings).await;
     lease.release().await?;
     result
 }
@@ -113,6 +122,7 @@ async fn sweep_with_lease(
     state: &AppState,
     lease: &crate::job_lease::ActiveJobLease,
     shutdown: &CancellationToken,
+    settings: &Settings,
 ) -> Result<(), StoreError> {
     let cursor = state
         .store
@@ -126,8 +136,23 @@ async fn sweep_with_lease(
         if shutdown.is_cancelled() {
             break;
         }
-        if let Some(file) = state.store.get_file(id).await? {
-            if let Some((audio, language)) = candidate(&file) {
+        if let Some(mut file) = state.store.get_file(id).await? {
+            if settings.download_match && selection::existing_english(&file).is_none() {
+                let _ = crate::http::subtitle_downloads::try_english_match(state, id).await;
+                if let Some(latest) = state.store.get_file(id).await? {
+                    file = latest;
+                }
+            }
+            if selection::existing_english(&file).is_some() {
+                next = id;
+                continue;
+            }
+            if settings.translate_text && schedule_text(state, &file).await {
+                next = id;
+                continue;
+            }
+            if let Some((audio, language)) = settings.from_audio.then(|| candidate(&file)).flatten()
+            {
                 let task = if language == "en" {
                     SpeechTask::Transcribe
                 } else {
@@ -164,18 +189,24 @@ async fn sweep_with_lease(
     Ok(())
 }
 
+async fn schedule_text(state: &AppState, file: &MediaFile) -> bool {
+    for candidate in selection::candidates(file, selection::Route::Text, None) {
+        let selection::Source::Text(track, language) = candidate else {
+            continue;
+        };
+        if crate::subtitle_text_translation::api::schedule(state, file, track.index, language)
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn candidate(file: &MediaFile) -> Option<(&AudioStream, String)> {
     use crate::subtitle_transcription::{eligible, normalized_language};
-    if !eligible(file)
-        || file.subtitle_streams.iter().any(|track| {
-            !track.forced
-                && !plurx_core::tracks::is_bitmap_subtitle(&track.codec)
-                && track
-                    .language
-                    .as_deref()
-                    .is_some_and(|tag| normalized_language(tag) == "en")
-        })
-    {
+    if !eligible(file) {
         return None;
     }
     let audio = file
@@ -183,7 +214,13 @@ fn candidate(file: &MediaFile) -> Option<(&AudioStream, String)> {
         .iter()
         .find(|track| track.default)
         .or_else(|| file.audio_streams.first())?;
-    let language = normalized_language(audio.language.as_deref()?);
-    plurx_core::store::background_jobs_transcription::whisper_language(&language)
-        .then_some((audio, language))
+    let language = audio
+        .language
+        .as_deref()
+        .map(normalized_language)
+        .filter(|language| {
+            plurx_core::store::background_jobs_transcription::whisper_language(language)
+        })
+        .unwrap_or_else(|| "auto".into());
+    Some((audio, language))
 }
