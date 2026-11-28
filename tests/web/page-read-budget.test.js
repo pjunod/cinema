@@ -931,6 +931,7 @@ test("Settings loads only the active tab manifest", () => {
     libraries: { required: ["settings", "libs", "status", "dvConversions"], secondary: [] },
     metadata: { required: ["settings"], secondary: ["libs", "developerReadiness"] },
     playback: { required: ["settings"], secondary: ["developerReadiness"] },
+    subtitles: { required: ["subtitlePreferences", "aiSubtitles"], secondary: [] },
     livetv: { required: ["settings"], secondary: ["developerReadiness"] },
     analysis: { required: ["settings", "analysis"], secondary: ["developerReadiness"] },
     maintenance: { required: ["settings", "dvConversions"], secondary: ["developerReadiness"] },

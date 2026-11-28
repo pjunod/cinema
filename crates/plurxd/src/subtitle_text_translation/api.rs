@@ -1,10 +1,7 @@
 //! Closed, authenticated DTOs for translating existing text subtitles.
-use super::{artifacts, config, ADAPTER_CONTRACT, CATALOG_REVISION, MODEL_ID};
+use super::{artifacts, ADAPTER_CONTRACT, MODEL_ID};
 use crate::{
-    http::{
-        error::ApiError,
-        extract::{AdminUser, AuthUser},
-    },
+    http::{error::ApiError, extract::AuthUser},
     state::AppState,
 };
 use axum::{
@@ -15,21 +12,12 @@ use plurx_core::store::{
     background_jobs::{
         BackgroundJob, EnqueueJob, EnqueueOutcome, JobPayload, JobRequest, JobState,
     },
-    background_jobs_transcription::{artifact_key, ModelAction},
+    background_jobs_transcription::artifact_key,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ModelRequest {
-    version: u8,
-    request_id: String,
-    node_id: String,
-    boot_id: String,
-    model_id: String,
-}
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateRequest {
@@ -77,89 +65,6 @@ fn request(version: u8, id: &str) -> Result<(), ApiError> {
         ));
     }
     Ok(())
-}
-pub(crate) async fn settings(
-    _user: AuthUser,
-    State(state): State<AppState>,
-) -> Result<Json<config::Snapshot>, ApiError> {
-    Ok(Json(config::read(&state).await?))
-}
-pub(crate) async fn update_settings(
-    _user: AdminUser,
-    State(state): State<AppState>,
-    Json(input): Json<config::UpdateRequest>,
-) -> Result<Json<config::Snapshot>, ApiError> {
-    Ok(Json(config::save(&state, input).await?))
-}
-pub(crate) async fn models(
-    _user: AuthUser,
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
-    Ok(Json(
-        json!({"version":1,"catalog":artifacts::catalog_public(),"workers":super::workers(&state).await?,"server_now_ms":crate::state::clock_ms()}),
-    ))
-}
-pub(crate) async fn options(
-    AuthUser(user): AuthUser,
-    State(state): State<AppState>,
-    Path(file_id): Path<i64>,
-) -> Result<Json<Value>, ApiError> {
-    let file = state
-        .store
-        .get_file(file_id)
-        .await?
-        .ok_or(ApiError::NotFound("file"))?;
-    Ok(Json(
-        json!({"version":1,"file_id":file.id.to_string(),"source_size":file.size.to_string(),"source_mtime":file.mtime.to_string(),"subtitles":file.subtitle_streams.iter().map(|track|json!({"index":track.index,"language":track.language,"title":track.title,"downloaded_subtitle_id":file.downloaded_subtitle(track.index).map(|caption|caption.stable_id()),"text_eligible":!plurx_core::tracks::is_bitmap_subtitle(&track.codec)})).collect::<Vec<_>>(),"configuration":config::read(&state).await?,"model_id":MODEL_ID,"input_languages":artifacts::catalog_public()["input_languages"],"workers":super::workers(&state).await?,"permissions":{"read":true,"create":crate::ai_subtitles::allowed(state.store.as_ref(),&user).await?},"server_now_ms":crate::state::clock_ms()}),
-    ))
-}
-async fn model_action(
-    state: &AppState,
-    user_id: i64,
-    input: ModelRequest,
-    action: ModelAction,
-) -> Result<Json<Value>, ApiError> {
-    request(input.version, &input.request_id)?;
-    let digest =
-        plurx_core::store::subtitle_translation::digest(&json!({"action":action,"body":input}))?;
-    if let Some(reply) = replay(state, user_id, &input.request_id, &digest).await? {
-        return Ok(Json(reply));
-    }
-    if input.model_id != MODEL_ID
-        || input.node_id != state.node_id
-        || input.boot_id != state.subtitle_models.boot_id
-    {
-        return Err(conflict(
-            "worker_changed",
-            "Refresh the current worker before model setup",
-        ));
-    }
-
-    let payload = JobPayload::SubtitleTextModelOperation {
-        action,
-        model_id: MODEL_ID.into(),
-        catalog_revision: CATALOG_REVISION.into(),
-        model_sha256: artifacts::expected_bundle_digest(),
-        adapter_contract: ADAPTER_CONTRACT.into(),
-        target_node_id: state.node_id.clone(),
-        target_boot_id: state.subtitle_models.boot_id.clone(),
-        admin_user_id: user_id,
-    };
-    enqueue(state, user_id, &input.request_id, digest, payload).await
-}
-pub(crate) async fn install(
-    AdminUser(user): AdminUser,
-    State(state): State<AppState>,
-    Json(input): Json<ModelRequest>,
-) -> Result<Json<Value>, ApiError> {
-    model_action(&state, user.id, input, ModelAction::Install).await
-}
-pub(crate) async fn verify(
-    AdminUser(user): AdminUser,
-    State(state): State<AppState>,
-    Json(input): Json<ModelRequest>,
-) -> Result<Json<Value>, ApiError> {
-    model_action(&state, user.id, input, ModelAction::Verify).await
 }
 pub(crate) async fn create(
     AuthUser(user): AuthUser,

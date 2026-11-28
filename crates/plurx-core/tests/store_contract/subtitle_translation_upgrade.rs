@@ -42,6 +42,7 @@ async fn replicated_progressive_retarget_upgrade_preserves_owned_data_and_refuse
     statements.extend([
         ("DROP TABLE subtitle_translation_stored_tracks".to_owned(),hiqlite::params!()),
         ("DROP TABLE subtitle_translation_finish_demands".to_owned(),hiqlite::params!()),
+        ("DROP TABLE subtitle_translation_schedule_exclusions".to_owned(),hiqlite::params!()),
         ("DROP TRIGGER subtitle_translation_mutate".to_owned(),hiqlite::params!()),
         ("DROP TRIGGER subtitle_translation_capture_continuity".to_owned(),hiqlite::params!()),
         ("DROP TRIGGER subtitle_translation_retire_continuity".to_owned(),hiqlite::params!()),

@@ -80,7 +80,7 @@ function setIconSize(v){ try{localStorage.setItem("plurx_iconsize",v)}catch(e){}
 // using to perform the pairing.
 function profileMenuHtml(){
   const name=ME?ME.username:"", role=ME&&ME.is_admin?"Administrator":"Signed in";
-  const settings = ME&&ME.is_admin ? `<button onclick="location.hash='#/settings';closeMenus()">Settings</button>`:"";
+  const settings = ME&&ME.is_admin ? `<button onclick="location.hash='#/settings';closeMenus()">Settings</button>`:`<button onclick="location.hash='#/settings/subtitles';closeMenus()">Subtitles</button>`;
   return `<div class="pident"><span class="pavatar">${esc((name[0]||"?").toUpperCase())}</span>`
     +`<span><b>${esc(name||"—")}</b><small>${role}</small></span></div>`
     +`<button onclick="showConnectQr()">Show server QR code</button><button onclick="showDiagnostics()">Help · Report a problem</button>`

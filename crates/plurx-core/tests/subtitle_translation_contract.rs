@@ -688,9 +688,30 @@ async fn prepared(store: &SqliteStore) -> plurx_core::store::subtitle_translatio
 }
 
 #[tokio::test]
+async fn vad_asset_identity_separates_producers_and_survives_retries() {
+    let (_dir, store, _) = fixture();
+    let mut recipe = prepared(&store).await;
+    let old = recipe.expected_asset_id().unwrap();
+    recipe.operation_id = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+        recipe.expected_asset_id().unwrap(),
+        old,
+        "published legacy asset IDs stay readable"
+    );
+    for pipeline in ["translation-window-v2", "translation-window-v2-fast"] {
+        recipe.profile.pipeline_revision = pipeline.into();
+        let first = recipe.expected_asset_id().unwrap();
+        recipe.operation_epoch += 1;
+        assert_eq!(recipe.expected_asset_id().unwrap(), first);
+        recipe.operation_id = uuid::Uuid::new_v4().to_string();
+        assert_ne!(recipe.expected_asset_id().unwrap(), first);
+    }
+}
+
+#[tokio::test]
 async fn finish_demand_publishes_each_core_after_the_viewer_leaves() {
     use plurx_core::store::{
-        subtitle_translation_publication::PublishTranslationSegment,
+        subtitle_translation_publication::{BindTranslationSource, PublishTranslationSegment},
         subtitle_translation_read::{TranslationQuery, TranslationRead},
         MediaStore,
     };
@@ -769,7 +790,7 @@ async fn finish_demand_publishes_each_core_after_the_viewer_leaves() {
         .read_subtitle_translation(query(
             21_000,
             TranslationQuery::Operation {
-                operation_id: recipe.operation_id,
+                operation_id: recipe.operation_id.clone(),
             },
         ))
         .await
@@ -792,6 +813,109 @@ async fn finish_demand_publishes_each_core_after_the_viewer_leaves() {
         .unwrap()
         .progressive_asset_id
         .is_none());
+
+    // Deleting the stored track neither discards the cached cues nor lets
+    // maintenance immediately recreate the track. An explicit retry can
+    // rebind the same asset and restore the track from its accepted cores.
+    let track_id = caption.stable_id();
+    store
+        .delete_ai_subtitle_track(recipe.source.clone(), &track_id)
+        .await
+        .expect("delete AI track");
+    assert!(store
+        .ai_subtitle_excluded_from_schedule(recipe.source.clone())
+        .await
+        .expect("check automatic scheduling"));
+    assert!(store
+        .get_file(1)
+        .await
+        .unwrap()
+        .unwrap()
+        .downloaded_subtitle(0)
+        .is_none());
+    let stopped = store
+        .read_subtitle_translation(query(
+            22_000,
+            TranslationQuery::Operation {
+                operation_id: recipe.operation_id.clone(),
+            },
+        ))
+        .await
+        .expect("deleted operation");
+    assert_eq!(stopped[0]["state"], "stopped");
+    assert_eq!(stopped[0]["reason"], "track_deleted");
+    let remaining: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM subtitle_translation_segments WHERE asset_id=?1",
+            [&recipe.asset_id],
+            |row| row.get(0),
+        )
+        .expect("retained segments");
+    assert_eq!(remaining, recipe.core_count());
+
+    let retry = store
+        .mutate_subtitle_translation(mutate(
+            TranslationAction::RetryOperation {
+                operation_id: recipe.operation_id.clone(),
+                expected_operation_epoch: recipe.operation_epoch,
+                expected_view_revision: stopped[0]["view_revision"]
+                    .as_str()
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+                expected_state: "stopped".into(),
+                playback_id: String::new(),
+                position_ms: 0,
+                playback_rate: 1.0,
+                paused: false,
+                continuity_id: None,
+            },
+            22_000,
+        ))
+        .await
+        .expect("explicit retry");
+    assert_eq!(retry["outcome"], "accepted");
+    let preparation = claim(
+        &store,
+        retry["job_id"].as_str().expect("replacement prep"),
+        JobKind::SubtitleTranslationPrepare,
+        22_100,
+    )
+    .await;
+    assert!(store
+        .bind_translation_source(BindTranslationSource {
+            source: preparation.supported_payload().expect("closed producer"),
+            token: preparation.token.expect("fenced producer"),
+            source_sha256: recipe.source_sha256.clone(),
+            resolved_language: None,
+            local_identity: "owned-source".into(),
+            now_ms: 22_200,
+        })
+        .await
+        .expect("cached result republishes atomically"));
+    let refreshed = store
+        .get_file(1)
+        .await
+        .unwrap()
+        .expect("current file after retry");
+    let restored = refreshed.downloaded_subtitle(0).expect("restored captions");
+    assert_eq!(restored.stable_id(), track_id);
+    assert_eq!(restored.vtt, caption.vtt);
+    store
+        .maintain_translation_cache(100_000_000)
+        .await
+        .expect("retire unused inline backing");
+    let metadata = store
+        .read_subtitle_translation(query(
+            100_000_001,
+            TranslationQuery::Operation {
+                operation_id: recipe.operation_id,
+            },
+        ))
+        .await
+        .expect("stored track survives cache retirement");
+    assert_eq!(metadata[0]["state"], "complete");
+    assert_eq!(metadata[0]["asset_id"], track_id);
 }
 
 #[tokio::test]
@@ -1835,6 +1959,24 @@ async fn shared_grant_reads_reuse_fixed_lease_and_never_create_compute_authority
         .expect("lease")
         .remove(0);
     let id = lease["lease_id"].as_str().expect("ID").to_owned();
+    let other_asset = "a".repeat(64);
+    for query in [
+        Q::Lease {
+            asset_id: other_asset.clone(),
+            lease_id: id.clone(),
+        },
+        Q::Window {
+            asset_id: other_asset,
+            lease_id: id.clone(),
+            position_ms: 0,
+        },
+    ] {
+        assert!(store
+            .read_shared_captions(read(principal.clone(), query, 1800))
+            .await
+            .expect("asset-scoped shared read")
+            .is_empty());
+    }
     for seek in 0..300_i64 {
         let reused = store
             .read_shared_captions(read(

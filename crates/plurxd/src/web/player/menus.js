@@ -41,13 +41,13 @@ function setupTrackMenus(){
   // Subtitles are offered in every playback mode. A stream that starts at an
   // offset (transcode, copy-HLS, a resumed remux) shifts the cues to match —
   // see setSub() — so the track lines up wherever playback actually began.
-  const has=!!(typeof watchTranslationAction==="function"&&watchTranslationAction(watchCurrentFile()))||!!(PLAYER.subs&&PLAYER.subs.length)||(typeof translationMenuChoice==="function"&&!!translationMenuChoice());
+  const has=!!(typeof aiCaptionPlayerFile==="function"&&aiCaptionLocal(aiCaptionPlayerFile()))||!!(typeof watchTranslationAction==="function"&&watchTranslationAction(watchCurrentFile()))||!!(PLAYER.subs&&PLAYER.subs.length)||(typeof translationMenuChoice==="function"&&!!translationMenuChoice());
   const cc=document.getElementById("pbsubs"); if(cc) cc.style.display=has?"":"none";
   pbSyncSubIcon();
 }
 // Project subtitle selection immediately, including while the picture is paused.
 function pbSyncSubIcon(){ const cc=document.getElementById("pbsubs");
-  if(cc) cc.classList.toggle("on", !!(PLAYER&&(PLAYER.curSub>=0||(typeof translationSelected==="function"&&translationSelected(PLAYER)))));
+  if(cc) cc.classList.toggle("on", !!(PLAYER&&(PLAYER.curSub>=0||(typeof AI_CAPTION_PLAYBACK!=="undefined"&&AI_CAPTION_PLAYBACK?.player===PLAYER)||(typeof translationSelected==="function"&&translationSelected(PLAYER)))));
   if(typeof watchRenderLedger==="function") watchRenderLedger();
 }
 // `low` = opened from the bottom transport, so the menu anchors above that
@@ -155,9 +155,9 @@ function toggleMenu(kind,low){
       <button onclick="retryQualityChange()">Retry quality change</button>
       <button onclick="applyQualityWithRestart()">Apply with restart</button>`:"");
   } else {
-    m.innerHTML=`<button class="${PLAYER.curSub<0&&!(typeof translationSelected==="function"&&translationSelected(PLAYER))?'sel':''}" data-remote-track="-1" onclick="setSub(-1)">Off</button>`+
+    m.innerHTML=`<button class="${PLAYER.curSub<0&&!(typeof AI_CAPTION_PLAYBACK!=="undefined"&&AI_CAPTION_PLAYBACK?.player===PLAYER)&&!(typeof translationSelected==="function"&&translationSelected(PLAYER))?'sel':''}" data-remote-track="-1" onclick="setSub(-1)">Off</button>`+
       (typeof translationMenuChoice==="function"?translationMenuChoice():"")+
-      (PLAYER.subs||[]).map(s=>`<button class="${PLAYER.curSub===s.index?'sel':''}" data-remote-track="${s.index}" onclick="setSub(${s.index})">${esc(subLabelMenu(s))}</button>`).join("") + captionActionsMenu();
+      (PLAYER.subs||[]).map(s=>`<button class="${PLAYER.curSub===s.index?'sel':''}" data-remote-track="${s.index}" onclick="setSub(${s.index})">${esc(subLabelMenu(s)+(s.ai?" · AI":""))}</button>`).join("") + captionActionsMenu();
   }
   m.querySelectorAll("button").forEach(button=>{
     if(!button.hasAttribute("role")) button.setAttribute("role","menuitem");
@@ -320,7 +320,10 @@ function setQuality(q){
 }
 
 function captionActionsMenu(){
-  if(typeof watchCurrentFile!=="function")return "";const file=watchCurrentFile();if(!file||!watchTranslationAction(file))return "";
-  const shared=playbackFileContextForFile(file).source_ref.kind!=="local";
-  return `<div class="amsec">AI captions</div><button onclick="openPlayerCaptionControls('speech')">${shared?"Available AI captions":"Generate or translate speech"}</button>`+(shared?"":`<button onclick="openPlayerCaptionControls('text')">Translate existing subtitles</button>`);
+  if(typeof watchCurrentFile!=="function")return "";
+  const local=typeof aiCaptionPlayerFile==="function"?aiCaptionPlayerFile():null;
+  if(local&&aiCaptionLocal(local))return aiCaptionMenu(local);
+  const file=watchCurrentFile();
+  if(!file||!watchTranslationAction(file)||playbackFileContextForFile(file).source_ref.kind==="local")return "";
+  return `<button onclick="openPlayerCaptionControls('speech')">Available AI captions</button>`;
 }

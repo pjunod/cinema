@@ -2908,6 +2908,10 @@ final class PlayerController: ObservableObject {
     }
 
     func selectSubtitle(_ index: Int?) {
+        selectSubtitle(index, refreshNativeRenditions: false)
+    }
+
+    private func selectSubtitle(_ index: Int?, refreshNativeRenditions: Bool) {
         let cold = started && decision == nil
         let requestedIndex = index ?? PrePlaySelection.subtitleOff
         guard progressiveCaptionOutputSelected || index != selectedSubtitle
@@ -2947,13 +2951,15 @@ final class PlayerController: ObservableObject {
             restartInitialDecision(lifecycle: lifecycleGeneration)
             return
         }
-        let route = Self.subtitleSelectionRoute(
+        let selectionRoute = Self.subtitleSelectionRoute(
             for: index,
             tracks: subtitles,
             activeBurn: activeBurnedSubtitle,
             isDirectPlayback: isDirectPlayback,
             activeOverlay: activeOverlay
         )
+        let route: SubtitleSelectionRoute = refreshNativeRenditions && selectionRoute == .mediaSelection && !isDirectPlayback
+            ? .reopen : selectionRoute
         let destination = seekState.selection(
             at: positionForPlaybackIntent(),
             durationMs: knownDurationMs,
@@ -4718,6 +4724,22 @@ final class PlayerController: ObservableObject {
 
     /// Explicit local caption output is chosen by the player UI before entry.
     func selectProgressiveCaptions(_ task: CaptionTask) {
+        prepareProgressiveCaptionSelection {
+            self.progressiveCaptions.request(task)
+        }
+    }
+
+    func selectAISubtitles(route: String = "auto", language: String? = nil) {
+        if progressiveCaptions.selected && route == "auto" { selectSubtitle(nil); return }
+        guard progressiveCaptions.aiOptions?.canStart == true else { return }
+        prepareProgressiveCaptionSelection {
+            self.progressiveCaptions.requestAI(route: route, language: language) { [weak self] id, embeddedIndex in
+                self?.useStoredAISubtitle(id, embeddedIndex: embeddedIndex)
+            }
+        }
+    }
+
+    private func prepareProgressiveCaptionSelection(_ select: @escaping () -> Bool) {
         guard started, !player.isExternalPlaybackActive else {
             showPlaybackNotice("Return playback to this device to show progressive captions.")
             return
@@ -4739,7 +4761,32 @@ final class PlayerController: ObservableObject {
                 showPlaybackNotice("Captions were not selected because subtitle removal did not attach. Try again after the stream change finishes.")
                 return
             }
-            if progressiveCaptions.request(task) { player.allowsExternalPlayback = false }
+            if select() { player.allowsExternalPlayback = false }
+        }
+    }
+
+    private func useStoredAISubtitle(_ id: String?, embeddedIndex: Int?) {
+        guard started, let model, let context = fileContext,
+              let viewer = progressiveCaptions.aiPlaybackId else { return }
+        let lifecycle = lifecycleGeneration
+        Task {
+            do {
+                let quality: PlaybackQuality = selectedHeight.map(Self.initialQuality(height:)) ?? (selectedQualityIsOriginal ? .original : .auto)
+                let refreshed = try await requestPlaybackDecision(model, context,
+                    PrePlaySelection(audioIndex: selectedAudio, subtitleIndex: PrePlaySelection.subtitleOff), quality)
+                guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
+                      progressiveCaptions.aiPlaybackId == viewer,
+                      refreshed.decision.fileId == fileId,
+                      let track = refreshed.decision.subtitles?.first(where: { track in
+                          id.map { track.downloadedSubtitleId == $0 } ?? (track.index == embeddedIndex)
+                      }) else { return }
+                decision?.subtitles = refreshed.decision.subtitles
+                selectSubtitle(track.index, refreshNativeRenditions: true)
+            } catch {
+                if isCurrentLifecycle(lifecycle), progressiveCaptions.aiPlaybackId == viewer {
+                    showPlaybackNotice(error.localizedDescription)
+                }
+            }
         }
     }
 

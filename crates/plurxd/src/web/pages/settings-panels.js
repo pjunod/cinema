@@ -5,7 +5,7 @@
 // the rail's order and the chip strip's order.
 const SET_GROUPS=[
   ["Content",[["libraries","Libraries"],["metadata","Metadata"],["livetv","Live TV"]]],
-  ["Playback",[["playback","Playback"],["analysis","Analysis"]]],
+  ["Playback",[["playback","Playback"],["subtitles","Subtitles"],["analysis","Analysis"]]],
   ["Server",[["maintenance","Maintenance"],["users","Users"],["system","System"],["cluster","Cluster"]]],
   ["Outside",[["integrations","Integrations"],["sharing","Sharing"],["remotes","Remotes & devices"]]],
   ["Developer",[["developer","Developer"]]],
@@ -23,8 +23,8 @@ const DEVELOPER_MOVED={"cinema-sharing-settings":"sharing","jellyfin-compatibili
 // address bar names the section and the back button walks between them.
 function isSettingsRoute(h){ return h==="#/settings"||h==="#/admin"||(typeof h==="string"&&h.startsWith("#/settings/")); }
 function settingsRouteTab(h){
-  if(h==="#/settings/developer/enable-subtitle-transcription") return "maintenance";
-  if(h==="#/settings/developer/enable-subtitle-translation") return "playback";
+  if(/^#\/settings\/(?:developer|maintenance)\/enable-subtitle-transcription$/.test(h||"")
+    ||/^#\/settings\/(?:developer|playback)\/enable-subtitle-translation$/.test(h||""))return "subtitles";
   const moved=/^#\/settings\/developer\/([a-z0-9-]+)$/.exec(h||"");
   if(moved&&Object.hasOwn(DEVELOPER_MOVED,moved[1])) return DEVELOPER_MOVED[moved[1]];
   const m=/^#\/settings\/([a-z]+)(?:\/[a-z0-9-]+)?$/.exec(h||"");
@@ -64,7 +64,7 @@ let SETTINGS_SHOWN_TAB=null;
 // the live DOM node, so an unsaved edit, the Save it enabled, an open readiness
 // disclosure and focus all survive; the card's own Save replaces it from the
 // server's answer, and a fresh visit to the section draws it anew.
-const SETTINGS_KEPT_MOUNTS={playback:["enable-subtitle-translation"],cluster:["cluster-settings","cluster-backup"],analysis:["subbackfillcard"],maintenance:["enable-subtitle-transcription"]};
+const SETTINGS_KEPT_MOUNTS={subtitles:["subtitle-preferences","ai-subtitle-settings"],cluster:["cluster-settings","cluster-backup"],analysis:["subbackfillcard"]};
 let SETTINGS_PENDING_KEEP=null;
 function captureSettingsMounts(tab){
   const nodes=(SETTINGS_KEPT_MOUNTS[tab]||[]).map(id=>document.getElementById(id))
@@ -113,6 +113,7 @@ function renderSettings(){
 function settingsPanel(tab,d){
   if(tab==="metadata")     return metadataPanel(d.settings,d.developerReadiness);
   if(tab==="playback")     return playbackPanel(d.settings,d.developerReadiness);
+  if(tab==="subtitles")    return aiSubtitleSettingsPanel(d.subtitlePreferences,d.aiSubtitles);
   if(tab==="livetv")       return liveTvPanel(d.settings,d.developerReadiness);
   if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis,d.developerReadiness);
   if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions,d.developerReadiness);
@@ -203,7 +204,7 @@ function maintenancePanel(settings,dv,readiness){
     ${togRow("job-boot","Scan every library at startup","About 30 seconds after the server starts — a server switched off while files landed doesn't notice them until its next scheduled run.",settings.scan_on_startup)}
     ${setCardFoot("saveMaintenance")}`);
   return `${setHead("Maintenance","Background work this node does on its own: what is scheduled, what it costs, and where to turn it off.")}
-    <div class="setgrid2">${jobs}${precachePanel(settings)}${subtitleStorePanel(settings)}${subtitleStoredSourcesCard(settings,readiness)}${dvDiskPanel(settings,dv)}${windowsServerCard(settings,readiness)}${subtitleTranscriptionCard()}${telemetryPanel(settings)}</div>`;
+    <div class="setgrid2">${jobs}${precachePanel(settings)}${subtitleStorePanel(settings)}${subtitleStoredSourcesCard(settings,readiness)}${dvDiskPanel(settings,dv)}${windowsServerCard(settings,readiness)}${telemetryPanel(settings)}</div>`;
 }
 const PRODUCE_EVERY=[[0,"Never"],[360,"6 hours"],[720,"12 hours"],[1440,"Daily"]];
 const CACHE_SIZES=[0,10,25,50,100,250,500,1000];
@@ -664,7 +665,7 @@ function metadataPanel(settings,readiness){
 // calendar seam; both are the opposite direction of the Metadata providers,
 // which is why they no longer share a page with them.
 function integrationsPanel(settings,trakt){
-  return `${setHead("Integrations","Other services plurx talks to.")}${traktCardHtml(trakt)}${monarrCardHtml()}${jellyfinCompatibilityCard(settings,SETTINGS_DATA.developerReadiness)}<div class="card">${cardHead("OpenSubtitles","Find and download missing movie and episode subtitles.")}<div style="padding:16px"><button class="sm" onclick="openSubtitleProvider(this)">Configure OpenSubtitles</button><div id="subtitle-provider-form"></div></div></div>`;
+  return `${setHead("Integrations","Other services plurx talks to.")}${traktCardHtml(trakt)}${monarrCardHtml()}${jellyfinCompatibilityCard(settings,SETTINGS_DATA.developerReadiness)}`;
 }
 
 async function openSubtitleProvider(button){
@@ -677,7 +678,6 @@ async function openSubtitleProvider(button){
       <label for="os-key">API key</label><input id="os-key" type="password" autocomplete="off">
       <label for="os-user">Account username (optional)</label><input id="os-user" autocomplete="off" value="${esc(settings.username||"")}">
       <label for="os-password">Account password (optional)</label><input id="os-password" type="password" autocomplete="new-password">
-      <label><input id="os-auto" type="checkbox"${settings.automatic?" checked":""}> Automatically download missing subtitles when the file matches</label>
       <label for="os-languages">Automatic languages (up to three codes, separated by commas)</label><input id="os-languages" value="${esc((settings.languages||["en"]).join(", "))}" placeholder="en, fr">
       <p class="muted">Downloads use the provider’s allowance. An account can provide a higher allowance.</p>
       <button class="sm" onclick="saveSubtitleProvider(false)">Save</button>
@@ -689,7 +689,7 @@ async function openSubtitleProvider(button){
 async function saveSubtitleProvider(clear){
   const status=document.getElementById("os-status");
   const key=document.getElementById("os-key"),password=document.getElementById("os-password");
-  const body=clear?{api_key:"",username:"",password:"",automatic:false}:{username:document.getElementById("os-user").value.trim(),automatic:document.getElementById("os-auto").checked,languages:document.getElementById("os-languages").value.split(",").map(v=>v.trim()).filter(Boolean)};
+  const body=clear?{api_key:"",username:"",password:"",automatic:false}:{username:document.getElementById("os-user").value.trim(),languages:document.getElementById("os-languages").value.split(",").map(v=>v.trim()).filter(Boolean)};
   if(!clear&&key.value.trim())body.api_key=key.value.trim();
   if(!clear&&password.value)body.password=password.value;
   status.textContent="Saving…";
@@ -731,11 +731,7 @@ function playbackPanel(settings,readiness){
   const defaults=setCard(`${cardHead("Defaults for every player","All players · Applies to new playback on web, Apple and Android. Anime dual-audio still prefers the original audio with subtitles.")}
       <div class="setfields">
         <div><label for="pal">Audio language</label><select id="pal">${langOpts(settings.default_audio_lang)}</select></div>
-        <div><label for="psl">Subtitle language</label><select id="psl">${langOpts(settings.default_sub_lang)}</select></div>
-        <div><label for="psm">Show subtitles</label><select id="psm" style="min-width:230px">
-          <option value="auto" ${settings.sub_mode==='auto'?'selected':''}>Auto — only for foreign audio</option>
-          <option value="always" ${settings.sub_mode==='always'?'selected':''}>Always on</option>
-          <option value="off" ${settings.sub_mode==='off'?'selected':''}>Off</option></select></div>
+
       </div>
       <div class="err" id="perr"></div>
       ${setCardFoot("savePlaybackDefaults")}`);
@@ -768,7 +764,7 @@ function playbackPanel(settings,readiness){
   // Chapter thumbnails and both decoder controls graduated from Developer on
   // 2026-09-28; quality switching, this browser's second player and the PGS
   // overlay on 2026-10-10 (Paul's Developer lifecycle). Each keeps its own Save.
-  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${subtitleTranslationCard()}${openInCard()}${hdrDisplayPeakCard()}${local}${chapterThumbnailsCard(settings,readiness)}${preparedQualityCard(settings,readiness)}${preparedHandoffBrowserCard()}${pgsOverlayCard(settings,readiness)}<div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision and HDR</h2></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${displayTargetHdr10Card(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}${dolbyVisionRefitCard(settings,readiness)}<div class="setsection" id="enable-output-preparation"><h2>Reusable output</h2></div>${outputPreparationCard(settings,readiness)}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${vodReorderCard(settings)}${rateControlCard(settings)}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}</details>`;
+  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${openInCard()}${hdrDisplayPeakCard()}${local}${chapterThumbnailsCard(settings,readiness)}${preparedQualityCard(settings,readiness)}${preparedHandoffBrowserCard()}${pgsOverlayCard(settings,readiness)}<div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision and HDR</h2></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${displayTargetHdr10Card(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}${dolbyVisionRefitCard(settings,readiness)}<div class="setsection" id="enable-output-preparation"><h2>Reusable output</h2></div>${outputPreparationCard(settings,readiness)}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${vodReorderCard(settings)}${rateControlCard(settings)}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}</details>`;
 }
 
 function searchSettingsCard(readiness){

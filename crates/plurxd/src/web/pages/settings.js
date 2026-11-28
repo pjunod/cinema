@@ -77,6 +77,8 @@ const SETTINGS_ENDPOINTS={
   sys:()=>api("/system"),users:()=>api("/users"),trakt:()=>api("/trakt/status"),
   sharingStatus:()=>sharingManagementRead("/sharing/status"),sharingImports:()=>sharingManagementRead("/sharing/imports"),sharingExports:()=>sharingManagementRead("/sharing/exports"),
   developerReadiness:()=>api("/developer/readiness"),
+  subtitlePreferences:()=>api("/ai-subtitles/preferences"),
+  aiSubtitles:()=>api("/ai-subtitles/settings"),
   https:()=>api("/system/https"),
   sourceRecovery:()=>api("/developer/source-recovery"),
   analysis:()=>api("/analysis/summary"),
@@ -109,6 +111,7 @@ const SETTINGS_MANIFEST={
   libraries:{required:["settings","libs","status","dvConversions"],secondary:[]},
   metadata:{required:["settings"],secondary:["libs","developerReadiness"]},
   playback:{required:["settings"],secondary:["developerReadiness"]},
+  subtitles:{required:["subtitlePreferences","aiSubtitles"],secondary:[]},
   livetv:{required:["settings"],secondary:["developerReadiness"]},
   analysis:{required:["settings","analysis"],secondary:["developerReadiness"]},
   maintenance:{required:["settings","dvConversions"],secondary:["developerReadiness"]},
@@ -209,7 +212,8 @@ function settingsTabsHtml(tab){
   // walks between sections; render() keeps the cached aggregate across the
   // switch because the previous route was also Settings.
   const d=SETTINGS_DATA||{};
-  return SET_GROUPS.map(([group,tabs])=>`<div class="setgroup">${esc(group)}</div>`+tabs.map(([id,label])=>{
+  const groups=ME?.is_admin?SET_GROUPS:[["Playback",[["subtitles","Subtitles"]]]];
+  return groups.map(([group,tabs])=>`<div class="setgroup">${esc(group)}</div>`+tabs.map(([id,label])=>{
     const aside=settingsTabAside(id,d);
     return `<button class="settab${tab===id?' active':''}" role="link" aria-current="${tab===id?'page':'false'}" onclick="setSettingsTab('${id}')">${esc(label)}${aside}</button>`;
   }).join("")).join("");
@@ -348,7 +352,7 @@ async function loadSettingsTab(generation,tab){
   return settingsCurrent(generation,tab);
 }
 async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
-  if(!ME.is_admin){ if(["remotes","developer"].includes(settingsRouteTab(location.hash)))viewLocalRemoteSettings(generation);else location.hash="#/"; return; }
+  if(!ME.is_admin&&settingsRouteTab(location.hash)!=="subtitles"){ if(["remotes","developer"].includes(settingsRouteTab(location.hash)))viewLocalRemoteSettings(generation);else location.hash="#/"; return; }
   const route=location.hash;
   if(reset){
     if(typeof sharingRetire==="function")sharingRetire();

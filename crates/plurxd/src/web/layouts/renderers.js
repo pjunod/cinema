@@ -93,6 +93,7 @@ function recomposeItemPresentation(page){
     if(replacement&&replacement!==node)replacement.replaceWith(node);
   }
   main.replaceChildren(template.content);
+  if(typeof aiCaptionBindPreplay==="function")aiCaptionBindPreplay(main,page);
   if(page.annotations&&page.item) paintAnnotationSlots(page.item.id,page.annotations);
 }
 function layoutChrome(active, inner){

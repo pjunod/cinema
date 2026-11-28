@@ -101,6 +101,7 @@ async function setSub(index){
       {title:"That subtitle requires an SDR burn-in. HDR playback was kept unchanged."});
     return false;   // nothing changed, so nothing to remember
   }
+  if(typeof aiCaptionRetirePlayback==="function")aiCaptionRetirePlayback();
   if(typeof translationSelectSource==="function") translationSelectSource(me,index);
   else me.captionIntentSerial=(me.captionIntentSerial||0)+1;
   const video=/** @type {HTMLVideoElement|null} */(document.getElementById("video"));
@@ -278,6 +279,7 @@ function splitAudioSwitched(me,hls,trackId){
   const want=me&&me.requestedAudio;
   if(!want||want.hls!==hls||me.hls!==hls||want.track!==trackId) return;
   me.requestedAudio=null;
+  if(typeof aiCaptionRetirePlayback==="function")aiCaptionRetirePlayback();
   if(typeof translationRetire==="function")translationRetire("audio changed");
   me.curAudio=want.index;
   const track=me.audio[want.index];
@@ -309,6 +311,7 @@ async function switchAudio(idx){
   const alternate=splitAudioTrackFor(me,idx);
   if(alternate>=0){ requestSplitAudio(me,idx,alternate); return; }
   endWait(false); // cancel a timer armed for the stream this switch replaces
+  if(typeof aiCaptionRetirePlayback==="function")aiCaptionRetirePlayback();
   if(typeof translationRetire==="function")translationRetire("audio changed");
   me.curAudio=idx;
   renderPlayerInfo();

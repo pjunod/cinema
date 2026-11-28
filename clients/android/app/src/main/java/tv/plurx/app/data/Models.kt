@@ -222,6 +222,8 @@ data class SubtitleStream(
      * is why the detail screen only ever *adds* the marker.
      */
     val hearing_impaired: Boolean = false,
+    val ai: Boolean = false,
+    val track_id: String? = null,
 )
 
 /**
@@ -298,6 +300,7 @@ data class MediaFileDto(
     val bitrate: Long? = null,
     val audio_streams: List<AudioStream> = emptyList(),
     val subtitle_streams: List<SubtitleStream> = emptyList(),
+    val subtitle_search_enabled: Boolean = false,
     /**
      * The server's own track outcome for this file. Null on a server that
      * predates the shared contract — the detail screen then lists the tracks
@@ -493,6 +496,8 @@ data class SubTrack(
     val overlay: String? = null,
     /** Additive origin: downloaded captions are absent from the source container. */
     val source: String = "embedded",
+    val downloaded_subtitle_id: String? = null,
+    val ai: Boolean = false,
 ) {
     /**
      * Route on this, not on [text]. The two questions differ for exactly one

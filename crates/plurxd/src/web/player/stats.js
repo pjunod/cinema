@@ -692,6 +692,7 @@ async function reportProgress(fileId, ended, attachedOwner){
 function closePlayer(options={}){
   if(typeof sharedCaptionRetire==="function")sharedCaptionRetire("player closed");
   if(typeof textTranslationRetire==="function")textTranslationRetire(SUBTITLE_TEXT_TRANSLATION);
+  if(typeof aiCaptionRetirePlayback==="function")aiCaptionRetirePlayback();
   if(typeof translationRetire==="function")translationRetire("player closed");
   if(WATCH_CLOSE_PROMISE)return WATCH_CLOSE_PROMISE;
   // Cancellation and first-frame rollback can change the authoritative

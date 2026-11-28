@@ -136,7 +136,19 @@ async fn sweep_with_lease(
         if shutdown.is_cancelled() {
             break;
         }
-        if let Some(mut file) = state.store.get_file(id).await? {
+        if let Some(mut file) = state.store.get_file(id).await?.filter(|file| file.size > 0) {
+            if state
+                .store
+                .ai_subtitle_excluded_from_schedule(SourceRevision {
+                    file_id: file.id,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                })
+                .await?
+            {
+                next = id;
+                continue;
+            }
             if settings.download_match && selection::existing_english(&file).is_none() {
                 let _ = crate::http::subtitle_downloads::try_english_match(state, id).await;
                 if let Some(latest) = state.store.get_file(id).await? {
@@ -151,14 +163,17 @@ async fn sweep_with_lease(
                 next = id;
                 continue;
             }
-            if let Some((audio, language)) = settings.from_audio.then(|| candidate(&file)).flatten()
-            {
-                let task = if language == "en" {
-                    SpeechTask::Transcribe
-                } else {
-                    SpeechTask::TranslateToEnglish
-                };
-                match start_finish_only(state, &file, audio, language, task, 0).await {
+            if let Some(audio) = settings.from_audio.then(|| candidate(&file)).flatten() {
+                match start_finish_only(
+                    state,
+                    &file,
+                    audio,
+                    "auto".into(),
+                    SpeechTask::TranslateToEnglish,
+                    0,
+                )
+                .await
+                {
                     Ok(result)
                         if matches!(
                             result["outcome"].as_str(),
@@ -204,23 +219,12 @@ async fn schedule_text(state: &AppState, file: &MediaFile) -> bool {
     false
 }
 
-fn candidate(file: &MediaFile) -> Option<(&AudioStream, String)> {
-    use crate::subtitle_transcription::{eligible, normalized_language};
-    if !eligible(file) {
+fn candidate(file: &MediaFile) -> Option<&AudioStream> {
+    if !crate::subtitle_transcription::eligible(file) {
         return None;
     }
-    let audio = file
-        .audio_streams
+    file.audio_streams
         .iter()
         .find(|track| track.default)
-        .or_else(|| file.audio_streams.first())?;
-    let language = audio
-        .language
-        .as_deref()
-        .map(normalized_language)
-        .filter(|language| {
-            plurx_core::store::background_jobs_transcription::whisper_language(language)
-        })
-        .unwrap_or_else(|| "auto".into());
-    Some((audio, language))
+        .or_else(|| file.audio_streams.first())
 }

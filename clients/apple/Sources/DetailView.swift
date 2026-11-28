@@ -1224,6 +1224,30 @@ struct DetailView: View {
             VStack(alignment: .leading, spacing: 10) {
                 TrackFactsSection(file: file)
                 TrackChoiceCostNotice(file: file, selection: trackSelection(for: file))
+                if file.videoCodec != nil {
+                    let code = file.playbackDefaults?.subtitle?.preferredLanguage ?? "en"
+                    let language = Locale.current.localizedString(forLanguageCode: code) ?? code
+                    NavigationLink((file.subtitleStreams ?? []).contains(where: { $0.ai == true })
+                                   ? "Manage AI subtitles" : "Add \(language) subtitles") {
+                        AISubtitleItemView(file: file, audioIndex: trackSelection(for: file).audioIndex) { trackId, index in
+                            guard let refreshed = try? await model.itemDetail(itemId),
+                                  let current = refreshed.files?.first(where: { $0.id == file.id }) else { return }
+                            detail = refreshed
+                            let binding = trackSelectionBinding(for: file)
+                            var selection = binding.wrappedValue
+                            if index != nil {
+                                selection.subtitleIndex = current.subtitleStreams?.first { track in
+                                    trackId.map { stable in track.trackId == stable } ?? (track.index == index)
+                                }?.index ?? selection.subtitleIndex
+                            } else if let chosen = selection.subtitleIndex,
+                                      let old = file.subtitleStreams?.first(where: { $0.index == chosen })?.trackId {
+                                selection.subtitleIndex = current.subtitleStreams?.first(where: { $0.trackId == old })?.index
+                                    ?? PrePlaySelection.subtitleOff
+                            }
+                            binding.wrappedValue = selection
+                        }
+                    }
+                }
             }
         }
     }

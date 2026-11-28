@@ -124,6 +124,25 @@ pub(super) async fn viewer<T: QueueSql>(store: &T, viewer: Viewer) -> Result<boo
         .is_empty())
 }
 
+pub(super) async fn excluded_from_schedule<T: QueueSql>(
+    store: &T,
+    source: SourceRevision,
+) -> Result<bool, StoreError> {
+    source.validate()?;
+    let rows = store
+        .queue_sql(
+            "SELECT 'true' AS result_json FROM subtitle_translation_schedule_exclusions
+         WHERE file_id=json_extract($1,'$.file_id') AND source_size=json_extract($1,'$.source_size')
+         AND source_mtime=json_extract($1,'$.source_mtime')"
+                .into(),
+            encode(&source)?,
+            false,
+            false,
+        )
+        .await?;
+    Ok(!rows.is_empty())
+}
+
 pub(super) async fn delete_track<T: QueueSql>(
     store: &T,
     source: SourceRevision,
@@ -137,6 +156,16 @@ pub(super) async fn delete_track<T: QueueSql>(
     }
     let body = encode(&json!({"source":source,"track":track_id}))?;
     store.queue_transaction(vec![
+        (r#"INSERT INTO subtitle_translation_schedule_exclusions(file_id,source_size,source_mtime)
+ SELECT f.id,f.size,f.mtime FROM files f
+ WHERE f.id=json_extract($1,'$.source.file_id') AND f.size=json_extract($1,'$.source.source_size')
+ AND f.mtime=json_extract($1,'$.source.source_mtime')
+ AND (EXISTS(SELECT 1 FROM json_each(f.downloaded_subtitles) row
+    WHERE json_extract(row.value,'$.transcription.artifact_key')=json_extract($1,'$.track')
+    OR json_extract(row.value,'$.text_translation.artifact_key')=json_extract($1,'$.track'))
+  OR EXISTS(SELECT 1 FROM subtitle_translation_stored_tracks stored WHERE stored.file_id=f.id AND stored.source_size=f.size
+    AND stored.source_mtime=f.mtime AND stored.asset_id=json_extract($1,'$.track')))
+ ON CONFLICT(file_id) DO UPDATE SET source_size=excluded.source_size,source_mtime=excluded.source_mtime"#.into(),body.clone()),
         (r#"UPDATE files SET downloaded_subtitles=(SELECT json_group_array(json(caption)) FROM (
   SELECT value AS caption FROM json_each(files.downloaded_subtitles)
   WHERE json_extract(value,'$.transcription.artifact_key') IS NOT json_extract($1,'$.track')
@@ -145,6 +174,14 @@ pub(super) async fn delete_track<T: QueueSql>(
  ))
  WHERE id=json_extract($1,'$.source.file_id') AND size=json_extract($1,'$.source.source_size')
  AND mtime=json_extract($1,'$.source.source_mtime')"#.into(), body.clone()),
+        (r#"UPDATE subtitle_translation_operations
+ SET state='stopped',stopped=1,reason='track_deleted',retryable=0,view_revision=view_revision+1
+ WHERE state='complete' AND asset_id=json_extract($1,'$.track')
+ AND file_id=json_extract($1,'$.source.file_id')
+ AND source_json=json(json_extract($1,'$.source'))
+ AND view_revision<9223372036854775806
+ AND EXISTS(SELECT 1 FROM files WHERE id=file_id AND size=json_extract($1,'$.source.source_size')
+    AND mtime=json_extract($1,'$.source.source_mtime'))"#.into(), body.clone()),
         (r#"DELETE FROM subtitle_translation_stored_tracks WHERE asset_id=json_extract($1,'$.track')
  AND file_id=json_extract($1,'$.source.file_id') AND source_size=json_extract($1,'$.source.source_size')
  AND source_mtime=json_extract($1,'$.source.source_mtime')

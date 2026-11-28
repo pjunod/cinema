@@ -444,10 +444,7 @@ fn http_route_group(path: &str) -> usize {
         "/api/v1/items/{id}"
         | "/api/v1/files/{id}/subtitles/search"
         | "/api/v1/files/{id}/subtitles/download"
-        | "/api/v1/files/{id}/subtitles/transcribe"
         | "/api/v1/files/{id}/ai-subtitles"
-        | "/api/v1/files/{id}/subtitle-text-translation/options"
-        | "/api/v1/files/{id}/subtitle-translation/options"
         | "/api/v1/files/{id}/subtitle-translation/assets"
         | "/api/v1/items/{id}/classification"
         | "/api/v1/items/{id}/photo"
@@ -557,8 +554,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/unscrobble"
         | "/api/v1/files/{id}/decision"
         | "/api/v1/files/{id}/hls/startup-decision"
-        | "/api/v1/files/{id}/subtitle-translation"
         | "/api/v1/subtitle-translation/operations/{id}"
+        | "/api/v1/ai-subtitles/operations/{id}"
         | "/api/v1/ai-subtitles/operations/{id}/cues"
         | "/api/v1/ai-subtitles/operations/{id}/viewer"
         | "/api/v1/ai-subtitles/operations/{id}/stop"
@@ -654,21 +651,11 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/server/node"
         | crate::discovery::PATH
         | "/api/v1/settings"
-        | "/api/v1/subtitle-transcription"
-        | "/api/v1/subtitle-translation"
-        | "/api/v1/subtitle-translation/models"
-        | "/api/v1/subtitle-text-translation/config"
         | "/api/v1/ai-subtitles/settings"
-        | "/api/v1/subtitle-text-translation/models"
-        | "/api/v1/subtitle-text-translation/models/install"
-        | "/api/v1/subtitle-text-translation/models/verify"
-        | "/api/v1/files/{id}/subtitles/{index}/translation"
+        | "/api/v1/ai-subtitles/preferences"
+        | "/api/v1/files/{id}/subtitles/{index}/timing"
         | "/api/v1/subtitle-text-translation/jobs/{id}"
         | "/api/v1/subtitle-text-translation/jobs/{id}/retry"
-        | "/api/v1/subtitle-transcription/managed"
-        | "/api/v1/subtitle-transcription/models"
-        | "/api/v1/subtitle-transcription/models/{id}/install"
-        | "/api/v1/subtitle-transcription/models/{id}/verify"
         | "/api/v1/subtitle-transcription/jobs/{id}"
         | "/api/v1/subtitle-provider"
         | "/api/v1/developer/readiness"
@@ -1735,10 +1722,6 @@ pub fn router(state: AppState) -> Router {
         .route("/settings", get(system::get_settings))
         .route("/system/https", get(https_admin::get))
         .route("/system/https/certificate", get(https_admin::certificate))
-        .route(
-            "/subtitle-transcription",
-            get(crate::subtitle_transcription::settings),
-        )
         .route("/subtitle-provider", get(subtitle_downloads::settings))
         // Advisory only. The Developer section lists what must be true
         // before each switch is safe; this is the other half — what this
@@ -2004,37 +1987,16 @@ pub fn router(state: AppState) -> Router {
             delete(users::revoke_user_device),
         )
         .route(
-            "/subtitle-transcription",
-            put(crate::subtitle_transcription::update_settings),
-        )
-        .route(
-            "/subtitle-text-translation/config",
-            get(crate::subtitle_text_translation::api::settings)
-                .put(crate::subtitle_text_translation::api::update_settings),
-        )
-        .route(
             "/ai-subtitles/settings",
             get(crate::ai_subtitles::get_settings).put(crate::ai_subtitles::put_settings),
         )
         .route(
-            "/subtitle-text-translation/models",
-            get(crate::subtitle_text_translation::api::models),
+            "/ai-subtitles/preferences",
+            get(crate::ai_subtitles::preferences::get).put(crate::ai_subtitles::preferences::put),
         )
         .route(
-            "/subtitle-text-translation/models/install",
-            post(crate::subtitle_text_translation::api::install),
-        )
-        .route(
-            "/subtitle-text-translation/models/verify",
-            post(crate::subtitle_text_translation::api::verify),
-        )
-        .route(
-            "/files/{id}/subtitle-text-translation/options",
-            get(crate::subtitle_text_translation::api::options),
-        )
-        .route(
-            "/files/{id}/subtitles/{index}/translation",
-            post(crate::subtitle_text_translation::api::create),
+            "/files/{id}/subtitles/{index}/timing",
+            get(crate::ai_subtitles::timing::get).put(crate::ai_subtitles::timing::put),
         )
         .route(
             "/subtitle-text-translation/jobs/{id}",
@@ -2045,21 +2007,12 @@ pub fn router(state: AppState) -> Router {
             post(crate::subtitle_text_translation::api::retry),
         )
         .route(
-            "/subtitle-translation",
-            get(crate::subtitle_translation::api::settings)
-                .put(crate::subtitle_translation::api::update_settings),
-        )
-        .route(
-            "/subtitle-translation/models",
-            get(crate::subtitle_translation::api::models),
-        )
-        .route(
-            "/files/{id}/subtitle-translation/options",
-            get(crate::subtitle_translation::api::options),
-        )
-        .route(
             "/files/{id}/ai-subtitles",
             get(crate::ai_subtitles::routes::describe).post(crate::ai_subtitles::routes::start),
+        )
+        .route(
+            "/ai-subtitles/operations/{id}",
+            get(crate::ai_subtitles::routes::status),
         )
         .route(
             "/ai-subtitles/operations/{id}/cues",
@@ -2077,10 +2030,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/files/{id}/subtitles/{index}",
             axum::routing::delete(crate::ai_subtitles::routes::delete_track),
-        )
-        .route(
-            "/files/{id}/subtitle-translation",
-            post(crate::subtitle_translation::api::create),
         )
         .route(
             "/files/{id}/subtitle-translation/assets",
@@ -2124,29 +2073,8 @@ pub fn router(state: AppState) -> Router {
             get(crate::subtitle_translation::api::segment),
         )
         .route(
-            "/subtitle-transcription/managed",
-            get(crate::subtitle_models::api::settings)
-                .put(crate::subtitle_models::api::update_settings),
-        )
-        .route(
-            "/subtitle-transcription/models",
-            get(crate::subtitle_models::api::models),
-        )
-        .route(
-            "/subtitle-transcription/models/{id}/install",
-            post(crate::subtitle_models::install),
-        )
-        .route(
-            "/subtitle-transcription/models/{id}/verify",
-            post(crate::subtitle_models::verify),
-        )
-        .route(
             "/subtitle-transcription/jobs/{id}",
             get(crate::subtitle_models::api::job),
-        )
-        .route(
-            "/files/{id}/subtitles/transcribe",
-            get(crate::subtitle_models::api::options).post(crate::subtitle_models::generate),
         )
         .route("/settings", put(system::update_settings))
         .route(

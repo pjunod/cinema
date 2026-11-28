@@ -506,6 +506,7 @@ struct MediaFile: Codable, Identifiable {
     var bitrate: Int? = nil
     var audioStreams: [AudioTrack]? = nil
     var subtitleStreams: [SubtitleStream]? = nil
+    var subtitleSearchEnabled: Bool? = nil
     /// The server's cold-start track outcome for this file. Absent from servers
     /// that predate the shared track-facts contract, in which case the detail
     /// screen shows the tracks without marking a default or a language status.
@@ -603,6 +604,8 @@ struct SubtitleStream: Codable, Identifiable, Hashable {
     /// server (or the shared contract fixture) that predates the field omits
     /// it, and because absence is not the same claim as `false`.
     var hearingImpaired: Bool?
+    var ai: Bool? = nil
+    var trackId: String? = nil
 }
 
 /// How the configured preferred language relates to one file's tracks and to
@@ -862,6 +865,7 @@ struct SubtitleTrack: Codable, Identifiable {
     /// Stable acquired-caption identity; ordinary menu indices can move after
     /// another caption is removed or published.
     var downloadedSubtitleId: String? = nil
+    var ai: Bool? = nil
 
     /// Formats the server can expose losslessly enough as an HLS WebVTT
     /// rendition. Styled ASS/SSA remains a burn even though it contains text.

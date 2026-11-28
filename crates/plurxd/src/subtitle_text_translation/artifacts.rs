@@ -1,7 +1,6 @@
 //! Text models reuse the managed, hash-verified artifact installer.
 use crate::subtitle_models::artifacts::{self, CatalogModel, ManagedModel};
 use serde::Deserialize;
-use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -11,8 +10,6 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub(crate) const MODEL_ID: &str = "opus-mt-mul-en";
-pub(crate) const ADAPTER_CONTRACT: &str = "candle-marian-0.11-v1";
 const CATALOG: &str = include_str!("catalog.json");
 #[derive(Deserialize)]
 struct Part {
@@ -78,13 +75,6 @@ pub(crate) fn supports_language(language: &str) -> bool {
     input_languages().contains(&crate::subtitle_transcription::normalized_language(
         language,
     ))
-}
-pub(crate) fn catalog_public() -> Value {
-    json!({"version":1,"model_id":MODEL_ID,"label":"Multilingual subtitles to English","adapter_contract":ADAPTER_CONTRACT,
-      "bundle_digest":expected_bundle_digest(),"model_sha256":SPEC.files.iter().find(|p|p.role=="weights").map(|p|&p.spec.sha256),
-      "input_languages":input_languages(),"target_language":"en","license":"Apache-2.0",
-      "download_bytes":SPEC.files.iter().map(|p|p.spec.download_bytes).sum::<u64>(),
-      "source":"https://huggingface.co/Helsinki-NLP/opus-mt-mul-en/tree/848eae0c1676cfce9bb791c200e8228e5a6396ff"})
 }
 pub(crate) struct VerifiedBundle {
     pub(crate) bundle_digest: String,

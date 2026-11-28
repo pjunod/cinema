@@ -1,20 +1,22 @@
-//! Opt-in offline whisper.cpp jobs: fixed argv, bounded work, common queue Stop.
-use crate::http::{error::ApiError, extract::AdminUser};
-use crate::state::AppState;
-use axum::{extract::State, Json};
+//! Shared subtitle engine helpers and AI subtitle worker polling.
 #[cfg(test)]
-use plurx_core::store::background_jobs::{EnqueueJob, JobRequest};
+use crate::http::error::ApiError;
+use crate::state::AppState;
+#[cfg(test)]
+use plurx_core::store::background_jobs::{CandidateQuery, EnqueueJob, JobRequest, JobSettlement};
+#[cfg(test)]
+use plurx_core::store::background_jobs_transcription::valid_language;
 use plurx_core::{
     domain::{DownloadedSubtitle, MediaFile, SubtitleTranscription},
     error::StoreError,
     store::{
-        background_jobs::{CandidateQuery, ClaimJob, JobKind, JobPayload, JobSettlement},
-        background_jobs_transcription::{artifact_key, valid_language},
+        background_jobs::JobPayload, background_jobs_transcription::artifact_key,
         MAX_DOWNLOADED_SUBTITLE_BYTES,
     },
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
@@ -24,9 +26,11 @@ use std::{
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
 const PREFIX: &str = "subtitles.transcription.";
 const MAX_DURATION_MS: i64 = 4 * 60 * 60 * 1000;
 const MAX_WAV_BYTES: u64 = 4 * 60 * 60 * 16_000 * 2 + 4096;
+#[cfg(test)]
 const MAX_MODEL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const WALL: Duration = Duration::from_secs(4 * 60 * 60);
 // Keep the container-relative film clock. Hard compensation inserts silence
@@ -55,6 +59,7 @@ impl Default for Settings {
         }
     }
 }
+#[cfg(test)]
 impl Settings {
     pub(crate) fn validate(&self) -> Result<(), ApiError> {
         if self.interval_mins > 10_080
@@ -71,19 +76,12 @@ impl Settings {
         Ok(())
     }
 }
-async fn read_settings(state: &AppState) -> Result<Settings, StoreError> {
-    parse_settings(state.store.get_setting(&format!("{PREFIX}config")).await?)
-}
-
-/// [`read_settings`] from this node's applied settings view, for the 15 s
-/// pass's look at whether transcription is on and how (A4). The job it then
-/// claims is claimed through the Store, and a save made here raises the
-/// settings floor, so it is read back from the authority until this replica
-/// holds it.
+#[cfg(test)]
 async fn pass_settings(applied: &plurx_core::store::AppliedView) -> Result<Settings, StoreError> {
     parse_settings(applied.setting(&format!("{PREFIX}config")).await?)
 }
 
+#[cfg(test)]
 fn parse_settings(value: Option<String>) -> Result<Settings, StoreError> {
     match value {
         None => Ok(Settings::default()),
@@ -95,6 +93,7 @@ fn parse_settings(value: Option<String>) -> Result<Settings, StoreError> {
         }
     }
 }
+#[cfg(test)]
 fn executable(command: &str) -> Option<PathBuf> {
     let usable = |path: &Path| {
         let Ok(meta) = std::fs::metadata(path) else {
@@ -119,47 +118,15 @@ fn executable(command: &str) -> Option<PathBuf> {
             .find(|path| usable(path))
     })
 }
-async fn readiness(config: &Settings) -> Value {
-    let command_available = executable(&config.command).is_some();
-    let model_available = if config.model_path.is_empty() {
-        false
-    } else {
-        tokio::fs::symlink_metadata(&config.model_path)
-            .await
-            .is_ok_and(|meta| meta.is_file() && meta.len() > 0 && meta.len() <= MAX_MODEL_BYTES)
-    };
-    json!({"command_available":command_available,"model_available":model_available,"ready":command_available && model_available,
-        "reason": if !command_available { "Install whisper.cpp or choose its local whisper-cli executable" } else if !model_available { "Choose an installed regular whisper.cpp model, up to 2 GiB; models are never downloaded" } else { "Local command and model are present; a fixture transcription is still required" }})
-}
-pub async fn settings(
-    _admin: AdminUser,
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
-    let config = read_settings(&state).await?;
-    let mut value =
-        serde_json::to_value(&config).map_err(|error| ApiError::Internal(error.to_string()))?;
-    value["readiness"] = readiness(&config).await;
-    Ok(Json(value))
-}
-pub async fn update_settings(
-    admin: AdminUser,
-    State(state): State<AppState>,
-    Json(mut config): Json<Settings>,
-) -> Result<Json<Value>, ApiError> {
-    config.validate()?; // Readiness is advisory and never rejects a saved choice.
-    config.language = normalized_language(&config.language);
-    crate::subtitle_models::config::activate_advanced(state.store.as_ref(), config).await?;
-    settings(admin, State(state)).await
-}
-
+#[cfg(test)]
 struct Model {
     handle: std::fs::File,
     digest: String,
     identity: plurx_core::fs_secure::FileIdentity,
-    english_only: bool,
     #[cfg(test)]
     languages: Vec<String>,
 }
+#[cfg(test)]
 async fn open_model(path: &str) -> Result<Model, StoreError> {
     let path = PathBuf::from(path);
     let handle = tokio::task::spawn_blocking(move || {
@@ -184,7 +151,6 @@ async fn open_model(path: &str) -> Result<Model, StoreError> {
     let mut hash = Sha256::new();
     let mut buffer = vec![0_u8; 256 * 1024];
     let mut bytes = 0_u64;
-    let mut english_only = false;
     #[cfg(test)]
     let mut languages = vec![];
     loop {
@@ -202,7 +168,6 @@ async fn open_model(path: &str) -> Result<Model, StoreError> {
             // 51864 vocabulary entries; multilingual models add language tokens.
             if u32::from_le_bytes(buffer[..4].try_into().expect("header width")) == 0x67676d6c {
                 let vocabulary = u32::from_le_bytes(buffer[4..8].try_into().expect("header width"));
-                english_only = vocabulary == 51864;
                 #[cfg(test)]
                 {
                     languages = languages_for_vocabulary(vocabulary);
@@ -231,11 +196,11 @@ async fn open_model(path: &str) -> Result<Model, StoreError> {
         handle,
         identity,
         digest: hex::encode(hash.finalize()),
-        english_only,
         #[cfg(test)]
         languages,
     })
 }
+#[cfg(test)]
 fn pipeline_digest(config: &Settings, command: &Path, model: &Model, audio_index: i64) -> String {
     hex::encode(Sha256::digest(format!(
         "whisper.cpp-v3:audio-language-default-lowest-ordinal-v1:copyts-start-at-zero:{PCM_CLOCK_FILTER}:decode-xerror-explode-stderr-empty:mono16k:threads2:{}:{}:{}:{}",
@@ -379,6 +344,7 @@ fn enqueue_request_selected(
         },
     })
 }
+#[cfg(test)]
 fn accepted_audio(file: &MediaFile, audio_index: i64, language: &str) -> bool {
     if audio_index < 0 {
         return false;
@@ -418,6 +384,7 @@ async fn transcribe(
     .await
 }
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn transcribe_selected(
     runtime_cache_dir: &Path,
     file: &MediaFile,
@@ -1269,6 +1236,7 @@ async fn pipeline_output(
 
 /// Header-only capability discovery for an explicitly configured Advanced model.
 /// Unknown formats cannot advertise a language merely because a file exists.
+#[cfg(test)]
 pub(crate) async fn model_languages(path: &str) -> Vec<String> {
     let path = PathBuf::from(path);
     tokio::task::spawn_blocking(move || {
@@ -1295,6 +1263,7 @@ pub(crate) async fn model_languages(path: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn languages_for_vocabulary(vocabulary: u32) -> Vec<String> {
     match vocabulary {
         51864 => vec!["en".into()],
@@ -1653,7 +1622,6 @@ fn scratch_cache(state: &AppState) -> PathBuf {
 }
 
 pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
-    let boot = uuid::Uuid::new_v4().to_string();
     let root = scratch_cache(&state).join("subtitle-transcription");
     if let Ok(mut entries) = tokio::fs::read_dir(&root).await {
         for _ in 0..32 {
@@ -1665,7 +1633,6 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             }
         }
     }
-    let mut model_cache = None;
     let mut slow_due = tokio::time::Instant::now();
     loop {
         if shutdown.is_cancelled() {
@@ -1690,8 +1657,12 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             if let Err(error) = crate::subtitle_models::worker_pass(&state, &shutdown).await {
                 tracing::debug!(%error, "managed subtitle worker pass stopped");
             }
-            if let Err(error) = pass(&state, &boot, &shutdown, &mut model_cache).await {
-                tracing::debug!(%error,"offline subtitle transcription pass stopped");
+            if let Err(error) = state
+                .store
+                .supersede_whole_file_subtitle_jobs(crate::state::clock_ms())
+                .await
+            {
+                tracing::debug!(%error, "retiring old whole-file subtitle jobs stopped");
             }
             slow_due = tokio::time::Instant::now() + Duration::from_secs(15);
         }
@@ -1705,239 +1676,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
         tokio::select! { ()=shutdown.cancelled()=>return, ()=tokio::time::sleep(idle)=>{}, ()=state.subtitle_models.translation.wake.notified()=>{} }
     }
 }
-async fn pass(
-    state: &AppState,
-    boot: &str,
-    shutdown: &CancellationToken,
-    model_cache: &mut Option<(String, Model)>,
-) -> Result<(), StoreError> {
-    let config = pass_settings(&state.applied).await?;
-    if !config.enabled {
-        return Ok(());
-    }
-    let authority = state.jobs.execution_authority();
-    if !authority.may_execute_job(JobKind::SubtitleTranscribe).await {
-        return Ok(());
-    }
-    let Some(command) = executable(&config.command) else {
-        return Ok(());
-    };
-    let Some(admission) = state.transcode.admit_fragment().await else {
-        return Ok(());
-    };
-    // Physical capacity remains held through model reads, children and scratch cleanup.
-    let path = PathBuf::from(&config.model_path);
-    let observed = tokio::task::spawn_blocking(move || {
-        let handle = plurx_core::fs_secure::open_read_nofollow_blocking(&path).ok()?;
-        plurx_core::fs_secure::std_file_identity(&handle).ok()
-    })
-    .await
-    .ok()
-    .flatten();
-    if !model_cache
-        .as_ref()
-        .is_some_and(|(path, model)| path == &config.model_path && Some(model.identity) == observed)
-    {
-        *model_cache = None;
-        let cancel = shutdown.child_token();
-        let operation = plurx_core::process::bounded::cancellable(
-            cancel.clone(),
-            open_model(&config.model_path),
-        );
-        tokio::pin!(operation);
-        let model = tokio::select! {
-            result = &mut operation => result?,
-            () = shutdown.cancelled() => { cancel.cancel(); let _ = operation.await; return Ok(()); }
-        };
-        *model_cache = Some((config.model_path.clone(), model));
-    }
-    let model = &model_cache.as_ref().expect("model fingerprint installed").1;
-    if !state.transcode.fragment_worker_idle(&admission) {
-        return Ok(());
-    }
-    let page = state
-        .store
-        .job_candidates(CandidateQuery {
-            node_id: state.node_id.clone(),
-            kinds: vec![JobKind::SubtitleTranscribe],
-            after: None,
-            now_ms: crate::state::clock_ms(),
-            limit: 32,
-            admissible_only: false,
-        })
-        .await?;
-    for candidate in page.jobs {
-        let Ok(payload @ JobPayload::SubtitleTranscribe { .. }) = candidate.supported_payload()
-        else {
-            continue;
-        };
-        let JobPayload::SubtitleTranscribe {
-            file_id,
-            audio_index,
-            source_size,
-            source_mtime,
-            ref pipeline_digest,
-            ref language,
-            ..
-        } = payload
-        else {
-            unreachable!()
-        };
-        let mut accepted_config = config.clone();
-        accepted_config.language = language.clone();
-        if model.english_only && normalized_language(language) != "en" {
-            continue;
-        }
-        if pipeline_digest != &self::pipeline_digest(&accepted_config, &command, model, audio_index)
-        {
-            continue;
-        }
-        let file = state.store.get_file(file_id).await?;
-        if let Some(file) = &file {
-            if file.size == source_size
-                && file.mtime == source_mtime
-                && crate::fragment_index_cluster::open_source_playback_fence(file, None)
-                    .await
-                    .is_err()
-            {
-                continue;
-            }
-        }
-        if shutdown.is_cancelled() || !state.transcode.fragment_worker_idle(&admission) {
-            return Ok(());
-        }
-        let now = crate::state::clock_ms();
-        let Some((job, deadline)) = crate::background_jobs::claim_with_resolution(
-            state.store.as_ref(),
-            &candidate,
-            ClaimJob {
-                job_id: candidate.id.clone(),
-                expected_revision: candidate.revision,
-                node_id: state.node_id.clone(),
-                boot_id: boot.into(),
-                claim_id: uuid::Uuid::new_v4().to_string(),
-                kind: JobKind::SubtitleTranscribe,
-                payload_version: 1,
-                now_ms: now,
-                dispatched_at_ms: now,
-            },
-        )
-        .await?
-        else {
-            continue;
-        };
-        let active = crate::background_jobs::ActiveBackgroundJob::start(
-            Arc::clone(&state.store),
-            Arc::clone(&authority),
-            job.token
-                .clone()
-                .ok_or_else(|| StoreError::Task("transcription claim missing token".into()))?,
-            deadline,
-            JobKind::SubtitleTranscribe,
-        )
-        .await?;
-        let fence = active.fence();
-        let Some(file) = file else {
-            let _ = fence
-                .settle(JobSettlement::Stop {
-                    error_code: "transcription_source_missing".into(),
-                })
-                .await;
-            active.finish().await;
-            continue;
-        };
-        let cancel = fence.loss_token().child_token();
-        let operation = async {
-            if file.size != source_size
-                || file.mtime != source_mtime
-                || !eligible(&file)
-                || !accepted_audio(&file, audio_index, &accepted_config.language)
-            {
-                return Err(StoreError::Task(
-                    "transcription source changed or exceeds bound".into(),
-                ));
-            }
-            plurx_core::process::bounded::cancellable(
-                cancel.clone(),
-                transcribe_selected(
-                    &scratch_cache(state),
-                    &file,
-                    &accepted_config,
-                    &command,
-                    model,
-                    &cancel,
-                    &crate::ffmpeg::ffmpeg_bin(),
-                    audio_index,
-                ),
-            )
-            .await
-        };
-        let operation = crate::background_jobs::budgeted(fence.source_budget(), operation);
-        let result =
-            await_claimed_inference(operation, &state.transcode, &admission, shutdown, &cancel)
-                .await;
-        if cancel.is_cancelled() || shutdown.is_cancelled() {
-            let _ = fence
-                .settle(JobSettlement::Yield {
-                    error_code: Some("worker_interrupted".into()),
-                    checkpoint: None,
-                    not_before_ms: crate::state::clock_ms() + 5000,
-                })
-                .await;
-        } else {
-            match result {
-                Ok(vtt) => {
-                    let caption = DownloadedSubtitle {
-                        text_translation: None,
-                        source_size,
-                        source_mtime,
-                        provider_file_id: 0,
-                        transcription: Some(SubtitleTranscription {
-                            audio_index,
-                            artifact_key: artifact_key(&payload)?,
-                            model_sha256: model.digest.clone(),
-                            pipeline_digest: self::pipeline_digest(
-                                &accepted_config,
-                                &command,
-                                model,
-                                audio_index,
-                            ),
-                            adapter: "whisper.cpp".into(),
-                            progressive_asset_id: None,
-                            execution: None,
-                            generated_at_ms: crate::state::clock_ms(),
-                        }),
-                        language: accepted_config.language.clone(),
-                        title: "Machine transcription (whisper.cpp)".into(),
-                        hearing_impaired: false,
-                        forced: false,
-                        vtt,
-                    };
-                    if !fence.publish_transcription(payload, caption).await? {
-                        let _ = fence
-                            .settle(JobSettlement::Stop {
-                                error_code: "transcription_publication_refused".into(),
-                            })
-                            .await;
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(job_id = %job.id, %error, "offline subtitle transcription refused");
-                    let _ = fence
-                        .settle(JobSettlement::Fail {
-                            error_code: "subtitle_transcription_failed".into(),
-                        })
-                        .await;
-                }
-            }
-        }
-        active.finish().await;
-        return Ok(());
-    }
-    Ok(())
-}
-/// A saved disable/mode change stops future claims. An accepted attempt keeps
-/// its captured recipe; only Stop, shutdown or foreground demand interrupts it.
+#[cfg(test)]
 async fn await_claimed_inference<T>(
     operation: impl std::future::Future<Output = Result<T, StoreError>>,
     transcode: &crate::transcode::TranscodeManager,
@@ -1952,6 +1691,7 @@ async fn await_claimed_inference<T>(
         () = watch_capacity(transcode, admission) => { cancel.cancel(); operation.await },
     }
 }
+#[cfg(test)]
 pub(crate) async fn watch_capacity(
     transcode: &crate::transcode::TranscodeManager,
     admission: &crate::transcode::FragmentAdmission,

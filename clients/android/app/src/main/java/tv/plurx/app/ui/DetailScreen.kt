@@ -351,6 +351,7 @@ private fun DetailContent(
                             // or a book has nothing here worth a picker.
                             showTracks = item.isPlayableVideo,
                             tracks = chosen,
+                            onSubtitlesChanged = onWatchedChanged,
                             onTracks = { picked ->
                                 trackChoices = trackChoices + (file.id to picked)
                             },
@@ -830,6 +831,7 @@ private fun VersionCard(
     showTracks: Boolean,
     tracks: PreplayTracks,
     onTracks: (PreplayTracks) -> Unit,
+    onSubtitlesChanged: () -> Unit,
 ) {
     Column(
         Modifier.fillMaxWidth().background(SurfaceHi, MaterialTheme.shapes.medium)
@@ -874,6 +876,7 @@ private fun VersionCard(
                 enabled = file.available,
                 tracks = tracks,
                 onTracks = onTracks,
+                onSubtitlesChanged = onSubtitlesChanged,
             )
         }
         if (showTracks) {
@@ -923,6 +926,7 @@ private fun TrackFactsCard(
     enabled: Boolean,
     tracks: PreplayTracks,
     onTracks: (PreplayTracks) -> Unit,
+    onSubtitlesChanged: () -> Unit,
 ) {
     // Pricing a subtitle is the server's answer too. Ask `/decision` with the
     // pending selection and read `selection`; a newer choice supersedes the
@@ -950,6 +954,11 @@ private fun TrackFactsCard(
         subtitleNotice = preplaySubtitleNotice(cost),
         onTracks = onTracks,
     )
+    if (file.video_codec != null) {
+        AISubtitleItemSection(vm, file, enabled, tracks, onSubtitlesChanged) { index ->
+            onTracks(tracks.copy(subtitle = SubtitleChoice(index)))
+        }
+    }
 }
 
 @Composable

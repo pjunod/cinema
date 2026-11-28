@@ -230,8 +230,9 @@ All routes are under `/api/v1`. All take a signed-in user, and `who` decides whe
   - `ready_to_ms` is how far ahead the cues are ready. It draws the green mark on the timeline.
   - `track_index` is set once the stored track exists. Clients then select that index as an ordinary subtitle track and stop reading cues.
 - **`PUT /ai-subtitles/operations/{id}/viewer`** with `{position_ms, playback_rate}` is the viewer heartbeat (the demand), sent every 10 s while the entry is selected. A seek past `ready_to_ms` moves the work to the new position. `DELETE` on the same route releases it.
+- **`GET /ai-subtitles/operations/{id}`** reads the current account’s exact operation independently of its subtitle-language preference.
 - **`GET /ai-subtitles/operations/{id}/cues?from_ms&to_ms`** returns `{cues: [{start_ms, end_ms, text}], ready_to_ms, state}`. It is the one in-progress reader for both routes. For the audio route the server reads the asset segments behind it, under the existing lease and attestation rules. For the text route it reads the partial text cues.
-- **`POST /ai-subtitles/operations/{id}/stop`** stops the work. **`DELETE /files/{id}/subtitles/{index}`** deletes a stored AI track; that is the ⋯ Delete. "Redo at Best" is a `POST` with `quality: "best"` and `route: "audio"`.
+- **`POST /ai-subtitles/operations/{id}/stop`** stops subtitles for this viewer. The other viewers and the durable finish demand keep their own work. **`DELETE /files/{id}/subtitles/{index}`** deletes a stored AI track; that is the ⋯ Delete. Ahead-of-time work skips that media revision after deletion. A new explicit request can recreate the track. "Redo at Best" is a `POST` with `quality: "best"` and `route: "audio"`.
 - **Stored tracks.** A stored AI track carries `ai: true` in the file's `subtitle_streams`. Clients show the AI badge from that field, and the title is the language name, such as "English".
 - **Settings.** `GET /ai-subtitles/settings` returns the document, its `revision` and `readiness`:
   `{nodes: [{label, cores, gpu, state: "ready"|"downloading"|"failed"|"unsupported", reason, tested_at_ms}], summary}`.

@@ -57,7 +57,9 @@ fn cue_body(cue: &TextTranslationCue) -> Result<String, StoreError> {
     }
     Ok(body)
 }
-const CURRENT:&str="EXISTS(SELECT 1 FROM files WHERE id=json_extract($1,'$.source.file_id') AND size=json_extract($1,'$.source.source_size') AND mtime=json_extract($1,'$.source.source_mtime') AND probe_json IS NOT NULL) AND ((json_extract($1,'$.source.admin_user_id')=0 AND EXISTS(SELECT 1 FROM settings ai_schedule WHERE ai_schedule.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_schedule.value) THEN json_extract(ai_schedule.value,'$.version')=1 AND json_type(ai_schedule.value,'$.ahead_of_time')='true' ELSE 0 END)) OR EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.source.admin_user_id') AND (is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END)))) AND EXISTS(SELECT 1 FROM settings WHERE key='subtitles.ai.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.version')=1 AND json_type(value,'$.translate_text')='true' ELSE 0 END)";
+const CURRENT:&str="EXISTS(SELECT 1 FROM files WHERE id=json_extract($1,'$.source.file_id') AND size=json_extract($1,'$.source.source_size') AND mtime=json_extract($1,'$.source.source_mtime') AND probe_json IS NOT NULL) AND ((json_extract($1,'$.source.admin_user_id')=0 AND EXISTS(SELECT 1 FROM settings ai_schedule WHERE ai_schedule.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_schedule.value) THEN json_extract(ai_schedule.value,'$.version')=1 AND json_type(ai_schedule.value,'$.ahead_of_time')='true' ELSE 0 END)
+ AND NOT EXISTS(SELECT 1 FROM subtitle_translation_schedule_exclusions skip WHERE skip.file_id=json_extract($1,'$.source.file_id')
+   AND skip.source_size=json_extract($1,'$.source.source_size') AND skip.source_mtime=json_extract($1,'$.source.source_mtime'))) OR EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.source.admin_user_id') AND (is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END)))) AND EXISTS(SELECT 1 FROM settings WHERE key='subtitles.ai.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.version')=1 AND json_type(value,'$.translate_text')='true' ELSE 0 END)";
 pub(super) async fn publish<T: QueueSql>(
     store: &T,
     input: PublishTextSlice,
@@ -658,8 +660,18 @@ mod tests {
         schedule(false);
         publish.cues = vec![cue(1)];
         assert!(!store
-            .publish_text_translation_slice(publish)
+            .publish_text_translation_slice(publish.clone())
             .await
             .expect("refuse once unscheduled"));
+        schedule(true);
+        conn.execute(
+            "INSERT INTO subtitle_translation_schedule_exclusions VALUES(1,100,20)",
+            [],
+        )
+        .expect("exclude the explicitly deleted source revision");
+        assert!(!store
+            .publish_text_translation_slice(publish)
+            .await
+            .expect("exclude deleted caption from scheduled publication"));
     }
 }

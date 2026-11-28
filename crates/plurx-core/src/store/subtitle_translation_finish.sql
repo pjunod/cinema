@@ -18,6 +18,13 @@ CREATE TABLE subtitle_translation_stored_tracks(
 CREATE INDEX subtitle_translation_stored_tracks_file
 ON subtitle_translation_stored_tracks(file_id,source_size,source_mtime,asset_id);
 -- next statement
+-- Explicit deletion suppresses maintenance creation for this media revision.
+CREATE TABLE subtitle_translation_schedule_exclusions(
+ file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+ source_size INTEGER NOT NULL,
+ source_mtime INTEGER NOT NULL
+) STRICT;
+-- next statement
 DROP TRIGGER subtitle_translation_mutate;
 -- next statement
 CREATE TRIGGER subtitle_translation_mutate AFTER INSERT ON subtitle_translation_commands
@@ -51,13 +58,14 @@ BEGIN
  UPDATE subtitle_translation_ranges SET range_revision=range_revision+1,state='queued',job_id=json_extract(NEW.request_json,'$.allocated_job_id'),reason=NULL,retryable=0,updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
  WHERE operation_id=json_extract(NEW.result_json,'$.operation_id') AND operation_epoch=json_extract(NEW.request_json,'$.action.expected_operation_epoch') AND core_index=json_extract(NEW.request_json,'$.action.core_index')
  AND json_extract(NEW.request_json,'$.action.action')='retry_range';
- INSERT INTO subtitle_translation_demands(id,operation_id,operation_epoch,user_id,playback_id,generation,position_ms,playback_rate,paused,expires_at_ms,created_at_ms,updated_at_ms)
- SELECT json_extract(NEW.request_json,'$.allocated_demand_id'),op.id,op.operation_epoch,json_extract(NEW.request_json,'$.user_id'),json_extract(NEW.request_json,'$.action.playback_id'),1,json_extract(NEW.request_json,'$.action.position_ms'),json_extract(NEW.request_json,'$.action.playback_rate'),json_extract(NEW.request_json,'$.action.paused'),json_extract(NEW.request_json,'$.now_ms')+15000,json_extract(NEW.request_json,'$.now_ms'),json_extract(NEW.request_json,'$.now_ms')
+ INSERT INTO subtitle_translation_demands(id,operation_id,operation_epoch,user_id,playback_id,generation,position_ms,playback_rate,paused,continuity_id,expires_at_ms,created_at_ms,updated_at_ms)
+ SELECT json_extract(NEW.request_json,'$.allocated_demand_id'),op.id,op.operation_epoch,json_extract(NEW.request_json,'$.user_id'),json_extract(NEW.request_json,'$.action.playback_id'),1,json_extract(NEW.request_json,'$.action.position_ms'),json_extract(NEW.request_json,'$.action.playback_rate'),json_extract(NEW.request_json,'$.action.paused'),json_extract(NEW.request_json,'$.action.continuity_id'),json_extract(NEW.request_json,'$.now_ms')+15000,json_extract(NEW.request_json,'$.now_ms'),json_extract(NEW.request_json,'$.now_ms')
  FROM subtitle_translation_operations op WHERE op.id=json_extract(NEW.result_json,'$.operation_id') AND json_extract(NEW.request_json,'$.action.action') IN ('create','retry_operation','retry_range')
  AND json_extract(NEW.request_json,'$.action.playback_id')!=''
- ON CONFLICT(operation_id,operation_epoch,user_id,playback_id) DO UPDATE SET generation=generation+1,position_ms=excluded.position_ms,playback_rate=excluded.playback_rate,paused=excluded.paused,released=0,expires_at_ms=excluded.expires_at_ms,updated_at_ms=excluded.updated_at_ms;
+ ON CONFLICT(operation_id,operation_epoch,user_id,playback_id) DO UPDATE SET generation=generation+1,position_ms=excluded.position_ms,playback_rate=excluded.playback_rate,paused=excluded.paused,continuity_id=excluded.continuity_id,released=0,expires_at_ms=excluded.expires_at_ms,updated_at_ms=excluded.updated_at_ms;
  UPDATE subtitle_translation_demands SET generation=generation+1,position_ms=CASE WHEN json_extract(NEW.request_json,'$.action.action')='demand' THEN json_extract(NEW.request_json,'$.action.position_ms') ELSE position_ms END,
  playback_rate=CASE WHEN json_extract(NEW.request_json,'$.action.action')='demand' THEN json_extract(NEW.request_json,'$.action.playback_rate') ELSE playback_rate END,
+ continuity_id=CASE WHEN json_extract(NEW.request_json,'$.action.action')='demand' THEN json_extract(NEW.request_json,'$.action.continuity_id') ELSE continuity_id END,
  paused=CASE WHEN json_extract(NEW.request_json,'$.action.action')='demand' THEN json_extract(NEW.request_json,'$.action.paused') ELSE paused END,
  released=CASE WHEN json_extract(NEW.request_json,'$.action.action')='release' THEN 1 ELSE 0 END,expires_at_ms=json_extract(NEW.request_json,'$.now_ms')+15000,updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
  WHERE id=json_extract(NEW.request_json,'$.action.demand_id') AND json_extract(NEW.request_json,'$.action.action') IN ('demand','release');
@@ -68,7 +76,7 @@ BEGIN
  UPDATE subtitle_translation_operations SET view_revision=view_revision+1,updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
  WHERE id=json_extract(NEW.result_json,'$.operation_id') AND json_extract(NEW.request_json,'$.action.action') IN ('create','demand','release','release_viewer','retry_range');
  UPDATE subtitle_translation_commands SET result_json=(SELECT json_object('outcome','accepted','operation_id',op.id,'operation_epoch',CAST(op.operation_epoch AS TEXT),'view_revision',CAST(op.view_revision AS TEXT),'state',op.state,'asset_id',op.asset_id,'job_id',CASE WHEN json_extract(NEW.request_json,'$.action.action')='retry_range' THEN r.job_id WHEN op.state='checking_source' THEN op.preparation_job_id ELSE NULL END,'core_index',r.core_index,'range_revision',CASE WHEN r.range_revision IS NULL THEN NULL ELSE CAST(r.range_revision AS TEXT) END,
- 'demand_id',d.id,'demand_generation',CASE WHEN d.generation IS NULL THEN NULL ELSE CAST(d.generation AS TEXT) END,'expires_at_ms',d.expires_at_ms,'intent_expires_at_ms',json_extract(NEW.request_json,'$.intent_expires_at_ms'),'server_now_ms',json_extract(NEW.request_json,'$.now_ms'))
+ 'demand_id',d.id,'continuity_id',d.continuity_id,'demand_generation',CASE WHEN d.generation IS NULL THEN NULL ELSE CAST(d.generation AS TEXT) END,'expires_at_ms',d.expires_at_ms,'intent_expires_at_ms',json_extract(NEW.request_json,'$.intent_expires_at_ms'),'server_now_ms',json_extract(NEW.request_json,'$.now_ms'))
  FROM subtitle_translation_operations op LEFT JOIN subtitle_translation_demands d ON d.operation_id=op.id AND d.operation_epoch=op.operation_epoch AND d.user_id=json_extract(NEW.request_json,'$.user_id') AND d.playback_id=json_extract(NEW.request_json,'$.action.playback_id')
  LEFT JOIN subtitle_translation_ranges r ON r.operation_id=op.id AND r.operation_epoch=op.operation_epoch AND r.core_index=json_extract(NEW.request_json,'$.action.core_index')
  WHERE op.id=json_extract(NEW.result_json,'$.operation_id')) WHERE id=NEW.id;

@@ -1240,7 +1240,7 @@ private fun PlayerContent(
             }
         }
         if (plan.subtitles.isNotEmpty()) {
-            result += OwnedTrack("subtitles", "subtitles-off", "Off", controller.selectedSubtitle == null && controller.progressiveCaptions.selected == null) { if (controller.switchSubtitle(null)) { onSubtitleChanged(null); RemoteOutcome.Applied } else RemoteOutcome.Unavailable }
+            result += OwnedTrack("subtitles", "subtitles-off", "Off", controller.selectedSubtitle == null && controller.progressiveCaptions.selected == null && !controller.progressiveCaptions.aiSelected) { if (controller.switchSubtitle(null)) { onSubtitleChanged(null); RemoteOutcome.Applied } else RemoteOutcome.Unavailable }
             plan.subtitles.forEach { track -> result += OwnedTrack("subtitles", "server-subtitle:${track.index}", track.title ?: track.language ?: "Subtitle ${track.index}", controller.selectedSubtitle == track.index) {
                 if (controller.switchSubtitle(track.index)) { onSubtitleChanged(track.index); RemoteOutcome.Applied } else RemoteOutcome.Unavailable
             } }
@@ -1818,9 +1818,7 @@ private fun PlayerContent(
                 selectedServerAudio = controller.selectedAudio,
                 selectedServerSubtitle = controller.selectedSubtitle,
                 progressiveCaptions = controller.progressiveCaptions,
-                onGenerateCaptions = { onSubtitleChanged(null); controller.generateCaptions(it) },
-                subtitleTextTranslation = controller.subtitleTextTranslation,
-                onUseTranslatedCaption = { onSubtitleChanged(it); controller.reloadTranslatedCaption() },
+                onAISubtitles = { route, language -> onSubtitleChanged(null); controller.toggleAISubtitles(route, language, onSubtitleChanged) },
                 onServerAudio = {
                     onAudioChanged(it)
                     controller.switchAudio(it)

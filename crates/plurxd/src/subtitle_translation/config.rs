@@ -1,16 +1,20 @@
 //! Translation preference CAS is independent of installed model readiness.
 use crate::http::error::ApiError;
 use axum::http::StatusCode;
+#[cfg(test)]
+use plurx_core::store::subtitle_translation_settings::{
+    settings_revision, TranslationSettings, TranslationSettingsWrite, SETTINGS_KEY,
+};
 use plurx_core::store::{
     subtitle_translation_read::{TranslationQuery, TranslationRead},
-    subtitle_translation_settings::{
-        settings_revision, TranslationSettings, TranslationSettingsWrite, SETTINGS_KEY,
-    },
     Store,
 };
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::json;
 
+#[cfg(test)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdateRequest {
@@ -27,12 +31,14 @@ pub(crate) struct UpdateRequest {
     pub preferred_spoken_language: Option<String>,
 }
 
+#[cfg(test)]
 fn nullable_string<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
     Option::<String>::deserialize(deserializer)
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Snapshot {
     pub version: u8,
@@ -55,6 +61,7 @@ pub(crate) fn failure(status: StatusCode, code: &'static str, now: i64) -> ApiEr
     )
 }
 
+#[cfg(test)]
 fn snapshot(
     saved: TranslationSettings,
     revision: String,
@@ -73,6 +80,7 @@ fn snapshot(
     }
 }
 
+#[cfg(test)]
 async fn observed(
     store: &dyn Store,
     now: i64,
@@ -88,6 +96,7 @@ async fn observed(
     Ok((saved, raw, revision))
 }
 
+#[cfg(test)]
 pub(crate) async fn read(store: &dyn Store, now: i64) -> Result<Snapshot, ApiError> {
     let (saved, _, revision) = observed(store, now).await?;
     Ok(snapshot(saved, revision, now, None))
@@ -149,6 +158,7 @@ pub(crate) fn fresh_intent(expires: i64, now: i64) -> Result<(), ApiError> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) async fn save(
     store: &dyn Store,
     user_id: i64,
@@ -213,6 +223,7 @@ pub(crate) async fn save(
         .await?;
     saved_receipt(result, now)
 }
+#[cfg(test)]
 fn saved_receipt(result: serde_json::Value, now: i64) -> Result<Snapshot, ApiError> {
     match result["outcome"].as_str() {
         Some("saved") => {

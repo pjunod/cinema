@@ -586,6 +586,13 @@ class ModelContractTest {
     }
 
     @Test
+    fun aiSubtitleStartEncodesTheRequiredEnglishTarget() {
+        val wire = json.encodeToString(AISubtitleStart(request_id = "owned-request", target = "en"))
+        val request = Json.parseToJsonElement(wire)
+        assertEquals(Json.parseToJsonElement("""{"request_id":"owned-request","target":"en"}"""), request)
+    }
+
+    @Test
     fun subtitleTracksCarryBothTextAndTheServersNativeVerdict() {
         // The two flags are different questions and the server sends both:
         // `text` is "has extractable text" (!is_bitmap_subtitle), `native` is

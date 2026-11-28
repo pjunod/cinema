@@ -22,8 +22,8 @@ function harness(kind="local"){
   const nodes={"watch-subtitle-text-translation":panel,"text-subtitle-translation-settings":setup,"watch-shared-captions":shared,video,pmenu:element(),statsov:element(),player:element()};
   // Whole shipped rows register browser lifecycle listeners during loading.
   const window=new EventTarget(),document=Object.assign(new EventTarget(),{activeElement:null,getElementById:id=>nodes[id]||null,createElement:()=>element()});
-  const ctx=vm.createContext({console,TextEncoder,TextDecoder,Uint8Array,Map,Set,BigInt,Response,AbortController,Date,performance:{now:()=>1000},API:"/api/v1",AUTH_GENERATION:1,TOKEN:"token-fixture",PAGE_RENDER_GENERATION:1,ME:{is_admin:true},location:{hash:"#/watch/1"},window,document,localStorage:{getItem:()=>null,setItem(){}},setTimeout:(run,delay)=>schedule(run,delay),clearTimeout:id=>timers.delete(id),setInterval:(run,delay)=>schedule(run,delay,true),clearInterval:id=>timers.delete(id),esc:value=>String(value).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"),toast(){},fmtMbps:()=>"",fmtSize:()=>"",fmtDur:()=>"",fmtBytes:()=>"",fmtChannels:()=>"",clockFromSec:()=>"00:00",langName:value=>value,audioFactLabel:()=>"Audio",subFactLabel:()=>"Subtitle",currentCapsDocument:()=>({version:2}),watchCurrentFile:()=>file,watchCanGenerateSubtitles:()=>false,watchGenerationAction:()=>"",watchSelectedAudio:()=>-1,watchSelectedSub:()=>-1,translationSelected:()=>false,playbackOwnsAttachedMedia:()=>false,playerRangeBadge:()=>null,preparedSwitchLedger:()=>({}),decodePredictionLabel:()=>"Unknown",statsRunwayTone:()=>"muted",PlaybackPolicy:{controlLeaseMode:()=>"none",controlLeasePresentation:()=>({ownership:"none",label:"none"}),surfaceEntersFailedRouting:()=>false},PLAYBACK_SURFACE:{surface:{kind:"normal"},history:[]},pbSyncSubIcon(){},watchRenderLedger(){},fetch:async(url,init)=>{calls.push({url,init});return ctx.respond(url,init);},respond:()=>response({})});
-  for(const script of ["core/file-context.js","player/subtitle-translation.js","player/subtitle-text-translation.js","player/shared-subtitle-captions.js","player/audio-sync.js","detail/watch-browser.js","player/menus.js","player/stats.js","pages/settings-developer.js"])vm.runInContext(fs.readFileSync(path.join(WEB,script),"utf8"),ctx,{filename:script});
+  const ctx=vm.createContext({console,TextEncoder,TextDecoder,Uint8Array,Map,Set,BigInt,Response,AbortController,URLSearchParams,Date,performance:{now:()=>1000},API:"/api/v1",AUTH_GENERATION:1,TOKEN:"token-fixture",PAGE_RENDER_GENERATION:1,ME:{is_admin:true},location:{hash:"#/watch/1"},window,document,localStorage:{getItem:()=>null,setItem(){}},setTimeout:(run,delay)=>schedule(run,delay),clearTimeout:id=>timers.delete(id),setInterval:(run,delay)=>schedule(run,delay,true),clearInterval:id=>timers.delete(id),esc:value=>String(value).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"),toast(){},fmtMbps:()=>"",fmtSize:()=>"",fmtDur:()=>"",fmtBytes:()=>"",fmtChannels:()=>"",clockFromSec:()=>"00:00",langName:value=>value,audioFactLabel:()=>"Audio",subFactLabel:()=>"Subtitle",currentCapsDocument:()=>({version:2}),watchCurrentFile:()=>file,watchCanGenerateSubtitles:()=>false,watchGenerationAction:()=>"",watchSelectedAudio:()=>-1,watchSelectedSub:()=>-1,translationSelected:()=>false,playbackOwnsAttachedMedia:()=>false,playerRangeBadge:()=>null,preparedSwitchLedger:()=>({}),decodePredictionLabel:()=>"Unknown",statsRunwayTone:()=>"muted",PlaybackPolicy:{controlLeaseMode:()=>"none",controlLeasePresentation:()=>({ownership:"none",label:"none"}),surfaceEntersFailedRouting:()=>false},PLAYBACK_SURFACE:{surface:{kind:"normal"},history:[]},pbSyncSubIcon(){},watchRenderLedger(){},fetch:async(url,init)=>{calls.push({url,init});return ctx.respond(url,init);},respond:()=>response({})});
+  for(const script of ["core/file-context.js","player/subtitle-translation.js","player/subtitle-text-translation.js","player/shared-subtitle-captions.js","player/ai-subtitles.js","player/audio-sync.js","detail/watch-browser.js","player/menus.js","player/stats.js","pages/settings-developer.js"])vm.runInContext(fs.readFileSync(path.join(WEB,script),"utf8"),ctx,{filename:script});
   vm.runInContext(surfaceHistorySource,ctx,{filename:"player/surface.js"});
   // Selection is the adoption boundary under observation, after row declarations.
   ctx.setSub=async index=>{selected.push(index);ctx.PLAYER.curSub=index;};
@@ -51,14 +51,25 @@ test("Developer setup keeps the text preference available when worker readiness 
 
 test("shared captions stay discoverable with no subtitle tracks and expose read-only menu controls",()=>{
   const h=harness("shared"),ledger=h.ctx.watchLedgerHtml(),menu=h.ctx.captionActionsMenu();
-  assert.deepEqual(h.file.subtitle_streams,[]);assert.match(ledger,/<dt>Captions<\/dt>/);assert.match(ledger,/Available AI captions/);assert.doesNotMatch(ledger,/Translate existing subtitles/);
+  assert.deepEqual(h.file.subtitle_streams,[]);assert.match(ledger,/<dt>Subtitles<\/dt>/);assert.match(ledger,/Available AI captions/);assert.doesNotMatch(ledger,/Translate existing subtitles/);
   assert.match(menu,/Available AI captions/);assert.doesNotMatch(menu,/openPlayerCaptionControls\('text'\)/);
   h.file.subtitle_streams=[{index:1,language:"en"}];assert.match(h.ctx.watchTranslationAction(h.file),/Available AI captions/);
   for(const suffix of ["subtitle-text-translation/options","subtitles/0/translation"])assert.throws(()=>h.ctx.playbackFileApiPath(h.ctx.PLAYER.fileContext,suffix),/Invalid playback file context/);
 });
 
-test("local player menus retain both speech-caption and text-translation entry points",()=>{
-  const h=harness("local"),menu=h.ctx.captionActionsMenu();assert.match(menu,/Generate or translate speech/);assert.match(menu,/Translate existing subtitles/);
+test("local player menus offer the server-selected AI subtitle route",async()=>{
+  const h=harness("local"), requests=[];
+  h.ctx.api=async path=>{requests.push(path);return {target:"en",allowed:true,route:"text",label:"Translate its other subtitles",existing_index:null};};
+  const audio=h.ctx.translationAttachedAudioOrdinal(h.ctx.PLAYER);
+  await h.ctx.aiCaptionReadOptions(h.file,audio);
+  const menu=h.ctx.captionActionsMenu();
+  assert.match(menu,/aiCaptionStartPlayback\(\)/);
+  assert.match(menu,/Translate its other subtitles/);
+  assert.doesNotMatch(menu,/openPlayerCaptionControls/);
+  assert.equal(requests.length,1);
+  assert.match(requests[0],/\/ai-subtitles\?target=en/);
+  const fullscreen = fs.readFileSync(path.join(WEB,"player/projection-chrome.js"),"utf8");
+  assert.doesNotMatch(fullscreen,/watchGenerationAction|data-watch-generate/);
 });
 
 test("watch ledger labels selected generated and translated captions from the current owner",()=>{

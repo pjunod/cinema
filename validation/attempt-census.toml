@@ -156,9 +156,9 @@ retainedQualityRestart = { function = "applyRetainedQualityWithRestart", scopes 
 # Caption continuations retain their original viewer-action-only comparisons;
 # lifecycle, item and presentation predicates remain at each call site.
 subtitleReopenCompletion = { function = "applySubtitleSelection", scopes = ["viewerAction"] }
-progressiveCaptionCleanup = { function = "selectProgressiveCaptions", scopes = ["viewerAction"] }
-progressiveCaptionAfterControl = { function = "selectProgressiveCaptions", scopes = ["viewerAction"] }
-progressiveCaptionAfterSubtitleRemoval = { function = "selectProgressiveCaptions", scopes = ["viewerAction"] }
+progressiveCaptionCleanup = { function = "prepareProgressiveCaptionSelection", scopes = ["viewerAction"] }
+progressiveCaptionAfterControl = { function = "prepareProgressiveCaptionSelection", scopes = ["viewerAction"] }
+progressiveCaptionAfterSubtitleRemoval = { function = "prepareProgressiveCaptionSelection", scopes = ["viewerAction"] }
 progressiveAssetCleanup = { function = "selectProgressiveAsset", scopes = ["viewerAction"] }
 progressiveAssetAfterControl = { function = "selectProgressiveAsset", scopes = ["viewerAction"] }
 progressiveAssetAfterSubtitleRemoval = { function = "selectProgressiveAsset", scopes = ["viewerAction"] }

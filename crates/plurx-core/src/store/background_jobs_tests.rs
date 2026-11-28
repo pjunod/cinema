@@ -55,6 +55,105 @@ async fn claimed(store: &SqliteStore, request: ClaimJob) -> BackgroundJob {
 }
 
 #[tokio::test]
+async fn whole_file_subtitle_retirement_fences_legacy_jobs_and_keeps_other_work() {
+    let dir = tempfile::tempdir().expect("owned database directory");
+    let path = dir.path().join("jobs.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let db = rusqlite::Connection::open(path).expect("fixture connection");
+    let mut ids = Vec::new();
+    let advanced = JobPayload::SubtitleTranscribe {
+        file_id: 1,
+        audio_index: 0,
+        source_size: 100,
+        source_mtime: 1,
+        language: "en".into(),
+        model_sha256: "b".repeat(64),
+        pipeline_digest: "c".repeat(64),
+    };
+    let managed = JobPayload::SubtitleTranscribeManaged {
+        file_id: 1,
+        audio_index: 0,
+        source_size: 100,
+        source_mtime: 1,
+        language: "en".into(),
+        model_sha256: "b".repeat(64),
+        pipeline_digest: "c".repeat(64),
+        profile: super::background_jobs_transcription::ManagedProfile {
+            model_id: "base.en".into(),
+            catalog_revision: "legacy-catalog".into(),
+            adapter_contract: "legacy-adapter".into(),
+        },
+    };
+    for (n, historical) in [Some(advanced), Some(managed), None]
+        .into_iter()
+        .enumerate()
+    {
+        let mut job = enqueue(1000);
+        job.dedupe_key = format!("owned-legacy-fixture:{n}");
+        let id = job.id.clone();
+        store.enqueue_job(job).await.expect("seed candidate");
+        if n == 1 {
+            let row = store
+                .background_job(&id)
+                .await
+                .expect("read row")
+                .expect("row exists");
+            let _ = claimed(&store, claim(&id, row.revision, 1001)).await;
+        }
+        if let Some(payload) = historical {
+            let raw = serde_json::to_string(&payload).expect("historical payload");
+            let kind = serde_json::to_value(payload.kind()).expect("historical job kind");
+            let kind = kind.as_str().expect("string job kind");
+            db.execute(
+                "UPDATE background_jobs SET kind=?1,payload_json=?2 WHERE id=?3",
+                rusqlite::params![kind, raw, id],
+            )
+            .expect("install historical job schema");
+        }
+        ids.push(id);
+    }
+    assert!(store
+        .supersede_whole_file_subtitle_jobs(1002)
+        .await
+        .expect("retire"));
+    for (id, expected) in
+        ids.iter()
+            .zip([JobState::Cancelled, JobState::Cancelling, JobState::Queued])
+    {
+        let row = store
+            .background_job(id)
+            .await
+            .expect("read row")
+            .expect("row exists");
+        assert_eq!(row.state, expected);
+        if expected != JobState::Queued {
+            assert_eq!(row.last_error_code.as_deref(), Some("superseded"));
+        }
+        if expected == JobState::Cancelling {
+            assert!(
+                row.token.is_some(),
+                "physical reader retains its cleanup fence"
+            );
+        }
+    }
+    assert!(!store
+        .supersede_whole_file_subtitle_jobs(1003)
+        .await
+        .expect("repeat"));
+    store
+        .maintain_translation_cache(1004)
+        .await
+        .expect("ordinary cache maintenance");
+    let running = store
+        .background_job(&ids[1])
+        .await
+        .expect("read retained job")
+        .expect("job");
+    assert_eq!(running.state, JobState::Cancelling);
+    assert!(running.token.is_some());
+}
+
+#[tokio::test]
 async fn completed_job_with_unreleased_reader_keeps_origin_and_raises_recovery_gauge() {
     use super::MetricsStore;
     let dir = tempfile::tempdir().expect("directory");

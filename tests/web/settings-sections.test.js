@@ -247,46 +247,26 @@ function memoryStorage(initial) {
   return { getItem: (k) => (map.has(k) ? map.get(k) : null), setItem: (k, v) => map.set(k, String(v)), map };
 }
 
-test("legacy subtitle setup links route to Maintenance", () => {
-  const r=routing(memoryStorage(),"#/settings/developer/enable-subtitle-transcription");
-  assert.equal(r.settingsRouteTab(r.location.hash),"maintenance");
-  assert.equal(r.settingsTab(),"maintenance");
-  assert.match(shippedConst("SETTINGS_KEPT_MOUNTS"),/maintenance:\["enable-subtitle-transcription"\]/);
-});
-
-test("subtitle setup belongs to Maintenance without a temporary Developer card", () => {
-  const panels=developerPanels(), settings={}, readiness={features:[]};
-  assert.doesNotMatch(panels.developerPanel(settings,readiness),/Configure transcription|Generate subtitles offline/);
-  const maintenance=panels.maintenancePanel(settings,null,readiness);
-  assert.match(maintenance,/Generate subtitles offline/);
-  assert.match(maintenance,/Configure transcription/);
-  assert.match(maintenance,/id="subtitle-transcription-form"/);
-  const card=shippedSource("subtitleTranscriptionCard");
-  assert.match(card,/id:"enable-subtitle-transcription"/);
-  assert.doesNotMatch(card,/devGraduation|Leaves Developer when/);
-});
-
-test("English translation setup graduates to Playback and preserves legacy links", () => {
-  for(const route of ["#/settings/playback/enable-subtitle-translation","#/settings/developer/enable-subtitle-translation"]){
-    const r=routing(memoryStorage(),route);
-    assert.equal(r.settingsRouteTab(route),"playback");
-    assert.equal(r.settingsTab(),"playback");
+test("legacy subtitle setup links route to the unified Subtitles section", () => {
+  for (const path of ["developer/enable-subtitle-transcription", "maintenance/enable-subtitle-transcription",
+    "developer/enable-subtitle-translation", "playback/enable-subtitle-translation"]) {
+    const hash = `#/settings/${path}`;
+    const r = routing(memoryStorage(), hash);
+    assert.equal(r.settingsRouteTab(hash), "subtitles");
+    assert.equal(r.settingsTab(), "subtitles");
   }
-  const panels=developerPanels(),settings={},readiness={features:[]};
-  assert.doesNotMatch(panels.developerPanel(settings,readiness),/Configure English translation|Set up subtitle text translation/);
-  const html=panels.playbackPanel(settings,readiness);
-  assert.match(html,/Set up speech captions/);
-  assert.match(html,/Set up subtitle text translation/);
-  assert.match(html,/id="subtitle-translation-form"/);
-  assert.match(html,/selected audio track and the current playback timeline/);
-  assert.match(html,/Shared viewers can read committed AI captions/);
-  assert.match(html,/Original captions and Off remain available/);
-  assert.doesNotMatch(html,/Leaves Developer when|pill warn">experimental/);
-  const card=shippedSource("subtitleTranslationCard");
-  assert.match(card,/Accuracy needs checking/);
-  assert.match(card,/Generate captions from speech, translate speech to English, or translate an existing text subtitle/);
-  assert.doesNotMatch(card,/devGraduation|Leaves Developer when/);
-  assert.match(shippedSource("translationOpen"),/#\/settings\/playback\/enable-subtitle-translation/);
+});
+
+test("Subtitles owns account preferences and administrator setup", () => {
+  const panel = shippedSource("aiSubtitleSettingsPanel");
+  assert.match(panel, /subtitle-preferred-language/);
+  assert.match(panel, /subtitle-preferred-mode/);
+  assert.match(panel, /if\(!ME\?\.is_admin\)return[^;]*personal;/);
+  for (const control of ["download", "text", "audio", "when", "who", "readiness"])
+    assert.ok(panel.includes(`ai-subtitle-${control}`));
+  assert.match(panel, /saveAiSubtitleSettings/);
+  for (const rendering of ["developerPanel", "maintenancePanel", "playbackPanel"])
+    assert.doesNotMatch(shippedSource(rendering), /subtitle(?:Translation|Transcription)Card\(/);
 });
 
 test("old Developer anchors land on the section that now holds the card", () => {
@@ -352,12 +332,13 @@ test("every section is a route, grouped in the rail's order", () => {
   const r = routing(memoryStorage(), "#/settings/playback");
   assert.deepEqual(r.SET_GROUPS.map(([group]) => group), ["Content", "Playback", "Server", "Outside", "Developer"]);
   assert.deepEqual(r.SET_TABS.map(([id]) => id), [
-    "libraries", "metadata", "livetv", "playback", "analysis",
+    "libraries", "metadata", "livetv", "playback", "subtitles", "analysis",
     "maintenance", "users", "system", "cluster", "integrations", "sharing", "remotes", "developer",
   ]);
   const dispatch = {
     metadata: "metadataPanel(d.settings,d.developerReadiness)",
     playback: "playbackPanel(d.settings,d.developerReadiness)",
+    subtitles: "aiSubtitleSettingsPanel(d.subtitlePreferences,d.aiSubtitles)",
     livetv: "liveTvPanel(d.settings,d.developerReadiness)",
     analysis: "analysisSettingsPanel(d.settings,d.analysis,d.developerReadiness)",
     maintenance: "maintenancePanel(d.settings,d.dvConversions,d.developerReadiness)",
@@ -435,7 +416,7 @@ test("render() keeps the cached aggregate across a section switch and rewrites b
 
 test("the rail marks the active section, shows counts it already has, and never fetches", () => {
   const rail = new Function(
-    "SETTINGS_DATA", "esc", "PlurxClusterPanel", "SERVER",
+    "SETTINGS_DATA", "esc", "PlurxClusterPanel", "SERVER", "ME",
     `${shippedConst("SET_GROUPS")}${shippedConst("SET_TABS")}
      ${shippedSource("settingsClusterEnabled")}
      ${shippedSource("settingsTabAside")}
@@ -443,16 +424,16 @@ test("the rail marks the active section, shows counts it already has, and never 
      return settingsTabsHtml;`,
   );
   const data = { libs: [{ kind: "movies" }, { kind: "home" }], users: [{}, {}, {}], settings: { tmdb_configured: false } };
-  const html = rail(data, esc, { clusterStateView: () => ({ tone: "good" }) })("users");
+  const html = rail(data, esc, { clusterStateView: () => ({ tone: "good" }) }, {}, { is_admin: true })("users");
   assert.equal((html.match(/class="setgroup"/g) || []).length, 5);
   assert.match(html, /class="settab active" role="link" aria-current="page" onclick="setSettingsTab\('users'\)">Users<span class="setn">3<\/span>/);
   assert.match(html, /onclick="setSettingsTab\('libraries'\)">Libraries<span class="setn">2<\/span>/);
   assert.match(html, /Metadata<span class="setdot"/, "a missing TMDB key with a provider library is flagged before the section is opened");
   assert.doesNotMatch(html, /Cluster<span/, "cluster shows nothing until its data has been read");
-  const quiet = rail({ libs: [{ kind: "home" }], settings: { tmdb_configured: false } }, esc, {})("libraries");
+  const quiet = rail({ libs: [{ kind: "home" }], settings: { tmdb_configured: false } }, esc, {}, {}, { is_admin: true })("libraries");
   assert.doesNotMatch(quiet, /setdot/, "home and books libraries never want a key");
   assert.doesNotMatch(shippedSource("settingsTabAside"), /api\(/, "the rail spends no request of its own");
-  const sqlite = rail({ cluster: { unavailable: true, code: "membership_unavailable" } }, esc, {})("cluster");
+  const sqlite = rail({ cluster: { unavailable: true, code: "membership_unavailable" } }, esc, {}, {}, { is_admin: true })("cluster");
   assert.match(sqlite, /Cluster<span class="setn">off<\/span>/);
 });
 
@@ -502,7 +483,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     { getElementById: (id) => { assert.ok(ids.includes(id), `${fn} reads ${id}`); return { value: "v", checked: true, textContent: "" }; } },
     (v) => v, () => {}, () => {}, {}, {}, () => "", () => "", () => "", null,
   );
-  const defaults = ["pal", "psl", "psm", "perr"];
+  const defaults = ["pal", "perr"];
   // Protocol and quality switching have separate cards. Streaming must not
   // write either field: a card that saves a field it does not show can turn
   // something back on that an operator deliberately turned off.
@@ -527,7 +508,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     run("saveAutomaticDecoderRecovery", automaticRecovery)({ disabled: false }),
     run("savePgsOverlay", pgsOverlay)({ disabled: false }),
   ]).then(() => {
-    assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
+    assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang"]);
     assert.deepEqual(Object.keys(writes.saveStreaming.body).sort(), [
       "hls_ahead_max_secs", "hls_burst_secs", "hls_readrate",
       "stream_readrate", "vod_block_budget_secs", "vod_blocked_get_cap",
@@ -931,9 +912,7 @@ test("Developer holds three switches; everything else keeps its saves in its own
     /TOG:pgsoverlay\|[^|]*\|[^|]*\|checked=true/);
   assert.match(graduatedPlayback, /TOG:pqh\|[^|]*\|[^|]*\|checked=true/);
   assert.match(graduatedPlayback, /FOOT:savePreparedQuality/);
-  const subtitleCaptionsCard=/CARD\[CARDHEAD:AI captions[\s\S]*?(?=CARD\[CARDHEAD:|<details class="setdetails"|$)/.exec(graduatedPlayback);
-  assert.ok(subtitleCaptionsCard,"Playback keeps the unfinished subtitle operations together in their card");
-  assert.match(shippedSource("subtitleTranslationCard"),/Accuracy needs checking/,"the authored card keeps its accuracy qualification warning");
+  assert.doesNotMatch(graduatedPlayback, /AI captions|Set up speech captions/);
   assert.doesNotMatch(graduatedPlayback, /Leaves Developer when|pill warn">experimental/);
   // Absent from the settings document is on: the store's switch defaults on.
   // It sits in Maintenance beside the store it controls.
@@ -1219,23 +1198,23 @@ test("a section repaint carries kept settings cards across as live nodes", () =>
   // Analysis keeps the backfill card across its own panel's Save.
   const backfill=make("subbackfillcard"); dom={subbackfillcard:backfill}; active=null;
   assert.deepEqual(keep.capture("analysis").nodes,[backfill]);
-  const setup=make("enable-subtitle-transcription"); setup.savedEnabled=false; setup.unsavedLanguage="sv";
-  dom={"enable-subtitle-transcription":setup}; active=setup.child;
-  const setupKeep=keep.capture("maintenance");
-  const setupReplacement=make("enable-subtitle-transcription"); dom={"enable-subtitle-transcription":setupReplacement};
+  const setup=make("subtitle-preferences"); setup.savedEnabled=false; setup.unsavedLanguage="sv";
+  dom={"subtitle-preferences":setup}; active=setup.child;
+  const setupKeep=keep.capture("subtitles");
+  const setupReplacement=make("subtitle-preferences"); dom={"subtitle-preferences":setupReplacement};
   keep.restore(setupKeep);
-  assert.equal(setupReplacement.replaced,setup,"Maintenance keeps the live setup and its saved/unsaved controls");
+  assert.equal(setupReplacement.replaced,setup,"Subtitles keeps the account settings and in-progress edits");
   assert.equal(setupReplacement.replaced.savedEnabled,false);
   assert.equal(setupReplacement.replaced.unsavedLanguage,"sv");
   assert.equal(setup.child.focused,1);
 
-  const translation=make("enable-subtitle-translation");
+  const translation=make("ai-subtitle-settings");
   translation.savedEnabled=false;translation.draft={enabled:true,profile:"saved-model-choice",language:"de"};
-  dom={"enable-subtitle-translation":translation};active=translation.child;
-  const translationKeep=keep.capture("playback");
-  const translationReplacement=make("enable-subtitle-translation");dom={"enable-subtitle-translation":translationReplacement};
+  dom={"ai-subtitle-settings":translation};active=translation.child;
+  const translationKeep=keep.capture("subtitles");
+  const translationReplacement=make("ai-subtitle-settings");dom={"ai-subtitle-settings":translationReplacement};
   keep.restore(translationKeep);
-  assert.equal(translationReplacement.replaced,translation,"Playback keeps the live translation setup across aggregate repaint");
+  assert.equal(translationReplacement.replaced,translation,"Subtitles keeps AI settings during a repaint");
   assert.equal(translationReplacement.replaced.savedEnabled,false);
   assert.deepEqual(translationReplacement.replaced.draft,{enabled:true,profile:"saved-model-choice",language:"de"});
   assert.equal(translation.child.focused,1,"translation focus survives the repaint");

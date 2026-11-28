@@ -514,6 +514,24 @@ test("text translation file work requires an exact Local context and never borro
   }
 });
 
+test("unified subtitle work uses exact local file paths without a playback session",()=>{
+  const h=harness(),local=h.localPlaybackFileContext("9007199254740993");
+  const shared=h.sharedPlaybackFileContextFromDetail(reference,detail());
+  const bound=h.withPlaybackFileSession(local,"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+  const track_id="a".repeat(64);
+  for(const [suffix,query,wire] of [
+    ["ai-subtitles",{target:"en",audio_index:0},"target=en&audio_index=0"],
+    ["subtitles/search",{language:"pt-BR"},"language=pt-BR"],
+    ["subtitles/2/timing",{track_id},`track_id=${track_id}`],
+    ["subtitles/2",{track_id},`track_id=${track_id}`],
+  ]){
+    assert.equal(h.playbackFileApiPath(bound,suffix,query),`/files/9007199254740993/${suffix}?${wire}`);
+    assert.throws(()=>h.playbackFileUrl(shared,suffix,query));
+  }
+  assert.throws(()=>h.playbackFileUrl(local,"ai-subtitles",{target:"en&token=other"}));
+  assert.throws(()=>h.playbackFileUrl(local,"subtitles/2/timing",{track_id:"different-track"}));
+});
+
 test("published captions stay inside opaque read grammar and cannot acquire work authority",()=>{
   const h=harness(),shared=h.sharedPlaybackFileContextFromDetail(reference,detail()),hash="a".repeat(64),lease="11111111-1111-4111-8111-111111111111";
   assert.equal(h.playbackFileApiPath(shared,"captions"),detail().file_base.slice(7)+"/captions");

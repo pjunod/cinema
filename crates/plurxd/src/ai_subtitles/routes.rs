@@ -340,23 +340,70 @@ async fn start_audio(
         })
         .await?;
     let joining = rows.first().and_then(|row| row["operation_id"].as_str());
-    super::may_start_new(state, user, joining).await?;
-    let target_node_id = if let Some(node) =
-        rows.first().and_then(|row| row["target_node_id"].as_str())
-    {
-        node.to_owned()
-    } else if profile.model_id == "large-v3-q5_0" {
-        let spec = crate::subtitle_translation::profile::model_spec_for(&profile)?;
-        let requirement = crate::subtitle_models::self_install::ensure_speech(state, &spec).await?;
-        if requirement.state == "unsupported" {
-            return Err(conflict(
-                "no_capable_node",
-                "This server cannot install the selected subtitle quality",
-            ));
-        }
-        crate::subtitle_translation::source_worker(state, file).await?
+    let existing = match joining {
+        Some(id) => Some(audio_operation(state, user, id).await?),
+        None => None,
+    };
+    let retry = existing.as_ref().filter(|row| {
+        row["state"] == "stopped" || (row["state"] == "failed" && row["retryable"] == true)
+    });
+    super::may_start_new(state, user, if retry.is_some() { None } else { joining }).await?;
+    let playback_id = intent.playback_id.clone().unwrap_or_default();
+    let position_ms = if playback_id.is_empty() {
+        0
     } else {
-        eligible_worker(state, file, &profile).await?
+        intent.position_ms.min(clock.duration_ms)
+    };
+    let action = if let (Some(id), Some(row)) = (joining, retry) {
+        let counter = |key: &str| {
+            row[key]
+                .as_str()
+                .and_then(|n| n.parse().ok())
+                .ok_or_else(|| ApiError::Internal("Missing subtitle operation revision".into()))
+        };
+        TranslationAction::RetryOperation {
+            operation_id: id.into(),
+            expected_operation_epoch: counter("operation_epoch")?,
+            expected_view_revision: counter("view_revision")?,
+            expected_state: row["state"].as_str().unwrap_or_default().into(),
+            playback_id,
+            position_ms,
+            playback_rate: 1.0,
+            paused: false,
+            continuity_id: None,
+        }
+    } else {
+        let target_node_id =
+            if let Some(node) = rows.first().and_then(|row| row["target_node_id"].as_str()) {
+                node.to_owned()
+            } else if profile.model_id == "large-v3-q5_0" {
+                let spec = crate::subtitle_translation::profile::model_spec_for(&profile)?;
+                let requirement =
+                    crate::subtitle_models::self_install::ensure_speech(state, &spec).await?;
+                if requirement.state == "unsupported" {
+                    return Err(conflict(
+                        "no_capable_node",
+                        "This server cannot install the selected subtitle quality",
+                    ));
+                }
+                crate::subtitle_translation::source_worker(state, file).await?
+            } else {
+                eligible_worker(state, file, &profile).await?
+            };
+        TranslationAction::Create {
+            source: intent.source.clone(),
+            profile,
+            audio_index: intent.track_index,
+            spoken_language: language.into(),
+            duration_ms: clock.duration_ms,
+            target_node_id,
+            playback_id,
+            position_ms,
+            playback_rate: 1.0,
+            paused: false,
+            finish: true,
+            continuity_id: None,
+        }
     };
     let now_ms = now();
     let receipt = state
@@ -367,24 +414,7 @@ async fn start_audio(
             request_digest: intent.digest.clone(),
             now_ms,
             intent_expires_at_ms: now_ms.saturating_add(60_000),
-            action: TranslationAction::Create {
-                source: intent.source.clone(),
-                profile,
-                audio_index: intent.track_index,
-                spoken_language: language.into(),
-                duration_ms: clock.duration_ms,
-                target_node_id,
-                playback_id: intent.playback_id.clone().unwrap_or_default(),
-                position_ms: if intent.playback_id.is_some() {
-                    intent.position_ms.min(clock.duration_ms)
-                } else {
-                    0
-                },
-                playback_rate: 1.0,
-                paused: false,
-                finish: true,
-                continuity_id: None,
-            },
+            action,
         })
         .await?;
     let id = operation_id(&receipt)?;
@@ -457,7 +487,7 @@ async fn operation(
             let status = match row["state"].as_str() {
                 Some("complete") if track.is_some() => "complete",
                 Some("failed") => "failed",
-                Some("stopped") => "stopped",
+                Some("stopped" | "complete") => "stopped",
                 Some("checking_source" | "waiting_model" | "waiting_capacity" | "suspended") => {
                     "queued"
                 }
@@ -546,6 +576,15 @@ async fn resolved_intent(
         return Err(conflict("source_changed", "The media source changed"));
     }
     Ok((intent, file))
+}
+
+pub(crate) async fn status(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (intent, file) = resolved_intent(&state, &user, id).await?;
+    Ok(Json(operation(&state, &user, &file, &intent).await?))
 }
 
 #[derive(Deserialize)]
@@ -771,8 +810,27 @@ pub(crate) async fn describe(
     Path(file_id): Path<i64>,
     Query(input): Query<Options>,
 ) -> Result<Json<Value>, ApiError> {
-    english(input.target.as_deref())?;
+    let target = input.target.as_deref().unwrap_or("en");
+    if !crate::online_subtitles::valid_language(target) {
+        return Err(ApiError::BadRequest("Choose a subtitle language".into()));
+    }
     let file = file(&state, file_id).await?;
+    let preferred = crate::subtitle_transcription::normalized_language(target);
+    if preferred != "en" {
+        let existing = file
+            .subtitle_streams
+            .iter()
+            .find(|track| {
+                !track.forced && plurx_core::tracks::lang_matches(&track.language, target)
+            })
+            .map(|track| track.index);
+        return Ok(Json(json!({
+            "target":preferred, "allowed":false, "existing_index":existing,
+            "blocked":null, "route":null, "label":null, "estimate":null,
+            "source":null, "alternatives":[], "operation":null,
+            "search_online":crate::http::subtitle_downloads::configured(&state).await?,
+        })));
+    }
     let current = settings::read(&state).await?.settings;
     let may_start = user.is_admin || current.who == settings::Who::Everyone;
     let existing = selection::existing_english(&file);

@@ -331,15 +331,16 @@ class SubtitleEnginePackageCase(unittest.TestCase):
                     "base": (147951465, "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"),
                     "tiny.en": (77704715, "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f")}
         expected["small"] = (487601967, "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b")
+        expected["large-v3-q5_0"] = (1081140203, "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1")
         self.assertEqual({item["id"] for item in catalog["models"]}, set(expected))
         for item in catalog["models"]:
             self.assertEqual((item["download_bytes"], item["sha256"]), expected[item["id"]])
             self.assertEqual(item["license"], "MIT")
             self.assertIn("/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/", item["url"])
-            # This base model has n_vocab=51865: 99 language tokens. Engine
-            # language ID 99 (yue) belongs to the newer 51866-vocabulary models.
-            self.assertEqual(len(item["languages"]), 99 if item["id"] in ("base", "small") else 1)
-            self.assertNotIn("yue", item["languages"])
+            # The pinned Small and Large v3 use the newer 100-language vocabulary.
+            language_count = {"base": 99, "small": 100, "large-v3-q5_0": 100}.get(item["id"], 1)
+            self.assertEqual(len(item["languages"]), language_count)
+            self.assertEqual("yue" in item["languages"], language_count == 100)
             self.assertEqual(len(set(item["languages"])), len(item["languages"]))
             self.assertNotIn("*", item["languages"])
 

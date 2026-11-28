@@ -37,6 +37,7 @@ enum AppBuildInfo {
 /// accessibility identifiers and never changes; `title` is what a viewer reads.
 enum TVSettingsCategory: String, CaseIterable, Identifiable {
     case playback = "Playback"
+    case subtitles = "Subtitles"
     case appearance = "Appearance"
     case liveTv = "Live TV"
     case sharing = "Sharing"
@@ -160,11 +161,6 @@ struct SettingsView: View {
         Binding(get: { model.audioLang },
                 set: { model.setLanguages(audio: $0, sub: model.subLang) })
     }
-    private var subBinding: Binding<String> {
-        Binding(get: { model.subLang },
-                set: { model.setLanguages(audio: model.audioLang, sub: $0) })
-    }
-
     /// Apple TV reads plain section names; iPhone and iPad keep their own.
     private func heading(_ category: TVSettingsCategory, _ other: String) -> String {
         #if os(tvOS)
@@ -195,14 +191,6 @@ struct SettingsView: View {
         return "Shared libraries and sources"
         #else
         return "Shared libraries and Source status"
-        #endif
-    }
-
-    private var captionsLabel: String {
-        #if os(tvOS)
-        return "Caption tools"
-        #else
-        return "Captions and model setup"
         #endif
     }
 
@@ -292,9 +280,6 @@ struct SettingsView: View {
                 SettingsPicker("Audio language", value: languages.first { $0.id == model.audioLang }?.name ?? model.audioLang, selection: audioBinding) {
                     ForEach(languages) { Text($0.name).tag($0.id) }
                 }
-                SettingsPicker("Subtitle language", value: subtitleLanguages.first { $0.id == model.subLang }?.name ?? model.subLang, selection: subBinding) {
-                    ForEach(subtitleLanguages) { Text($0.name).tag($0.id) }
-                }
                 SettingsPicker("Subtitle switching", value: model.subtitleReadiness.label, selection: Binding(
                     get: { model.subtitleReadiness },
                     set: { model.setSubtitleReadiness($0) }
@@ -312,13 +297,20 @@ struct SettingsView: View {
                     set: { model.setAutoSkip($0) }
                 ))
                 playbackEngineeringRows
-                NavigationLink(captionsLabel) { ProgressiveCaptionSetupView() }
+
             } header: {
                 Text("Playback")
             } footer: {
                 Text(playbackFooter)
             }
             .settingsCategory(.playback, selection: category)
+
+            Section {
+                NavigationLink("Subtitle preferences and AI subtitles") { AISubtitleSettingsView() }
+            } header: {
+                Text("Subtitles")
+            }
+            .settingsCategory(.subtitles, selection: category)
 
             DolbyVisionRefitSettingsSection()
                 .settingsCategory(.playback, selection: category)

@@ -756,6 +756,7 @@ struct PlayerView: View {
     @State private var pendingMs: Int?
     @State private var controlsVisible = true
     @State private var showingCaptionTools = false
+    @State private var choosingAISpokenLanguage = false
     @State private var pendingCaptionTools = false
     @State private var confirmingCaptionPiP = false
     @State private var confirmingLocalCaptionOutput = false
@@ -2986,6 +2987,38 @@ struct PlayerView: View {
     #endif
 
     private var remoteScope: String { "playback:\(itemId):\(fileId)" }
+    private var aiSubtitleRemoteOptions: [RemoteChoice] {
+        guard controller.progressiveCaptions.selected else { return [] }
+        var choices = [
+            RemoteChoice(id: "ai-earlier", label: "Earlier by 250 ms", selected: false) {
+                controller.progressiveCaptions.subtitleOffsetMs = max(-15_000, controller.progressiveCaptions.subtitleOffsetMs - 250)
+            },
+            RemoteChoice(id: "ai-later", label: "Later by 250 ms", selected: false) {
+                controller.progressiveCaptions.subtitleOffsetMs = min(15_000, controller.progressiveCaptions.subtitleOffsetMs + 250)
+            }
+        ]
+        if controller.progressiveCaptions.aiRoute == "text" {
+            choices.insert(RemoteChoice(id: "ai-audio", label: "Use the audio instead", selected: false) {
+                controller.selectAISubtitles(route: "audio")
+            }, at: 0)
+        }
+        return choices
+    }
+
+    private var aiSubtitleRemoteLanguageChoices: [RemoteChoice] {
+        guard controller.progressiveCaptions.selected, controller.progressiveCaptions.aiRoute != "text" else { return [] }
+        let change = RemoteChoice(id: "ai-language", label: "Wrong language?", selected: false) {
+            choosingAISpokenLanguage.toggle()
+        }
+        guard choosingAISpokenLanguage else { return [change] }
+        return [change] + ["en", "de", "es", "fr", "it", "pt", "ja", "ko", "zh", "ar", "tr"].map { language in
+            RemoteChoice(id: "ai-language-\(language)", label: Self.languageName(language) ?? language, selected: false) {
+                choosingAISpokenLanguage = false
+                controller.selectAISubtitles(route: "audio", language: language)
+            }
+        }
+    }
+
     private func remoteChoices(_ kind: CinemaRemoteTrackKind) -> [RemoteChoice] {
         switch kind {
         case .audio:
@@ -2995,13 +3028,12 @@ struct PlayerView: View {
         case .subtitles:
             return [RemoteChoice(id: "off", label: "Off", selected: controller.captionIntent == .off) { controller.selectSubtitle(nil) }] + controller.subtitles.map { track in
                 RemoteChoice(id: String(track.index), label: Self.subtitleLabel(track), selected: controller.selectedSubtitle == track.index) { controller.selectSubtitle(track.index) }
-            } + [RemoteChoice(id: "progressive", label: "Caption generation and translation", selected: controller.progressiveCaptions.selected) {
-                #if os(tvOS)
-                pendingCaptionTools = true
-                #else
-                showingCaptionTools = true
-                #endif
-            }]
+            } + ((controller.progressiveCaptions.selected || controller.progressiveCaptions.aiOptions?.canStart == true) ? [
+                RemoteChoice(id: "progressive", label: controller.progressiveCaptions.selected ? "Stop AI subtitles" : "AI subtitles",
+                             selected: controller.progressiveCaptions.selected, detail: controller.progressiveCaptions.aiOptions?.label) {
+                    controller.selectAISubtitles()
+                }
+            ] : []) + aiSubtitleRemoteOptions + aiSubtitleRemoteLanguageChoices
         case .quality:
             return [RemoteChoice(id: "auto", label: "Auto", selected: controller.selectedHeight == nil && !controller.selectedQualityIsOriginal) { controller.selectQuality(nil) },
                     RemoteChoice(id: "original", label: "Original", selected: controller.selectedQualityIsOriginal) { controller.selectOriginalQuality() }] + controller.qualityRungs.map { rung in
@@ -3283,13 +3315,36 @@ struct PlayerView: View {
                 )
             }
         }
-        Button("Caption generation and translation") {
-            #if os(iOS)
-            pendingCaptionTools = true
-            dismissOptionMenu()
-            #else
-            showingCaptionTools = true
-            #endif
+        if controller.progressiveCaptions.selected {
+            ForEach(aiSubtitleRemoteOptions) { choice in
+                Button(choice.label, action: choice.choose)
+            }
+            Button("Wrong language?") { choosingAISpokenLanguage.toggle() }
+            if choosingAISpokenLanguage {
+                ForEach(["en", "de", "es", "fr", "it", "pt", "ja", "ko", "zh", "ar", "tr"], id: \.self) { language in
+                    Button(Self.languageName(language) ?? language) {
+                        choosingAISpokenLanguage = false
+                        controller.selectAISubtitles(route: "audio", language: language)
+                        revealControls()
+                    }
+                }
+            }
+        }
+        if controller.progressiveCaptions.selected || controller.progressiveCaptions.aiOptions?.canStart == true {
+            Button {
+                controller.selectAISubtitles()
+                #if os(iOS)
+                dismissOptionMenu()
+                #endif
+                revealControls()
+            } label: {
+                VStack(alignment: .leading) {
+                    Text(controller.progressiveCaptions.selected ? "Stop AI subtitles" : "AI subtitles")
+                    if let detail = controller.progressiveCaptions.aiOptions?.label {
+                        Text(detail).font(.caption)
+                    }
+                }
+            }
         }
     }
 
@@ -3354,6 +3409,7 @@ struct PlayerView: View {
     }
 
     static func subtitleLabel(_ track: SubtitleTrack) -> String {
+        if track.ai == true { return (languageName(track.language) ?? "English") + " · AI" }
         var parts = [track.title, languageName(track.language), track.codec.uppercased()]
             .compactMap { $0 }
         if track.forced { parts.append("Forced") }

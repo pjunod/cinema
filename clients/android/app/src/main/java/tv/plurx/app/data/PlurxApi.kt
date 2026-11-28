@@ -30,6 +30,42 @@ class StartupAllowance(val remainingMs: Long) :
  * relative. The bearer token is added by an OkHttp interceptor (see [Net]).
  */
 interface PlurxApi {
+    @Streaming @GET("files/{id}/ai-subtitles")
+    suspend fun aiSubtitleOptions(@Path("id") id: Long, @Query("target") target: String? = null,
+        @Query("audio_index") audioIndex: Long? = null): Response<ResponseBody>
+    @Streaming @POST("files/{id}/ai-subtitles")
+    suspend fun aiSubtitleStart(@Path("id") id: Long, @Body body: AISubtitleStart): Response<ResponseBody>
+    @Streaming @GET("ai-subtitles/operations/{id}")
+    suspend fun aiSubtitleOperation(@Path("id") id: String): Response<ResponseBody>
+    @Streaming @PUT("ai-subtitles/operations/{id}/viewer")
+    suspend fun aiSubtitleViewer(@Path("id") id: String, @Body body: AISubtitleViewer): Response<ResponseBody>
+    @DELETE("ai-subtitles/operations/{id}/viewer")
+    suspend fun aiSubtitleRelease(@Path("id") id: String, @Query("playback_id") playback: String): Response<Unit>
+    @GET("files/{id}/subtitles/search")
+    suspend fun aiSubtitleSearch(@Path("id") id: Long, @Query("language") language: String): AISubtitleSearch
+    @POST("files/{id}/subtitles/download")
+    suspend fun aiSubtitleDownload(@Path("id") id: Long, @Body body: AISubtitleDownload): AISubtitleDownloaded
+    @GET("files/{id}/subtitles/{index}/timing")
+    suspend fun aiSubtitleTiming(@Path("id") id: Long, @Path("index") index: Long,
+        @Query("track_id") track: String): AISubtitleTiming
+    @PUT("files/{id}/subtitles/{index}/timing")
+    suspend fun saveAISubtitleTiming(@Path("id") id: Long, @Path("index") index: Long,
+        @Query("track_id") track: String, @Body body: AISubtitleTiming): AISubtitleTiming
+    @DELETE("files/{id}/subtitles/{index}")
+    suspend fun aiSubtitleDelete(@Path("id") id: Long, @Path("index") index: Long,
+        @Query("track_id") track: String): Response<Unit>
+    @Streaming @GET("ai-subtitles/operations/{id}/cues")
+    suspend fun aiSubtitleCues(@Path("id") id: String, @Query("from_ms") from: Long,
+        @Query("to_ms") to: Long): Response<ResponseBody>
+    @GET("ai-subtitles/preferences")
+    suspend fun aiSubtitlePreferences(): AISubtitlePreferences
+    @PUT("ai-subtitles/preferences")
+    suspend fun saveAISubtitlePreferences(@Body body: AISubtitlePreferences): AISubtitlePreferences
+    @GET("ai-subtitles/settings")
+    suspend fun aiSubtitleSettings(): AISubtitleSettings
+    @PUT("ai-subtitles/settings")
+    suspend fun saveAISubtitleSettings(@Body body: AISubtitleSettingsWrite): AISubtitleSettings
+
     // Progressive caption responses are streamed and byte-bounded before decoding.
     @Streaming @GET("files/{id}/subtitle-translation/options")
     suspend fun captionOptions(@Path("id") id: Long): Response<ResponseBody>

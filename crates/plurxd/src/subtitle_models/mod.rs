@@ -4,7 +4,7 @@ pub(crate) mod artifacts;
 pub(crate) mod config;
 pub(crate) mod self_install;
 
-use crate::{http::error::ApiError, state::AppState};
+use crate::state::AppState;
 use artifacts::CatalogModel;
 use plurx_core::{
     error::StoreError,
@@ -24,7 +24,8 @@ use tokio::sync::RwLock;
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Catalog {
-    version: u8,
+    #[serde(rename = "version")]
+    _version: u8,
     pub(crate) revision: String,
     pub(crate) adapter_contract: String,
     pub(crate) models: Vec<CatalogModel>,
@@ -61,12 +62,6 @@ pub(crate) fn accepted_model_spec(
 pub(crate) fn catalog() -> &'static Catalog {
     &CATALOG
 }
-pub(crate) fn catalog_public() -> Value {
-    let data = catalog();
-    let models=data.models.iter().map(|model|json!({"id":model.id,"label":model.label,"languages":model.languages,"download_bytes":model.download_bytes,"sha256":model.sha256,"source":model.source,"license":model.license,"adapter_contract":data.adapter_contract})).collect::<Vec<_>>();
-    json!({"version":data.version,"catalog_revision":data.revision,"models":models})
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct EngineObservation {
     pub contract: String,
@@ -169,6 +164,7 @@ impl Runtime {
 fn unknown_worker(node_id: &str, label: &str) -> Value {
     json!({"node_id":node_id,"label":label,"eligible":false,"observed_at_ms":null,"expires_at_ms":null,"engine":null,"models":catalog().models.iter().map(|model|json!({"model_id":model.id,"status":"unknown","verified_at_ms":null,"reason":"worker_observation_unavailable"})).collect::<Vec<_>>()})
 }
+#[cfg(test)]
 pub(crate) fn spoken_language_tag(tag: Option<&str>) -> Option<String> {
     let tag = tag?.trim();
     if tag.is_empty()
@@ -301,111 +297,16 @@ pub(crate) async fn job_wait_reason(
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ModelOperationRequest {
-    version: u8,
-    node_ids: Vec<String>,
+    #[serde(rename = "version")]
+    _version: u8,
+    #[serde(rename = "node_ids")]
+    _node_ids: Vec<String>,
 }
-pub(crate) async fn install(
-    _admin: crate::http::extract::AdminUser,
-    axum::extract::State(state): axum::extract::State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-    axum::Json(request): axum::Json<Value>,
-) -> Result<axum::Json<Value>, ApiError> {
-    if request["version"] == 2 {
-        return crate::subtitle_translation::model_operation(
-            &state,
-            &id,
-            ModelAction::Install,
-            request,
-        )
-        .await;
-    }
-    let request = serde_json::from_value(request)
-        .map_err(|_| ApiError::BadRequest("Invalid model installation request".into()))?;
-    model_operation(&state, &id, ModelAction::Install, request).await
-}
-pub(crate) async fn verify(
-    _admin: crate::http::extract::AdminUser,
-    axum::extract::State(state): axum::extract::State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-    axum::Json(request): axum::Json<Value>,
-) -> Result<axum::Json<Value>, ApiError> {
-    if request["version"] == 2 {
-        return crate::subtitle_translation::model_operation(
-            &state,
-            &id,
-            ModelAction::Verify,
-            request,
-        )
-        .await;
-    }
-    let request = serde_json::from_value(request)
-        .map_err(|_| ApiError::BadRequest("Invalid model verification request".into()))?;
-    model_operation(&state, &id, ModelAction::Verify, request).await
-}
-async fn model_operation(
-    state: &AppState,
-    id: &str,
-    action: ModelAction,
-    request: ModelOperationRequest,
-) -> Result<axum::Json<Value>, ApiError> {
-    let unique = request
-        .node_ids
-        .iter()
-        .collect::<std::collections::BTreeSet<_>>();
-    if request.version != 1
-        || request.node_ids.is_empty()
-        || request.node_ids.len() > 16
-        || unique.len() != request.node_ids.len()
-        || request
-            .node_ids
-            .iter()
-            .any(|id| id.is_empty() || id.len() > 256)
-    {
-        return Err(ApiError::BadRequest(
-            "Choose one to sixteen distinct current workers with request version 1".into(),
-        ));
-    }
-    let model = catalog()
-        .models
-        .iter()
-        .find(|model| model.id == id)
-        .ok_or(ApiError::NotFound("subtitle model"))?;
-    let mut members = state
-        .cluster
-        .voter_targets()
-        .await
-        .map_err(|_| ApiError::ServiceUnavailable("Worker membership unavailable".into()))?
-        .into_iter()
-        .map(|peer| peer.node_id)
-        .collect::<std::collections::BTreeSet<_>>();
-    members.insert(state.node_id.clone());
-    let mut outcomes = Vec::new();
-    for node_id in request.node_ids {
-        if !members.contains(&node_id) {
-            outcomes.push(json!({"node_id":node_id,"job_id":null,"outcome":"worker_not_current"}));
-            continue;
-        }
-        let outcome = enqueue_model_operation(state, model, &node_id, action, None).await?;
-        let job_id = match &outcome {
-            EnqueueOutcome::Accepted { job_id, .. } | EnqueueOutcome::Existing { job_id, .. } => {
-                Some(job_id.as_str())
-            }
-            _ => None,
-        };
-        let mut value = serde_json::to_value(&outcome)
-            .map_err(|_| ApiError::Internal("Could not encode model operation".into()))?;
-        value["node_id"] = json!(node_id);
-        value["job_id"] = json!(job_id);
-        outcomes.push(value);
-    }
-    Ok(axum::Json(
-        json!({"version":1,"model_id":id,"operations":outcomes}),
-    ))
-}
-/// An admin's explicit Install or Test of one model on one node.
+#[cfg(test)]
 pub(crate) async fn enqueue_explicit_operation(
     state: &AppState,
     model: &CatalogModel,
@@ -457,118 +358,6 @@ pub(super) async fn enqueue_model_operation(
         .await
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct GenerationRequest {
-    version: u8,
-    audio_index: i64,
-    language: String,
-    #[serde(rename = "model_id")]
-    _model_id: String,
-    source_size: String,
-    source_mtime: String,
-}
-pub(crate) async fn generate(
-    crate::http::extract::AdminUser(admin): crate::http::extract::AdminUser,
-    axum::extract::State(state): axum::extract::State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<i64>,
-    axum::Json(body): axum::Json<Value>,
-) -> Result<axum::Json<Value>, ApiError> {
-    let settings = config::read(state.store.as_ref()).await?;
-    let file = state
-        .store
-        .get_file(id)
-        .await?
-        .ok_or(ApiError::NotFound("file"))?;
-    let request = if body == json!({}) {
-        let language = crate::subtitle_transcription::normalized_language(&settings.language);
-        let audio = file
-            .audio_streams
-            .iter()
-            .find(|audio| {
-                audio.default
-                    && audio.language.as_deref().is_some_and(|tag| {
-                        crate::subtitle_transcription::normalized_language(tag) == language
-                    })
-            })
-            .or_else(|| {
-                file.audio_streams.iter().find(|audio| {
-                    audio.language.as_deref().is_some_and(|tag| {
-                        crate::subtitle_transcription::normalized_language(tag) == language
-                    })
-                })
-            })
-            .ok_or_else(|| {
-                ApiError::BadRequest(
-                    "Choose the audio track and its spoken language explicitly".into(),
-                )
-            })?;
-        GenerationRequest {
-            version: 1,
-            audio_index: audio.index,
-            language,
-            _model_id: settings.model_id.clone(),
-            source_size: file.size.to_string(),
-            source_mtime: file.mtime.to_string(),
-        }
-    } else {
-        serde_json::from_value(body).map_err(|_| {
-            ApiError::BadRequest("Use the supported subtitle request version and fields".into())
-        })?
-    };
-    if request.version != 1
-        || request.source_size != file.size.to_string()
-        || request.source_mtime != file.mtime.to_string()
-    {
-        return Err(ApiError::Conflict(
-            "The source changed; refresh subtitle options".into(),
-        ));
-    }
-    if !crate::subtitle_transcription::eligible(&file) {
-        return Err(ApiError::BadRequest(
-            "Choose finite probed audio or video up to four hours".into(),
-        ));
-    }
-    let language = crate::subtitle_transcription::normalized_language(&request.language);
-    let audio = file
-        .audio_streams
-        .iter()
-        .find(|audio| audio.index == request.audio_index)
-        .ok_or_else(|| ApiError::BadRequest("Choose an existing audio track".into()))?;
-    if spoken_language_tag(audio.language.as_deref()).is_some_and(|tag| tag != language) {
-        return Err(ApiError::BadRequest(
-            "The selected language disagrees with the audio tag".into(),
-        ));
-    }
-    let mut result = crate::subtitle_translation::schedule::start_finish_only(
-        &state,
-        &file,
-        audio,
-        language,
-        plurx_core::store::subtitle_translation::SpeechTask::Transcribe,
-        admin.id,
-    )
-    .await?;
-    match result["outcome"].as_str() {
-        Some("accepted") => {
-            result["file_id"] = json!(file.id.to_string());
-            result["source_size"] = json!(file.size.to_string());
-            result["source_mtime"] = json!(file.mtime.to_string());
-            Ok(axum::Json(result))
-        }
-        Some("disabled") => Err(ApiError::Conflict(
-            "Enable AI subtitles from audio first".into(),
-        )),
-        Some("demand_quota") => Err(ApiError::typed(
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "ai_subtitles_busy",
-            "AI subtitle work is at capacity",
-        )),
-        _ => Err(ApiError::Conflict(
-            "The subtitle request is no longer current".into(),
-        )),
-    }
-}
 #[cfg(test)]
 fn generation_enqueue(
     file: &plurx_core::domain::MediaFile,
@@ -1275,12 +1064,7 @@ pub(crate) async fn worker_pass(
     }
     use plurx_core::store::background_jobs::{ClaimJob, JobKind, JobSettlement};
     let authority = state.jobs.execution_authority();
-    let settings = config::read_applied(&state.applied).await?;
-    let mut kinds = vec![JobKind::SubtitleModelOperation];
-    if settings.mode == config::Mode::Managed && settings.effective_enabled {
-        kinds.push(JobKind::SubtitleTranscribeManaged);
-    }
-    let candidates = next_candidates(state, kinds).await?;
+    let candidates = next_candidates(state, vec![JobKind::SubtitleModelOperation]).await?;
     for candidate in candidates.jobs {
         let payload = candidate.supported_payload()?;
         if matches!(&payload,JobPayload::SubtitleModelOperation{action,..} if action.is_translation())

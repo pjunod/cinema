@@ -1,0 +1,23 @@
+[[fixes]]
+id = "web.ai-subtitles-stored-track-identity"
+commits = ["7e17fbf565c392c7777378cec800fed393880268"]
+source = "crates/plurxd/src/web/player/ai-subtitles.js"
+source_anchor = "async function aiCaptionUseStored"
+test = "tests/web/ai-subtitles.test.js"
+test_anchor = "AI completion selects the stable track after subtitle indices move"
+
+[[fixes]]
+id = "web.ai-subtitles-item-language"
+commits = ["b2759a0f38a7c49ba4bf52f37efeb2647bbdbfea"]
+source = "crates/plurxd/src/web/player/ai-subtitles.js"
+source_anchor = "function aiCaptionItemMarkup"
+test = "tests/web/ai-subtitles.test.js"
+test_anchor = "item subtitle actions follow the account's chosen language"
+
+[[fixes]]
+id = "android.ai-subtitle-start-wire-target"
+commits = ["3699a9481aa28b144c94ee08cb447155a912240f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/AISubtitleModels.kt"
+source_anchor = "val target: String,"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/ModelContractTest.kt"
+test_anchor = "fun aiSubtitleStartEncodesTheRequiredEnglishTarget()"

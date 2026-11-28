@@ -83,7 +83,7 @@
         "table": "proposal \u00a74.1 queue protocol trait",
         "scope": "item",
         "item": "trait BackgroundJobStore",
-        "item_sha256": "c391c9ec2fc3503b0a2588dc514fc236d418a6c159e0391f649082bead5f9935"
+        "item_sha256": "d9f5e0414aa61326273fb3afb94b3ddb879365bfce36b4165b706b3d53a4ac28"
       },
       {
         "anchor": "pub struct JobToken {",
@@ -99,7 +99,7 @@
         "table": "proposal \u00a74.1 shared queue adapter",
         "scope": "item",
         "item": "impl<T: QueueSql> BackgroundJobStore for T",
-        "item_sha256": "6b4973f393ecd97c9e7fd3e264264c6b155ca33998d527f37f883938eccdc7a4"
+        "item_sha256": "9930c2e0d6d4a4d4c08b12bf864b0828af2929c039c5c07cae279189822c7cab"
       },
       {
         "anchor": "            || self.now_ms.saturating_sub(self.dispatched_at_ms) >= CLAIM_RESOLUTION_WINDOW_MS",
@@ -851,7 +851,7 @@
         "anchor": "last_error_code='producer_retargeted'",
         "scope": "item",
         "item": "trigger subtitle_translation_mutate",
-        "item_sha256": "5eea831521c9739d4ad33eb75f203b3548ec635577037a34d06f40ab20acd637"
+        "item_sha256": "59ce7e092c7d09346195993d7cab0f262f3a2c2b8566d3c55bb5ca89d12d3195"
       },
       {
         "table": "caption claim-continuity effects remain kind-scoped outside selected library model",

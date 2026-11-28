@@ -225,7 +225,7 @@ impl RangeRecipe {
     }
 
     pub fn expected_asset_id(&self) -> Result<String, StoreError> {
-        digest(&json!({
+        let mut identity = json!({
             "version": TRANSLATION_VERSION,
             "task": self.profile.task.name(),
             "source": self.source,
@@ -235,7 +235,18 @@ impl RangeRecipe {
             "output_language": self.profile.task.output_language(&self.spoken_language),
             "profile_id": self.profile.id()?,
             "duration_ms": self.duration_ms,
-        }))
+        });
+        // The VAD profiles can resolve an automatic recipe to the same
+        // language as a separate explicit recipe. Each producer owns its
+        // own publication and read snapshot. Retrying changes only the epoch.
+        if matches!(
+            self.profile.pipeline_revision.as_str(),
+            "translation-window-v2" | "translation-window-v2-fast"
+        ) {
+            identity["asset_identity_version"] = 2.into();
+            identity["operation_id"] = self.operation_id.clone().into();
+        }
+        digest(&identity)
     }
 }
 

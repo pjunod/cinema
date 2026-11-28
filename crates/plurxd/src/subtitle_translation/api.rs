@@ -1,11 +1,12 @@
 //! Closed public translation projections. Store recipes, paths and source
 //! binding authority never cross this boundary.
-use super::config::{self, UpdateRequest};
+use super::config;
+#[cfg(test)]
+use super::config::UpdateRequest;
+#[cfg(test)]
+use crate::http::extract::AdminUser;
 use crate::{
-    http::{
-        error::ApiError,
-        extract::{AdminUser, AuthUser},
-    },
+    http::{error::ApiError, extract::AuthUser},
     state::AppState,
 };
 use axum::{
@@ -16,13 +17,13 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+#[cfg(test)]
+use plurx_core::store::subtitle_translation::{digest, SourceRevision};
 use plurx_core::{
     domain::MediaFile,
     store::{
         background_jobs::{BackgroundJob, JobPayload, JobState},
-        subtitle_translation::{
-            digest, valid_digest, SourceRevision, SpeechTask, TranslationProfile,
-        },
+        subtitle_translation::{valid_digest, SpeechTask, TranslationProfile},
         subtitle_translation_mutation::{TranslationAction, TranslationMutation},
         subtitle_translation_read::{AcquireTranslationLease, TranslationQuery, TranslationRead},
     },
@@ -115,6 +116,7 @@ fn languages() -> Vec<String> {
         .expect("registered default speech profile")
         .languages
 }
+#[cfg(test)]
 fn selected_profile(model: &str, profile_id: &str) -> Result<TranslationProfile, ApiError> {
     super::profile::profiles()
         .into_iter()
@@ -122,6 +124,7 @@ fn selected_profile(model: &str, profile_id: &str) -> Result<TranslationProfile,
         .ok_or_else(invalid)
 }
 /// Saved preferences choose metadata defaults only; readiness never changes them.
+#[cfg(test)]
 fn configured_default_profile(saved: &config::Snapshot) -> Option<TranslationProfile> {
     if let Some(id) = saved.profile_id.as_deref() {
         return super::profile::profiles().into_iter().find(|profile| {
@@ -139,6 +142,7 @@ fn configured_default_profile(saved: &config::Snapshot) -> Option<TranslationPro
     }
     Some(super::profile::default_profile())
 }
+#[cfg(test)]
 fn profile_summary(
     profile: TranslationProfile,
     preferred_model: Option<&str>,
@@ -157,12 +161,14 @@ fn profile_summary(
         "activation_state":"active","activation_reason":"experimental_limited_profile"}),
     )
 }
+#[cfg(test)]
 pub async fn settings(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Response, ApiError> {
     response(config::read(state.store.as_ref(), crate::state::clock_ms()).await?)
 }
+#[cfg(test)]
 pub async fn update_settings(
     AdminUser(user): AdminUser,
     State(state): State<AppState>,
@@ -179,6 +185,7 @@ pub async fn update_settings(
         .await?,
     )
 }
+#[cfg(test)]
 pub async fn models(
     _admin: AdminUser,
     State(state): State<AppState>,
@@ -195,6 +202,7 @@ pub async fn models(
         "profiles":super::profile::profiles().into_iter().map(|profile| profile_summary(profile, preferred_model)).collect::<Result<Vec<_>,_>>()?,"workers":worker_rows(super::workers_public(&state).await?)?,"server_now_ms":crate::state::clock_ms()}),
     )
 }
+#[cfg(test)]
 fn worker_rows(rows: Vec<Value>) -> Result<Vec<Value>, ApiError> {
     if rows.len() > 32 {
         return Err(observation_error());
@@ -327,6 +335,7 @@ fn asset_summary(value: Value) -> Result<AssetSummary, ApiError> {
     ms(row.duration_ms).map_err(|_| observation_error())?;
     Ok(row)
 }
+#[cfg(test)]
 pub async fn options(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -364,6 +373,7 @@ pub async fn options(
         "assets":assets,"assets_next_cursor":next,"server_now_ms":crate::state::clock_ms()}),
     )
 }
+#[cfg(test)]
 fn normalized_language(value: Option<&str>) -> Option<String> {
     let raw = value?.trim();
     if raw.is_empty() || matches!(raw.to_ascii_lowercase().as_str(), "und" | "unknown" | "n/a") {
@@ -484,6 +494,7 @@ pub async fn assets(
     )
 }
 
+#[cfg(test)]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateRequest {
@@ -747,6 +758,7 @@ fn mutation_receipt(value: &Value, outcome: &str) -> Result<Value, ApiError> {
     Ok(answer)
 }
 
+#[cfg(test)]
 pub async fn create(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
