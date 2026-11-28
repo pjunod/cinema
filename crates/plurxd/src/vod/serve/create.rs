@@ -1314,9 +1314,14 @@ impl VodServe {
                     remaining
                 })
             });
-            return self
-                .settle_encoded_split(requested, started?, now + budget, &fences, false)
-                .await;
+            return Box::pin(self.settle_encoded_split(
+                requested,
+                started?,
+                now + budget,
+                &fences,
+                false,
+            ))
+            .await;
         }
         let Some(fallback) = fallback else {
             return started;
@@ -2767,13 +2772,13 @@ impl VodServe {
             serving_admission: None,
             viewer: None,
         };
-        self.settle_encoded_split(
+        Box::pin(self.settle_encoded_split(
             &VodCopyLayout::PendingEncodedV1,
             start,
             deadline,
             &fences,
             true,
-        )
+        ))
         .await
         .map(|_| ())
     }
