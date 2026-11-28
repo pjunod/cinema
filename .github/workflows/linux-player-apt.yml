@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: linux-player-apt-release
@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   package:
-    if: github.server_url != 'https://github.com' && github.ref == 'refs/heads/main'
+    if: github.server_url != 'https://github.com'
     runs-on: [ci-nonvoter-heavy-amd64]
     timeout-minutes: 45
     steps:
@@ -27,6 +27,29 @@ jobs:
         run: make linux-player-deb
         env:
           PLURX_DEB_JOBS: 4
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: linux-player-debian-release
+          path: |
+            target/linux-player-deb/plurx-player_*
+            target/linux-player-deb/SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    needs: package
+    if: github.server_url != 'https://github.com' && github.ref == 'refs/heads/main'
+    runs-on: [ci-nonvoter-heavy-amd64]
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
+        with:
+          name: linux-player-debian-release
+          path: target/linux-player-deb
       - name: Attach the verified release to the Forgejo project
         run: python3 clients/linux-player/packaging/attach-apt-release.py target/linux-player-deb
         env:
