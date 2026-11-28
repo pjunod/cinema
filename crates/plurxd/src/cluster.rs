@@ -829,7 +829,7 @@ impl Cluster {
         self.membership.live_tv_protocol_pending_nodes().await
     }
 
-    pub(crate) async fn live_tv_split_ready(&self) -> Result<bool, MembershipError> {
+    pub(crate) async fn permits_live_tv_split_ingress(&self) -> Result<bool, MembershipError> {
         self.membership.live_tv_split_ready().await
     }
 

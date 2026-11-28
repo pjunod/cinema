@@ -12,6 +12,10 @@ on:
         description: Validated rollout mode selected by the caller.
         required: true
         type: string
+    outputs:
+      official_verified:
+        description: Complete Store union and schema lineage passed for the official image.
+        value: ${{ jobs.aggregate.outputs.official_verified }}
   # Proving the sharded path must not cost pull-request traffic. A manual run
   # exercises these exact jobs on the real fleet and defaults to `shadow`, so
   # the rehearsal stays advisory until someone deliberately asks for the
@@ -39,7 +43,9 @@ jobs:
     # `validation/runner-fleet.toml` now says what the fleet carries and
     # `make operations-check` rejects a label no rostered runner answers to.
     runs-on: [ci-nonvoter-store]
-    timeout-minutes: 40
+    # The official legacy suite hit 150 minutes while still passing cases.
+    # Give each serial partition a cold-build budget below the runner's 3h cap.
+    timeout-minutes: ${{ inputs.execution-mode == 'official-image' && 175 || 40 }}
     continue-on-error: ${{ inputs.execution-mode == 'shadow' }}
     env:
       # The shard count lives here once and both `validation.store_shard`
@@ -96,12 +102,8 @@ jobs:
       # the replicated migration tests from old markers overflow libtest's
       # 2 MiB default and abort the whole shard.
       #
-      # Not covered here: `tests/schema_lineage_upgrade.rs`, the end-to-end
-      # test of the schema-lineage bridge, is a separate test binary that
-      # Dockerfile.store-shard does not export. It runs only in
-      # `make cluster-store-check` (the legacy Store lane and the
-      # cluster-store backstop), so in accelerated mode no pull-request lane
-      # runs it.
+      # The separate schema-lineage binary runs in the official lineage
+      # job, the legacy Store lane and the cluster-store backstop.
       - name: Run the assigned Store tests once
         id: store_shard
         if: steps.build_store_binary.outcome == 'success'
@@ -145,9 +147,51 @@ jobs:
           steps.store_shard.outcome != 'success')
         run: exit 1
 
+  lineage:
+    name: replicated Store schema lineage
+    needs: shard
+    if: github.server_url != 'https://github.com' && (inputs.execution-mode == 'official-image')
+    runs-on: [ci-nonvoter-store]
+    timeout-minutes: 90
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: cluster-store-legacy
+      - name: Verify the full schema-lineage bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/validation
+          RUST_MIN_STACK=8388608 cargo test --locked -p plurx-core \
+            --features cluster-read-cost-validation,hiqlite-contract-tests \
+            --test schema_lineage_upgrade -- --test-threads=1 \
+            2>&1 | tee target/validation/cluster-store-lineage.log
+      - name: Retain the schema-lineage log
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: cluster-store-lineage
+          path: target/validation/cluster-store-lineage.log
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+
   aggregate:
     name: replicated Store shard union
-    needs: shard
+    needs: [shard, lineage]
+    outputs:
+      official_verified: ${{ steps.official.outputs.verified }}
     if: github.server_url != 'https://github.com' && (always())
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
@@ -203,6 +247,15 @@ jobs:
           steps.download_store_shards.outcome != 'success' ||
           steps.validate_store_shards.outcome != 'success')
         run: exit 1
+      - name: Require and record the official Store evidence
+        id: official
+        if: inputs.execution-mode == 'official-image'
+        env:
+          LINEAGE_RESULT: ${{ needs.lineage.result }}
+        run: |
+          set -e
+          test "$LINEAGE_RESULT" = success
+          echo "verified=true" >> "$GITHUB_OUTPUT"
       - name: Restore persistent runner workspace ownership
         if: always()
         run: |
