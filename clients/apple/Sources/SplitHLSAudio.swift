@@ -1,8 +1,6 @@
 import Foundation
 
 enum SplitHLSAudio {
-    static let capability = "hls-split-av-v1"
-
     /// Only the server's own rendition group has stable source-track indices.
     /// Require the same master to name the group on a video variant.
     static func ownsMaster(_ url: URL, origin: String, session: String) -> Bool {

@@ -54,7 +54,7 @@ def device_caps(build, native_dovi=False):
             for codec in AUDIO_CODECS
         ],
         "containers": list(CONTAINERS),
-        "transports": ["progressive", "hls", "hls-split-av-v1"],
+        "transports": ["progressive", "hls"],
         "progressive_hevc_sample_entries": ["hvc1"],
         "hls_hevc_sample_entries": ["hvc1", "hev1"],
         "subtitle_overlays": [],

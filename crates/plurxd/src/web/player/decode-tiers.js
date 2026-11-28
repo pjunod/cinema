@@ -420,7 +420,7 @@ function capsDocument(c, limits){
     video,
     audio:String(c.acodec||"").split(",").filter(Boolean),
     containers:String(c.container||"").split(",").filter(Boolean),
-    transports:["progressive","hls","hls-bounded-range-v1","hls-split-av-v1"],
+    transports:["progressive","hls","hls-bounded-range-v1"],
     // No `subtitle_overlays`. This player has no PGS renderer, and absent is
     // never a claim — so the server offers it no PGS default, advertises no
     // `overlay` protocol, and tells it the truth when a viewer picks a bitmap
@@ -1712,7 +1712,10 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
           // when the encoders are busy, keep the copy without alternates.
           // The server reports the family's encoder refusal as the typed
           // `transcode_capacity_pending`; older builds named it directly.
-          if(options.split_audio===false||!error||!["vod_family_capacity","transcode_capacity_pending"].includes(error.code)) throw error;
+          const caps=PLAYER?.capsSnapshot||currentCapsDocument();
+          const requestedSplit=options.split_audio??(capsDocumentIsUsable(caps)&&
+            caps.transports?.includes("hls-split-av-v1"));
+          if(!requestedSplit||!error||!["vod_family_capacity","transcode_capacity_pending"].includes(error.code)) throw error;
           // `false` is the explicit muxed request; it outranks the caps token.
           const muxed={...options,split_audio:false};
           return openSessionRetryingNotYet(playbackFileContextForPlayer(PLAYER),muxed,signal,retry);
