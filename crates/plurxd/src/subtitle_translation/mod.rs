@@ -32,9 +32,6 @@ pub(crate) struct Runtime {
     candidate_cursor: RwLock<Option<plurx_core::store::background_jobs::CandidateCursor>>,
     turn: std::sync::atomic::AtomicUsize,
     maintenance_at: std::sync::atomic::AtomicI64,
-    automatic_keys: RwLock<VecDeque<String>>,
-    automatic_next: std::sync::atomic::AtomicI64,
-    failures: RwLock<std::collections::BTreeMap<String, String>>,
 }
 impl Runtime {
     pub(crate) fn try_borrow_read_preparation_slot(&self) -> Option<ReadPreparationSlot> {
@@ -49,10 +46,7 @@ impl Runtime {
             candidate_cursor: RwLock::new(None),
             turn: std::sync::atomic::AtomicUsize::new(0),
             maintenance_at: std::sync::atomic::AtomicI64::new(0),
-            automatic_keys: RwLock::new(VecDeque::new()),
-            automatic_next: std::sync::atomic::AtomicI64::new(0),
             wake: Notify::new(),
-            failures: RwLock::new(Default::default()),
         }
     }
     pub(crate) async fn remember(&self, source: Arc<runtime::VerifiedSource>) {
@@ -93,13 +87,45 @@ impl Runtime {
         .then_some(candidate)
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Capability {
-    model: plurx_core::store::background_jobs_transcription::SubtitleModelReceipt,
-    profile: TranslationProfile,
-    profile_id: String,
-    self_test_sha256: String,
+/// One speech profile's readiness on this node, from the one model receipt.
+/// A profile is verified when the current receipt for its model matches this
+/// node, this boot, the packaged engine and the model file it names
+/// ([`crate::subtitle_models::current_receipt`]); there is no per-profile
+/// record any more.
+pub(crate) fn profile_capability(
+    selected: &TranslationProfile,
+    spec: &crate::subtitle_models::artifacts::CatalogModel,
+    engine: Result<crate::subtitle_models::EngineIdentity<'_>, &str>,
+    model: &Result<plurx_core::fs_secure::FileIdentity, String>,
+    receipts: &[plurx_core::store::background_jobs_transcription::SubtitleModelReceipt],
+    failed: bool,
+    node_id: &str,
+    boot_id: &str,
+) -> Result<Value, StoreError> {
+    let profile_id = selected.id()?;
+    let verified = match (&engine, model) {
+        (Ok(engine), Ok(model)) => crate::subtitle_models::current_receipt(
+            receipts, node_id, boot_id, spec, engine, *model,
+        )
+        .map(|receipt| receipt.verified_at_ms),
+        _ => None,
+    };
+    let (status, reason) = if failed {
+        ("verification_failed", Some("model_verification_failed"))
+    } else if engine.is_err() {
+        ("unknown", Some("engine_unavailable"))
+    } else if model.as_ref().is_err_and(|e| e == "model_not_installed") {
+        ("missing", Some("model_missing"))
+    } else if model.is_err() {
+        ("unknown", Some("model_unavailable"))
+    } else if verified.is_some() {
+        ("verified", None)
+    } else {
+        ("unverified_cache", Some("translation_unverified"))
+    };
+    Ok(
+        json!({"task":selected.task.name(),"model_id":spec.id,"profile_id":profile_id,"status":status,"reason":reason,"verified_at_ms":if status=="verified"{verified}else{None},"model_sha256":spec.sha256,"engine_sha256":engine.as_ref().ok().map(|e|e.binary_sha256.to_owned())}),
+    )
 }
 pub(crate) async fn workers_public(state: &AppState) -> Result<Vec<Value>, ApiError> {
     let now = crate::state::clock_ms();
@@ -107,70 +133,40 @@ pub(crate) async fn workers_public(state: &AppState) -> Result<Vec<Value>, ApiEr
     let mut models = std::collections::BTreeMap::new();
     let receipts = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        state.store.read_subtitle_translation(TranslationRead {
-            user_id: 0,
-            now_ms: now,
-            query: TranslationQuery::Capabilities {
-                node_id: state.node_id.clone(),
-            },
-        }),
+        state.store.subtitle_model_receipts(&state.node_id),
     )
     .await
     .map_err(|_| ApiError::ServiceUnavailable("Worker readiness unavailable".into()))??;
-    let failures = state.subtitle_models.translation.failures.read().await;
+    let failures = state
+        .subtitle_models
+        .verification_failures
+        .read()
+        .await
+        .clone();
     let mut capabilities = Vec::new();
     for selected in profile::profiles() {
         let spec = profile::model_spec_for(&selected)?;
-        // Both tasks share immutable bytes, while readiness remains per profile.
-        // Observe each model separately once per response, never reuse Small's
-        // metadata for Base or vice versa.
+        // Both tasks share immutable bytes and one receipt; observe each
+        // model's file once per response.
         if !models.contains_key(&spec.sha256) {
             models.insert(
                 spec.sha256.clone(),
                 artifacts::model_identity(&state.subtitle_models.root, &spec).await,
             );
         }
-        let model = &models[&spec.sha256];
-        let profile_id = selected.id()?;
-        let mut verified = None;
-        if let (Ok(engine), Ok(model)) = (&engine, model) {
-            for row in &receipts {
-                let Ok(receipt) = serde_json::from_value::<Capability>(row.clone()) else {
-                    continue;
-                };
-                let m = &receipt.model;
-                if receipt.profile == selected
-                    && receipt.profile_id == profile_id
-                    && receipt.self_test_sha256 == profile::SELF_TEST_SHA256
-                    && m.node_id == state.node_id
-                    && m.boot_id == state.subtitle_models.boot_id
-                    && m.model_id == spec.id
-                    && m.model_sha256 == spec.sha256
-                    && m.adapter_contract == engine.adapter_contract
-                    && m.engine_sha256 == engine.binary_sha256
-                    && m.engine_file_identity == artifacts::identity_key(engine.identity)
-                    && m.model_file_identity == artifacts::identity_key(*model)
-                {
-                    verified = Some(m.verified_at_ms);
-                    break;
-                }
-            }
-        }
-        let failure = failures.get(&profile_id).map(String::as_str);
-        let (status, reason) = if let Some(failure) = failure {
-            ("verification_failed", Some(failure))
-        } else if engine.is_err() {
-            ("unknown", Some("engine_unavailable"))
-        } else if model.as_ref().is_err_and(|e| e == "model_not_installed") {
-            ("missing", Some("model_missing"))
-        } else if model.is_err() {
-            ("unknown", Some("model_unavailable"))
-        } else if verified.is_some() {
-            ("verified", None)
-        } else {
-            ("unverified_cache", Some("translation_unverified"))
-        };
-        capabilities.push(json!({"task":selected.task.name(),"model_id":spec.id,"profile_id":profile_id,"status":status,"reason":reason,"verified_at_ms":if status=="verified"{verified}else{None},"model_sha256":spec.sha256,"engine_sha256":engine.as_ref().ok().map(|e|e.binary_sha256.clone())}));
+        capabilities.push(profile_capability(
+            &selected,
+            &spec,
+            engine
+                .as_ref()
+                .map(crate::subtitle_models::EngineIdentity::of)
+                .map_err(String::as_str),
+            &models[&spec.sha256],
+            &receipts,
+            failures.contains(&spec.id),
+            &state.node_id,
+            &state.subtitle_models.boot_id,
+        )?);
     }
     let (cpu_budget, cpu_used, capacity_available) =
         state.transcode.speech_capacity_observation().await;
@@ -478,13 +474,16 @@ struct ModelRequest {
     profile_id: String,
     node_ids: Vec<String>,
 }
+/// The version 2 (translation purpose) model setup request. It enqueues the
+/// same one model operation as version 1, whose receipt qualifies every
+/// speech profile of the model.
 pub(crate) async fn model_operation(
     state: &AppState,
     id: &str,
     action: plurx_core::store::background_jobs_transcription::ModelAction,
     body: Value,
 ) -> Result<axum::Json<Value>, ApiError> {
-    use plurx_core::store::background_jobs::{EnqueueJob, EnqueueOutcome, JobPayload, JobRequest};
+    use plurx_core::store::background_jobs::EnqueueOutcome;
     let request: ModelRequest = serde_json::from_value(body)
         .map_err(|_| ApiError::BadRequest("Invalid translation model request".into()))?;
     let selected = profile::profiles()
@@ -498,6 +497,7 @@ pub(crate) async fn model_operation(
         .iter()
         .collect::<std::collections::BTreeSet<_>>();
     if request.version != 2
+        || action.is_translation()
         || request.purpose != "translation"
         || request.profile_id != selected.id()?
         || id != spec.id
@@ -514,9 +514,6 @@ pub(crate) async fn model_operation(
             "Choose the current translation model and distinct workers".into(),
         ));
     }
-    let digest = plurx_core::store::subtitle_translation::digest(
-        &json!({"method":"POST","route":format!("/subtitle-transcription/models/{id}/{}",if action==plurx_core::store::background_jobs_transcription::ModelAction::TranslationInstall{"install"}else{"verify"}),"body":request}),
-    )?;
     if request.intent_expires_at_ms <= now || request.intent_expires_at_ms > now + 300000 {
         return Err(ApiError::typed(
             axum::http::StatusCode::CONFLICT,
@@ -524,6 +521,11 @@ pub(crate) async fn model_operation(
             "Refresh and try again",
         ));
     }
+    let model = crate::subtitle_models::catalog()
+        .models
+        .iter()
+        .find(|model| model.id == spec.id && model.sha256 == spec.sha256)
+        .ok_or(ApiError::NotFound("subtitle model"))?;
     let mut operations = Vec::new();
     for node in &request.node_ids {
         // Initial qualified route is the serving single worker. A caller cannot
@@ -532,42 +534,7 @@ pub(crate) async fn model_operation(
             operations.push(json!({"node_id":node,"job_id":null,"outcome":"worker_not_current"}));
             continue;
         }
-        let key =
-            plurx_core::store::subtitle_translation::digest(&json!([request.request_id, node]))?;
-        let bytes =
-            hex::decode(&key[..32]).map_err(|_| ApiError::Internal("request identity".into()))?;
-        let request_id = uuid::Uuid::from_slice(&bytes)
-            .map_err(|_| ApiError::Internal("request identity".into()))?
-            .to_string();
-        let payload = JobPayload::SubtitleModelOperation {
-            action,
-            translation_profile: Some(selected.clone()),
-            model_id: spec.id.clone(),
-            catalog_revision: crate::subtitle_models::catalog().revision.clone(),
-            model_sha256: spec.sha256.clone(),
-            adapter_contract: selected.adapter_contract.clone(),
-            target_node_id: node.clone(),
-        };
-        let outcome = state
-            .store
-            .enqueue_job(EnqueueJob {
-                id: uuid::Uuid::new_v4().to_string(),
-                payload,
-                dedupe_key: format!("translation-model:{key}"),
-                priority: 1,
-                not_before_ms: now,
-                now_ms: now,
-                request: JobRequest {
-                    scope: "translation-model".into(),
-                    request_id,
-                    request_digest: digest.clone(),
-                    consumer_kind: "subtitle_model_operation".into(),
-                    consumer_ref: key,
-                    target_node_id: Some(node.clone()),
-                    deadline_ms: None,
-                    retain_identity: true,
-                },
-            })
+        let outcome = crate::subtitle_models::enqueue_explicit_operation(state, model, node, action)
             .await?;
         let job_id = match &outcome {
             EnqueueOutcome::Accepted { job_id, .. } | EnqueueOutcome::Existing { job_id, .. } => {
@@ -583,12 +550,10 @@ pub(crate) async fn model_operation(
     }
     state
         .subtitle_models
-        .translation
-        .failures
+        .verification_failures
         .write()
         .await
-        .remove(&request.profile_id);
-    state.subtitle_models.translation.wake.notify_one();
+        .remove(&spec.id);
     Ok(axum::Json(
         json!({"version":2,"purpose":"translation","model_id":id,"profile_id":request.profile_id,"operations":operations,"intent_expires_at_ms":request.intent_expires_at_ms,"server_now_ms":now}),
     ))

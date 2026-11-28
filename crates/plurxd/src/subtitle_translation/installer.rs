@@ -1,342 +1,23 @@
-//! Execute an already claimed translation-model operation. The manager owns
-//! claim/Stop/shutdown cancellation, settlement and qualified publication; this
-//! leaf returns evidence only after the real foreign-to-English self-test.
-use super::{profile, runtime};
-use crate::{
-    background_jobs::JobFence,
-    state::AppState,
-    subtitle_models::artifacts::{self, Engine, ManagedModel},
-    transcode::FragmentAdmission,
-};
-use plurx_core::{
-    error::StoreError,
-    store::{
-        background_jobs::JobPayload,
-        background_jobs_transcription::{
-            ModelAction, SubtitleModelReceipt, SubtitlePhase, TranslationQualification,
-        },
-    },
-};
-use std::time::Duration;
-use tokio_util::sync::CancellationToken;
-
-pub(crate) const CATALOG_REVISION: &str = "plurx-managed-subtitle-models-v2";
-
-pub(crate) struct Qualification {
-    pub(crate) receipt: SubtitleModelReceipt,
-    pub(crate) translation: TranslationQualification,
-}
-
-fn failure(code: &str) -> StoreError {
-    StoreError::Task(code.into())
-}
-
-fn interrupted(cancel: &CancellationToken) -> Result<(), StoreError> {
-    if cancel.is_cancelled() {
-        Err(failure("worker_interrupted"))
-    } else {
-        Ok(())
-    }
-}
-
-fn action(source: &JobPayload, node_id: &str) -> Result<ModelAction, StoreError> {
-    source.validate()?;
-    let JobPayload::SubtitleModelOperation {
-        translation_profile: Some(accepted),
-        action,
-        model_id,
-        catalog_revision,
-        model_sha256,
-        adapter_contract,
-        target_node_id,
-    } = source
-    else {
-        return Err(failure("translation_unverified"));
-    };
-    let spec = profile::model_spec_for(accepted)?;
-    if !action.is_translation()
-        || !profile::registered(accepted)
-        || model_id != &spec.id
-        || model_sha256 != &spec.sha256
-        || adapter_contract != &accepted.adapter_contract
-        || catalog_revision != CATALOG_REVISION
-        || target_node_id != node_id
-    {
-        return Err(failure("translation_unverified"));
-    }
-    Ok(*action)
-}
-
-async fn phase(
-    fence: &JobFence,
-    value: SubtitlePhase,
-    cancel: &CancellationToken,
-) -> Result<(), StoreError> {
-    interrupted(cancel)?;
-    let current = tokio::select! {
-        () = cancel.cancelled() => return Err(failure("worker_interrupted")),
-        result = tokio::time::timeout(Duration::from_secs(2), fence.observe_subtitle(value)) => {
-            result.map_err(|_| failure("worker_interrupted"))??
-        }
-    };
-    if current {
-        Ok(())
-    } else {
-        Err(failure("worker_interrupted"))
-    }
-}
-
-async fn admit(
-    state: &AppState,
-    fence: &JobFence,
-    cancel: &CancellationToken,
-) -> Result<FragmentAdmission, StoreError> {
-    interrupted(cancel)?;
-    phase(fence, SubtitlePhase::WaitingForCapacity, cancel).await?;
-    let admitted = state
-        .transcode
-        .admit_speech_queued(cancel)
-        .await
-        .filter(|admission| state.transcode.speech_capacity_available(admission))
-        .ok_or_else(|| failure("waiting_for_playback_capacity"))?;
-    interrupted(cancel)?;
-    phase(fence, SubtitlePhase::Verifying, cancel).await?;
-    Ok(admitted)
-}
-
-async fn hash_admitted(
-    state: &AppState,
-    cancel: &CancellationToken,
-    admission: &FragmentAdmission,
-    spec: &crate::subtitle_models::artifacts::CatalogModel,
-) -> Result<ManagedModel, StoreError> {
-    interrupted(cancel)?;
-    if !state.transcode.speech_capacity_available(admission) {
-        return Err(failure("waiting_for_playback_capacity"));
-    }
-    let hash = artifacts::open_model_cancellable(&state.subtitle_models.root, spec, cancel);
-    tokio::pin!(hash);
-    tokio::select! {
-        result = &mut hash => result.map_err(StoreError::Task),
-        () = crate::subtitle_transcription::watch_speech_capacity(&state.transcode, admission) => {
-            cancel.cancel();
-            // This await is mandatory: the blocking hash checks its token at
-            // each 128KiB chunk and must retire before admission is released.
-            let _ = hash.await;
-            Err(failure("waiting_for_playback_capacity"))
-        }
-    }
-}
-
-/// No media/CPU reservation is held during Install's network transfer. Verify
-/// admits before hashing; both actions admit before the production self-test.
-/// The caller must await this operation after cancelling manager_cancel and
-/// immediately use the qualified JobFence publication seam on success.
-pub(crate) async fn execute(
-    state: &AppState,
-    source: &JobPayload,
-    engine: &Engine,
-    fence: &JobFence,
-    manager_cancel: &CancellationToken,
-) -> Result<Qualification, StoreError> {
-    let cancel = manager_cancel.child_token();
-    interrupted(&cancel)?;
-    let action = action(source, &state.node_id)?;
-    let selected = match source {
-        JobPayload::SubtitleModelOperation {
-            translation_profile: Some(profile),
-            ..
-        } => profile.clone(),
-        _ => return Err(failure("translation_unverified")),
-    };
-    let spec = profile::model_spec_for(&selected)?;
-    if engine.adapter_contract != selected.adapter_contract {
-        return Err(failure("packaged_engine_unqualified"));
-    }
-    let (model, admission) = match action {
-        ModelAction::TranslationInstall => {
-            phase(fence, SubtitlePhase::Downloading, &cancel).await?;
-            let model = artifacts::install_model(&state.subtitle_models.root, &spec, &cancel)
-                .await
-                .map_err(StoreError::Task)?;
-            interrupted(&cancel)?;
-            let admission = admit(state, fence, &cancel).await?;
-            (model, admission)
-        }
-        ModelAction::TranslationVerify => {
-            let admission = admit(state, fence, &cancel).await?;
-            phase(fence, SubtitlePhase::Verifying, &cancel).await?;
-            let model = hash_admitted(state, &cancel, &admission, &spec).await?;
-            (model, admission)
-        }
-        _ => return Err(failure("translation_unverified")),
-    };
-    interrupted(&cancel)?;
-    if !state.transcode.speech_capacity_available(&admission) {
-        return Err(failure("waiting_for_playback_capacity"));
-    }
-    crate::subtitle_transcription::managed_artifacts_unchanged(engine, &model)?;
-    phase(fence, SubtitlePhase::Verifying, &cancel).await?;
-    runtime::self_test_translation(state, engine, &model, &selected, fence, &admission, &cancel)
-        .await?;
-    interrupted(&cancel)?;
-    crate::subtitle_transcription::managed_artifacts_unchanged(engine, &model)?;
-    let named_model = artifacts::model_identity(&state.subtitle_models.root, &spec)
-        .await
-        .map_err(StoreError::Task)?;
-    if named_model != model.identity || model.sha256 != spec.sha256 {
-        return Err(failure("artifact_digest_mismatch"));
-    }
-    // Re-inspect the current trusted package, including its companions. A held
-    // executable from a replaced bundle cannot qualify the new named package.
-    // Await the bounded engine verifier rather than timing out/detaching it.
-    let named_engine = artifacts::inspect_engine()
-        .await
-        .map_err(StoreError::Task)?;
-    if named_engine.identity != engine.identity
-        || named_engine.binary_sha256 != engine.binary_sha256
-        || named_engine.adapter_contract != engine.adapter_contract
-        || named_engine.platform != engine.platform
-    {
-        return Err(failure("packaged_engine_changed"));
-    }
-    crate::subtitle_transcription::managed_artifacts_unchanged(engine, &model)?;
-    interrupted(&cancel)?;
-    phase(fence, SubtitlePhase::Validating, &cancel).await?;
-    Ok(Qualification {
-        receipt: SubtitleModelReceipt {
-            // JobFence binds node/boot/job/fence/time atomically at publication.
-            node_id: String::new(),
-            boot_id: String::new(),
-            model_id: spec.id,
-            model_sha256: spec.sha256,
-            adapter_contract: engine.adapter_contract.clone(),
-            engine_sha256: engine.binary_sha256.clone(),
-            model_file_identity: artifacts::identity_key(model.identity),
-            engine_file_identity: artifacts::identity_key(engine.identity),
-            job_id: String::new(),
-            fence: 0,
-            verified_at_ms: 0,
-        },
-        translation: TranslationQualification {
-            profile: selected,
-            self_test_sha256: profile::SELF_TEST_SHA256.into(),
-        },
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn payload(action: ModelAction) -> JobPayload {
-        let selected = profile::selected_profile();
-        JobPayload::SubtitleModelOperation {
-            translation_profile: Some(selected.clone()),
-            action,
-            model_id: selected.model_id,
-            catalog_revision: CATALOG_REVISION.into(),
-            model_sha256: selected.model_sha256,
-            adapter_contract: selected.adapter_contract,
-            target_node_id: "translation-worker".into(),
-        }
-    }
-
-    #[test]
-    fn translation_install_and_verify_require_the_exact_server_owned_recipe() {
-        for expected in [
-            ModelAction::TranslationInstall,
-            ModelAction::TranslationVerify,
-        ] {
-            let source = payload(expected);
-            assert_eq!(
-                action(&source, "translation-worker").expect("test setup"),
-                expected
-            );
-            assert!(action(&source, "another-worker").is_err());
-            let mut changed = source.clone();
-            if let JobPayload::SubtitleModelOperation {
-                catalog_revision, ..
-            } = &mut changed
-            {
-                *catalog_revision = "old-catalog".into();
-            }
-            assert!(action(&changed, "translation-worker").is_err());
-            let mut changed = source.clone();
-            if let JobPayload::SubtitleModelOperation {
-                translation_profile: Some(profile),
-                ..
-            } = &mut changed
-            {
-                profile.left_context_ms = 2_000;
-            }
-            assert!(action(&changed, "translation-worker").is_err());
-            let mut changed = source;
-            if let JobPayload::SubtitleModelOperation { model_sha256, .. } = &mut changed {
-                *model_sha256 = "0".repeat(64);
-            }
-            assert!(action(&changed, "translation-worker").is_err());
-        }
-    }
-
-    #[test]
-    fn model_actions_bind_each_task_to_its_own_immutable_model() {
-        for selected in profile::profiles() {
-            for expected in [
-                ModelAction::TranslationInstall,
-                ModelAction::TranslationVerify,
-            ] {
-                let mut source = payload(expected);
-                if let JobPayload::SubtitleModelOperation {
-                    translation_profile,
-                    model_id,
-                    model_sha256,
-                    ..
-                } = &mut source
-                {
-                    *translation_profile = Some(selected.clone());
-                    *model_id = selected.model_id.clone();
-                    *model_sha256 = selected.model_sha256.clone();
-                }
-                assert_eq!(
-                    action(&source, "translation-worker").expect("exact task/model recipe"),
-                    expected
-                );
-                if let JobPayload::SubtitleModelOperation { model_sha256, .. } = &mut source {
-                    *model_sha256 = "0".repeat(64);
-                }
-                assert!(action(&source, "translation-worker").is_err());
-            }
-        }
-    }
-
-    #[test]
-    fn generation_model_action_cannot_qualify_translation_or_ignore_cancellation() {
-        let mut source = payload(ModelAction::TranslationVerify);
-        if let JobPayload::SubtitleModelOperation {
-            action,
-            translation_profile,
-            ..
-        } = &mut source
-        {
-            *action = ModelAction::Verify;
-            *translation_profile = None;
-        }
-        assert!(source.validate().is_ok());
-        assert!(action(&source, "translation-worker").is_err());
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        assert!(
-            matches!(interrupted(&cancel),Err(StoreError::Task(code)) if code=="worker_interrupted")
-        );
-    }
-}
+//! Speech profile qualification through the one model operation.
+//!
+//! Translation no longer has its own install/verify path: the model receipt
+//! that `subtitle_models` publishes after a multilingual model's German
+//! translate self-test qualifies both speech profiles. What remains here is
+//! the explicit local runtime qualification that drives that operation and
+//! the progressive worker end to end.
 
 /// Explicit local runtime qualification; excluded from every ordinary test run.
 /// The production model-operation helper is also the HTTP setup handler's seam.
 #[cfg(all(test, unix))]
 mod qualification {
-    use super::*;
+    use super::super::profile;
+    use crate::{
+        state::AppState,
+        subtitle_models::artifacts,
+    };
+    use plurx_core::store::background_jobs_transcription::ModelAction;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
     use crate::{
         http::extract::{AdminUser, AuthUser},
         subtitle_translation::{api, config},
@@ -349,7 +30,6 @@ mod qualification {
     use plurx_core::store::{
         background_jobs::{JobPayload, JobState},
         keys,
-        subtitle_translation_read::{TranslationQuery, TranslationRead},
         BackgroundJobStore, SqliteStore, Store,
     };
     use plurx_core::{
@@ -455,27 +135,25 @@ mod qualification {
             .await
             .expect("queued job read")
             .expect("queued job");
-        assert_eq!(queued.state, JobState::Queued);
+        assert!(matches!(queued.state, JobState::Queued | JobState::Succeeded));
         assert!(
             matches!(queued.supported_payload().expect("typed model payload"),
-            JobPayload::SubtitleModelOperation { translation_profile:Some(ref accepted), action:accepted_action, .. }
-                if accepted == selected && accepted_action == action)
+            JobPayload::SubtitleModelOperation { translation_profile:None, action:accepted_action, .. }
+                if accepted_action == action)
         );
-        let cancel = CancellationToken::new();
-        let worker = crate::subtitle_translation::manager::worker_pass(state, &cancel);
-        tokio::pin!(worker);
-        let progressed = tokio::select! {
-            result = &mut worker => result.expect("real serial setup worker"),
-            () = tokio::time::sleep_until(deadline) => {
-                cancel.cancel();
-                let result = worker.await;
-                panic!("bounded qualification deadline reached; cancelled worker fully awaited: {result:?}");
-            }
-        };
-        assert!(
-            progressed,
-            "the setup job must run in the real serial worker"
-        );
+        if queued.state == JobState::Queued {
+            let cancel = CancellationToken::new();
+            let worker = crate::subtitle_models::worker_pass(state, &cancel);
+            tokio::pin!(worker);
+            tokio::select! {
+                result = &mut worker => result.expect("real serial model worker"),
+                () = tokio::time::sleep_until(deadline) => {
+                    cancel.cancel();
+                    let result = worker.await;
+                    panic!("bounded qualification deadline reached; cancelled worker fully awaited: {result:?}");
+                }
+            };
+        }
         let completed = state
             .store
             .background_job(&job_id)
@@ -506,7 +184,7 @@ mod qualification {
                     .iter()
                     .any(|cap| cap["profile_id"] == profile_id && cap["status"] == "verified"))
             ),
-            "actual published receipt must qualify its own task profile: {workers:?}"
+            "the one published model receipt must qualify this task profile: {workers:?}"
         );
         json!({"job_id":job_id,"task":selected.task,"profile_id":profile_id,
             "action":action,"state":"succeeded","fence":completed.fence})
@@ -527,36 +205,22 @@ mod qualification {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20 * 60);
         let mut evidence = Vec::new();
         for selected in profile::legacy_profiles() {
-            for action in [
-                ModelAction::TranslationInstall,
-                ModelAction::TranslationVerify,
-            ] {
+            for action in [ModelAction::Install, ModelAction::Verify] {
                 evidence.push(qualify(&state, &selected, action, deadline).await);
             }
         }
         let reopened =
             SqliteStore::open(&database).expect("reopen committed qualification database");
         let receipts = reopened
-            .read_subtitle_translation(TranslationRead {
-                user_id: 0,
-                now_ms: crate::state::clock_ms(),
-                query: TranslationQuery::Capabilities {
-                    node_id: state.node_id.clone(),
-                },
-            })
+            .subtitle_model_receipts(&state.node_id)
             .await
-            .expect("durable qualified capabilities");
-        for selected in profile::legacy_profiles() {
-            let id = selected.id().expect("profile ID");
-            assert!(
-                receipts.iter().any(|receipt| receipt["profile_id"] == id
-                    && receipt["model"]["model_sha256"] == spec.sha256
-                    && receipt["model"]["engine_sha256"] == engine.binary_sha256
-                    && receipt["model"]["boot_id"] == state.subtitle_models.boot_id
-                    && receipt["self_test_sha256"] == profile::SELF_TEST_SHA256),
-                "both exact legacy task receipts must survive reopening private SQLite"
-            );
-        }
+            .expect("durable model receipts");
+        assert!(
+            receipts.iter().any(|receipt| receipt.model_sha256 == spec.sha256
+                && receipt.engine_sha256 == engine.binary_sha256
+                && receipt.boot_id == state.subtitle_models.boot_id),
+            "the one model receipt must survive reopening private SQLite"
+        );
         state.shutdown.cancel();
         let receipt = json!({"version":1,"scope":"local pinned German fixture through production queued Install/Verify for both speech tasks",
             "model_sha256":spec.sha256,"engine_sha256":engine.binary_sha256,"adapter_contract":engine.adapter_contract,
@@ -783,9 +447,9 @@ mod qualification {
         let mut qualifications = Vec::new();
         for (index, selected) in selected_profiles.iter().enumerate() {
             let action = if moving && index == 0 {
-                ModelAction::TranslationInstall
+                ModelAction::Install
             } else {
-                ModelAction::TranslationVerify
+                ModelAction::Verify
             };
             qualifications.push(qualify(&state, selected, action, deadline).await);
         }

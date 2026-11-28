@@ -1,5 +1,6 @@
 //! AI subtitles: one settings document and the authorization every start
 //! route shares. The queue SQL enforces the same `who` rule at claim time.
+pub(crate) mod readiness;
 pub(crate) mod settings;
 
 use crate::{
@@ -11,6 +12,18 @@ use crate::{
 };
 use axum::{extract::State, http::StatusCode, Json};
 use plurx_core::{domain::User, store::Store};
+
+/// The speech models the audio route needs at a quality tier; every node
+/// that can run them installs them by itself
+/// ([`crate::subtitle_models::self_install`]). Every tier uses `small`
+/// until the tiers are measured, which also adds the speech-detection model.
+pub(crate) fn required_speech_models(quality: settings::Quality) -> &'static [&'static str] {
+    match quality {
+        settings::Quality::Fast | settings::Quality::Balanced | settings::Quality::Best => {
+            &["small"]
+        }
+    }
+}
 
 /// Active AI subtitle operations and jobs a non-admin may hold at once.
 pub(crate) const MAX_ACTIVE_PER_USER: i64 = 2;
@@ -62,11 +75,16 @@ pub(crate) async fn may_start_new(
     Ok(())
 }
 
+/// The settings document plus each node's `readiness` for it.
 pub(crate) async fn get_settings(
     _user: AuthUser,
     State(state): State<AppState>,
-) -> Result<Json<settings::Snapshot>, ApiError> {
-    Ok(Json(settings::read(&state).await?))
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let snapshot = settings::read(&state).await?;
+    let mut body = serde_json::to_value(&snapshot)
+        .map_err(|_| ApiError::Internal("Could not encode AI subtitles settings".into()))?;
+    body["readiness"] = readiness::cluster(&state).await?;
+    Ok(Json(body))
 }
 
 pub(crate) async fn put_settings(

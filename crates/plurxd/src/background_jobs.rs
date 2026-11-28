@@ -1492,28 +1492,7 @@ impl JobFence {
     pub(crate) async fn publish_subtitle_model(
         &self,
         source: plurx_core::store::background_jobs::JobPayload,
-        receipt: plurx_core::store::background_jobs_transcription::SubtitleModelReceipt,
-    ) -> Result<bool, StoreError> {
-        self.publish_qualified_subtitle_model(source, receipt, None)
-            .await
-    }
-
-    pub(crate) async fn publish_translation_model(
-        &self,
-        source: plurx_core::store::background_jobs::JobPayload,
-        receipt: plurx_core::store::background_jobs_transcription::SubtitleModelReceipt,
-        translation: plurx_core::store::background_jobs_transcription::TranslationQualification,
-    ) -> Result<bool, StoreError> {
-        self.publish_qualified_subtitle_model(source, receipt, Some(translation))
-            .await
-    }
-    async fn publish_qualified_subtitle_model(
-        &self,
-        source: plurx_core::store::background_jobs::JobPayload,
         mut receipt: plurx_core::store::background_jobs_transcription::SubtitleModelReceipt,
-        translation: Option<
-            plurx_core::store::background_jobs_transcription::TranslationQualification,
-        >,
     ) -> Result<bool, StoreError> {
         let mut state = self.0.state.lock().await;
         if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
@@ -1529,7 +1508,6 @@ impl JobFence {
         receipt.fence = token.fence;
         receipt.verified_at_ms = now_ms;
         let mut request = plurx_core::store::background_jobs_transcription::PublishSubtitleModel {
-            translation,
             token,
             source,
             receipt,

@@ -1425,11 +1425,16 @@ pub(crate) async fn translate_range(
 /// This returns no readiness receipt and makes no source/coverage publication.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
+/// The multilingual model self-test: the compiled German clip through the
+/// production decode and inference path for `task`, checked against the
+/// publisher's words. Its success is the one model receipt that both speech
+/// tasks and whole-file transcription accept.
 pub(crate) async fn self_test_translation(
     state: &AppState,
     engine: &Engine,
     model: &ManagedModel,
-    profile: &plurx_core::store::subtitle_translation::TranslationProfile,
+    spec: &crate::subtitle_models::artifacts::CatalogModel,
+    task: SpeechTask,
     fence: &JobFence,
     admission: &FragmentAdmission,
     manager_cancel: &CancellationToken,
@@ -1438,13 +1443,10 @@ pub(crate) async fn self_test_translation(
     let operation = plurx_core::process::bounded::cancellable(cancel.clone(), async {
         use super::profile as selected;
         use plurx_core::store::background_jobs_transcription::SubtitlePhase;
-        if !selected::registered(profile) {
-            return Err(failure("translation_unverified"));
-        }
-        if model.sha256 != profile.model_sha256 {
+        if model.sha256 != spec.sha256 {
             return Err(failure("artifact_digest_mismatch"));
         }
-        if engine.adapter_contract != profile.adapter_contract {
+        if engine.adapter_contract != crate::subtitle_models::catalog().adapter_contract {
             return Err(failure("packaged_engine_unqualified"));
         }
         crate::subtitle_transcription::managed_artifacts_unchanged(engine, model)?;
@@ -1522,7 +1524,7 @@ pub(crate) async fn self_test_translation(
             selected::SELF_TEST_SHA256,
             0,
             selected::SELF_TEST_LANGUAGE,
-            profile.task,
+            task,
             engine,
             model,
             scratch.path(),
@@ -1536,7 +1538,7 @@ pub(crate) async fn self_test_translation(
         }
         crate::subtitle_transcription::managed_artifacts_unchanged(engine, model)?;
         interrupted(&cancel)?;
-        if !(match profile.task {
+        if !(match task {
             SpeechTask::TranslateToEnglish => selected::english_self_test(&cues),
             SpeechTask::Transcribe => selected::transcription_self_test(&cues),
         }) {
@@ -1560,7 +1562,8 @@ pub(crate) async fn self_test_translation(
     state: &AppState,
     engine: &Engine,
     model: &ManagedModel,
-    profile: &plurx_core::store::subtitle_translation::TranslationProfile,
+    spec: &crate::subtitle_models::artifacts::CatalogModel,
+    task: SpeechTask,
     fence: &JobFence,
     admission: &FragmentAdmission,
     manager_cancel: &CancellationToken,

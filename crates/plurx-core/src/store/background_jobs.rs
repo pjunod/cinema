@@ -135,11 +135,12 @@ macro_rules! subtitle_advanced_admission { () => { r#"EXISTS (SELECT 1 FROM sett
 // does not cancel another viewer's still-live interest in the same core.
 macro_rules! text_admission {
     // `admin_user_id` is the requesting user (the field name predates AI
-    // subtitles opening to every user). Model setup stays admin-only; a
-    // translation needs that user to exist and to be an admin or allowed by
-    // `subtitles.ai.v1` who='everyone', and the document's translate_text.
+    // subtitles opening to every user). Model setup is an admin's, or the
+    // node's own self-install (`admin_user_id` 0); a translation needs that
+    // user to exist and to be an admin or allowed by `subtitles.ai.v1`
+    // who='everyone', and the document's translate_text.
     ($payload:literal, $now:literal) => { concat!(r#"((json_extract("#,$payload,r#",'$.kind')='subtitle_text_model_operation'
-    AND EXISTS(SELECT 1 FROM users WHERE id=json_extract("#,$payload,r#",'$.admin_user_id') AND is_admin=1)) OR (
+    AND (json_extract("#,$payload,r#",'$.admin_user_id')=0 OR EXISTS(SELECT 1 FROM users WHERE id=json_extract("#,$payload,r#",'$.admin_user_id') AND is_admin=1))) OR (
     json_extract("#,$payload,r#",'$.kind')!='subtitle_text_model_operation'
     AND EXISTS(SELECT 1 FROM users WHERE id=json_extract("#,$payload,r#",'$.admin_user_id') AND (is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END)))
     AND EXISTS(SELECT 1 FROM files WHERE id=json_extract("#,$payload,r#",'$.file_id') AND size=json_extract("#,$payload,r#",'$.source_size') AND mtime=json_extract("#,$payload,r#",'$.source_mtime') AND probe_json IS NOT NULL)
@@ -2196,7 +2197,8 @@ impl JobPayload {
                     && adapter_contract == "candle-marian-0.11-v1"
                     && identifier(target_node_id)
                     && uuid::Uuid::parse_str(target_boot_id).is_ok()
-                    && *admin_user_id > 0
+                    // 0 is the node's own self-install (no requesting admin).
+                    && *admin_user_id >= 0
             }
             Self::SubtitleModelOperation {
                 action,

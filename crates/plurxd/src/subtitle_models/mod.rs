@@ -2,6 +2,7 @@
 pub(crate) mod api;
 pub(crate) mod artifacts;
 pub(crate) mod config;
+pub(crate) mod self_install;
 
 use crate::{http::error::ApiError, state::AppState};
 use artifacts::CatalogModel;
@@ -96,6 +97,14 @@ pub(crate) struct WorkerObservation {
     pub engine: Option<EngineObservation>,
     pub models: Vec<ModelObservation>,
     pub waits: Vec<JobWaitObservation>,
+    /// Logical CPUs this node offers; absent from older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cores: Option<u32>,
+    /// What the saved AI subtitles settings need on this node and how far
+    /// its self-install has got. `None` from a peer that predates
+    /// self-install; `Some(empty)` when the settings need nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirements: Option<Vec<self_install::Requirement>>,
 }
 const OBSERVATION_TTL: Duration = Duration::from_secs(60);
 
@@ -108,7 +117,8 @@ pub(crate) struct Runtime {
     peers: RwLock<Option<(Instant, Vec<Value>)>>,
     waits: RwLock<BTreeMap<String, (Instant, String)>>,
     automatic_verifications: RwLock<BTreeMap<String, String>>,
-    verification_failures: RwLock<std::collections::BTreeSet<String>>,
+    pub(crate) verification_failures: RwLock<std::collections::BTreeSet<String>>,
+    pub(crate) self_install: self_install::Attempts,
     candidate_cursor: RwLock<Option<plurx_core::store::background_jobs::CandidateCursor>>,
 }
 impl Runtime {
@@ -135,6 +145,7 @@ impl Runtime {
             waits: RwLock::new(BTreeMap::new()),
             automatic_verifications: RwLock::new(Default::default()),
             verification_failures: RwLock::new(Default::default()),
+            self_install: Default::default(),
             candidate_cursor: RwLock::new(None),
         }
     }
@@ -207,6 +218,10 @@ pub(crate) async fn workers_public(state: &AppState) -> Result<Vec<Value>, Store
                             && v.observed_at_ms <= crate::state::clock_ms().saturating_add(5000)
                             && v.models.len() <= 4
                             && v.waits.len() <= 32
+                            && v.requirements.as_ref().is_none_or(|rows| {
+                                rows.len() <= 4
+                                    && rows.iter().all(self_install::Requirement::bounded)
+                            })
                     })
                     .map(|v| json!(v))
                     .unwrap_or_else(|| unknown_worker(node_id, "Unavailable worker")),
@@ -302,7 +317,7 @@ pub(crate) async fn install(
         return crate::subtitle_translation::model_operation(
             &state,
             &id,
-            ModelAction::TranslationInstall,
+            ModelAction::Install,
             request,
         )
         .await;
@@ -321,7 +336,7 @@ pub(crate) async fn verify(
         return crate::subtitle_translation::model_operation(
             &state,
             &id,
-            ModelAction::TranslationVerify,
+            ModelAction::Verify,
             request,
         )
         .await;
@@ -390,7 +405,16 @@ async fn model_operation(
         json!({"version":1,"model_id":id,"operations":outcomes}),
     ))
 }
-async fn enqueue_model_operation(
+/// An admin's explicit Install or Test of one model on one node.
+pub(crate) async fn enqueue_explicit_operation(
+    state: &AppState,
+    model: &CatalogModel,
+    node_id: &str,
+    action: ModelAction,
+) -> Result<EnqueueOutcome, StoreError> {
+    enqueue_model_operation(state, model, node_id, action, None).await
+}
+pub(super) async fn enqueue_model_operation(
     state: &AppState,
     model: &CatalogModel,
     node_id: &str,
@@ -671,6 +695,11 @@ impl WorkerObservation {
             && self.expires_at_ms.saturating_sub(self.observed_at_ms) <= 60_000
             && self.models.len() <= 4
             && self.waits.len() <= 32
+            && self.cores.is_none_or(|cores| (1..=4096).contains(&cores))
+            && self
+                .requirements
+                .as_ref()
+                .is_none_or(|rows| rows.len() <= 4 && rows.iter().all(self_install::Requirement::bounded))
             && self.engine.as_ref().is_none_or(|engine| {
                 engine.contract.len() <= 256
                     && engine.platform.len() <= 64
@@ -711,6 +740,65 @@ impl WorkerObservation {
             })
     }
 }
+/// What a model receipt binds of the packaged engine.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EngineIdentity<'a> {
+    pub adapter_contract: &'a str,
+    pub binary_sha256: &'a str,
+    pub identity: plurx_core::fs_secure::FileIdentity,
+}
+impl<'a> EngineIdentity<'a> {
+    pub(crate) fn of(engine: &'a artifacts::Engine) -> Self {
+        Self {
+            adapter_contract: &engine.adapter_contract,
+            binary_sha256: &engine.binary_sha256,
+            identity: engine.identity,
+        }
+    }
+}
+
+/// The one verification record for a model: the receipt published by its
+/// last successful model operation on this node, in this boot, against this
+/// packaged engine and these exact model bytes. Whole-file transcription
+/// and both progressive speech profiles accept it; nothing else qualifies a
+/// speech model.
+pub(crate) fn current_receipt<'r>(
+    receipts: &'r [plurx_core::store::background_jobs_transcription::SubtitleModelReceipt],
+    node_id: &str,
+    boot_id: &str,
+    spec: &CatalogModel,
+    engine: &EngineIdentity<'_>,
+    model: plurx_core::fs_secure::FileIdentity,
+) -> Option<&'r plurx_core::store::background_jobs_transcription::SubtitleModelReceipt> {
+    receipts.iter().find(|receipt| {
+        receipt.node_id == node_id
+            && receipt.boot_id == boot_id
+            && receipt.model_id == spec.id
+            && receipt.model_sha256 == spec.sha256
+            && receipt.adapter_contract == engine.adapter_contract
+            && receipt.engine_sha256 == engine.binary_sha256
+            && receipt.model_file_identity == artifacts::identity_key(model)
+            && receipt.engine_file_identity == artifacts::identity_key(engine.identity)
+    })
+}
+
+/// Which self-test qualifies a model. A multilingual model runs the German
+/// clip translated to English, which exercises the decoder, the language
+/// path and the translate task, so its receipt also covers transcription.
+/// An English-only model keeps the packaged English clip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SelfTest {
+    English,
+    GermanToEnglish,
+}
+pub(crate) fn self_test_for(spec: &CatalogModel) -> SelfTest {
+    if spec.languages.len() > 1 {
+        SelfTest::GermanToEnglish
+    } else {
+        SelfTest::English
+    }
+}
+
 async fn refresh_local(state: &AppState) -> Result<(), StoreError> {
     let now = crate::state::clock_ms();
     let inspected = artifacts::inspect_engine().await;
@@ -737,15 +825,17 @@ async fn refresh_local(state: &AppState) -> Result<(), StoreError> {
         });
         let verified = accepted
             && !failed
-            && opened.as_ref().ok().zip(engine).zip(receipt).is_some_and(
-                |((model, engine), receipt)| {
-                    receipt.boot_id == state.subtitle_models.boot_id
-                        && receipt.adapter_contract == engine.adapter_contract
-                        && receipt.engine_sha256 == engine.binary_sha256
-                        && receipt.model_file_identity == artifacts::identity_key(*model)
-                        && receipt.engine_file_identity == artifacts::identity_key(engine.identity)
-                },
-            );
+            && opened.as_ref().ok().zip(engine).is_some_and(|(model, engine)| {
+                current_receipt(
+                    &receipts,
+                    &state.node_id,
+                    &state.subtitle_models.boot_id,
+                    spec,
+                    &EngineIdentity::of(engine),
+                    *model,
+                )
+                .is_some()
+            });
         let status = if opened.is_ok() && !accepted {
             "unverified_cache"
         } else if failed {
@@ -825,6 +915,10 @@ async fn refresh_local(state: &AppState) -> Result<(), StoreError> {
         ),
         models,
         waits,
+        cores: std::thread::available_parallelism()
+            .ok()
+            .and_then(|cores| u32::try_from(cores.get()).ok()),
+        requirements: state.subtitle_models.self_install.observed().await,
     };
     *state.subtitle_models.local.write().await = Some((Instant::now(), observation));
     Ok(())
@@ -847,6 +941,11 @@ fn accepted_model_identity(
 #[derive(Debug, PartialEq, Eq)]
 enum ModelOperationOrigin<'a> {
     Explicit,
+    /// The node's own install of a model its saved settings need
+    /// ([`self_install`]), bound to the boot that enqueued it.
+    SelfInstall {
+        boot_id: &'a str,
+    },
     Automatic {
         boot_id: &'a str,
         identity_sha: &'a str,
@@ -865,6 +964,15 @@ fn model_operation_origin<'a>(
     let suffix = job.dedupe_key.strip_prefix(&prefix)?;
     if suffix == "request" {
         return Some(ModelOperationOrigin::Explicit);
+    }
+    if let Some(rest) = suffix.strip_prefix(self_install::KEY_PREFIX) {
+        let (boot_id, attempt) = rest.split_once(':')?;
+        return (*action == ModelAction::Install
+            && uuid::Uuid::parse_str(boot_id).is_ok()
+            && !attempt.is_empty()
+            && attempt.len() <= 4
+            && attempt.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(ModelOperationOrigin::SelfInstall { boot_id });
     }
     let (boot_id, identity_sha) = suffix.split_once(':')?;
     (*action == ModelAction::Verify
@@ -1173,6 +1281,9 @@ pub(crate) async fn worker_pass(
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> Result<(), StoreError> {
     refresh_local(state).await?;
+    if let Err(error) = self_install::pass(state).await {
+        tracing::debug!(%error, "AI subtitles self-install pass stopped");
+    }
     use plurx_core::store::background_jobs::{ClaimJob, JobKind, JobSettlement};
     let authority = state.jobs.execution_authority();
     let settings = config::read_applied(&state.applied).await?;
@@ -1202,6 +1313,15 @@ pub(crate) async fn worker_pass(
         let payload = candidate.supported_payload()?;
         if matches!(&payload,JobPayload::SubtitleModelOperation{action,..} if action.is_translation())
         {
+            // A queued row of the removed per-profile translation path: the
+            // one model operation replaced it, so settle it unrun.
+            state
+                .store
+                .cancel_job(plurx_core::store::background_jobs::CancelJob {
+                    job_id: candidate.id.clone(),
+                    now_ms: crate::state::clock_ms(),
+                })
+                .await?;
             continue;
         }
         let kind = payload.kind();
@@ -1248,6 +1368,15 @@ pub(crate) async fn worker_pass(
         let automatic_model_identity = if !generation {
             match model_operation_origin(&candidate, &payload) {
                 Some(ModelOperationOrigin::Explicit) => None,
+                Some(ModelOperationOrigin::SelfInstall { boot_id }) => {
+                    if boot_id != state.subtitle_models.boot_id {
+                        // A previous boot's self-install; this boot decides
+                        // afresh and enqueues its own.
+                        retire_obsolete_model_operation(state, &candidate, spec).await?;
+                        continue;
+                    }
+                    None
+                }
                 Some(ModelOperationOrigin::Automatic { boot_id, .. }) => {
                     let model = artifacts::model_identity(&state.subtitle_models.root, spec)
                         .await
@@ -1316,15 +1445,15 @@ pub(crate) async fn worker_pass(
                 .read()
                 .await
                 .contains(&spec.id)
-                || !receipts.iter().any(|receipt| {
-                    receipt.model_id == spec.id
-                        && receipt.model_sha256 == spec.sha256
-                        && receipt.boot_id == state.subtitle_models.boot_id
-                        && receipt.engine_sha256 == engine.binary_sha256
-                        && receipt.adapter_contract == engine.adapter_contract
-                        && receipt.model_file_identity == artifacts::identity_key(model)
-                        && receipt.engine_file_identity == artifacts::identity_key(engine.identity)
-                })
+                || current_receipt(
+                    &receipts,
+                    &state.node_id,
+                    &state.subtitle_models.boot_id,
+                    spec,
+                    &EngineIdentity::of(&engine),
+                    model,
+                )
+                .is_none()
             {
                 state
                     .subtitle_models
@@ -1464,10 +1593,27 @@ pub(crate) async fn worker_pass(
                 {
                     return Err(StoreError::Task("subtitle_operation_fenced".into()));
                 }
-                crate::subtitle_transcription::self_test_managed(
-                    state, &engine, &model, &fence, &admission, &cancel,
-                )
-                .await?;
+                match self_test_for(spec) {
+                    SelfTest::English => {
+                        crate::subtitle_transcription::self_test_managed(
+                            state, &engine, &model, &fence, &admission, &cancel,
+                        )
+                        .await?
+                    }
+                    SelfTest::GermanToEnglish => {
+                        crate::subtitle_translation::runtime::self_test_translation(
+                            state,
+                            &engine,
+                            &model,
+                            spec,
+                            plurx_core::store::subtitle_translation::SpeechTask::TranslateToEnglish,
+                            &fence,
+                            &admission,
+                            &cancel,
+                        )
+                        .await?
+                    }
+                }
                 if cancel.is_cancelled() {
                     return Err(StoreError::Task("worker_interrupted".into()));
                 }
@@ -1857,7 +2003,6 @@ mod tests {
             assert!(!state
                 .store
                 .publish_subtitle_model(PublishSubtitleModel {
-                    translation: None,
                     token,
                     source,
                     receipt,
@@ -1878,7 +2023,6 @@ mod tests {
             assert!(state
                 .store
                 .publish_subtitle_model(PublishSubtitleModel {
-                    translation: None,
                     token,
                     source,
                     receipt,
@@ -2889,6 +3033,304 @@ mod tests {
         assert_eq!(replay.next_run_ms, 0);
         assert_eq!(replay.cursor, 0);
         lease.release().await.expect("release");
+        state.shutdown.cancel();
+    }
+
+    fn capable() -> self_install::Facts {
+        self_install::Facts {
+            speech_engine: true,
+            text_engine: true,
+            free_disk_bytes: Some(64 << 30),
+            memory_bytes: Some(32 << 30),
+            may_execute_speech: true,
+            may_execute_text: true,
+        }
+    }
+    fn ai_settings(from_audio: bool) -> crate::ai_subtitles::settings::Settings {
+        crate::ai_subtitles::settings::Settings {
+            version: 1,
+            download_match: false,
+            translate_text: false,
+            from_audio,
+            ahead_of_time: false,
+            who: crate::ai_subtitles::settings::Who::Admins,
+            quality: crate::ai_subtitles::settings::Quality::Balanced,
+        }
+    }
+    async fn queued_model_operations(state: &AppState) -> Vec<BackgroundJob> {
+        state
+            .store
+            .job_candidates(plurx_core::store::background_jobs::CandidateQuery {
+                node_id: state.node_id.clone(),
+                kinds: vec![plurx_core::store::background_jobs::JobKind::SubtitleModelOperation],
+                after: None,
+                now_ms: crate::state::clock_ms() + 10,
+                limit: 32,
+                admissible_only: false,
+            })
+            .await
+            .expect("model operations")
+            .jobs
+    }
+    fn small() -> &'static CatalogModel {
+        catalog()
+            .models
+            .iter()
+            .find(|model| model.id == "small")
+            .expect("small in the catalog")
+    }
+
+    /// With the audio route on and `small` missing, one worker pass enqueues
+    /// exactly one self-install for this node and a second pass none; with
+    /// the audio route off, nothing.
+    #[tokio::test]
+    async fn audio_route_self_installs_a_missing_model_once() {
+        let root = crate::test_tempdir().expect("private root");
+        let state = persistent_state(root.path(), &root.path().join("self-install.sqlite"));
+        refresh_local(&state).await.expect("observe");
+        let now = crate::state::clock_ms();
+        let off = self_install::pass_with(&state, &ai_settings(false), &capable(), now)
+            .await
+            .expect("pass with the audio route off");
+        assert!(off.is_empty());
+        assert!(queued_model_operations(&state).await.is_empty());
+
+        let rows = self_install::pass_with(&state, &ai_settings(true), &capable(), now)
+            .await
+            .expect("first pass");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model_id, "small");
+        assert_eq!(rows[0].state, "downloading");
+        let jobs = queued_model_operations(&state).await;
+        assert_eq!(jobs.len(), 1);
+        let payload = jobs[0].supported_payload().expect("typed payload");
+        assert!(matches!(
+            &payload,
+            JobPayload::SubtitleModelOperation {
+                action: ModelAction::Install,
+                model_id,
+                target_node_id,
+                translation_profile: None,
+                ..
+            } if model_id == "small" && *target_node_id == state.node_id
+        ));
+        assert_eq!(
+            model_operation_origin(&jobs[0], &payload),
+            Some(ModelOperationOrigin::SelfInstall {
+                boot_id: &state.subtitle_models.boot_id
+            })
+        );
+        let again = self_install::pass_with(&state, &ai_settings(true), &capable(), now + 1)
+            .await
+            .expect("second pass");
+        assert_eq!(again[0].state, "downloading");
+        assert_eq!(queued_model_operations(&state).await.len(), 1);
+        assert_eq!(
+            state.subtitle_models.local_observation().await.and_then(|o| o.requirements),
+            Some(again),
+            "the outcome reaches the worker observation"
+        );
+
+        // A node that cannot hold or run the model reports why and installs nothing.
+        let other = persistent_state(root.path(), &root.path().join("small-node.sqlite"));
+        refresh_local(&other).await.expect("observe");
+        let mut tight = capable();
+        tight.memory_bytes = Some(small().download_bytes);
+        let rows = self_install::pass_with(&other, &ai_settings(true), &tight, now)
+            .await
+            .expect("unsupported pass");
+        assert_eq!(rows[0].state, "unsupported");
+        assert_eq!(rows[0].reason.as_deref(), Some("insufficient_memory"));
+        let mut no_engine = capable();
+        no_engine.speech_engine = false;
+        let rows = self_install::pass_with(&other, &ai_settings(true), &no_engine, now)
+            .await
+            .expect("engine-less pass");
+        assert_eq!(rows[0].reason.as_deref(), Some("engine_unavailable"));
+        assert!(queued_model_operations(&other).await.is_empty());
+        state.shutdown.cancel();
+        other.shutdown.cancel();
+    }
+
+    /// A cached model with no accepted receipt (a cancelled install) gets a
+    /// self-install, never an automatic verification.
+    #[tokio::test]
+    async fn unverified_cache_is_repaired_by_a_self_install_not_an_automatic_verify() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::test_tempdir().expect("private root");
+        let state = persistent_state(root.path(), &root.path().join("cache.sqlite"));
+        let model_root = root.path().join("subtitle-models");
+        std::fs::create_dir(&model_root).expect("model root");
+        std::fs::set_permissions(&model_root, std::fs::Permissions::from_mode(0o700))
+            .expect("private models");
+        let cached_path = model_root.join(format!("{}.bin", small().sha256));
+        // Only identity and receipt eligibility are under test; these bytes
+        // do not claim to be a recognizer model.
+        let cache = std::fs::File::create(&cached_path).expect("cache");
+        cache
+            .set_len(small().download_bytes)
+            .expect("sparse metadata fixture");
+        cache
+            .set_permissions(std::fs::Permissions::from_mode(0o400))
+            .expect("model permissions");
+        drop(cache);
+        refresh_local(&state).await.expect("observe");
+        let observed = state.subtitle_models.local_observation().await.expect("observation");
+        assert_eq!(
+            observed
+                .models
+                .iter()
+                .find(|model| model.model_id == "small")
+                .expect("small observed")
+                .status,
+            "unverified_cache"
+        );
+        let mut full_disk = capable();
+        full_disk.free_disk_bytes = Some(0);
+        let rows = self_install::pass_with(
+            &state,
+            &ai_settings(true),
+            &full_disk,
+            crate::state::clock_ms(),
+        )
+        .await
+        .expect("pass");
+        assert_eq!(rows[0].state, "downloading", "present bytes need no new disk");
+        let jobs = queued_model_operations(&state).await;
+        assert_eq!(jobs.len(), 1);
+        assert!(matches!(
+            jobs[0].supported_payload().expect("typed payload"),
+            JobPayload::SubtitleModelOperation {
+                action: ModelAction::Install,
+                ..
+            }
+        ));
+        assert!(state
+            .subtitle_models
+            .automatic_verifications
+            .read()
+            .await
+            .is_empty());
+        state.shutdown.cancel();
+    }
+
+    /// A failed self-install backs off 15 min, then 1 h, capped at 6 h, and
+    /// reports why.
+    #[tokio::test]
+    async fn failed_self_install_backs_off_and_reports_the_reason() {
+        assert_eq!(self_install::backoff_ms(1), 15 * 60_000);
+        assert_eq!(self_install::backoff_ms(2), 60 * 60_000);
+        assert_eq!(self_install::backoff_ms(3), 6 * 60 * 60_000);
+        assert_eq!(self_install::backoff_ms(40), 6 * 60 * 60_000);
+        let root = crate::test_tempdir().expect("private root");
+        let state = persistent_state(root.path(), &root.path().join("backoff.sqlite"));
+        refresh_local(&state).await.expect("observe");
+        let now = crate::state::clock_ms();
+        let settings = ai_settings(true);
+        self_install::pass_with(&state, &settings, &capable(), now)
+            .await
+            .expect("first attempt");
+        let first = queued_model_operations(&state).await;
+        assert_eq!(first.len(), 1);
+        state
+            .store
+            .cancel_job(plurx_core::store::background_jobs::CancelJob {
+                job_id: first[0].id.clone(),
+                now_ms: now + 1,
+            })
+            .await
+            .expect("stop the attempt");
+        let rows = self_install::pass_with(&state, &settings, &capable(), now + 2)
+            .await
+            .expect("backed-off pass");
+        assert_eq!(rows[0].state, "failed");
+        assert_eq!(rows[0].reason.as_deref(), Some("install_cancelled"));
+        assert_eq!(rows[0].retry_at_ms, Some(now + 2 + 15 * 60_000));
+        assert!(queued_model_operations(&state).await.is_empty());
+        let later = self_install::pass_with(&state, &settings, &capable(), now + 15 * 60_000 + 3)
+            .await
+            .expect("retry pass");
+        assert_eq!(later[0].state, "downloading");
+        let retried = queued_model_operations(&state).await;
+        assert_eq!(retried.len(), 1);
+        assert_ne!(retried[0].id, first[0].id);
+        assert!(retried[0].dedupe_key.ends_with(":1"));
+        state.shutdown.cancel();
+    }
+
+    /// A multilingual model's receipt comes from the German clip translated
+    /// to English; English-only models keep the English clip.
+    #[test]
+    fn multilingual_models_self_test_with_the_german_translate_case() {
+        for model in &catalog().models {
+            assert_eq!(
+                self_test_for(model),
+                if model.languages.len() > 1 {
+                    SelfTest::GermanToEnglish
+                } else {
+                    SelfTest::English
+                },
+                "{}",
+                model.id
+            );
+        }
+        assert_eq!(self_test_for(small()), SelfTest::GermanToEnglish);
+        let base_en = catalog().models.iter().find(|m| m.id == "base.en").expect("base.en");
+        assert_eq!(self_test_for(base_en), SelfTest::English);
+        assert_eq!(crate::subtitle_translation::profile::SELF_TEST_LANGUAGE, "de");
+        assert_eq!(small().sha256, crate::subtitle_translation::profile::MODEL_SHA256);
+    }
+
+    /// A queued row of the removed translation install path is settled by
+    /// the one model worker instead of running or failing to deserialize.
+    #[tokio::test]
+    async fn queued_legacy_translation_model_actions_are_cancelled() {
+        let root = crate::test_tempdir().expect("private root");
+        let state = persistent_state(root.path(), &root.path().join("legacy.sqlite"));
+        let selected = crate::subtitle_translation::profile::selected_profile();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = crate::state::clock_ms();
+        let payload = JobPayload::SubtitleModelOperation {
+            translation_profile: Some(selected.clone()),
+            action: ModelAction::TranslationVerify,
+            model_id: selected.model_id.clone(),
+            catalog_revision: catalog().revision.clone(),
+            model_sha256: selected.model_sha256.clone(),
+            adapter_contract: selected.adapter_contract.clone(),
+            target_node_id: state.node_id.clone(),
+        };
+        state
+            .store
+            .enqueue_job(EnqueueJob {
+                id: id.clone(),
+                payload,
+                dedupe_key: format!("translation-auto:{}", "a".repeat(64)),
+                priority: 0,
+                not_before_ms: now,
+                now_ms: now,
+                request: JobRequest {
+                    scope: "translation-auto".into(),
+                    request_id: id.clone(),
+                    request_digest: "b".repeat(64),
+                    consumer_kind: "subtitle_model_operation".into(),
+                    consumer_ref: id.clone(),
+                    target_node_id: Some(state.node_id.clone()),
+                    deadline_ms: None,
+                    retain_identity: true,
+                },
+            })
+            .await
+            .expect("queued legacy row");
+        worker_pass(&state, &tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("worker pass");
+        let job = state
+            .store
+            .background_job(&id)
+            .await
+            .expect("lookup")
+            .expect("retained");
+        assert_eq!(job.state, JobState::Cancelled);
         state.shutdown.cancel();
     }
 }

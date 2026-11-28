@@ -1132,22 +1132,20 @@ async fn idle_cache_collection_preserves_live_read_lease_and_stop_tombstone() {
 }
 
 #[tokio::test]
-async fn translation_qualification_never_mints_unrun_generation_readiness() {
+async fn one_model_receipt_qualifies_and_legacy_translation_actions_publish_nothing() {
     use plurx_core::store::{
         background_jobs::{EnqueueJob, JobPayload, JobRequest},
-        background_jobs_transcription::{
-            ModelAction, PublishSubtitleModel, SubtitleModelReceipt, TranslationQualification,
-        },
+        background_jobs_transcription::{ModelAction, PublishSubtitleModel, SubtitleModelReceipt},
     };
     let (_dir, store, conn) = fixture();
-    for (label, action, qualified) in [
+    for (label, action, legacy) in [
         ("translation", ModelAction::TranslationVerify, true),
         ("ordinary", ModelAction::Verify, false),
     ] {
         let id = uuid::Uuid::new_v4().to_string();
         let selected = profile();
         let source = JobPayload::SubtitleModelOperation {
-            translation_profile: qualified.then_some(selected.clone()),
+            translation_profile: legacy.then_some(selected.clone()),
             action,
             model_id: "small".into(),
             catalog_revision: "catalog".into(),
@@ -1191,35 +1189,36 @@ async fn translation_qualification_never_mints_unrun_generation_readiness() {
             fence: token.fence,
             verified_at_ms: 1200,
         };
-        assert!(store
+        let published = store
             .publish_subtitle_model(PublishSubtitleModel {
                 token,
                 source,
                 receipt,
-                translation: qualified.then_some(TranslationQualification {
-                    profile: selected,
-                    self_test_sha256: "f".repeat(64)
-                }),
-                now_ms: 1200
+                now_ms: 1200,
             })
-            .await
-            .expect("publish"));
+            .await;
+        if legacy {
+            assert!(published.is_err(), "a legacy translation action publishes nothing");
+        } else {
+            assert!(published.expect("publish"));
+        }
         assert_eq!(
             conn.query_row(
                 "SELECT count(*) FROM subtitle_translation_capabilities",
                 [],
                 |r| r.get::<_, i64>(0)
             )
-            .expect("translation receipt"),
-            1
+            .expect("capability rows"),
+            0,
+            "no per-profile capability rows are written any more"
         );
         assert_eq!(
             store
                 .subtitle_model_receipts("worker")
                 .await
-                .expect("normal receipt")
+                .expect("model receipts")
                 .len(),
-            if qualified { 0 } else { 1 }
+            if legacy { 0 } else { 1 }
         );
     }
 }
