@@ -190,6 +190,28 @@ pub async fn output_command(
     .await
 }
 
+/// A bounded service child with a descriptor manifest bound at launch.
+pub async fn output_command_with_descriptors(
+    command: &mut Command,
+    wall_time: Duration,
+    max_output_bytes: usize,
+    work: super::ChildWork,
+    manifest: std::sync::Arc<super::source_lifetime::DescriptorManifest>,
+) -> io::Result<Output> {
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Service,
+        None,
+        &[],
+        None,
+        Some(manifest),
+    )
+    .await
+}
+
 /// Bounded CPU child with held descriptors and an LC_ALL-only environment.
 /// Absolute executable and library-qualified package paths are required.
 pub async fn output_command_clean_env(

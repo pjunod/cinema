@@ -206,6 +206,7 @@ impl TranscodeManager {
         }
         Some(StartInfo {
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,

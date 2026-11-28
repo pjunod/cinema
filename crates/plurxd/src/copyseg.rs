@@ -336,7 +336,7 @@ pub(crate) struct NativeSplitAuthor {
     /// The projected soundtrack's proved sample entry. The split master
     /// writes CODECS and CHANNELS from it, never from a constant.
     audio_facts: fmp4::AacSampleEntryFacts,
-    pub(crate) video: fmp4::video_splice::SpliceVideoFormat,
+    pub(crate) video: std::sync::Arc<fmp4::video_splice::SpliceVideoFormat>,
     audio_end: Option<u64>,
     video_end: Option<u64>,
     source_frames: u64,
@@ -421,38 +421,11 @@ impl NativeSplitSegment {
         &self,
         grid: plurx_core::transcode::VodFrameGrid,
     ) -> Result<Vec<plurx_core::segplan::PlanEntry>, String> {
-        use plurx_core::segplan::{PlanCut, PlanEntry, PlanEntryKind};
-        let frames = self.ordinary.tracks[0].sample_count() as u64;
-        let per_window = u64::from(grid.frames_per_segment).min(64);
-        if per_window == 0 || frames < 2 {
-            return Err("rolling segment cannot provide a complete FEL witness".into());
-        }
-        let last = self
-            .first_source_frame
-            .checked_add(frames)
-            .ok_or("source frame overflow")?;
-        let step = u64::from(grid.denominator);
-        let mut first = self.first_source_frame;
-        let mut entries = Vec::new();
-        while first < last {
-            let count = (per_window - first % per_window).min(last - first);
-            entries.push(PlanEntry {
-                index: u32::try_from(first / per_window)
-                    .map_err(|_| "private FEL index overflow")?,
-                kind: PlanEntryKind::Video,
-                start_ticks: first
-                    .checked_mul(step)
-                    .ok_or("first FEL source tick overflow")?,
-                duration_ticks: count
-                    .checked_mul(step)
-                    .ok_or("private FEL duration overflow")?,
-                est_bytes: 0,
-                cut: PlanCut::Clean,
-                fragments: 0,
-            });
-            first += count;
-        }
-        Ok(entries)
+        native_fel_windows(
+            self.first_source_frame,
+            self.ordinary.tracks[0].sample_count() as u64,
+            grid,
+        )
     }
 
     #[cfg(target_os = "linux")]
@@ -466,12 +439,33 @@ impl NativeSplitSegment {
             .ordinary_video_init()
             .video()
             .ok_or("ordinary video missing")?;
-        let bytes = crate::vodencode::dv_runtime::package_fel_segment(
-            &windows,
+        NativeFelSegment::package(
             &self.ordinary,
             ordinary_track,
             &self.public_video,
             &author.video,
+            windows,
+            first_fragment_sequence,
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl NativeFelSegment {
+    pub(crate) fn package(
+        ordinary: &fmp4::Fragment,
+        ordinary_track: &fmp4::Track,
+        output_extent: &fmp4::Fragment,
+        format: &fmp4::video_splice::SpliceVideoFormat,
+        windows: Vec<crate::vodencode::dv_runtime::NativeFelWindow>,
+        first_fragment_sequence: u32,
+    ) -> Result<Self, String> {
+        let bytes = crate::vodencode::dv_runtime::package_fel_segment(
+            &windows,
+            ordinary,
+            ordinary_track,
+            output_extent,
+            format,
             first_fragment_sequence,
         )?;
         use plurx_core::transcode::dv_processing::DvDigest;
@@ -481,7 +475,7 @@ impl NativeSplitSegment {
         Ok(NativeFelSegment {
             bytes,
             proof: NativeFelSegmentProof {
-                ordinary_video: sha2::Sha256::digest(&self.public_video.bytes).into(),
+                ordinary_video: sha2::Sha256::digest(&output_extent.bytes).into(),
                 shape,
                 receipts: windows.into_iter().map(|window| window.receipt).collect(),
             },
@@ -489,10 +483,50 @@ impl NativeSplitSegment {
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn native_fel_windows(
+    first_source_frame: u64,
+    frames: u64,
+    grid: plurx_core::transcode::VodFrameGrid,
+) -> Result<Vec<plurx_core::segplan::PlanEntry>, String> {
+    use plurx_core::segplan::{PlanCut, PlanEntry, PlanEntryKind};
+    let per_window = u64::from(grid.frames_per_segment).min(64);
+    if per_window == 0 || frames < 2 {
+        return Err("rolling segment cannot provide a complete FEL witness".into());
+    }
+    let last = first_source_frame
+        .checked_add(frames)
+        .ok_or("source frame overflow")?;
+    let step = u64::from(grid.denominator);
+    let mut first = first_source_frame;
+    let mut entries = Vec::new();
+    while first < last {
+        let count = (per_window - first % per_window).min(last - first);
+        entries.push(PlanEntry {
+            index: u32::try_from(first / per_window).map_err(|_| "private FEL index overflow")?,
+            kind: PlanEntryKind::Video,
+            start_ticks: first
+                .checked_mul(step)
+                .ok_or("first FEL source tick overflow")?,
+            duration_ticks: count
+                .checked_mul(step)
+                .ok_or("private FEL duration overflow")?,
+            est_bytes: 0,
+            cut: PlanCut::Clean,
+            fragments: 0,
+        });
+        first += count;
+    }
+    Ok(entries)
+}
+
 impl NativeSplitAuthor {
     pub(crate) fn new(init: Init) -> Result<Self, fmp4::Fmp4Error> {
         let tracks = fmp4::track_projection::CopyTrackProjection::new(init)?;
-        let video = fmp4::video_splice::SpliceVideoFormat::new(tracks.video_init(), 48_000)?;
+        let video = std::sync::Arc::new(fmp4::video_splice::SpliceVideoFormat::new(
+            tracks.video_init(),
+            48_000,
+        )?);
         // Only AAC sample entries can be proved today. Any other soundtrack
         // keeps the ordinary mux rather than a master that names a codec it
         // cannot attest (P62 S2 rule 6; S3 adds AC-3 and E-AC-3 facts).
@@ -580,6 +614,118 @@ impl NativeSplitAuthor {
             first_source_frame,
         })
     }
+}
+
+struct UnprocessedSplitAuthor {
+    tracks: fmp4::track_projection::CopyTrackProjection,
+    audio_facts: fmp4::AacSampleEntryFacts,
+    audio_end: Option<u64>,
+    video_end: Option<u64>,
+}
+
+enum RollingSplitAuthor {
+    NativeFel(NativeSplitAuthor),
+    Unprocessed(UnprocessedSplitAuthor),
+}
+
+impl RollingSplitAuthor {
+    fn new(init: Init, unprocessed: bool) -> Result<Self, fmp4::Fmp4Error> {
+        if unprocessed {
+            let tracks = fmp4::track_projection::CopyTrackProjection::new(init)?;
+            let audio_facts = fmp4::aac_lc_sample_entry_facts(tracks.audio_init())?;
+            Ok(Self::Unprocessed(UnprocessedSplitAuthor {
+                tracks,
+                audio_facts,
+                audio_end: None,
+                video_end: None,
+            }))
+        } else {
+            NativeSplitAuthor::new(init).map(Self::NativeFel)
+        }
+    }
+
+    fn inits(&self) -> (&Init, &Init, fmp4::AacSampleEntryFacts) {
+        match self {
+            Self::NativeFel(author) => (
+                author.video.init(),
+                author.audio_init(),
+                author.audio_facts.clone(),
+            ),
+            Self::Unprocessed(author) => (
+                author.tracks.video_init(),
+                author.tracks.audio_init(),
+                author.audio_facts.clone(),
+            ),
+        }
+    }
+
+    fn segment(
+        &mut self,
+        bytes: &[u8],
+        sequence: u32,
+    ) -> Result<RollingSplitMedia, fmp4::Fmp4Error> {
+        match self {
+            Self::NativeFel(author) => {
+                let media = author.segment(bytes, sequence)?;
+                Ok(RollingSplitMedia {
+                    video: media.public_video,
+                    audio: media.audio,
+                    first_source_frame: media.first_source_frame,
+                    samples: media.ordinary.tracks[0].sample_count() as u64,
+                })
+            }
+            Self::Unprocessed(author) => {
+                let media = author.tracks.segment(bytes, sequence)?;
+                let audio = &media.audio.tracks[0];
+                let video = &media.video.tracks[0];
+                let error = || {
+                    fmp4::Fmp4Error::Malformed(
+                        "rolling split has discontinuous track timestamps".into(),
+                    )
+                };
+                if author
+                    .audio_end
+                    .is_some_and(|end| end != audio.base_decode_time)
+                    || author
+                        .video_end
+                        .is_some_and(|end| end != video.base_decode_time)
+                    || video
+                        .runs
+                        .iter()
+                        .flat_map(|run| &run.samples)
+                        .next()
+                        .is_none_or(|sample| !sample.is_sync())
+                {
+                    return Err(error());
+                }
+                author.audio_end = Some(
+                    audio
+                        .base_decode_time
+                        .checked_add(audio.duration())
+                        .ok_or_else(error)?,
+                );
+                author.video_end = Some(
+                    video
+                        .base_decode_time
+                        .checked_add(video.duration())
+                        .ok_or_else(error)?,
+                );
+                Ok(RollingSplitMedia {
+                    first_source_frame: 0,
+                    samples: video.sample_count() as u64,
+                    audio: media.audio,
+                    video: media.video,
+                })
+            }
+        }
+    }
+}
+
+struct RollingSplitMedia {
+    video: fmp4::Fragment,
+    audio: fmp4::Fragment,
+    first_source_frame: u64,
+    samples: u64,
 }
 
 /// Split assets are private until the rolling response owner selects the
@@ -700,6 +846,238 @@ pub(crate) struct RollingCopySourceClock {
     pub(crate) clock: fmp4::video_splice::CopiedPictureClock,
 }
 
+#[cfg(test)]
+fn rolling_profile81_opening() -> (Init, Published) {
+    use fmp4::DolbyVisionRecord;
+
+    let mut reader = FragmentReader::new();
+    reader.push(include_bytes!(
+        "../../plurx-core/tests/fixtures/dv-runtime/rolling-hdr10-with-aac.mp4"
+    ));
+    let Some(Unit::Init(mut init)) = reader.next_unit().expect("fixture init") else {
+        panic!("missing fixture init");
+    };
+    let record = DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("Profile 8.1");
+    fmp4::set_dolby_vision_record(&mut init, &record).expect("author DV init");
+    let Some(Unit::Fragment(fragment)) = reader.next_unit().expect("fixture fragment") else {
+        panic!("missing fixture fragment");
+    };
+    let segment =
+        fmp4::merge_retaining(&[fragment], &init, 1, true).expect("write fixture segment");
+    (
+        init,
+        Published {
+            index: 0,
+            segment,
+            reason: fmp4::CutReason::EndOfStream,
+            seconds: 1.0,
+        },
+    )
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn rolling_native_split_muxes_the_opening_before_publication_on_refusal() {
+    let (init, opening) = rolling_profile81_opening();
+    let root = crate::test_tempdir().expect("split writer directory");
+    let split =
+        std::sync::Arc::new(NativeSplitInventory::with_budget(0, u64::MAX).with_writer_layout());
+    let mut writer = SessionDir::new(root.path().to_owned(), 2, 16, None);
+    writer.split_inventory = Some(std::sync::Arc::clone(&split));
+    writer.write_init(&init).await.expect("stage init");
+    writer.write_segment(&opening).await.expect("stage opening");
+    assert!(
+        !split.allows_scalar(),
+        "unexpected opening refusal: {:?}",
+        split.decline_reason()
+    );
+    assert!(split.active_ids().is_none());
+    assert!(!root.path().join("index.m3u8").exists());
+
+    // Decline during the private opening, with one whole pair already staged.
+    // Entry 1 repeats its decode origin, which breaks the split proof.
+    let second = Published {
+        index: 1,
+        ..opening.clone()
+    };
+    writer
+        .write_segment(&second)
+        .await
+        .expect("replay muxed opening");
+    assert!(split.allows_scalar());
+    assert!(split.active_ids().is_none());
+    assert!(root.path().join("index.m3u8").exists());
+    assert!(!root.path().join("split-audio.mp4").exists());
+    assert_eq!(
+        tokio::fs::read(root.path().join("init.mp4"))
+            .await
+            .expect("muxed initialization"),
+        init.bytes
+    );
+    for published in [opening, second] {
+        assert_eq!(
+            tokio::fs::read(root.path().join(published.name()))
+                .await
+                .expect("replayed muxed segment"),
+            published.segment.bytes,
+        );
+    }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn rolling_split_reproduces_issued_children_in_a_new_sequence_epoch() {
+    use crate::transcode::RollingHlsLayout;
+    let (mut init, mut opening) = rolling_profile81_opening();
+    fmp4::remove_dolby_vision_record(&mut init).expect("plain HDR10 init");
+    let root = crate::test_tempdir().expect("rolling split directory");
+    let inventory = std::sync::Arc::new(
+        NativeSplitInventory::with_budget(0, u64::MAX)
+            .with_audio_index(Some(2))
+            .with_unprocessed_projection(),
+    );
+    let mut writer = SessionDir::new(root.path().to_owned(), 0, 16, None);
+    writer.split_inventory = Some(std::sync::Arc::clone(&inventory));
+    writer.write_init(&init).await.expect("initial pair");
+    writer
+        .write_segment(&opening)
+        .await
+        .expect("first epoch media");
+    let layout = inventory
+        .seal_for_activation()
+        .expect("issued layout")
+        .expect("fMP4 layout");
+    let RollingHlsLayout::SplitV1 { video, audio, .. } = &layout else {
+        panic!("split required")
+    };
+
+    let next = crate::test_tempdir().expect("second owner directory");
+    let resumed = std::sync::Arc::new(
+        NativeSplitInventory::with_budget(0, u64::MAX)
+            .with_audio_index(Some(2))
+            .with_unprocessed_projection()
+            .with_expected_layout(Some(layout.clone())),
+    );
+    let mut writer = SessionDir::new(next.path().to_owned(), 0, 16, None);
+    // The epoch is deliberately outside the range of a BMFF sequence number
+    // multiplied by the child fragment stride.
+    opening.index = 1_000_000_000;
+    writer.first_media_sequence = opening.index;
+    writer.init_name = "init-e2.mp4".to_owned();
+    writer.split_inventory = Some(std::sync::Arc::clone(&resumed));
+    writer
+        .write_init(&init)
+        .await
+        .expect("reproduce role inits");
+    writer
+        .write_segment(&opening)
+        .await
+        .expect("reproduce paired media");
+    assert_eq!(
+        resumed
+            .seal_for_activation()
+            .expect("committed epoch layout"),
+        Some(layout.clone())
+    );
+    let playlist = tokio::fs::read_to_string(next.path().join("index.m3u8"))
+        .await
+        .expect("epoch playlist");
+    assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:1000000000"));
+    assert!(playlist.contains("init-e2.mp4"));
+    assert!(playlist.contains(&opening.name()));
+    assert_eq!(
+        resumed
+            .active_ids()
+            .expect("active video rendition")
+            .for_role("video"),
+        Some(video.as_str())
+    );
+    assert_eq!(
+        resumed
+            .active_ids()
+            .expect("active audio rendition")
+            .for_role("audio"),
+        Some(audio.as_str())
+    );
+    assert!(!next.path().join("init.mp4").exists());
+    assert!(!next.path().join("split-video.mp4").exists());
+
+    let refused = crate::test_tempdir().expect("mismatched owner directory");
+    let mut writer = SessionDir::new(refused.path().to_owned(), 0, 16, None);
+    writer.split_inventory = Some(std::sync::Arc::new(
+        NativeSplitInventory::with_budget(0, u64::MAX)
+            .with_unprocessed_projection()
+            .with_expected_layout(Some(RollingHlsLayout::SplitV1 {
+                video: "0".repeat(64),
+                audio: audio.clone(),
+                audio_index: 2,
+            })),
+    ));
+    assert!(writer.write_init(&init).await.is_err());
+    assert!(!refused.path().join("index.m3u8").exists());
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[tokio::test]
+async fn native_fel_reads_verified_split_video_without_muxed_media() {
+    use fmp4::video_splice::CopyStaticMetadata;
+    let (init, published) = rolling_profile81_opening();
+
+    let mut author = NativeSplitAuthor::new(init.clone()).expect("verified native configuration");
+    let expected = author
+        .segment(&published.segment.bytes, 0)
+        .expect("verified native segment");
+
+    let root = crate::test_tempdir().expect("split writer directory");
+    let split = std::sync::Arc::new(NativeSplitInventory::with_budget(0, u64::MAX));
+    let mut writer = SessionDir::new(root.path().to_owned(), 0, 16, None);
+    writer.split_inventory = Some(std::sync::Arc::clone(&split));
+    writer.write_init(&init).await.expect("stage role inits");
+    writer
+        .write_segment(&published)
+        .await
+        .expect("publish paired role media");
+    assert!(split.primary_video());
+    assert!(!root.path().join("split-video.mp4").exists());
+
+    let format = split
+        .committed_video_format()
+        .expect("committed video format");
+    let video = split
+        .open_splice_video(root.path(), 0, &format)
+        .await
+        .expect("verified video");
+    let track = format.init().video().expect("projected video track");
+    assert_eq!(video.bytes, expected.public_video.bytes);
+    assert_eq!(
+        CopyStaticMetadata::of(&video, track).expect("projected metadata"),
+        CopyStaticMetadata::of(
+            &expected.ordinary,
+            author
+                .ordinary_video_init()
+                .video()
+                .expect("original video")
+        )
+        .expect("ordinary metadata"),
+    );
+    assert_eq!(
+        tokio::fs::read(root.path().join("init.mp4"))
+            .await
+            .expect("video init"),
+        format.init().bytes,
+    );
+    let path =
+        root.path()
+            .join(split.child_object("video", Some(&fmp4::segment_name(0)), "init.mp4"));
+    tokio::fs::write(path, b"corrupted")
+        .await
+        .expect("alter test fragment");
+    assert!(split
+        .open_splice_video(root.path(), 0, &format)
+        .await
+        .is_err());
+}
+
 #[cfg(all(test, target_os = "linux"))]
 #[tokio::test]
 async fn native_copy_picture_clock_binds_before_pipe_eof() {
@@ -776,6 +1154,12 @@ async fn native_copy_picture_clock_names_why_it_could_not_bind() {
     );
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RollingMuxedRetry {
+    Fragmented,
+    TransportStream,
+}
+
 #[derive(Default)]
 pub(crate) struct NativeSplitInventory {
     /// The ordinary copy's startup sizing: three times the title's average
@@ -793,7 +1177,17 @@ pub(crate) struct NativeSplitInventory {
     /// The source audio stream the copy carries, for the master's NAME,
     /// LANGUAGE and stable rendition id.
     audio_index: Option<i64>,
+    project_unprocessed: bool,
     init_ids: std::sync::OnceLock<NativeSplitInitIds>,
+    #[cfg(target_os = "linux")]
+    video_format: std::sync::OnceLock<std::sync::Arc<fmp4::video_splice::SpliceVideoFormat>>,
+    writer_owns_layout: std::sync::atomic::AtomicBool,
+    primary_video: std::sync::atomic::AtomicBool,
+    retry_muxed: std::sync::OnceLock<RollingMuxedRetry>,
+    expected_layout: Option<crate::transcode::RollingHlsLayout>,
+    sealed_layout: std::sync::OnceLock<crate::transcode::RollingHlsLayout>,
+    writer_cancellation: tokio_util::sync::CancellationToken,
+    writer_completion: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     chosen: std::sync::OnceLock<bool>,
     /// Why the layout settled on the ordinary mux, set by the decision itself.
     declined: std::sync::OnceLock<&'static str>,
@@ -822,16 +1216,100 @@ pub(crate) struct NativeSplitInitIds {
     /// RFC 6381 codec and channel count proved by the audio init.
     pub(crate) audio_codec: &'static str,
     pub(crate) audio_channels: u16,
+    pub(crate) video_facts: Option<RollingSplitVideoFacts>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RollingSplitVideoFacts {
+    pub(crate) codec: String,
+    pub(crate) supplemental_codecs: Option<String>,
+    pub(crate) range: plurx_core::transcode::split_master::VideoRange,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+}
+
+impl RollingSplitVideoFacts {
+    fn of(init: &Init) -> Result<Self, fmp4::Fmp4Error> {
+        use plurx_core::transcode::split_master::VideoRange;
+        let facts = fmp4::copy_video_sample_entry_facts(init)?;
+        let error = || {
+            fmp4::Fmp4Error::Unsupported(
+                "rolling split cannot attest the video sample entry".into(),
+            )
+        };
+        let sample_entry = std::str::from_utf8(&facts.sample_entry).map_err(|_| error())?;
+        let codec = match facts.codec {
+            fmp4::VideoCodec::H264 => fmp4::avc_rfc6381_codec(init)?,
+            fmp4::VideoCodec::Hevc => {
+                crate::http::hls::hevc_codec_from_init(&init.bytes, sample_entry)
+            }
+        }
+        .ok_or_else(error)?;
+        let range = facts
+            .color
+            .and_then(|(_, transfer, _, _)| VideoRange::from_transfer(transfer));
+        let range = match (facts.codec, facts.bit_depth, range) {
+            (fmp4::VideoCodec::H264, 8, None | Some(VideoRange::Sdr)) => VideoRange::Sdr,
+            (fmp4::VideoCodec::Hevc, 10, Some(VideoRange::Pq | VideoRange::Hlg))
+            | (fmp4::VideoCodec::Hevc, 8 | 10, Some(VideoRange::Sdr)) => range.ok_or_else(error)?,
+            _ => return Err(error()),
+        };
+        if fmp4::dolby_vision_record(init)?.is_some() {
+            return Err(error());
+        }
+        Ok(Self {
+            codec,
+            supplemental_codecs: None,
+            range,
+            width: facts.width,
+            height: facts.height,
+        })
+    }
+
+    fn of_native(author: &NativeSplitAuthor) -> Result<Self, fmp4::Fmp4Error> {
+        use plurx_core::transcode::split_master::VideoRange;
+        let geometry = fmp4::hevc_hdr10_sample_entry_facts(author.ordinary_video_init())?;
+        let init = author.video.init();
+        let error =
+            || fmp4::Fmp4Error::Unsupported("rolling FEL cannot attest the projected init".into());
+        let codec =
+            crate::http::hls::hevc_codec_from_init(&init.bytes, "hev1").ok_or_else(error)?;
+        let dolby = fmp4::dolby_vision_record(init)?
+            .filter(|record| record.profile == 8 && record.level != 0)
+            .ok_or_else(error)?;
+        Ok(Self {
+            codec,
+            supplemental_codecs: Some(format!("dvhe.08.{:02}/db1p", dolby.level)),
+            range: VideoRange::Pq,
+            width: geometry.width,
+            height: geometry.height,
+        })
+    }
 }
 
 impl NativeSplitInitIds {
-    pub(crate) fn of(author: &NativeSplitAuthor) -> Self {
+    pub(crate) fn of(author: &NativeSplitAuthor) -> Result<Self, fmp4::Fmp4Error> {
+        Ok(Self::from_pair(
+            author.video.init(),
+            author.audio_init(),
+            author.audio_facts.clone(),
+            Some(RollingSplitVideoFacts::of_native(author)?),
+        ))
+    }
+
+    fn from_pair(
+        video: &Init,
+        audio: &Init,
+        facts: fmp4::AacSampleEntryFacts,
+        video_facts: Option<RollingSplitVideoFacts>,
+    ) -> Self {
         use sha2::Digest;
         Self {
-            video: hex::encode(sha2::Sha256::digest(&author.video.init().bytes)),
-            audio: hex::encode(sha2::Sha256::digest(&author.audio_init().bytes)),
-            audio_codec: author.audio_facts.codec,
-            audio_channels: author.audio_facts.channels,
+            video: hex::encode(sha2::Sha256::digest(&video.bytes)),
+            audio: hex::encode(sha2::Sha256::digest(&audio.bytes)),
+            audio_codec: facts.codec,
+            audio_channels: facts.channels,
+            video_facts,
         }
     }
 
@@ -897,6 +1375,53 @@ impl NativeSplitInventory {
     }
 
     /// The source audio stream the copy carries.
+    pub(crate) fn with_expected_layout(
+        mut self,
+        layout: Option<crate::transcode::RollingHlsLayout>,
+    ) -> Self {
+        self.expected_layout = layout;
+        self
+    }
+
+    pub(crate) fn sealed_layout(&self) -> Option<crate::transcode::RollingHlsLayout> {
+        self.sealed_layout.get().cloned()
+    }
+
+    pub(crate) fn seal_for_activation(
+        &self,
+    ) -> Result<Option<crate::transcode::RollingHlsLayout>, String> {
+        use crate::transcode::RollingHlsLayout;
+        if self.retry_muxed.get() == Some(&RollingMuxedRetry::TransportStream) {
+            return Ok(None);
+        }
+        let layout = if let Some(ids) = self.active_ids() {
+            RollingHlsLayout::SplitV1 {
+                video: ids.video.clone(),
+                audio: ids.audio.clone(),
+                audio_index: self
+                    .audio_index
+                    .ok_or("rolling split did not bind its source audio")?,
+            }
+        } else if self.allows_scalar() {
+            RollingHlsLayout::FragmentedMuxedV1
+        } else {
+            return Err("rolling writer has not selected a presentation".into());
+        };
+        if self
+            .expected_layout
+            .as_ref()
+            .is_some_and(|expected| *expected != layout)
+        {
+            return Err("rolling owner could not reproduce the issued rendition".into());
+        }
+        let sealed = self.sealed_layout.get_or_init(|| layout.clone());
+        if *sealed != layout {
+            return Err("rolling writer changed an issued presentation".into());
+        }
+        Ok(Some(layout))
+    }
+
+    /// The source audio stream the copy carries.
     pub(crate) fn audio_index(&self) -> Option<i64> {
         self.audio_index
     }
@@ -923,6 +1448,54 @@ impl NativeSplitInventory {
         self.compare_prepared_head = true;
         self.prepared_head = std::sync::Mutex::new(PreparedNativeFelHead::Pending);
         self
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn committed_video_format(
+        &self,
+    ) -> Option<std::sync::Arc<fmp4::video_splice::SpliceVideoFormat>> {
+        self.active_ids()?;
+        self.video_format.get().cloned()
+    }
+
+    /// Verify the committed single-track object independently of open files
+    /// for the ordinary mux or the other role.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn open_splice_video(
+        &self,
+        dir: &std::path::Path,
+        index: u64,
+        format: &fmp4::video_splice::SpliceVideoFormat,
+    ) -> Result<fmp4::Fragment, String> {
+        use sha2::Digest;
+        let ids = self
+            .active_ids()
+            .ok_or("native split layout is not active")?;
+        let digest = self
+            .observed_video(index, ids)
+            .ok_or("native split video has no committed digest")?;
+        let path =
+            dir.join(self.child_object("video", Some(&fmp4::segment_name(index)), "init.mp4"));
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|error| error.to_string())?;
+        if <[u8; 32]>::from(sha2::Sha256::digest(&bytes)) != digest {
+            return Err("native split video differs from its committed digest".into());
+        }
+        let mut reader = FragmentReader::new();
+        reader.push(&format.init().bytes);
+        let Some(Unit::Init(_)) = reader.next_unit().map_err(|error| error.to_string())? else {
+            return Err("native split format lacks its init".into());
+        };
+        reader.push(&bytes);
+        match reader.next_unit().map_err(|error| error.to_string())? {
+            Some(Unit::Fragment(fragment))
+                if reader.buffered() == 0 && fragment.tracks.len() == 1 =>
+            {
+                Ok(fragment)
+            }
+            _ => Err("native split video is not one complete video fragment".into()),
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -1040,6 +1613,7 @@ impl NativeSplitInventory {
             audio: "b".repeat(64),
             audio_codec: "mp4a.40.2",
             audio_channels: 2,
+            video_facts: None,
         };
         self.init_ids
             .set(ids.clone())
@@ -1131,6 +1705,9 @@ impl NativeSplitInventory {
     /// session's only route to FEL: keeping ownership then would decline every
     /// upgrade and strand the viewer without FEL.
     pub(crate) fn owns_fel_processing(&self) -> bool {
+        if self.project_unprocessed {
+            return false;
+        }
         #[cfg(target_os = "linux")]
         if self.chosen.get().is_none() && (self.compare_prepared_head || self.resume_clock_required)
         {
@@ -1139,8 +1716,89 @@ impl NativeSplitInventory {
         self.active_ids().is_some()
     }
 
+    pub(crate) fn writer_owns_layout(&self) -> bool {
+        self.writer_owns_layout
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn with_writer_layout(self) -> Self {
+        self.writer_owns_layout
+            .store(true, std::sync::atomic::Ordering::Release);
+        self
+    }
+
+    pub(crate) fn with_unprocessed_projection(mut self) -> Self {
+        self.project_unprocessed = true;
+        self.with_writer_layout()
+    }
+
+    pub(crate) fn allows_scalar(&self) -> bool {
+        !self.writer_owns_layout()
+            || self.retry_muxed.get().is_some()
+            || self.chosen.get() == Some(&false)
+    }
+
+    pub(crate) fn register_reader(
+        &self,
+    ) -> (
+        tokio_util::sync::CancellationToken,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (complete, completion) = tokio::sync::oneshot::channel();
+        *self
+            .writer_completion
+            .lock()
+            .expect("rolling reader completion") = Some(completion);
+        (self.writer_cancellation.clone(), complete)
+    }
+
+    pub(crate) async fn retire_reader_for_muxed_retry(
+        &self,
+        output: RollingMuxedRetry,
+    ) -> Result<(), String> {
+        if self.sealed_layout.get().is_some() || self.expected_layout.is_some() {
+            return Err("a producer retry cannot replace an issued rolling generation".into());
+        }
+        self.writer_cancellation.cancel();
+        let completion = self
+            .writer_completion
+            .lock()
+            .expect("rolling reader completion")
+            .take();
+        if let Some(completion) = completion {
+            tokio::time::timeout(std::time::Duration::from_secs(15), completion)
+                .await
+                .map_err(|_| "the superseded rolling reader did not release scratch".to_owned())?
+                .ok();
+        }
+        let _ = self.retry_muxed.set(output);
+        Ok(())
+    }
+
+    pub(crate) fn primary_video(&self) -> bool {
+        self.active_ids().is_some()
+            && self
+                .primary_video
+                .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn child_object(
+        &self,
+        role: &str,
+        media_name: Option<&str>,
+        init_name: &str,
+    ) -> String {
+        if role == "video" && self.primary_video() {
+            return media_name.unwrap_or(init_name).to_owned();
+        }
+        match media_name {
+            Some(name) => format!("split-{role}-{name}"),
+            None => format!("split-{role}.mp4"),
+        }
+    }
+
     pub(crate) fn active_ids(&self) -> Option<&NativeSplitInitIds> {
-        if self.chosen.get() == Some(&true) {
+        if self.chosen.get() == Some(&true) && self.retry_muxed.get().is_none() {
             self.init_ids.get()
         } else {
             None
@@ -1245,10 +1903,32 @@ impl NativeSplitInventory {
     }
 }
 
+/// The original opening bytes stay private until the writer can choose a
+/// presentation. Normal rolling starts decide on their first segment.
+fn publish_as_io(error: PublishError) -> std::io::Error {
+    match error {
+        PublishError::Io(error) => error,
+        PublishError::Contract(reason) => std::io::Error::other(reason),
+    }
+}
+
+struct PendingNativeSplit {
+    muxed_init: Init,
+    input: Vec<Published>,
+    input_bytes: usize,
+}
+
+const MAX_NATIVE_SPLIT_OPENING_BYTES: usize = 128 * 1024 * 1024;
+
 struct SessionDir {
     dir: PathBuf,
+    first_media_sequence: u64,
+    init_name: String,
     split_inventory: Option<std::sync::Arc<NativeSplitInventory>>,
-    split_author: Option<NativeSplitAuthor>,
+    split_author: Option<RollingSplitAuthor>,
+    split_first_index: Option<u64>,
+    pending_native_split: Option<PendingNativeSplit>,
+    exclusive_native_split: bool,
     split_staged_bytes: u64,
     /// Bytes of the ordinary copy's init and media this writer has landed.
     /// Playlists are rewritten in place and failed writes land nothing, so
@@ -1328,8 +2008,13 @@ impl SessionDir {
     ) -> SessionDir {
         SessionDir {
             dir,
+            first_media_sequence: 0,
+            init_name: "init.mp4".to_owned(),
             split_inventory: None,
             split_author: None,
+            split_first_index: None,
+            pending_native_split: None,
+            exclusive_native_split: false,
             split_staged_bytes: 0,
             ordinary_bytes: std::sync::atomic::AtomicU64::new(0),
             largest_ordinary: std::sync::atomic::AtomicU64::new(0),
@@ -1350,7 +2035,14 @@ impl SessionDir {
     }
 
     fn playlist(&self, end: bool) -> String {
-        let mut out = fmp4::playlist_header(self.target_duration);
+        let mut out = if self.first_media_sequence == 0 && self.init_name == "init.mp4" {
+            fmp4::playlist_header(self.target_duration)
+        } else {
+            format!(
+                "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:{}\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MAP:URI=\"{}\"\n",
+                self.target_duration, self.first_media_sequence, self.init_name,
+            )
+        };
         out.push_str(&self.entries);
         if end {
             out.push_str("#EXT-X-ENDLIST\n");
@@ -1432,7 +2124,11 @@ impl SessionDir {
             write.commit(bytes.len() as u64);
         }
         if let Ok(Some(object)) = &written {
-            if let Some(collector) = &self.retained {
+            if let Some(collector) = self
+                .retained
+                .as_ref()
+                .filter(|_| !self.exclusive_native_split)
+            {
                 collector.capture(self.dir.join(name), name, object.clone());
             }
         }
@@ -1536,7 +2232,14 @@ impl SessionDir {
             // An undecided split never waits and never spends what the
             // ordinary copy still needs to reach its startup: it is paid for
             // by growth on top of that remainder, or it does not write.
-            if let Some(authorized) = grants.authorize_keeping(bytes, self.ordinary_reserve()) {
+            if let Some(authorized) = grants.authorize_keeping(
+                bytes,
+                if self.exclusive_native_split {
+                    0
+                } else {
+                    self.ordinary_reserve()
+                },
+            ) {
                 return Ok(Some(authorized));
             }
             return Err(std::io::Error::new(
@@ -1631,10 +2334,15 @@ impl SessionDir {
         // the session's ceiling: a split staged beyond it could never be served
         // beside the ordinary copy it mirrors. `largest` is the write in
         // flight, charged twice until its rename settles.
-        let landed = self
-            .ordinary_bytes
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let need = self.ordinary_need(inventory);
+        let (landed, need) = if self.exclusive_native_split {
+            (0, 0)
+        } else {
+            (
+                self.ordinary_bytes
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                self.ordinary_need(inventory),
+            )
+        };
         if !active
             && self
                 .split_staged_bytes
@@ -1656,7 +2364,7 @@ impl SessionDir {
                         ordinary_bytes = landed,
                         ordinary_need_bytes = need,
                         session_ceiling = inventory.session_ceiling,
-                        "native split layout declined before selection: both copies would exceed the session's scratch ceiling"
+                        "native split opening would exceed the session's scratch ceiling"
                     );
                 }
                 return Ok(false);
@@ -1700,44 +2408,90 @@ impl SessionDir {
     }
 
     async fn write_init(&mut self, init: &Init) -> std::io::Result<()> {
-        let committed = self.publish_ordinary("init.mp4", &init.bytes).await?;
-        self.observe_object("init.mp4", committed, None);
-        if self.split_inventory.is_some() {
-            match NativeSplitAuthor::new(init.clone()) {
-                Ok(author) => {
+        if let Some(inventory) = self.split_inventory.as_ref().map(std::sync::Arc::clone) {
+            if matches!(
+                inventory.expected_layout,
+                Some(crate::transcode::RollingHlsLayout::FragmentedMuxedV1)
+            ) {
+                inventory.settle("issued_fragmented_mux");
+                return self.write_muxed_init(init).await;
+            }
+            inventory
+                .writer_owns_layout
+                .store(true, std::sync::atomic::Ordering::Release);
+            let author = RollingSplitAuthor::new(init.clone(), inventory.project_unprocessed)
+                .and_then(|author| {
+                    let ids = match &author {
+                        RollingSplitAuthor::NativeFel(native) => NativeSplitInitIds::of(native)?,
+                        RollingSplitAuthor::Unprocessed(_) => {
+                            let (video, audio, audio_facts) = author.inits();
+                            NativeSplitInitIds::from_pair(
+                                video,
+                                audio,
+                                audio_facts,
+                                Some(RollingSplitVideoFacts::of(video)?),
+                            )
+                        }
+                    };
+                    Ok((author, ids))
+                });
+            match author {
+                Ok((author, ids)) => {
+                    if let Some(crate::transcode::RollingHlsLayout::SplitV1 {
+                        video,
+                        audio,
+                        audio_index,
+                    }) = &inventory.expected_layout
+                    {
+                        if video != &ids.video
+                            || audio != &ids.audio
+                            || Some(*audio_index) != inventory.audio_index
+                        {
+                            return Err(std::io::Error::other(
+                                "rolling initialization differs from the issued rendition",
+                            ));
+                        }
+                    }
+                    self.exclusive_native_split = true;
+                    self.pending_native_split = Some(PendingNativeSplit {
+                        muxed_init: init.clone(),
+                        input: Vec::new(),
+                        input_bytes: 0,
+                    });
+                    let (video, audio, _) = author.inits();
                     let items = [
-                        (
-                            "split-audio.mp4".to_owned(),
-                            author.audio_init().bytes.as_slice(),
-                        ),
-                        (
-                            "split-video.mp4".to_owned(),
-                            author.video.init().bytes.as_slice(),
-                        ),
+                        ("split-audio.mp4".to_owned(), audio.bytes.as_slice()),
+                        (self.init_name.clone(), video.bytes.as_slice()),
                     ];
-                    if !self.publish_split_files(&items).await? {
+                    if self.publish_split_files(&items).await? {
+                        if inventory.init_ids.set(ids.clone()).is_err()
+                            && inventory.init_ids.get() != Some(&ids)
+                        {
+                            return Err(std::io::Error::other(
+                                "split copy changed its initialization",
+                            ));
+                        }
+                        #[cfg(target_os = "linux")]
+                        if let RollingSplitAuthor::NativeFel(native) = &author {
+                            let _ = inventory
+                                .video_format
+                                .set(std::sync::Arc::clone(&native.video));
+                        }
+                        self.split_author = Some(author);
                         return Ok(());
                     }
-                    let ids = NativeSplitInitIds::of(&author);
-                    let inventory = self
-                        .split_inventory
-                        .as_ref()
-                        .expect("split writer has inventory");
-                    if inventory.init_ids.set(ids.clone()).is_err()
-                        && inventory.init_ids.get() != Some(&ids)
-                    {
-                        return Err(std::io::Error::other(
-                            "split copy changed its initialization",
-                        ));
-                    }
-                    self.split_author = Some(author);
+                    self.fallback_native_split().await.map_err(publish_as_io)?;
+                    return Ok(());
                 }
                 Err(error) => {
-                    // Settle the layout with this cause, so the master names
-                    // it rather than the generic `split_init_unavailable`.
-                    if let Some(inventory) = self.split_inventory.take() {
-                        inventory.settle("split_init_unsplittable");
+                    if inventory
+                        .expected_layout
+                        .as_ref()
+                        .is_some_and(crate::transcode::RollingHlsLayout::split)
+                    {
+                        return Err(std::io::Error::other(error));
                     }
+                    inventory.settle("split_init_unsplittable");
                     tracing::info!(
                         target: "plurxd::copyseg",
                         %error,
@@ -1746,11 +2500,75 @@ impl SessionDir {
                 }
             }
         }
-        // No playlist yet: one with no segment in it is a promise the session
-        // cannot keep if ffmpeg dies in the next second. The actor's first-
-        // media admission observes exactly this file, so it lands only when
-        // the publish gate opens.
+        self.write_muxed_init(init).await
+    }
+
+    async fn write_muxed_init(&mut self, init: &Init) -> std::io::Result<()> {
+        let name = self.init_name.clone();
+        let committed = self.publish_ordinary(&name, &init.bytes).await?;
+        self.observe_object(&name, committed, None);
         Ok(())
+    }
+
+    async fn fallback_native_split(&mut self) -> Result<(), PublishError> {
+        if self.split_inventory.as_ref().is_some_and(|inventory| {
+            inventory
+                .expected_layout
+                .as_ref()
+                .is_some_and(crate::transcode::RollingHlsLayout::split)
+        }) {
+            return Err(PublishError::Contract(
+                "issued split rendition cannot fall back".into(),
+            ));
+        }
+        let startup = self.pending_native_split.take().ok_or_else(|| {
+            PublishError::Contract("committed native split cannot switch to muxed".into())
+        })?;
+        self.discard_declined_split().await;
+        for name in
+            std::iter::once(self.init_name.clone()).chain(startup.input.iter().map(Published::name))
+        {
+            match tokio::fs::remove_file(self.dir.join(name)).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(PublishError::Io(error)),
+            }
+        }
+        self.exclusive_native_split = false;
+        self.entries.clear();
+        self.published_secs = 0.0;
+        self.ordinary_secs = 0.0;
+        self.ordinary_bytes
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.largest_ordinary
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.write_muxed_init(&startup.muxed_init).await?;
+        for published in startup.input {
+            self.write_muxed_segment(&published).await?;
+        }
+        Ok(())
+    }
+
+    fn commit_native_split(&mut self) -> bool {
+        let Some(startup) = self.pending_native_split.as_ref() else {
+            return self.exclusive_native_split;
+        };
+        let Some(inventory) = self.split_inventory.as_ref() else {
+            return false;
+        };
+        let range = startup
+            .input
+            .first()
+            .zip(startup.input.last())
+            .map(|(first, last)| (first.index, last.index));
+        inventory
+            .primary_video
+            .store(true, std::sync::atomic::Ordering::Release);
+        if inventory.choose(range).is_none() {
+            return false;
+        }
+        self.pending_native_split = None;
+        true
     }
 
     /// Once the master has settled on the ordinary mux, nothing can ever
@@ -1835,12 +2653,18 @@ impl SessionDir {
         }
     }
 
-    async fn write_split_segment(&mut self, published: &Published) -> Result<(), PublishError> {
+    async fn write_split_segment(
+        &mut self,
+        published: &Published,
+    ) -> Result<Option<f64>, PublishError> {
         let Some(author) = self.split_author.as_mut() else {
-            return Ok(());
+            return Ok(None);
         };
-        let sequence = u32::try_from(published.index)
-            .ok()
+        let first = *self.split_first_index.get_or_insert(published.index);
+        let sequence = published
+            .index
+            .checked_sub(first)
+            .and_then(|index| u32::try_from(index).ok())
             .and_then(|index| index.checked_mul(256))
             .ok_or_else(|| PublishError::Contract("split fragment sequence overflow".into()))?;
         let media = match author.segment(&published.segment.bytes, sequence) {
@@ -1863,20 +2687,39 @@ impl SessionDir {
                         );
                     }
                 }
-                return Ok(());
+                return Ok(None);
             }
         };
+        let video_clock = author.inits().0.tracks[0].timescale;
+        let video_seconds = media.video.tracks[0].duration() as f64 / f64::from(video_clock);
+        let audio_seconds = media.audio.tracks[0].duration() as f64 / 48_000.0;
+        if ![video_seconds, audio_seconds].into_iter().all(|seconds| {
+            seconds.is_finite() && seconds > 0.0 && seconds <= f64::from(self.target_duration)
+        }) {
+            self.split_author = None;
+            let inventory = self.split_inventory.as_ref().expect("split inventory");
+            if inventory.settle("split_track_duration_refused").0.is_some() {
+                return Err(PublishError::Contract(
+                    "committed split contains an invalid duration".into(),
+                ));
+            }
+            return Ok(None);
+        }
         let name = published.name();
         let items = [
             (format!("split-audio-{name}"), media.audio.bytes.as_slice()),
             (
-                format!("split-video-{name}"),
-                media.public_video.bytes.as_slice(),
+                if self.exclusive_native_split {
+                    name
+                } else {
+                    format!("split-video-{name}")
+                },
+                media.video.bytes.as_slice(),
             ),
         ];
         if !self.publish_split_files(&items).await? {
             self.split_author = None;
-            return Ok(());
+            return Ok(None);
         }
         let inventory = self
             .split_inventory
@@ -1885,19 +2728,24 @@ impl SessionDir {
         inventory.segments.lock().expect("split inventory").insert(
             published.index,
             NativeSplitEntry {
-                bytes: (media.audio.bytes.len() + media.public_video.bytes.len()) as i64,
+                bytes: (media.audio.bytes.len()
+                    + if self.exclusive_native_split {
+                        0
+                    } else {
+                        media.video.bytes.len()
+                    }) as i64,
                 audio_ticks: media.audio.tracks[0].duration(),
                 first_source_frame: media.first_source_frame,
-                samples: media.ordinary.tracks[0].sample_count() as u64,
+                samples: media.samples,
                 #[cfg(target_os = "linux")]
-                ordinary_video: inventory.compare_prepared_head.then(|| {
+                ordinary_video: Some({
                     use sha2::Digest;
-                    sha2::Sha256::digest(&media.public_video.bytes).into()
+                    sha2::Sha256::digest(&media.video.bytes).into()
                 }),
             },
         );
         inventory.changed.notify_waiters();
-        Ok(())
+        Ok(Some(video_seconds))
     }
 
     async fn write_segment(&mut self, published: &Published) -> Result<(), PublishError> {
@@ -1912,6 +2760,37 @@ impl SessionDir {
                 self.target_duration,
             )));
         }
+        if self.exclusive_native_split {
+            if let Some(startup) = self.pending_native_split.as_mut() {
+                let size = published.segment.bytes.len();
+                if startup.input_bytes.saturating_add(size) > MAX_NATIVE_SPLIT_OPENING_BYTES {
+                    self.split_inventory
+                        .as_ref()
+                        .expect("split inventory")
+                        .settle("opening_window_too_large");
+                    self.fallback_native_split().await?;
+                    return self.write_muxed_segment(published).await;
+                }
+                startup.input_bytes = startup.input_bytes.saturating_add(size);
+                startup.input.push(published.clone());
+            }
+            let Some(video_seconds) = self.write_split_segment(published).await? else {
+                return self.fallback_native_split().await;
+            };
+            self.append_playlist_entry(published, video_seconds);
+            if self.published_secs >= f64::from(self.gate_secs) {
+                if self.commit_native_split() {
+                    self.publish_playlist().await?;
+                } else {
+                    self.fallback_native_split().await?;
+                }
+            }
+            return Ok(());
+        }
+        self.write_muxed_segment(published).await
+    }
+
+    async fn write_muxed_segment(&mut self, published: &Published) -> Result<(), PublishError> {
         let name = published.name();
         let committed = self
             .publish_ordinary(&name, &published.segment.bytes)
@@ -1935,16 +2814,20 @@ impl SessionDir {
                 "playback startup phase completed"
             );
         }
-        self.entries
-            .push_str(&fmp4::playlist_entry(published.seconds, &name));
-        self.published_secs += published.seconds;
-        // The publish gate. The segment is on disk; whether the world learns
-        // of it is a separate decision, taken once: until `gate_secs` of
-        // media exist there is no playlist at all, and the first one a player
-        // loads already lists the whole cushion.
+        self.append_playlist_entry(published, published.seconds);
         if !self.started && self.published_secs < f64::from(self.gate_secs) {
             return Ok(());
         }
+        self.publish_playlist().await
+    }
+
+    fn append_playlist_entry(&mut self, published: &Published, seconds: f64) {
+        self.entries
+            .push_str(&fmp4::playlist_entry(seconds, &published.name()));
+        self.published_secs += seconds;
+    }
+
+    async fn publish_playlist(&mut self) -> Result<(), PublishError> {
         let first_playlist = !self.started;
         self.started = true;
         let text = self.playlist(false);
@@ -1965,6 +2848,9 @@ impl SessionDir {
     }
 
     async fn write_endlist(&mut self) -> std::io::Result<()> {
+        if self.pending_native_split.is_some() && !self.commit_native_split() {
+            self.fallback_native_split().await.map_err(publish_as_io)?;
+        }
         if self.entries.is_empty() {
             return Ok(());
         }
@@ -2098,6 +2984,7 @@ pub(crate) async fn run_observed<R: AsyncRead + Unpin>(
         #[cfg(target_os = "linux")]
         None,
         None,
+        None,
     )
     .await
 }
@@ -2117,6 +3004,7 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
     retained: Option<std::sync::Arc<crate::vodserve::retained::RollingCollection>>,
     split_inventory: Option<std::sync::Arc<NativeSplitInventory>>,
     #[cfg(target_os = "linux")] mut picture_clock: Option<CopyPicturePipe>,
+    epoch: Option<&crate::transcode::SessionTakeoverStart>,
     cancellation: Option<&tokio_util::sync::CancellationToken>,
 ) -> Outcome {
     let strip_dolby_vision_record = video.leaves_a_stale_dolby_vision_record(source);
@@ -2138,6 +3026,15 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
     }
     let mut reader = FragmentReader::new();
     let mut out = SessionDir::new(dir, limits.publish_gate_secs, limits.target_seconds, grants);
+    if let Some(epoch) = epoch {
+        let Ok(first_media_sequence) = u64::try_from(epoch.media_sequence) else {
+            return Outcome::Unsupported(
+                "rolling fragment epoch has an invalid media sequence".into(),
+            );
+        };
+        out.first_media_sequence = first_media_sequence;
+        out.init_name = crate::transcode::init_object_name(Some(epoch.owner_epoch));
+    }
     out.measurement = measurement;
     out.retained = retained;
     out.split_inventory = split_inventory;
@@ -2372,6 +3269,9 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                             (outcome, split) => {
                                 if let (Err(reason), Some(split)) = (outcome, split) {
                                     split.decline_unselected(reason, session_id);
+                                    if split.writer_owns_layout() {
+                                        split.settle(reason);
+                                    }
                                 }
                                 out.split_inventory = None;
                             }
@@ -2405,6 +3305,9 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                                         "enhancement_layer_not_full",
                                         session_id,
                                     );
+                                    if split.writer_owns_layout() {
+                                        split.settle("enhancement_layer_not_full");
+                                    }
                                 }
                                 out.split_inventory = None;
                             }
@@ -2520,10 +3423,12 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                                 }
                             };
                         }
-                        segmenter =
-                            Some(Segmenter::new(init, policy).retaining_hevc_parameter_sets(
-                                retain_hevc_parameter_sets && !guard_dvh1,
-                            ));
+                        segmenter = Some(
+                            Segmenter::starting_at(init, policy, out.first_media_sequence)
+                                .retaining_hevc_parameter_sets(
+                                    retain_hevc_parameter_sets && !guard_dvh1,
+                                ),
+                        );
                     }
                     if let Some(init) = guarded_dvh1_init.as_ref() {
                         if let Err(error) = fmp4::validate_rolling_dvh1_fragment(init, &fragment) {

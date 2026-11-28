@@ -631,6 +631,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/live-tv/guide/refresh"
         | "/api/v1/live-tv/sessions/{capability}/master.m3u8"
         | "/api/v1/live-tv/sessions/{capability}/index.m3u8"
+        | "/api/v1/live-tv/sessions/{capability}/{role}/{rendition}/index.m3u8"
+        | "/api/v1/live-tv/sessions/{capability}/{role}/{rendition}/{kind}/{object}"
         | "/api/v1/live-tv/sessions/{capability}/status"
         | "/api/v1/live-tv/sessions/{capability}/keepalive"
         | "/api/v1/live-tv/sessions/{capability}/{segment}"
@@ -768,6 +770,7 @@ fn http_route_group(path: &str) -> usize {
         | crate::live_tv::SNAPSHOT_PATH
         | crate::live_tv::START_PATH
         | crate::live_tv::START_V2_PATH
+        | crate::live_tv::START_SPLIT_PATH
         | crate::live_tv::ACTIVATE_PATH
         | crate::live_tv::RESOURCE_PATH
         | crate::live_tv::STOP_PATH
@@ -2275,6 +2278,14 @@ pub fn router(state: AppState) -> Router {
             get(live_tv::playlist),
         )
         .route(
+            "/live-tv/sessions/{capability}/{role}/{rendition}/index.m3u8",
+            get(live_tv::split_playlist),
+        )
+        .route(
+            "/live-tv/sessions/{capability}/{role}/{rendition}/{kind}/{object}",
+            get(live_tv::split_object),
+        )
+        .route(
             "/live-tv/sessions/{capability}/status",
             get(live_tv::session_status),
         )
@@ -2598,6 +2609,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             crate::live_tv::START_V2_PATH,
             post(internal_live_tv::start_v2).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::START_SPLIT_PATH,
+            post(internal_live_tv::start_split).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
         )

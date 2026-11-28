@@ -131,13 +131,12 @@ async fn read_projection_input(ready: SegmentReady, limit: u64) -> Result<Vec<u8
 }
 
 impl EncodedVodProjection {
-    fn new(rendition: &Rendition, init: Init) -> Result<Self, VodError> {
+    fn new(rendition: &Rendition, init: Init, source_copy: bool) -> Result<Self, VodError> {
         use plurx_core::fmp4::{self, VideoCodec};
-        let encoding = rendition
-            .recipe
-            .encoding
-            .as_ref()
-            .ok_or_else(|| invalid("encoded split has no executable recipe"))?;
+        let encoding = rendition.recipe.encoding.as_ref();
+        if encoding.is_none() && !source_copy {
+            return Err(invalid("encoded split has no executable recipe"));
+        }
         let audio_index = rendition
             .recipe
             .audio_index
@@ -190,7 +189,9 @@ impl EncodedVodProjection {
         let signaled_range = video
             .color
             .and_then(|(_, transfer, _, _)| VideoRange::from_transfer(transfer));
-        let range = match encoding.delivered_output_grade() {
+        let range = match encoding.map_or(OutputGrade::Sdr, |encoding| {
+            encoding.delivered_output_grade()
+        }) {
             OutputGrade::Sdr
                 if signaled_range == Some(VideoRange::Sdr)
                     || signaled_range.is_none()
@@ -214,9 +215,11 @@ impl EncodedVodProjection {
         };
         let dolby =
             fmp4::dolby_vision_record(video_init).map_err(|error| invalid(error.to_string()))?;
+        let preserves_processed_dv =
+            encoding.is_some_and(|encoding| encoding.preserves_processed_dv());
         let supplemental_codecs = match dolby {
             Some(record)
-                if encoding.preserves_processed_dv()
+                if preserves_processed_dv
                     && range == VideoRange::Pq
                     && record.profile == 8
                     && record.bl_signal_compatibility_id == 1
@@ -235,7 +238,7 @@ impl EncodedVodProjection {
                     record.level
                 ))
             }
-            None if !encoding.preserves_processed_dv() => None,
+            None if !preserves_processed_dv => None,
             _ => {
                 return Err(invalid(
                     "encoded video init does not prove its Dolby Vision contract",
@@ -250,8 +253,16 @@ impl EncodedVodProjection {
         let duration = file
             .duration_ms
             .ok_or_else(|| invalid("encoded title has no duration"))?;
-        let identity = encoding.identity(file, duration as f64 / 1000.0);
-        let producer_id = rendition_key(&rendition.recipe, &identity);
+        let producer_id = if rendition.key.starts_with("source-") {
+            // Source recipes are already bound to the catalogue revision.
+            // Keep that namespace in the projected identity and encode it
+            // using the rendition contract's digest format.
+            hex::encode(Sha256::digest(rendition.key.as_bytes()))
+        } else {
+            let encoding = encoding.ok_or_else(|| invalid("encoded VOD identity is missing"))?;
+            let identity = encoding.identity(file, duration as f64 / 1000.0);
+            rendition_key(&rendition.recipe, &identity)
+        };
         let child_id = |role: &[u8], init_id: &str| {
             let mut sha = Sha256::new();
             sha.update(b"plurx-vod-encoded-projection-v1\0");
@@ -262,9 +273,20 @@ impl EncodedVodProjection {
         };
         let video_id = child_id(b"video", &video_init_id);
         let audio_id = child_id(b"audio", &audio_init_id);
-        let peak = encoding
-            .projected_vod_peak_bps(&rendition.plan)
-            .ok_or_else(|| invalid("encoded producer cannot prove its delivery budget"))?;
+        let peak = match encoding {
+            Some(encoding) => encoding.projected_vod_peak_bps(&rendition.plan),
+            None => rendition
+                .plan
+                .entries
+                .iter()
+                .map(|entry| {
+                    let seconds = entry.seconds(rendition.plan.timescale);
+                    (entry.est_bytes as f64 * 16.0 / seconds).ceil() as u64
+                })
+                .max(),
+        }
+        .filter(|peak| *peak > 0 && *peak < u64::MAX)
+        .ok_or_else(|| invalid("paired VOD producer cannot prove its delivery budget"))?;
         let master = SplitPresentation {
             variants: vec![SplitVideo {
                 rendition_id: video_id.clone(),
@@ -272,9 +294,9 @@ impl EncodedVodProjection {
                 supplemental_codecs,
                 width: Some(u32::from(video.width)),
                 height: Some(u32::from(video.height)),
-                frame_rate: Some(
-                    f64::from(encoding.grid.numerator) / f64::from(encoding.grid.denominator),
-                ),
+                frame_rate: encoding.map(|encoding| {
+                    f64::from(encoding.grid.numerator) / f64::from(encoding.grid.denominator)
+                }),
                 video_range: range,
                 budget: None,
             }],
@@ -306,7 +328,7 @@ impl EncodedVodProjection {
                 source_index: audio_index,
                 rendition_id: audio_id,
                 init_id: audio_init_id,
-                source_copy: false,
+                source_copy: source_copy && !rendition.recipe.aac,
             },
         };
         if !layout.valid() {
@@ -356,6 +378,7 @@ impl EncodedVodProjection {
         index: u32,
         source: SegmentReady,
         audio: bool,
+        custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
     ) -> Result<SegmentReady, VodError> {
         let mut recent = self.recent.lock().await;
         let delivery = Arc::clone(&source.delivery);
@@ -386,11 +409,14 @@ impl EncodedVodProjection {
             let projector = Arc::clone(&self.projector);
             let directory = rendition.dir.path().to_owned();
             let peak_bps = self.peak_bps;
+            let custody = custody.cloned();
             let projected = tokio::task::spawn_blocking(move || {
                 let _worker = worker;
-                let ProjectedVodWindow { video, audio } = projector
-                    .vod_window(&bytes, index)
-                    .map_err(|error| invalid(error.to_string()))?;
+                let _custody = custody;
+                let ProjectedVodWindow { video, audio, .. } =
+                    projector
+                        .vod_window(&bytes, index)
+                        .map_err(|error| invalid(error.to_string()))?;
                 let total = (video.len() as u64).saturating_add(audio.len() as u64);
                 if total > output_limit
                     || duration.is_none_or(|duration| {
@@ -429,6 +455,7 @@ impl VodServe {
         owner: &ResponseOwner,
         index: Option<u32>,
         budget: Duration,
+        custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
     ) -> Result<SegmentReady, VodError> {
         if let Some(artifact) = owner.retained_output.as_ref() {
             return artifact
@@ -443,17 +470,23 @@ impl VodServe {
         }
         if let Some(index) = index {
             return self
-                .serve_segment(
+                .serve_segment_with_read_custody(
                     &found.rendition,
                     session_id,
                     index,
                     budget,
                     Arc::clone(&found.delivery),
+                    custody,
                 )
                 .await;
         }
-        self.serve_init(&found.rendition, budget, Arc::clone(&found.delivery))
-            .await
+        self.serve_init_with_read_custody(
+            &found.rendition,
+            budget,
+            Arc::clone(&found.delivery),
+            custody,
+        )
+        .await
     }
 
     pub(super) async fn settle_encoded_split(
@@ -462,6 +495,7 @@ impl VodServe {
         mut start: VodStart,
         deadline: Instant,
         fences: &VodCreateFences<'_>,
+        allow_source_copy: bool,
     ) -> Result<VodStart, String> {
         let Some(publication) = self.session_media_rendition(&start.session_id, None).await else {
             return Err("encoded split producer disappeared before verification".into());
@@ -474,14 +508,15 @@ impl VodServe {
             return Err("encoded producer ownership changed before split verification".into());
         }
         let prove = async {
-            if found
-                .rendition
-                .recipe
-                .encoding
-                .as_ref()
-                .is_none_or(|encoding| !encoding.plan.options().input_has_audio)
-            {
-                return Err(invalid("encoded producer has no soundtrack to project"));
+            let recipe = &found.rendition.recipe;
+            let may_project = recipe.encoding.as_ref().map_or(
+                allow_source_copy
+                    && !recipe.audio_excluded
+                    && !recipe.file.audio_streams.is_empty(),
+                |encoding| encoding.plan.options().input_has_audio,
+            );
+            if !may_project {
+                return Err(invalid("paired VOD producer has no soundtrack to project"));
             }
             let entry = media_entry_containing_ms(
                 &found.rendition.plan,
@@ -491,10 +526,10 @@ impl VodServe {
             // Start the exact admitted window first. A processed encoder cannot bootstrap
             // with the ordinary init-head pipe because it needs the verified helper input.
             let first = self
-                .encoded_split_input(&start.session_id, &found, &owner, Some(entry), budget)
+                .encoded_split_input(&start.session_id, &found, &owner, Some(entry), budget, None)
                 .await?;
             let ready = self
-                .encoded_split_input(&start.session_id, &found, &owner, None, budget)
+                .encoded_split_input(&start.session_id, &found, &owner, None, budget, None)
                 .await?;
             let bytes = read_projection_input(ready, MAX_INIT_BYTES).await?;
             let init_id = hex::encode(Sha256::digest(&bytes));
@@ -526,9 +561,10 @@ impl VodServe {
             if reader.buffered() != 0 {
                 return Err(invalid("encoded init contains trailing media"));
             }
-            let projection = EncodedVodProjection::new(&found.rendition, init)?;
+            let projection =
+                EncodedVodProjection::new(&found.rendition, init, recipe.encoding.is_none())?;
             projection
-                .project_segment(&found.rendition, entry, first, false)
+                .project_segment(&found.rendition, entry, first, false, None)
                 .await?;
             Ok::<_, VodError>(projection)
         };
@@ -681,6 +717,7 @@ impl VodServe {
         session_id: &str,
         request: &ChildMediaRequest,
         deadline: Instant,
+        custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
     ) -> Option<VodPublication<Option<SegmentReady>>> {
         let (projection, found, owner) = self.encoded_split_snapshot(session_id).await?;
         let Some(projection) = projection else {
@@ -697,6 +734,9 @@ impl VodServe {
             };
             if self.source_changed(&found.rendition) {
                 return Err(invalid("encoded split source changed"));
+            }
+            if let Some(custody) = custody {
+                custody.source().map_err(invalid)?;
             }
             if request.kind == "init" {
                 if request.object.strip_suffix(".mp4") != Some(init_id) {
@@ -733,10 +773,16 @@ impl VodServe {
                 .block_budget
                 .min(deadline.saturating_duration_since(Instant::now()));
             let source = self
-                .encoded_split_input(session_id, &found, &owner, Some(index), budget)
+                .encoded_split_input(session_id, &found, &owner, Some(index), budget, custody)
                 .await?;
             let ready = projection
-                .project_segment(&found.rendition, index, source, request.role == "audio")
+                .project_segment(
+                    &found.rendition,
+                    index,
+                    source,
+                    request.role == "audio",
+                    custody,
+                )
                 .await?;
             if self.source_changed(&found.rendition) {
                 return Err(invalid("encoded split source changed during projection"));

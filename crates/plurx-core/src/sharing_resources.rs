@@ -20,6 +20,33 @@ pub enum SharingHlsResourceKind {
     MediaSegment,
     SubtitlePlaylist { index: u16 },
     SubtitleSegment { index: u16 },
+    ChildPlaylist { role: SharingHlsRole },
+    ChildInit { role: SharingHlsRole },
+    ChildSegment { role: SharingHlsRole },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharingHlsRole {
+    Video,
+    Audio,
+}
+
+impl SharingHlsRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Video => "video",
+            Self::Audio => "audio",
+        }
+    }
+}
+
+impl SharingHlsResourceKind {
+    pub fn media_object(self) -> bool {
+        matches!(
+            self,
+            Self::Init | Self::MediaSegment | Self::ChildInit { .. } | Self::ChildSegment { .. }
+        )
+    }
 }
 
 /// The original bounded relative URI is retained, including segment padding.
@@ -171,6 +198,46 @@ fn segment(value: &str, suffix: &str) -> Result<()> {
     Ok(())
 }
 
+fn media_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn child_kind(path: &str) -> Option<SharingHlsResourceKind> {
+    let (role, suffix) = path.split_once('/')?;
+    let role = match role {
+        "audio" => SharingHlsRole::Audio,
+        "video" => SharingHlsRole::Video,
+        _ => return None,
+    };
+    let (rendition, resource) = suffix.split_once('/')?;
+    if !media_digest(rendition) {
+        return None;
+    }
+    Some(match resource {
+        "index.m3u8" => SharingHlsResourceKind::ChildPlaylist { role },
+        name => {
+            let (kind, name) = name.split_once('/')?;
+            match kind {
+                "init" if name.strip_suffix(".mp4").is_some_and(media_digest) => {
+                    SharingHlsResourceKind::ChildInit { role }
+                }
+                "segment" => {
+                    let index = name.strip_suffix(".m4s")?;
+                    let value = digits(index, i64::MAX as u64).ok()?;
+                    if value.to_string() != index {
+                        return None;
+                    }
+                    SharingHlsResourceKind::ChildSegment { role }
+                }
+                _ => return None,
+            }
+        }
+    })
+}
+
 impl SharingHlsResource {
     pub fn parse(uri: &str) -> Result<Self> {
         if uri.is_empty()
@@ -202,6 +269,9 @@ impl SharingHlsResource {
             _ if path.starts_with("seg") && (path.ends_with(".ts") || path.ends_with(".m4s")) => {
                 segment(path, if path.ends_with(".ts") { ".ts" } else { ".m4s" })?;
                 SharingHlsResourceKind::MediaSegment
+            }
+            _ if matches!(path.split('/').next(), Some("video" | "audio")) => {
+                child_kind(path).ok_or(SharingResourceUnsupported)?
             }
             _ => {
                 let fields: Vec<_> = path.split('/').collect();
@@ -266,6 +336,31 @@ impl SharingHlsResource {
             kind,
             native,
         })
+    }
+
+    pub fn rendition(&self) -> Option<(&str, &str)> {
+        match self.kind {
+            SharingHlsResourceKind::ChildPlaylist { .. }
+            | SharingHlsResourceKind::ChildInit { .. }
+            | SharingHlsResourceKind::ChildSegment { .. } => {
+                let (role, path) = self.uri.split_once('/')?;
+                let (rendition, _) = path.split_once('/')?;
+                Some((role, rendition))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn child_object(&self) -> Option<(&str, &str)> {
+        if !matches!(
+            self.kind,
+            SharingHlsResourceKind::ChildInit { .. } | SharingHlsResourceKind::ChildSegment { .. }
+        ) {
+            return None;
+        }
+        let (_, after_role) = self.uri.split_once('/')?;
+        let (_, suffix) = after_role.split_once('/')?;
+        suffix.split_once('/')
     }
 
     /// A bounded opaque delivery identity, never a filesystem path.
@@ -359,14 +454,21 @@ pub fn validate_sharing_playlist(resource: &SharingHlsResource, bytes: &[u8]) ->
         SharingHlsResourceKind::SubtitlePlaylist { index } => Some(index),
         SharingHlsResourceKind::Master
         | SharingHlsResourceKind::Index
-        | SharingHlsResourceKind::Video => None,
+        | SharingHlsResourceKind::Video
+        | SharingHlsResourceKind::ChildPlaylist { .. } => None,
         _ => return Err(SharingResourceUnsupported),
     };
     let mut lines = text.lines();
     if lines.next() != Some("#EXTM3U") {
         return Err(SharingResourceUnsupported);
     }
+    let rendition = resource.rendition();
     let mut pending = false;
+    let mut pending_audio = None;
+    let mut split_groups = std::collections::BTreeSet::new();
+    let mut split_variants = false;
+    let mut scalar_variants = false;
+    let mut child_init = false;
     for (number, line) in lines.enumerate() {
         if number >= MAX_PLAYLIST_LINES
             || line.len() > MAX_PLAYLIST_LINE_BYTES
@@ -383,16 +485,35 @@ pub fn validate_sharing_playlist(resource: &SharingHlsResource, bytes: &[u8]) ->
             }
             let child = if let Some(index) = subtitle {
                 SharingHlsResource::parse(&format!("subs/{index}/{line}"))?
+            } else if let Some((role, id)) = rendition {
+                SharingHlsResource::parse(&format!("{role}/{id}/{line}"))?
             } else {
                 SharingHlsResource::parse(line)?
             };
             let valid = if master {
-                matches!(
+                if matches!(
                     child.kind,
-                    SharingHlsResourceKind::Index | SharingHlsResourceKind::Video
-                ) && child.native != Some(1)
+                    SharingHlsResourceKind::ChildPlaylist {
+                        role: SharingHlsRole::Video
+                    }
+                ) {
+                    split_variants = true;
+                    pending_audio
+                        .take()
+                        .is_some_and(|group| split_groups.contains(group))
+                } else {
+                    scalar_variants = true;
+                    matches!(
+                        child.kind,
+                        SharingHlsResourceKind::Index | SharingHlsResourceKind::Video
+                    ) && child.native != Some(1)
+                        && pending_audio.is_none()
+                }
             } else if subtitle.is_some() {
                 matches!(child.kind, SharingHlsResourceKind::SubtitleSegment { .. })
+            } else if rendition.is_some() {
+                matches!(child.kind, SharingHlsResourceKind::ChildSegment { .. })
+                    && child.rendition() == rendition
             } else {
                 child.kind == SharingHlsResourceKind::MediaSegment
             };
@@ -417,16 +538,24 @@ pub fn validate_sharing_playlist(resource: &SharingHlsResource, bytes: &[u8]) ->
                     "AUTOSELECT",
                     "FORCED",
                     "CHARACTERISTICS",
+                    "CHANNELS",
+                    "STABLE-RENDITION-ID",
                     "URI",
                 ],
             )?;
-            if attrs.get("TYPE") != Some(&"SUBTITLES") {
-                return Err(SharingResourceUnsupported);
-            }
             let child =
                 SharingHlsResource::parse(attrs.get("URI").ok_or(SharingResourceUnsupported)?)?;
-            if !matches!(child.kind, SharingHlsResourceKind::SubtitlePlaylist { .. }) {
-                return Err(SharingResourceUnsupported);
+            match (attrs.get("TYPE").copied(), child.kind) {
+                (Some("SUBTITLES"), SharingHlsResourceKind::SubtitlePlaylist { .. }) => {}
+                (
+                    Some("AUDIO"),
+                    SharingHlsResourceKind::ChildPlaylist {
+                        role: SharingHlsRole::Audio,
+                    },
+                ) => {
+                    split_groups.insert(*attrs.get("GROUP-ID").ok_or(SharingResourceUnsupported)?);
+                }
+                _ => return Err(SharingResourceUnsupported),
             }
         } else if let Some(raw) = line.strip_prefix("#EXT-X-STREAM-INF:") {
             if !master || pending {
@@ -444,8 +573,10 @@ pub fn validate_sharing_playlist(resource: &SharingHlsResource, bytes: &[u8]) ->
                     "SUPPLEMENTAL-CODECS",
                     "CLOSED-CAPTIONS",
                     "SUBTITLES",
+                    "AUDIO",
                 ],
             )?;
+            pending_audio = attrs.get("AUDIO").copied();
             digits(
                 attrs.get("BANDWIDTH").ok_or(SharingResourceUnsupported)?,
                 i64::MAX as u64,
@@ -456,9 +587,14 @@ pub fn validate_sharing_playlist(resource: &SharingHlsResource, bytes: &[u8]) ->
                 return Err(SharingResourceUnsupported);
             }
             let attrs = closed_attributes(raw, &["URI"])?;
-            if SharingHlsResource::parse(attrs.get("URI").ok_or(SharingResourceUnsupported)?)?.kind
-                != SharingHlsResourceKind::Init
-            {
+            let uri = attrs.get("URI").ok_or(SharingResourceUnsupported)?;
+            if let Some((role, id)) = rendition {
+                let child = SharingHlsResource::parse(&format!("{role}/{id}/{uri}"))?;
+                if child_init || !matches!(child.kind, SharingHlsResourceKind::ChildInit { .. }) {
+                    return Err(SharingResourceUnsupported);
+                }
+                child_init = true;
+            } else if SharingHlsResource::parse(uri)?.kind != SharingHlsResourceKind::Init {
                 return Err(SharingResourceUnsupported);
             }
         } else if let Some(raw) = line.strip_prefix("#EXTINF:") {
@@ -508,6 +644,10 @@ pub fn validate_sharing_playlist(resource: &SharingHlsResource, bytes: &[u8]) ->
             .or_else(|| line.strip_prefix("#EXT-X-DISCONTINUITY-SEQUENCE:"))
         {
             digits(raw, i64::MAX as u64)?;
+        } else if master && line == "#EXT-X-INDEPENDENT-SEGMENTS" {
+            if pending {
+                return Err(SharingResourceUnsupported);
+            }
         } else if matches!(
             line,
             "#EXT-X-PLAYLIST-TYPE:EVENT"
@@ -525,7 +665,12 @@ pub fn validate_sharing_playlist(resource: &SharingHlsResource, bytes: &[u8]) ->
             return Err(SharingResourceUnsupported);
         }
     }
-    if pending {
+    if pending
+        || pending_audio.is_some()
+        || rendition.is_some() && !child_init
+        || split_variants && scalar_variants
+        || !split_groups.is_empty() && !split_variants
+    {
         return Err(SharingResourceUnsupported);
     }
     Ok(())
@@ -638,6 +783,40 @@ mod tests {
             let before = playlist.as_bytes().to_vec();
             validate_sharing_playlist(&SharingHlsResource::parse(uri).expect("engine resource"), &before).expect("engine playlist");
             assert_eq!(before, playlist.as_bytes());
+        }
+    }
+
+    #[test]
+    fn sharing_hls_split_playlist_binds_children_to_their_role_and_parent() {
+        let video = "a".repeat(64);
+        let audio = "b".repeat(64);
+        let init = "c".repeat(64);
+        let master = format!(
+            "#EXTM3U\n#EXT-X-VERSION:10\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Original\",CHANNELS=\"2\",URI=\"audio/{audio}/index.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=800000,AUDIO=\"audio\"\nvideo/{video}/index.m3u8\n"
+        );
+        let root = SharingHlsResource::parse("master.m3u8").expect("closed master path");
+        validate_sharing_playlist(&root, master.as_bytes()).expect("split master");
+        for invalid in [
+            master.replace("AUDIO=\"audio\"", "AUDIO=\"wrong\""),
+            master.replace("TYPE=AUDIO", "TYPE=SUBTITLES"),
+            master.replace(&format!("video/{video}/index.m3u8"), "index.m3u8"),
+        ] {
+            assert!(validate_sharing_playlist(&root, invalid.as_bytes()).is_err());
+        }
+        let child = SharingHlsResource::parse(&format!("audio/{audio}/index.m3u8"))
+            .expect("closed audio child path");
+        let body =
+            format!("#EXTM3U\n#EXT-X-MAP:URI=\"init/{init}.mp4\"\n#EXTINF:4.0,\nsegment/22.m4s\n");
+        validate_sharing_playlist(&child, body.as_bytes()).expect("relative role objects");
+        for invalid in [
+            body.replace(
+                &format!("init/{init}.mp4"),
+                &format!("video/{video}/init/{init}.mp4"),
+            ),
+            body.replace("segment/22.m4s", &format!("video/{video}/segment/22.m4s")),
+            body.replace("segment/22.m4s", "segment/22.m4s?native=1"),
+        ] {
+            assert!(validate_sharing_playlist(&child, invalid.as_bytes()).is_err());
         }
     }
 

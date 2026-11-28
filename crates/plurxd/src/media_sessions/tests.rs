@@ -317,6 +317,7 @@ pub(super) fn valid_start_request() -> RemoteStartRequest {
         request: SessionRequest {
             split_audio: false,
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -551,6 +552,7 @@ fn valid_start_response() -> RemoteStartResponse {
     let session_id = "00000000-0000-4000-8000-0000000000b1".to_owned();
     RemoteStartResponse {
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         processed_fel: None,
         processed_dv_profile: None,
         retained_output: None,
@@ -568,6 +570,36 @@ fn valid_start_response() -> RemoteStartResponse {
         control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
         activation_generation: Some(0),
     }
+}
+
+#[test]
+fn rolling_split_layout_is_bound_to_the_issued_master_and_durable_takeover() {
+    use crate::transcode::RollingHlsLayout;
+    let layout = RollingHlsLayout::SplitV1 {
+        video: "a".repeat(64),
+        audio: "b".repeat(64),
+        audio_index: 3,
+    };
+    let mut response = valid_start_response();
+    response.vod = false;
+    response.control_lease_timeout_ms = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS;
+    response.rolling_hls_layout = Some(layout.clone());
+    assert!(!response.is_valid(), "split cannot advertise the scalar root");
+    response.playlist_url = format!("/api/v1/hls/{}/master.m3u8", response.session_id);
+    assert!(response.is_valid());
+    response.vod = true;
+    assert!(!response.is_valid(), "rolling layouts are not VOD verdicts");
+
+    let mut durable = valid_start_request();
+    assert!(durable.is_valid());
+    durable.request.rolling_hls_layout = Some(layout.clone());
+    assert!(!durable.is_valid(), "only the owner can issue a rolling layout");
+    assert!(takeover_recipe_is_valid(&durable));
+    let encoded = serde_json::to_vec(&durable).expect("rolling recipe serializes");
+    let recovered: RemoteStartRequest = serde_json::from_slice(&encoded).expect("rolling recipe");
+    assert_eq!(recovered.request.rolling_hls_layout, Some(layout));
+    durable.protocol_version -= 1;
+    assert!(!takeover_recipe_is_valid(&durable));
 }
 
 #[test]
@@ -4803,6 +4835,7 @@ fn a_split_copy_route_is_reopened_not_taken_over_and_its_wire_keeps_the_split() 
             presentation: crate::transcode::Presentation::Vod,
             split_audio: true,
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             ..eligible.request.clone()
         },
         ..eligible.clone()

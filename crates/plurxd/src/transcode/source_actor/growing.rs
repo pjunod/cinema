@@ -2,9 +2,10 @@
 //! its status observations can mint a Sharing grant or an Analysis claim.
 use super::*;
 use crate::{
-    copyrange::CopyRangeProduction,
+    copyrange::{CopyRangeProduction, SplitRangeRequest},
     source_generation::{SourceRenditionOwner, SourceRenditionOwners},
 };
+use plurx_core::sharing_resources::SharingHlsRole;
 
 pub(crate) struct SourceGrowingPreparation {
     owners: Arc<SourceRenditionOwners>,
@@ -206,19 +207,78 @@ impl SourceViewerActor {
             Arc::clone(&guard),
             Arc::clone(&self.0.resource_hooks),
         );
+        let split = backing.production.files.lock().await.split();
+        let verifies = |role| {
+            let layout = split.as_ref()?;
+            let (id, init) = layout.ids(role);
+            (resource.rendition()? == (role.as_str(), id)).then_some(init)
+        };
         let payload = match kind {
+            SharingHlsResourceKind::ChildPlaylist { role } => {
+                verifies(role).ok_or(unsupported)?;
+                let playlist = backing
+                    .production
+                    .files
+                    .lock()
+                    .await
+                    .split_playlist(role)
+                    .ok_or(ended)?;
+                SourceResourcePayload::Playlist(playlist)
+            }
+            SharingHlsResourceKind::ChildInit { role } => {
+                let init = verifies(role).ok_or(unsupported)?;
+                if resource
+                    .child_object()
+                    .and_then(|(_, name)| name.strip_suffix(".mp4"))
+                    != Some(init)
+                {
+                    return Err(unsupported);
+                }
+                let directory = backing.production.files.lock().await.payload_path.clone();
+                let layout = split.as_ref().ok_or(unsupported)?;
+                SourceResourcePayload::File(
+                    layout
+                        .init_object(role, directory, Arc::clone(&backing.delivery))
+                        .await
+                        .map_err(|_| pending)?,
+                )
+            }
             SharingHlsResourceKind::Index | SharingHlsResourceKind::Video => {
+                if split.is_some() {
+                    return Err(unsupported);
+                }
                 SourceResourcePayload::Playlist(backing.production.files.lock().await.playlist())
             }
-            SharingHlsResourceKind::Init | SharingHlsResourceKind::MediaSegment => {
-                let name = resource
-                    .as_str()
-                    .split('?')
-                    .next()
-                    .unwrap_or("")
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("");
+            SharingHlsResourceKind::Init
+            | SharingHlsResourceKind::MediaSegment
+            | SharingHlsResourceKind::ChildSegment { .. } => {
+                let projected = if let SharingHlsResourceKind::ChildSegment { role } = kind {
+                    verifies(role).ok_or(unsupported)?;
+                    let index: u32 = resource
+                        .child_object()
+                        .and_then(|(_, name)| name.strip_suffix(".m4s"))
+                        .and_then(|index| index.parse().ok())
+                        .ok_or(unsupported)?;
+                    Some((role, index))
+                } else {
+                    if split.is_some() {
+                        return Err(unsupported);
+                    }
+                    None
+                };
+                let name = if let Some((_, index)) = projected {
+                    plurx_core::fmp4::segment_name(u64::from(index))
+                } else {
+                    resource
+                        .as_str()
+                        .split('?')
+                        .next()
+                        .unwrap_or("")
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("")
+                        .to_owned()
+                };
                 // The wait window starts here: what production has
                 // committed by now is what a deadline is judged against.
                 let waiter = crate::copyrange::CommitWaiter::begin(
@@ -250,13 +310,31 @@ impl SourceViewerActor {
                         // need this lock, and an open on a slow or hung share
                         // must not hold them.
                         let payload = files.payload.clone();
-                        let path = files.payload_path.join(name);
+                        let directory = files.payload_path.clone();
+                        let path = directory.join(&name);
+                        let row = projected
+                            .map(|(role, index)| files.split_row(index, role).ok_or(unsupported))
+                            .transpose()?;
                         drop(files);
                         let mut ready = custody
-                            .open_ready_child(&payload, &path, name, &etag, &backing.delivery)
+                            .open_ready_child(&payload, &path, &name, &etag, &backing.delivery)
                             .await
                             .map_err(|_| pending)?;
                         ready.observed_media_duration_ms = duration;
+                        if let Some((role, index)) = projected {
+                            let layout = split.as_ref().ok_or(ended)?;
+                            ready = Arc::clone(layout)
+                                .media_object(
+                                    role,
+                                    index,
+                                    row.ok_or(ended)?,
+                                    ready,
+                                    directory,
+                                    custody.clone(),
+                                )
+                                .await
+                                .map_err(|_| pending)?;
+                        }
                         break ready;
                     }
                     // A range that ended without it, or a copy that died,
@@ -284,6 +362,20 @@ impl SourceViewerActor {
                 // The opened immutable segment is pinned through the real body.
                 ready.delivery = Arc::clone(&backing.delivery);
                 SourceResourcePayload::File(ready)
+            }
+            SharingHlsResourceKind::Master if split.is_some() => {
+                let layout = split.as_ref().ok_or(unsupported)?;
+                let bytes = crate::http::hls::source_split_master(
+                    layout.presentation.clone(),
+                    &backing.file,
+                    native.as_ref().and_then(|tracks| tracks.selected()),
+                    &native
+                        .as_ref()
+                        .map(|tracks| tracks.indexes())
+                        .unwrap_or_default(),
+                )
+                .map_err(|_| unsupported)?;
+                SourceResourcePayload::Playlist(bytes)
             }
             SharingHlsResourceKind::Master
             | SharingHlsResourceKind::SubtitlePlaylist { .. }
@@ -441,7 +533,13 @@ impl SourceViewerActor {
         // Every authenticated resource the viewer fetches is activity; only
         // a served media segment is presentation evidence.
         backing.note_activity();
-        if kind == SharingHlsResourceKind::MediaSegment {
+        if matches!(
+            kind,
+            SharingHlsResourceKind::MediaSegment
+                | SharingHlsResourceKind::ChildSegment {
+                    role: SharingHlsRole::Video
+                }
+        ) {
             backing.note_media_served().await;
         }
         drop(custody);
@@ -715,7 +813,7 @@ impl TranscodeManager {
             .ok_or(SourceWorkerError::Unavailable)?;
         let range_id = uuid::Uuid::new_v4();
         *stage = "growing.range_files";
-        let files = CopyRangeFiles::create(
+        let mut files = CopyRangeFiles::create(
             &self.work_dir,
             observation_root,
             namespace.clone(),
@@ -730,6 +828,14 @@ impl TranscodeManager {
         )
         .await
         .map_err(|_| SourceWorkerError::Unavailable)?;
+        if let Some(request) = prepared
+            .request()
+            .split_audio
+            .then(|| SplitRangeRequest::new(&file, &session_id, prepared.request().audio_index))
+            .flatten()
+        {
+            files.request_split(request);
+        }
         *stage = "growing.copy_mux";
         let mux = ObservedCopyMux::new(
             Arc::clone(&contract),
@@ -944,16 +1050,21 @@ impl TranscodeManager {
                     );
                     SourceWorkerError::copy_failure(&error)
                 })?;
+            let split = actual.production.files.lock().await.seal_split();
             startup_stage = "growing.source_height";
             let facts = StartInfo {
                 vod_copy_layout: None,
+                rolling_hls_layout: None,
                 processed_dv_profile: None,
                 processed_fel: None,
                 degraded_processing: None,
                 retained_output: None,
                 audio_delivery: prepared.request().audio_delivery.clone(),
                 session_id: session_id.clone(),
-                playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+                playlist_url: format!(
+                    "/api/v1/hls/{session_id}/{}.m3u8",
+                    if split { "master" } else { "index" }
+                ),
                 duration_ms: actual.file.duration_ms,
                 start_seconds: prepared.request().start_seconds,
                 media_origin_seconds: origin as f64 / 1000.0,

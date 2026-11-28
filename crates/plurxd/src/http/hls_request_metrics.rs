@@ -23,7 +23,7 @@ use axum::http::StatusCode;
 ///
 /// Only the combinations a registered route can produce are listed, so the
 /// exposition is a fixed, small set rather than a cross product.
-pub(super) const HLS_OBJECTS: [(&str, &str, &str); 20] = [
+pub(super) const HLS_OBJECTS: [(&str, &str, &str); 26] = [
     ("session", "master", "none"),
     ("session", "media_playlist", "muxed"),
     ("session", "init", "muxed"),
@@ -40,6 +40,12 @@ pub(super) const HLS_OBJECTS: [(&str, &str, &str); 20] = [
     ("live_tv", "media_playlist", "muxed"),
     ("live_tv", "init", "muxed"),
     ("live_tv", "segment", "muxed"),
+    ("live_tv", "media_playlist", "video"),
+    ("live_tv", "init", "video"),
+    ("live_tv", "segment", "video"),
+    ("live_tv", "media_playlist", "audio"),
+    ("live_tv", "init", "audio"),
+    ("live_tv", "segment", "audio"),
     ("offline", "master", "none"),
     ("offline", "media_playlist", "muxed"),
     ("offline", "segment", "muxed"),
@@ -124,6 +130,17 @@ pub(super) fn classify(method: &axum::http::Method, template: &str, path: &str) 
             ("session", resource, child_role(path, 2)?)
         }
         "/live-tv/sessions/{capability}/master.m3u8" => ("live_tv", "master", "none"),
+        "/live-tv/sessions/{capability}/{role}/{rendition}/index.m3u8" => {
+            ("live_tv", "media_playlist", child_role(path, 1)?)
+        }
+        "/live-tv/sessions/{capability}/{role}/{rendition}/{kind}/{object}" => {
+            let kind = if path.rsplit('/').nth(1) == Some("init") {
+                "init"
+            } else {
+                "segment"
+            };
+            ("live_tv", kind, child_role(path, 2)?)
+        }
         "/live-tv/sessions/{capability}/index.m3u8" => ("live_tv", "media_playlist", "muxed"),
         "/live-tv/sessions/{capability}/{segment}" => {
             ("live_tv", init_or_segment(last_component(path)), "muxed")

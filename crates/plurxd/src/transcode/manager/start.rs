@@ -201,6 +201,8 @@ impl TranscodeManager {
             None,
             None,
             false,
+            false,
+            None,
             None,
         )
         .await
@@ -239,6 +241,8 @@ impl TranscodeManager {
             None,
             None,
             false,
+            false,
+            None,
             None,
         )
         .await
@@ -642,6 +646,57 @@ impl TranscodeManager {
             .await
     }
 
+    async fn seal_rolling_start_layout(
+        &self,
+        session_id: &str,
+        session: &Arc<Session>,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Option<RollingHlsLayout>, String> {
+        let Some(inventory) = &session.native_split else {
+            return Ok(None);
+        };
+        let deadline =
+            deadline.unwrap_or_else(|| tokio::time::Instant::now() + ROLLING_PUBLICATION_HARD);
+        loop {
+            if session.control.is_retired() || session.failed.load(Acquire) {
+                return Err(format!(
+                    "rolling presentation failed before activation: {:?}",
+                    session.failure_reason()
+                ));
+            }
+            let resolved = tokio::time::timeout_at(deadline, async {
+                let _transition = session.child_transition.lock().await;
+                if session.replacing_child.load(Acquire) || session.control.is_retired() {
+                    return Ok(None);
+                }
+                let published = plurx_core::transcode::manifest::read_bounded_playlist(
+                    &session.dir,
+                    "index.m3u8",
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                if published.is_some_and(|playlist| {
+                    !parse_playlist(&String::from_utf8_lossy(&playlist)).is_empty()
+                }) {
+                    return inventory.seal_for_activation().map(Some);
+                }
+                Ok(None)
+            })
+            .await
+            .map_err(|_| {
+                format!("rolling presentation {session_id} did not open before its deadline")
+            })??;
+            if let Some(layout) = resolved {
+                return Ok(layout);
+            }
+            tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(40)))
+                .await
+                .map_err(|_| {
+                    format!("rolling presentation {session_id} did not open before its deadline")
+                })?;
+        }
+    }
+
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
     pub(super) async fn start_with_audio_offset(
         &self,
@@ -665,6 +720,8 @@ impl TranscodeManager {
         retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
         retain_output: Option<bool>,
         source_telemetry: bool,
+        allow_rolling_split: bool,
+        expected_layout: Option<&crate::transcode::RollingHlsLayout>,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<StartInfo, String> {
         let rate_control = self.rate_control_snapshot();
@@ -695,7 +752,6 @@ impl TranscodeManager {
         // viewer's per-playback opt-out (`SessionRequest::retain_output`): it
         // stops this session collecting, never its reuse of a copy that
         // already exists.
-        let retained_budget = Self::rolling_retained_budget_from(&settings);
         let collect_retained = retain_output != Some(false);
         let pacing = Self::pacing_from_settings(&settings, false).await;
         let sw_budget = Self::num_from(
@@ -795,6 +851,20 @@ impl TranscodeManager {
                 return Ok(info);
             }
         }
+        let rolling_split = expected_layout.is_some()
+            || allow_rolling_split
+                && takeover.is_none()
+                && plan.options().input_has_audio
+                && opts.audio.as_ref().is_none_or(|audio| {
+                    audio
+                        .presentation_identity()
+                        .is_some_and(|(codec, _)| codec == "aac")
+                });
+        let retained_budget = if rolling_split {
+            None
+        } else {
+            Self::rolling_retained_budget_from(&settings)
+        };
         // The retained lookup's captured production, kept for the producer
         // below when its logical graph is byte-identical: one source fence
         // and engine attestation per start, not one per consumer.
@@ -1153,7 +1223,11 @@ impl TranscodeManager {
         if let Some(provenance) = &rolling_provenance {
             execution_file.path = provenance.input_path();
         }
-        let args = transcode::hls_args(&plan, &execution);
+        let args = if rolling_split {
+            transcode::rolling_fmp4_pipe_args(&plan, &execution)
+        } else {
+            transcode::hls_args(&plan, &execution)
+        };
         if plan.input_is_hdr()
             && plan.options().pipeline == Pipeline::Cpu
             && plan.options().tone_map == ToneMap::Zscale
@@ -1478,6 +1552,11 @@ impl TranscodeManager {
             )
         }
         .with_completion_expectation(expected_remaining_ms, completion_tolerance_ms);
+        let policy = if rolling_split {
+            policy.with_fragment_reader()
+        } else {
+            policy
+        };
         let progress = Arc::new(Progress::new());
         let (control, mut executor_registration) =
             crate::playback_control::RollingControlHandle::spawn_prepublication_transcode(
@@ -1529,7 +1608,16 @@ impl TranscodeManager {
             cache_location: None,
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
-            native_split: None,
+            native_split: rolling_split.then(|| Arc::new(
+                copyseg::NativeSplitInventory::with_budget(
+                    0,
+                    u64::try_from(RollingScratchSizing::session_ceiling(Self::ahead_limits_from(&settings)))
+                        .unwrap_or(0),
+                )
+                .with_audio_index(audio_index.or_else(|| file.audio_streams.first().map(|stream| stream.index)))
+                .with_unprocessed_projection()
+                .with_expected_layout(expected_layout.cloned())
+            )),
             publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
             file_id,
@@ -1645,64 +1733,118 @@ impl TranscodeManager {
                 return Err(reason);
             }
         }
-        if let Err(reason) = session
-            .spawn_and_install_prepublication_child(generation, |source_input| {
-                spawn_ffmpeg_at_with_env(
-                    macos_executable
-                        .as_ref()
-                        .map(|executable| executable.path.as_path())
-                        .or_else(|| {
-                            session
-                                .rolling_provenance
-                                .as_ref()
-                                .map(|proof| proof.executable_path())
-                        })
-                        .unwrap_or(std::path::Path::new(&producer_ffmpeg_bin())),
-                    &crate::source_input::source_args(&args, &file.path, &[3], source_input),
-                    crate::process_control::ChildWork::realtime("playback transcode"),
-                    encoder.label(),
-                    &session_id,
-                    FfmpegProgressObserver::rolling(
-                        Arc::clone(&progress),
-                        generation,
-                        session.control.clone(),
-                    ),
-                    &self.runtime_cache,
-                    {
-                        #[cfg(unix)]
-                        let descriptors = FfmpegDescriptors::from_raw_fds(
-                            session
-                                .rolling_provenance
-                                .as_ref()
-                                .filter(|_| source_input.is_none())
-                                .map(|proof| proof.source_fd()),
-                            None,
-                            session
-                                .subtitle_handle
-                                .as_ref()
-                                .map(std::os::fd::AsRawFd::as_raw_fd),
-                            false,
-                        );
-                        #[cfg(windows)]
-                        let descriptors = windows_session_descriptors(&session)?;
-                        descriptors
-                    },
-                    observation.clone(),
-                    &macos_executable
-                        .as_ref()
-                        .map(|executable| executable.processing_child_env())
-                        .unwrap_or_default(),
-                )
+        let ffmpeg_bin = producer_ffmpeg_bin();
+        let program = macos_executable
+            .as_ref()
+            .map(|executable| executable.path.as_path())
+            .or_else(|| {
+                session
+                    .rolling_provenance
+                    .as_ref()
+                    .map(|proof| proof.executable_path())
             })
-            .await
-        {
-            fail_prepublication_transaction(
-                &session,
-                format!("initial transcode producer could not be installed: {reason}"),
+            .unwrap_or(std::path::Path::new(&ffmpeg_bin));
+        let processing_env = macos_executable
+            .as_ref()
+            .map(|executable| executable.processing_child_env())
+            .unwrap_or_default();
+        let descriptors = |uses_held_file: bool| -> Result<FfmpegDescriptors, String> {
+            #[cfg(unix)]
+            return Ok(FfmpegDescriptors::from_raw_fds(
+                session
+                    .rolling_provenance
+                    .as_ref()
+                    .filter(|_| uses_held_file)
+                    .map(|proof| proof.source_fd()),
+                None,
+                session
+                    .subtitle_handle
+                    .as_ref()
+                    .map(std::os::fd::AsRawFd::as_raw_fd),
+                false,
+            ));
+            #[cfg(windows)]
+            return windows_session_descriptors(&session);
+        };
+        let observer = || {
+            FfmpegProgressObserver::rolling(
+                Arc::clone(&progress),
+                generation,
+                session.control.clone(),
             )
-            .await;
-            start_settlement.disarm();
-            return Err(reason);
+        };
+        let started = if rolling_split {
+            session
+                .spawn_and_install_prepublication_pipe_child(generation, |source_input| {
+                    let source_url = source_input.map(crate::source_input::SourceInput::url);
+                    spawn_ffmpeg_pipe_at(
+                        program,
+                        &crate::source_input::source_args(&args, &file.path, &[3], source_url),
+                        crate::process_control::ChildWork::realtime("playback transcode"),
+                        encoder.label(),
+                        &session_id,
+                        observer(),
+                        &self.runtime_cache,
+                        descriptors(source_input.is_none())?,
+                        observation.clone(),
+                        &processing_env,
+                    )
+                })
+                .await
+                .map(Some)
+        } else {
+            session
+                .spawn_and_install_prepublication_child(generation, |source_input| {
+                    spawn_ffmpeg_at_with_env(
+                        program,
+                        &crate::source_input::source_args(&args, &file.path, &[3], source_input),
+                        crate::process_control::ChildWork::realtime("playback transcode"),
+                        encoder.label(),
+                        &session_id,
+                        observer(),
+                        &self.runtime_cache,
+                        descriptors(source_input.is_none())?,
+                        observation.clone(),
+                        &processing_env,
+                    )
+                })
+                .await
+                .map(|()| None)
+        };
+        match started {
+            Ok(Some(stdout)) => {
+                let grants = session.scratch.as_ref().map(|permit| {
+                    copyseg::WriteGrants::new(
+                        Arc::clone(permit.ledger()),
+                        permit.key(),
+                        Arc::clone(&self.scratch_cap),
+                        scratch_envelope,
+                    )
+                    .with_starved_signal(Arc::clone(&self.scratch_starved))
+                });
+                spawn_copy_reader_owner(
+                    Arc::clone(&session),
+                    stdout,
+                    dir.clone(),
+                    session_id.clone(),
+                    generation,
+                    file.clone(),
+                    transcode::CopyVideoOptions::new(false, true),
+                    grants,
+                    #[cfg(target_os = "linux")]
+                    None,
+                );
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                fail_prepublication_transaction(
+                    &session,
+                    format!("initial transcode producer could not be installed: {reason}"),
+                )
+                .await;
+                start_settlement.disarm();
+                return Err(reason);
+            }
         }
         tracing::info!(
             target: "plurxd::transcode",
@@ -1722,6 +1864,24 @@ impl TranscodeManager {
             start_settlement.disarm();
             return Err(reason);
         }
+        let rolling_hls_layout = match self
+            .seal_rolling_start_layout(&session_id, &session, replacement_deadline)
+            .await
+        {
+            Ok(layout) => layout,
+            Err(reason) => {
+                let _ = self
+                    .retire_session_until_with_cause(
+                        &session_id,
+                        &session,
+                        replacement_deadline,
+                        "rolling_layout_refused",
+                    )
+                    .await;
+                start_settlement.disarm();
+                return Err(reason);
+            }
+        };
         start_settlement.settle();
         self.emit_session_event(
             &session_id,
@@ -1741,12 +1901,18 @@ impl TranscodeManager {
 
         Ok(StartInfo {
             vod_copy_layout: None,
+            rolling_hls_layout: rolling_hls_layout.clone(),
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
             retained_output: None,
             audio_delivery: opts.audio.clone(),
-            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            playlist_url: format!(
+                "/api/v1/hls/{session_id}/{}",
+                rolling_hls_layout
+                    .as_ref()
+                    .map_or("index.m3u8", RollingHlsLayout::playlist_filename),
+            ),
             session_id,
             duration_ms: file.duration_ms,
             start_seconds,
@@ -1798,6 +1964,8 @@ impl TranscodeManager {
             None,
             false,
             false,
+            false,
+            None,
             None,
             #[cfg(target_os = "linux")]
             None,
@@ -1847,6 +2015,8 @@ impl TranscodeManager {
         retain_output: Option<bool>,
         source_telemetry: bool,
         allow_native_split: bool,
+        allow_basic_split: bool,
+        expected_layout: Option<&crate::transcode::RollingHlsLayout>,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
         #[cfg(target_os = "linux")] prepared_native_fel: Option<PreparedNativeFelStart>,
     ) -> Result<StartInfo, String> {
@@ -1870,6 +2040,10 @@ impl TranscodeManager {
         let can_split_at_requested_offset = start_seconds == 0.0 || resume_video_index.is_some();
         #[cfg(not(target_os = "linux"))]
         let can_split_at_requested_offset = start_seconds == 0.0;
+        let basic_split_requested = allow_basic_split
+            && !options.convert_dolby_vision
+            && !file.audio_streams.is_empty()
+            && audio_offset_ms == 0;
         let native_split_requested = allow_native_split
             && can_split_at_requested_offset
             && audio_offset_ms == 0
@@ -1981,7 +2155,11 @@ impl TranscodeManager {
         // every later `options.` in this function is the served answer. `asked`
         // survives only to log the difference.
         let asked = options;
-        let segmenting = takeover.is_none() && copyseg::supports(file.video_codec.as_deref());
+        let segmenting = (takeover.is_none() || expected_layout.is_some())
+            && copyseg::supports(file.video_codec.as_deref());
+        if expected_layout.is_some() && !segmenting {
+            return Err("the source cannot reproduce its rolling fMP4 generation".to_owned());
+        }
         let options = if segmenting && asked.convert_dolby_vision {
             asked
         } else {
@@ -2015,7 +2193,7 @@ impl TranscodeManager {
             preserve,
             options.convert_dolby_vision,
         );
-        if video_options.promotes_parameter_sets() && takeover.is_some() {
+        if video_options.promotes_parameter_sets() && takeover.is_some() && !segmenting {
             return Err(
                 "this HEVC source requires GOP-aware init promotion and cannot use the legacy takeover muxer"
                     .to_owned(),
@@ -2031,8 +2209,8 @@ impl TranscodeManager {
         // whether both copies of the served window fit beside what the
         // ordinary copy still needs.
         let ordinary_sizing = RollingScratchSizing::Startup(startup_bytes);
-        let split_sizing = RollingScratchSizing::Startup(startup_bytes.saturating_mul(2));
-        let split_eligible = native_split_requested && segmenting;
+        let split_eligible = segmenting
+            && (native_split_requested || basic_split_requested || expected_layout.is_some());
         #[cfg(target_os = "linux")]
         let split_reservation = prepared_scratch.filter(|_| split_eligible).or_else(|| {
             // A warm head is staged whole beside both copies: it needs the
@@ -2049,10 +2227,13 @@ impl TranscodeManager {
         let split_reservation = None;
         let split_reservation = split_reservation.or_else(|| {
             split_eligible
-                .then(|| self.reserve_rolling_scratch_with(split_sizing, limits))
+                .then(|| self.reserve_rolling_scratch_with(ordinary_sizing, limits))
                 .and_then(Result::ok)
         });
         let native_split = split_reservation.is_some();
+        if expected_layout.is_some() && !native_split {
+            return Err("could not reserve scratch to reproduce the rolling generation".to_owned());
+        }
         if options.convert_dolby_vision && !native_split {
             let reason = if !allow_native_split {
                 "not_allowed_for_request"
@@ -2298,7 +2479,10 @@ impl TranscodeManager {
         #[cfg(target_os = "linux")]
         let mut picture_clock = None;
         #[cfg(target_os = "linux")]
-        let resumed_split = native_split && start_seconds > 0.0;
+        let resumed_split = native_split
+            && options.convert_dolby_vision
+            && start_seconds > 0.0
+            && !matches!(expected_layout, Some(RollingHlsLayout::FragmentedMuxedV1));
         let initial_args = if segmenting {
             transcode::copy_pipe_args_with_audio_delivery(
                 &execution_file,
@@ -2435,8 +2619,11 @@ impl TranscodeManager {
                     u64::try_from(ordinary_sizing.grant_bytes(limits)).unwrap_or(0),
                     u64::try_from(RollingScratchSizing::session_ceiling(limits)).unwrap_or(0),
                 )
+                .with_writer_layout()
                 .with_startup_secs(rolling_startup_media_ms(1.0) as f64 / 1_000.0)
-                .with_audio_index(audio_index);
+                .with_audio_index(audio_index.or_else(|| file.audio_streams.first().map(|stream| stream.index)))
+                .with_expected_layout(expected_layout.cloned());
+                let split = if options.convert_dolby_vision { split } else { split.with_unprocessed_projection() };
                 #[cfg(target_os = "linux")]
                 let split = if warm_head.is_some() { split.compare_prepared_head() } else { split };
                 #[cfg(target_os = "linux")]
@@ -2584,6 +2771,7 @@ impl TranscodeManager {
                             .unwrap_or(std::path::Path::new(&ffmpeg_bin())),
                         &crate::source_input::source_args(args, &file.path, &[3], source_url),
                         crate::process_control::ChildWork::realtime("playback transcode"),
+                        "copy",
                         &session_id,
                         FfmpegProgressObserver::rolling(
                             Arc::clone(&progress),
@@ -2613,6 +2801,7 @@ impl TranscodeManager {
                             descriptors
                         },
                         DiagnosticObservation::copy(&session_id),
+                        &[],
                     )
                     .map_err(|reason| copy_start_local_failure(preferred_native, reason))?;
                     #[cfg(target_os = "linux")]
@@ -2754,6 +2943,24 @@ impl TranscodeManager {
             start_settlement.disarm();
             return Err(reason);
         }
+        let rolling_hls_layout = match self
+            .seal_rolling_start_layout(&session_id, &session, replacement_deadline)
+            .await
+        {
+            Ok(layout) => layout,
+            Err(reason) => {
+                let _ = self
+                    .retire_session_until_with_cause(
+                        &session_id,
+                        &session,
+                        replacement_deadline,
+                        "rolling_layout_refused",
+                    )
+                    .await;
+                start_settlement.disarm();
+                return Err(copy_start_local_failure(preferred_native, reason));
+            }
+        };
         start_settlement.settle();
         self.emit_session_event(
             &session_id,
@@ -2765,12 +2972,18 @@ impl TranscodeManager {
 
         Ok(StartInfo {
             vod_copy_layout: None,
+            rolling_hls_layout: rolling_hls_layout.clone(),
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
             retained_output: None,
             audio_delivery: audio_delivery.cloned(),
-            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            playlist_url: format!(
+                "/api/v1/hls/{session_id}/{}",
+                rolling_hls_layout
+                    .as_ref()
+                    .map_or("index.m3u8", RollingHlsLayout::playlist_filename),
+            ),
             session_id,
             duration_ms: file.duration_ms,
             start_seconds,

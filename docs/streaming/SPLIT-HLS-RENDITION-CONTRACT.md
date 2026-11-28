@@ -226,3 +226,48 @@ projection deadline refusals keep the encoded muxed media URL. The owner
 retains the selected layout, producer identity, and both child identities
 under media-pool protocol 15. Recovery verifies those identities before
 serving the issued child URLs.
+
+### Rolling HLS
+
+The rolling producer commits one fragmented MP4 layout before activation. An
+opening window that proves separate video and AAC objects can publish a split
+master. During that private opening the writer keeps the original packets so a
+projection refusal can publish the muxed presentation. A committed split writes
+one primary video object per segment and one audio object. The native Dolby
+Vision FEL splice verifies the primary video digest and reads that track.
+
+Media-pool protocol 16 carries the issued rolling layout. A takeover reserves
+a new media sequence range and publishes a discontinuity for both children. It
+must reproduce the issued initialization identities before serving the split
+master. Relay requests use the same role and rendition paths as local requests.
+
+### Live TV, sharing, and Jellyfin
+
+Live TV projects the selected fMP4 audio and video from the tuner session's
+existing writer. Before the first ready manifest, the owner reserves the
+retained window and verifies the alignment, format and combined peak of both
+tracks. The owner keeps muxed delivery for an unproved opening or for the
+existing caption presentation. On a remote start, the ingress must use the
+signed split-aware start route advertised by the owner. The ingress requires
+fresh fleet support for the child routes before requesting split. Legacy
+ingress and mixed-fleet starts continue to receive muxed delivery. Both split
+children preserve the producer's sequence and discontinuity positions.
+Recently advertised fragments retain their read authority after they leave
+the sliding playlist.
+
+For finite shared VOD, the Source may project its admitted fMP4 pair before
+the durable publication fence. The Receiver affirms the contract with
+`x-plurx-receiver-hls: hls-split-av-v1`, and the client sends the corresponding
+transport capability. The Source and Receiver validate the role and rendition
+on every child resource, including relative playlist links. The original
+Source owner serves the issued presentation. A bounded growing Source
+range may project a verified AVC/AAC pair from its committed range objects.
+Each row must pass the pair proof before either child advertises it. An
+audio-only flush at EOF joins the soundtrack clock and appears in the audio
+playlist. The issued range and payload digests bind projected reads throughout
+the owner's response lease. Refused openings publish the muxed route.
+
+Jellyfin negotiates this layout with a device profile whose
+`PlurxHlsTransports` contains `hls-split-av-v1`. It rewrites the master and
+split child paths through the established authenticated Jellyfin session.
+Clients without that claim use the existing muxed paths.

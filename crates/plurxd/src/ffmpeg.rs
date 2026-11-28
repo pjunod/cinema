@@ -1098,12 +1098,17 @@ async fn held_source_packet_probe(
     if let Some(input) = input {
         let cap = usize::try_from(max_stdout_bytes.saturating_add(1))
             .map_err(|error| HeldPacketProbeError::Process(error.to_string()))?;
-        let output = plurx_core::process::source_lifetime::mediated(
-            plurx_core::process::bounded::output_command(
+        plurx_core::process::source_lifetime::configure_brokered_cwd(command.as_std_mut());
+        let manifest = crate::producer_spawn::Descriptors::default()
+            .prepare(&mut command, crate::producer_spawn::ChildStdios::CAPTURED)
+            .map_err(|error| HeldPacketProbeError::Process(error.to_string()))?;
+        let output = plurx_core::process::source_lifetime::brokered(
+            plurx_core::process::bounded::output_command_with_descriptors(
                 &mut command,
                 timeout,
                 cap,
                 crate::process_control::ChildWork::background("fragment index packet probe"),
+                manifest,
             ),
         )
         .await;

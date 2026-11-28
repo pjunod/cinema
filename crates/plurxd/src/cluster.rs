@@ -829,6 +829,10 @@ impl Cluster {
         self.membership.live_tv_protocol_pending_nodes().await
     }
 
+    pub(crate) async fn live_tv_split_ready(&self) -> Result<bool, MembershipError> {
+        self.membership.live_tv_split_ready().await
+    }
+
     /// This node's own hostname, when known.
     pub(crate) fn own_hostname(&self) -> Option<String> {
         self.membership.local_hostname()

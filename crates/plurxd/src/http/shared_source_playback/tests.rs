@@ -1008,6 +1008,181 @@ async fn sharing_source_http_real_encoded_h1_h2_playlist_init_and_segment() {
     Box::pin(actual_source_resource_delivery(SourceFixtureMode::Encoded)).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_split_finite_serves_both_children() {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter("warn,hiqlite=error,plurxd::vodserve=info,plurxd::copyrange=info")
+        .try_init();
+    for mode in [
+        SourceFixtureMode::SplitCopy,
+        SourceFixtureMode::SplitEncoded,
+    ] {
+        Box::pin(actual_source_split_delivery(mode)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_growing_split_reads_a_committed_pair() {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter("warn,hiqlite=error,plurxd::vodserve=info,plurxd::copyrange=info")
+        .try_init();
+    Box::pin(actual_source_split_delivery(
+        SourceFixtureMode::RangeSplitCopy,
+    ))
+    .await;
+}
+
+async fn actual_source_split_delivery(mode: SourceFixtureMode) {
+    let mut fixture = real_source_start_fixture_with(mode, None).await;
+    fixture.keep_fixture_membership_stable().await;
+    let start = fixture_start(
+        axum::extract::State((*fixture.state).clone()),
+        fixture.headers.clone(),
+        axum::extract::Path((
+            fixture.reference.item_id.as_str().to_owned(),
+            fixture.reference.file_id.as_str().to_owned(),
+        )),
+        axum::body::Body::from(fixture.request.clone()),
+    )
+    .await
+    .expect("publish exact Source pair");
+    let bytes = axum::body::to_bytes(start.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("Source Start");
+    let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
+        .expect("Receiver accepts Source Start");
+    assert!(decoded.response().playlist_url.ends_with("/master.m3u8"));
+    let mut request: Value = serde_json::from_slice(&fixture.request).expect("request");
+    let id = request["session"]["request_id"]
+        .as_str()
+        .expect("request ID")
+        .to_owned();
+    request["incarnation_id"] = json!(decoded.incarnation_id());
+    request["session_id"] = json!(decoded.response().session_id);
+    request["control_epoch"] = json!(
+        decoded
+            .response()
+            .control
+            .as_ref()
+            .expect("control")
+            .control_epoch
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::serve_http(
+        listener,
+        super::super::sharing::peer_router((*fixture.state).clone()),
+        async move {
+            let _ = stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let url = format!(
+        "http://{address}/sharing/v1/items/{}/files/{}/sessions/{id}/resources",
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str(),
+    );
+    let get = |resource: String| {
+        let mut request = request.clone();
+        request["resource"] = json!(resource);
+        let headers = fixture.headers.clone();
+        let url = &url;
+        async move {
+            let response = actual_resource_request(
+                address,
+                true,
+                url,
+                headers,
+                serde_json::to_vec(&request).expect("resource request"),
+            )
+            .await;
+            let status = response.status();
+            let mime = response.headers().get("content-type").cloned();
+            let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+                .await
+                .expect("body");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{mode:?}: {resource}: {}",
+                String::from_utf8_lossy(&body)
+            );
+            (mime, body)
+        }
+    };
+    let (_, master) = get("master.m3u8".into()).await;
+    let master = std::str::from_utf8(&master).expect("split master");
+    let mut growing_counts = Vec::new();
+    for role in ["video", "audio"] {
+        let marker = format!("{role}/");
+        let rest = master
+            .split_once(&marker)
+            .unwrap_or_else(|| panic!("{mode:?}: {master}"))
+            .1;
+        let id = &rest[..rest.find('/').expect("rendition")];
+        let (_, playlist) = get(format!("{role}/{id}/index.m3u8")).await;
+        let playlist = if matches!(mode, SourceFixtureMode::RangeSplitCopy) {
+            tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                let mut playlist = playlist;
+                while !playlist.ends_with(b"#EXT-X-ENDLIST\n") {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    playlist = get(format!("{role}/{id}/index.m3u8")).await.1;
+                }
+                playlist
+            })
+            .await
+            .expect("range playlists close after the final verified audio flush")
+        } else {
+            playlist
+        };
+        let playlist = std::str::from_utf8(&playlist).expect("split child");
+        let init = playlist
+            .lines()
+            .find_map(|line| line.strip_prefix("#EXT-X-MAP:URI=\""))
+            .and_then(|line| line.strip_suffix('"'))
+            .expect("child init");
+        let segment = playlist
+            .lines()
+            .find(|line| line.starts_with("segment/"))
+            .expect("child segment");
+        if matches!(mode, SourceFixtureMode::RangeSplitCopy) {
+            let count = playlist
+                .lines()
+                .filter(|line| line.starts_with("segment/"))
+                .count();
+            growing_counts.push(count);
+            if role == "audio" {
+                let last = playlist
+                    .lines()
+                    .rfind(|line| line.starts_with("segment/"))
+                    .expect("audio tail");
+                assert!(!get(format!("{role}/{id}/{last}")).await.1.is_empty());
+            }
+        }
+        for child in [init, segment] {
+            let (mime, bytes) = get(format!("{role}/{id}/{child}")).await;
+            assert!(!bytes.is_empty(), "{role} child object");
+            let mime = mime.expect("typed child MIME");
+            assert!(mime.to_str().expect("MIME text").starts_with(role));
+        }
+    }
+    if let [video, audio] = growing_counts.as_slice() {
+        assert_eq!(
+            *audio,
+            video + 1,
+            "the audio-only tail must never advertise a video object"
+        );
+    }
+    let _ = stop.send(());
+    server.await.expect("server").expect("shutdown");
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_http_native_copy_h1_h2_vtt_and_held_body_end() {
     Box::pin(actual_source_resource_delivery(
         SourceFixtureMode::NativeCopy,
@@ -2890,6 +3065,7 @@ async fn sharing_source_bound_invocation_projects_the_complete_start_response() 
     let incarnation = incarnation_id.to_string();
     let info = crate::transcode::StartInfo {
         vod_copy_layout: None,
+        rolling_hls_layout: None,
         processed_dv_profile: None,
         processed_fel: None,
         degraded_processing: None,

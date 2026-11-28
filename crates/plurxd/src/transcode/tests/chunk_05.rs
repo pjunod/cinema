@@ -1595,7 +1595,7 @@
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
             dual_layer_as_copied: false,
         }, "owner", &supersession_user, None, None, None, playback_id, false, None,
-            (!retention).then_some(false), false, false, None,
+            (!retention).then_some(false), false, false, false, None, None,
             #[cfg(target_os = "linux")]
             None,
         ).await.expect("ordinary start");

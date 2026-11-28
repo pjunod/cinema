@@ -1827,7 +1827,8 @@ fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
 fn takeover_recipe_is_valid(request: &RemoteStartRequest) -> bool {
     remote_start_envelope_is_valid(request)
         && worker_session_request_fields_are_valid(&request.request)
-        && request.request.presentation == crate::transcode::Presentation::Live
+        && (request.request.presentation == crate::transcode::Presentation::Live
+            || request.request.rolling_hls_layout.is_some())
 }
 
 /// The request contract shared by public ingress and private worker ingress.
@@ -1838,6 +1839,7 @@ fn takeover_recipe_is_valid(request: &RemoteStartRequest) -> bool {
 /// a request sent to a peer.
 pub(crate) fn worker_session_request_is_valid(request: &SessionRequest) -> bool {
     worker_session_request_fields_are_valid(request)
+        && request.rolling_hls_layout.is_none()
         && request.presentation == crate::transcode::Presentation::Vod
 }
 
@@ -1852,6 +1854,7 @@ pub(crate) fn source_session_request_is_valid(
         plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. }
     ) && principal.valid_admission_shape()
         && request.vod_copy_layout.is_none()
+        && request.rolling_hls_layout.is_none()
         && session_request_fields_are_valid(request, true)
         && request.presentation == crate::transcode::Presentation::Vod
 }
@@ -1863,6 +1866,11 @@ fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
 fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) -> bool {
     request.dv_processing_route().is_ok()
         && request.vod_copy_layout_valid()
+        && request.rolling_hls_layout.as_ref().is_none_or(|layout| {
+            request.vod_copy_layout.is_none()
+                && request.continuous_media.is_none()
+                && layout.valid()
+        })
         && request
         .dv_refit_digest.as_deref().is_none_or(|digest|
             matches!(request.kind, SessionKind::Copy { convert_dolby_vision: true, .. })
@@ -1924,6 +1932,8 @@ fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) 
 pub(crate) struct RemoteStartResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) vod_copy_layout: Option<crate::transcode::VodCopyLayout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rolling_hls_layout: Option<crate::transcode::RollingHlsLayout>,
 
     /// Owner answer carried separately from the strict legacy JSON body.
     #[serde(skip)]
@@ -2208,6 +2218,7 @@ impl From<StartInfo> for RemoteStartResponse {
     fn from(info: StartInfo) -> Self {
         Self {
             vod_copy_layout: info.vod_copy_layout,
+            rolling_hls_layout: info.rolling_hls_layout,
             processed_dv_profile: info.processed_dv_profile,
             processed_fel: info.processed_fel,
             retained_output: info.retained_output,
@@ -2267,9 +2278,19 @@ impl RemoteStartResponse {
         let split_path =
             self.vod && self.playlist_url == format!("/api/v1/hls/{}/master.m3u8", self.session_id);
         uuid::Uuid::parse_str(&self.session_id).is_ok()
-            && match &self.vod_copy_layout {
-                None => muxed_path || (!encoded && split_path),
-                Some(layout) => {
+            && match (&self.vod_copy_layout, &self.rolling_hls_layout) {
+                (None, Some(layout)) => {
+                    !self.vod
+                        && layout.valid()
+                        && self.playlist_url
+                            == format!(
+                                "/api/v1/hls/{}/{}",
+                                self.session_id,
+                                layout.playlist_filename()
+                            )
+                }
+                (None, None) => muxed_path || (!encoded && split_path),
+                (Some(layout), None) => {
                     self.vod
                         && layout.encoded() == encoded
                         && !layout.pending()
@@ -2280,6 +2301,7 @@ impl RemoteStartResponse {
                             muxed_path
                         }
                 }
+                (Some(_), Some(_)) => false,
             }
             && self.processed_dv_profile.is_none_or(|profile| {
                 profile == 8
@@ -5179,6 +5201,7 @@ pub(crate) fn unix_ms() -> i64 {
 fn durable_route_is_vod(route: &MediaSessionRoute) -> bool {
     serde_json::from_str::<RemoteStartRequest>(&route.recipe_json).map_or(true, |request| {
         request.request.presentation == crate::transcode::Presentation::Vod
+            && request.request.rolling_hls_layout.is_none()
     })
 }
 
@@ -7705,6 +7728,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     .await
     .map_err(|_| "candidate takeover validation timed out".to_owned())?
     .map_err(|error| error.to_string())?;
+    envelope.request.presentation = crate::transcode::Presentation::Live;
     let user = tokio::time::timeout_at(
         deadline,
         state.store.get_user(

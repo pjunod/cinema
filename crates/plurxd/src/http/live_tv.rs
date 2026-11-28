@@ -18,7 +18,8 @@ use crate::live_tv::{
     LiveTvError, LiveTvGuide, LiveTvResourceRequest, LiveTvSessionStatus, LiveTvSnapshot,
     LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStopRequest, SnapshotFreshness,
     SnapshotRequest, ACTIVATE_PATH, GUIDE_PATH, MAX_SNAPSHOT_BYTES, RESOURCE_PATH, RESUME_PATH,
-    RETIRE_PATH, SNAPSHOT_PATH, START_PATH, START_STATE_PATH, START_V2_PATH, STOP_PATH,
+    RETIRE_PATH, SNAPSHOT_PATH, START_PATH, START_SPLIT_PATH, START_SPLIT_PROTOCOL,
+    START_STATE_PATH, START_V2_PATH, STOP_PATH,
 };
 use crate::live_tv_delivery::LivePlaybackRequest;
 use crate::state::AppState;
@@ -517,6 +518,7 @@ pub(crate) async fn issue_start(
         config_generation: config.generation,
         source_serving_generation: generation,
         playback,
+        split_ingress: true,
     };
     let ticket = state
         .live_tv
@@ -580,7 +582,16 @@ pub(crate) async fn start_session(
         config_generation: config.generation,
         source_serving_generation: ingress_generation,
         playback,
+        split_ingress: true,
     };
+    if request.allows_split() {
+        request.split_ingress = tokio::time::timeout_at(
+            stage_deadline(Duration::from_millis(750), deadline),
+            state.cluster.live_tv_split_ready(),
+        )
+        .await
+        .is_ok_and(|result| result.unwrap_or(false));
+    }
     // A failure here is deliberately *not* followed by a retire from this node.
     // The start may have been admitted on the owner, and the client's answer
     // says so: anything the owner did not decide leaves the client holding its
@@ -866,6 +877,16 @@ pub(crate) async fn master(
         .map_err(|error| ApiError::Internal(error.to_string()))?;
     let status: LiveTvSessionStatus =
         serde_json::from_slice(&bytes).map_err(|error| ApiError::Internal(error.to_string()))?;
+    if let Some(master) = status.split_master {
+        return Ok(Response::builder()
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "application/vnd.apple.mpegurl",
+            )
+            .header(axum::http::header::CACHE_CONTROL, "no-store")
+            .body(Body::from(master))
+            .expect("static split master response headers"));
+    }
     let delivery = status.delivery;
     let services = delivery.as_ref().and_then(|plan| {
         plan.reasons
@@ -900,6 +921,65 @@ pub(crate) async fn playlist(
     State(state): State<AppState>,
 ) -> Result<Response<Body>, ApiError> {
     owner_resource(&state, LiveTvResourceRequest::Playlist { capability }).await
+}
+
+pub(crate) async fn split_playlist(
+    Path((capability, role, rendition)): Path<(String, String, String)>,
+    State(state): State<AppState>,
+) -> Result<Response<Body>, ApiError> {
+    let role =
+        crate::live_tv::split::Role::parse(&role).ok_or(ApiError::NotFound("live-TV rendition"))?;
+    owner_resource(
+        &state,
+        LiveTvResourceRequest::SplitPlaylist {
+            capability,
+            role,
+            rendition,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn split_object(
+    Path((capability, role, rendition, kind, object)): Path<(
+        String,
+        String,
+        String,
+        String,
+        String,
+    )>,
+    State(state): State<AppState>,
+) -> Result<Response<Body>, ApiError> {
+    let role =
+        crate::live_tv::split::Role::parse(&role).ok_or(ApiError::NotFound("live-TV rendition"))?;
+    let request = match kind.as_str() {
+        "init" if object.strip_suffix(".mp4") == Some(rendition.as_str()) => {
+            LiveTvResourceRequest::SplitInit {
+                capability,
+                role,
+                rendition,
+            }
+        }
+        "segment" => {
+            let value = object
+                .strip_suffix(".m4s")
+                .ok_or(ApiError::NotFound("live-TV fragment"))?;
+            let sequence: u64 = value
+                .parse()
+                .map_err(|_| ApiError::NotFound("live-TV fragment"))?;
+            if sequence.to_string() != value {
+                return Err(ApiError::NotFound("live-TV fragment"));
+            }
+            LiveTvResourceRequest::SplitFragment {
+                capability,
+                role,
+                rendition,
+                sequence,
+            }
+        }
+        _ => return Err(ApiError::NotFound("live-TV fragment")),
+    };
+    owner_resource(&state, request).await
 }
 
 pub(crate) async fn segment(
@@ -1243,8 +1323,16 @@ async fn owner_start_within(
     }
     let (node_id, base) = owner_peer(state, &config.owner_node_id).await?;
     let (path, body) = if request.playback.is_some() {
+        let split_compatible = request.allows_split()
+            && owner_snapshot_within(state, config, false, false, budget)
+                .await
+                .is_ok_and(|snapshot| snapshot.start_protocols.contains(&START_SPLIT_PROTOCOL));
         (
-            START_V2_PATH,
+            if split_compatible {
+                START_SPLIT_PATH
+            } else {
+                START_V2_PATH
+            },
             serde_json::to_vec(&LiveTvStartRequestV2::from(request))
                 .map_err(|error| ApiError::Internal(error.to_string()))?,
         )
@@ -1402,10 +1490,14 @@ async fn owner_resource(
     }
     let (node_id, base) = owner_peer(state, &owner).await?;
     let max_body_bytes = match &request {
-        LiveTvResourceRequest::Playlist { .. } => crate::live_tv::MAX_PLAYLIST_BYTES,
+        LiveTvResourceRequest::Playlist { .. } | LiveTvResourceRequest::SplitPlaylist { .. } => {
+            crate::live_tv::MAX_PLAYLIST_BYTES
+        }
         LiveTvResourceRequest::Segment { .. }
         | LiveTvResourceRequest::Init { .. }
-        | LiveTvResourceRequest::Fragment { .. } => crate::live_tv::MAX_SEGMENT_BYTES,
+        | LiveTvResourceRequest::Fragment { .. }
+        | LiveTvResourceRequest::SplitInit { .. }
+        | LiveTvResourceRequest::SplitFragment { .. } => crate::live_tv::MAX_SEGMENT_BYTES,
         LiveTvResourceRequest::Status { .. } => 32 * 1024,
         LiveTvResourceRequest::Keepalive { .. } => 1024,
     };
@@ -1416,6 +1508,8 @@ async fn owner_resource(
         LiveTvResourceRequest::Segment { .. }
             | LiveTvResourceRequest::Init { .. }
             | LiveTvResourceRequest::Fragment { .. }
+            | LiveTvResourceRequest::SplitInit { .. }
+            | LiveTvResourceRequest::SplitFragment { .. }
     ) {
         let response = state
             .live_tv_peers
@@ -1434,7 +1528,10 @@ async fn owner_resource(
         if !response.status.is_success() {
             return Err(wire_api_error(response.status, &response.body));
         }
-        let content_type = if matches!(request, LiveTvResourceRequest::Playlist { .. }) {
+        let content_type = if matches!(
+            request,
+            LiveTvResourceRequest::Playlist { .. } | LiveTvResourceRequest::SplitPlaylist { .. }
+        ) {
             "application/vnd.apple.mpegurl"
         } else {
             "application/json"

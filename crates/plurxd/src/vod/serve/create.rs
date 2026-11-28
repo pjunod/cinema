@@ -1285,16 +1285,15 @@ impl VodServe {
             retained_capture: prepared.retained_capture.clone(),
             ..VodRecipeRequest::from(prepared.request)
         });
-        let started = self
-            .attach_vod_session(
-                prepared,
-                file,
-                settings,
-                attribution,
-                session_id.clone(),
-                &fences,
-            )
-            .await;
+        let started = Box::pin(self.attach_vod_session(
+            prepared,
+            file,
+            settings,
+            attribution,
+            session_id.clone(),
+            &fences,
+        ))
+        .await;
         if let Some(requested) = encoded_split.as_ref() {
             let now = Instant::now();
             let owner_deadline = fences
@@ -1316,7 +1315,7 @@ impl VodServe {
                 })
             });
             return self
-                .settle_encoded_split(requested, started?, now + budget, &fences)
+                .settle_encoded_split(requested, started?, now + budget, &fences, false)
                 .await;
         }
         let Some(fallback) = fallback else {
@@ -1332,9 +1331,15 @@ impl VodServe {
                     %error,
                     "split copy refused before publication; preparing muxed copy"
                 );
-                return self
-                    .attach_vod_session(fallback, file, settings, attribution, session_id, &fences)
-                    .await;
+                return Box::pin(self.attach_vod_session(
+                    fallback,
+                    file,
+                    settings,
+                    attribution,
+                    session_id,
+                    &fences,
+                ))
+                .await;
             }
         }
         started
@@ -2465,6 +2470,7 @@ impl ReservedSourceVodRendition {
         Ok(SourcePendingStartInfo {
             info: crate::transcode::StartInfo {
                 vod_copy_layout: None,
+                rolling_hls_layout: None,
                 processed_dv_profile: self
                     .rendition
                     .recipe
@@ -2482,7 +2488,8 @@ impl ReservedSourceVodRendition {
                 session_id: session_id.into(),
                 // A split copy's entry point is its family master: the
                 // video-only index alone would play without any soundtrack.
-                playlist_url: if self.rendition.recipe.audio_excluded {
+                playlist_url: if self.rendition.recipe.audio_excluded || pending.request.split_audio
+                {
                     format!("/api/v1/hls/{session_id}/master.m3u8")
                 } else {
                     format!("/api/v1/hls/{session_id}/index.m3u8")
@@ -2748,6 +2755,27 @@ impl VodServe {
             pending.processed_reuse_scope,
         ))
         .await
+    }
+
+    pub(crate) async fn settle_source_vod_split(
+        &self,
+        start: VodStart,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        let fences = VodCreateFences {
+            release_fence: None,
+            serving_admission: None,
+            viewer: None,
+        };
+        self.settle_encoded_split(
+            &VodCopyLayout::PendingEncodedV1,
+            start,
+            deadline,
+            &fences,
+            true,
+        )
+        .await
+        .map(|_| ())
     }
 
     /// No codec/FFprobe/burn work is hidden in this copy-only preparation.
@@ -3804,6 +3832,7 @@ mod principal_demand_tests {
         let request = SessionRequest {
             split_audio: false,
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             source_telemetry: None,
             quality_catalog: None,
             candidate_context: None,

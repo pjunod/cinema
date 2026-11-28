@@ -1492,6 +1492,7 @@ impl TranscodeManager {
             let request = SessionRequest {
                 split_audio: false,
                 vod_copy_layout: None,
+                rolling_hls_layout: None,
                 source_telemetry: None,
                 dv_processing_destination: None,
                 retain_output: None,
@@ -5035,6 +5036,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
         let request = SessionRequest {
             split_audio: false,
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -5996,6 +5998,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
         let mut request = SessionRequest {
             split_audio: false,
             vod_copy_layout: None,
+            rolling_hls_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,

@@ -1,7 +1,10 @@
 //! Source-private payloads and independent durable cumulative observations.
 //! Completed bytes precede ONE atomic manifest containing refs, rows and
 //! checkpoint. Inflight observers own the opened immutable manifest itself.
-use super::ObservedCopySegment;
+use super::{
+    split::{PairRow, SplitRange, SplitRangeRequest},
+    ObservedCopySegment,
+};
 use crate::copy_analysis::{CopyRangeCheckpoint, CopyRowInspection};
 use plurx_core::{
     fmp4::{Init, PromotionInputs},
@@ -154,6 +157,10 @@ pub(crate) struct CopyRangeFiles {
     promotion: PromotionInputs,
     canonical_init: Option<Arc<Init>>,
     av_init: Option<Arc<Init>>,
+    split_request: Option<SplitRangeRequest>,
+    split: Option<Arc<SplitRange>>,
+    split_rows: Vec<PairRow>,
+    split_sealed: bool,
     canonical_init_sha256: String,
     av_init_sha256: String,
     origin: Option<i64>,
@@ -268,6 +275,10 @@ impl CopyRangeFiles {
             promotion,
             canonical_init: None,
             av_init: None,
+            split_request: None,
+            split: None,
+            split_rows: Vec::new(),
+            split_sealed: false,
             canonical_init_sha256: String::new(),
             av_init_sha256: String::new(),
             origin: None,
@@ -305,6 +316,60 @@ impl CopyRangeFiles {
         self.payload_retired = true;
         Ok(())
     }
+    pub(crate) fn request_split(&mut self, request: SplitRangeRequest) {
+        self.split_request = Some(request);
+    }
+
+    pub(crate) fn seal_split(&mut self) -> bool {
+        self.split_sealed = self.split.is_some() && self.committed_segments != 0;
+        if !self.split_sealed {
+            self.split = None;
+            self.split_rows.clear();
+        }
+        self.split_sealed
+    }
+
+    pub(crate) fn split(&self) -> Option<Arc<SplitRange>> {
+        self.split_sealed
+            .then(|| self.split.as_ref().map(Arc::clone))
+            .flatten()
+    }
+
+    pub(crate) fn split_row(
+        &self,
+        index: u32,
+        role: plurx_core::sharing_resources::SharingHlsRole,
+    ) -> Option<PairRow> {
+        (self.split_sealed && (index as usize) < self.committed_segments)
+            .then(|| self.split_rows.get(index as usize))
+            .flatten()
+            .filter(|row| row.duration(role).is_some())
+            .cloned()
+    }
+
+    pub(crate) fn split_playlist(
+        &self,
+        role: plurx_core::sharing_resources::SharingHlsRole,
+    ) -> Option<Vec<u8>> {
+        use std::fmt::Write;
+        let split = self.split()?;
+        let (_, init) = split.ids(role);
+        let target = plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS;
+        let mut playlist = format!("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MAP:URI=\"init/{init}.mp4\"\n");
+        for (index, row) in self.split_rows[..self.committed_segments]
+            .iter()
+            .enumerate()
+        {
+            if let Some(duration) = row.duration(role) {
+                let _ = writeln!(playlist, "#EXTINF:{duration:.6},\nsegment/{index}.m4s");
+            }
+        }
+        if self.committed_eof {
+            playlist.push_str("#EXT-X-ENDLIST\n");
+        }
+        Some(playlist.into_bytes())
+    }
+
     pub(crate) fn publisher(&self) -> CopyRangePublisher {
         self.publisher.clone()
     }
@@ -363,6 +428,13 @@ impl CopyRangeFiles {
             })
             .await
             .map_err(|_| "copy_observation_init_write_failed".to_owned())?;
+        if let Some(request) = self.split_request.take() {
+            match SplitRange::new(request, (*av).clone()) {
+                Ok(layout) => self.split = Some(Arc::new(layout)),
+                Err(reason) => tracing::info!(target: "plurxd::copyrange", %reason,
+                    "Source range split init refused before publication"),
+            };
+        }
         self.canonical_init = Some(canonical);
         self.av_init = Some(av);
         Ok(())
@@ -428,6 +500,27 @@ impl CopyRangeFiles {
                     .checked_add(row.duration)
                     .ok_or("copy_range_row_overflow")?,
             );
+        }
+        if let Some(split) = &self.split {
+            match split
+                .prove(
+                    &segment.media.bytes,
+                    segment.output_index,
+                    self.split_rows.last(),
+                    segment.video_entry().is_none(),
+                    retirement,
+                )
+                .await
+            {
+                Ok(row) => self.split_rows.push(row),
+                Err(error) if self.split_sealed => return Err(error),
+                Err(reason) => {
+                    tracing::info!(target: "plurxd::copyrange", %reason,
+                        "Source range split pair refused before publication");
+                    self.split = None;
+                    self.split_rows.clear();
+                }
+            }
         }
         let name = fmp4_name(segment.output_index);
         let sha256 = hex::encode(Sha256::digest(&segment.media.bytes));

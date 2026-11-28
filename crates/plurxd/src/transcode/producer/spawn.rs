@@ -593,12 +593,16 @@ pub(super) fn spawn_ffmpeg_pipe_at(
     program: &std::path::Path,
     args: &[String],
     work: crate::process_control::ChildWork,
+    encoder_label: &'static str,
     session_id: &str,
     progress_observer: FfmpegProgressObserver,
     runtime_cache: &std::path::Path,
     descriptors: FfmpegDescriptors,
     observation: DiagnosticObservation,
+    processing_env: &[(&str, &std::ffi::OsStr)],
 ) -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String> {
+    let mut child_env = vec![("http_proxy", std::ffi::OsStr::new(""))];
+    child_env.extend_from_slice(processing_env);
     let crate::producer_spawn::Spawned {
         child,
         child_job,
@@ -611,10 +615,11 @@ pub(super) fn spawn_ffmpeg_pipe_at(
             runtime_cache,
             progress: crate::producer_spawn::Progress::Stderr,
             descriptors,
-            env: &[("http_proxy", std::ffi::OsStr::new(""))],
+            env: &child_env,
             work,
         },
     )?;
+    let fault_sink = observation.fault_sink(&progress_observer);
     let reader = Some({
         let sid = session_id.to_owned();
         let started = Instant::now();
@@ -623,10 +628,10 @@ pub(super) fn spawn_ffmpeg_pipe_at(
             // Progress blocks share this stream with the log, so they are
             // sorted out before classification: a `key=value` line can never
             // become a decode record, and the log is not drowned in telemetry.
-            let accumulator = crate::decoder_health::read_diagnostics(
+            let accumulator = crate::decoder_health::read_diagnostics_reporting(
                 stderr,
                 grammar,
-                |line| log_ffmpeg_stderr(&sid, "copy", line),
+                |line| log_ffmpeg_stderr(&sid, encoder_label, line),
                 |line| {
                     if plurx_core::transcode::progress::is_progress_line(line) {
                         progress_observer.apply_line(line);
@@ -635,11 +640,16 @@ pub(super) fn spawn_ffmpeg_pipe_at(
                         false
                     }
                 },
+                |fault, records, action_qualified| {
+                    if let Some(sink) = fault_sink.as_ref() {
+                        sink.report(fault, records, action_qualified);
+                    }
+                },
             )
             .await;
             tracing::warn!(
                 target: "plurxd::transcode",
-                session = %session_log_id(&sid), encoder = "copy",
+                session = %session_log_id(&sid), encoder = encoder_label,
                 elapsed_s = started.elapsed().as_secs(),
                 "transcode ffmpeg process ended"
             );
