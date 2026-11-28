@@ -3683,7 +3683,13 @@ async fn build_with_args_owned(
         tokio::spawn(read_stderr_tail(
             stderr,
             stderr_scan,
-            matches!(file.video_codec.as_deref(), Some("hevc" | "h265")),
+            matches!(file.video_codec.as_deref(), Some("hevc" | "h265")).then(|| {
+                plurx_core::hevc_configuration::Trace::for_copy(
+                    outputs
+                        .first()
+                        .is_some_and(|output| output.video.promotes_parameter_sets()),
+                )
+            }),
         ))
     });
     let observed = Arc::new(std::sync::Mutex::new((0_u64, 0_i64, 0_usize)));
@@ -4147,13 +4153,12 @@ fn finish_header_scan(
 async fn read_stderr_tail(
     mut input: impl AsyncRead + Unpin,
     mut scan: Option<StderrScan>,
-    hevc: bool,
+    mut trace: Option<plurx_core::hevc_configuration::Trace>,
 ) -> (
     Vec<String>,
     Option<StderrScan>,
     Option<plurx_core::hevc_configuration::Trace>,
 ) {
-    let mut trace = hevc.then(plurx_core::hevc_configuration::Trace::default);
     use plurx_core::content_analysis::{MAX_INDEX_STDERR_BYTES, MAX_INDEX_STDERR_LINES};
 
     let mut tail = VecDeque::with_capacity(MAX_INDEX_STDERR_BYTES);

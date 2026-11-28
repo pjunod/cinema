@@ -221,6 +221,15 @@ fn a_converting_session_gets_a_converting_pipeline_and_its_own_identity() {
 /// of a recipe-identity regression.
 #[tokio::test]
 async fn requeue_through_the_no_holder_arm_after_converting_artifact_hydrates() {
+    exercise_cluster_converting_artifact(false).await;
+}
+
+#[tokio::test]
+async fn stale_portable_hevc_refusal_leaves_room_for_the_local_index() {
+    exercise_cluster_converting_artifact(true).await;
+}
+
+async fn exercise_cluster_converting_artifact(stale_refusal: bool) {
     testfixtures::require_ffmpeg();
     let source_dir = crate::test_tempdir().expect("source dir");
     let source_path = source_dir.path().join("profile-seven.mkv");
@@ -289,6 +298,7 @@ async fn requeue_through_the_no_holder_arm_after_converting_artifact_hydrates() 
         .expect("stored file");
     let video = copy_video_pipeline(&file, None, true, true, true);
     assert!(video.converts_dolby_vision());
+    assert!(!video.retains_hevc_parameter_sets());
 
     let object_version = crate::fragment_index_cluster::inspect_copy_source(&file)
         .await
@@ -345,6 +355,21 @@ async fn requeue_through_the_no_holder_arm_after_converting_artifact_hydrates() 
         .expect("converted record");
     let mut index = synthetic_index(3);
     index.promotion.dolby_vision = Some(record.clone());
+    if stale_refusal {
+        index.promotion.hevc_configuration = Some(plurx_core::hevc_configuration::Proof {
+            revision: plurx_core::hevc_configuration::REVISION,
+            source_node_id: "node-a".into(),
+            source_object_version: crate::fragment_index_cluster::local_object_version(
+                &object_version,
+            )
+            .to_owned(),
+            source_sha256: Some(source_sha256.clone()),
+            stream_index: 0,
+            slices: 12,
+            refusal: Some("source extradata lacks a complete decoder configuration".into()),
+            parser: 0,
+        });
+    }
     let blob = plurx_core::store::encode_cluster_fragment_index_blob(
         &index,
         &source_sha256,
@@ -394,11 +419,49 @@ async fn requeue_through_the_no_holder_arm_after_converting_artifact_hydrates() 
         None,
         None,
     );
-    let (hydrated, hydrated_version, hydrated_key) = serve
-        .try_cluster_fragment_index(&file, video, None, super::shared::AttachmentPurpose::SelectedDetail)
+    let hydrated = serve
+        .try_cluster_fragment_index(
+            &file,
+            video,
+            None,
+            super::shared::AttachmentPurpose::SelectedDetail,
+            true,
+        )
         .await
-        .expect("selected converting artifact hydrates")
-        .expect("source is already attested");
+        .expect("selected converting artifact hydrates");
+    if stale_refusal {
+        assert!(
+            hydrated.is_none(),
+            "the verified path can use its local index"
+        );
+        let purpose = super::shared::AttachmentPurpose::SelectedDetail;
+        assert!(serve
+            .try_cluster_fragment_index_matching(
+                &file,
+                video,
+                None,
+                purpose,
+                Some(&cache_key),
+                true,
+            )
+            .await
+            .expect("verify the issued v2 artifact")
+            .is_none());
+        assert!(serve
+            .try_cluster_fragment_index_matching(
+                &file,
+                video,
+                None,
+                purpose,
+                Some(&cache_key),
+                false,
+            )
+            .await
+            .expect("unverified recovery keeps the issued artifact")
+            .is_some());
+        return;
+    }
+    let (hydrated, hydrated_version, hydrated_key) = hydrated.expect("source is already attested");
     assert_eq!(hydrated_key, cache_key);
     assert_eq!(
         hydrated_version,
@@ -410,7 +473,13 @@ async fn requeue_through_the_no_holder_arm_after_converting_artifact_hydrates() 
 
     crate::fragment_index_cluster::remove_local_blob(cache.path(), &cache_key).await;
     let selected = serve
-        .try_cluster_fragment_index(&file, video, None, super::shared::AttachmentPurpose::SelectedDetail)
+        .try_cluster_fragment_index(
+            &file,
+            video,
+            None,
+            super::shared::AttachmentPurpose::SelectedDetail,
+            true,
+        )
         .await
         .expect_err("speculation never rehydrates or repairs a missing blob");
     assert!(selected.contains("requires foreground hydration"));
@@ -421,7 +490,13 @@ async fn requeue_through_the_no_holder_arm_after_converting_artifact_hydrates() 
         .expect("published job");
     assert_eq!(unrepaired.state, "ready");
     let unavailable = serve
-        .try_cluster_fragment_index(&file, video, None, super::shared::AttachmentPurpose::Playback)
+        .try_cluster_fragment_index(
+            &file,
+            video,
+            None,
+            super::shared::AttachmentPurpose::Playback,
+            true,
+        )
         .await
         .expect_err("a catalogue row without any verified holder is not playable");
     assert!(
@@ -635,10 +710,23 @@ async fn hevc_vod_checks_proof_before_reusing_a_cached_rendition() {
             }),
             "hevc_configuration_unverified",
         ),
+        // A refusal stored by the reader before the glued-line and
+        // promoting-copy fixes is not a fact about the source: the title is
+        // analysed again, never refused outright on it.
+        (
+            "stale refusal",
+            Some(plurx_core::hevc_configuration::Proof {
+                refusal: Some("HEVC parameter sets change; immutable copy is unsafe".into()),
+                parser: 0,
+                ..good.clone()
+            }),
+            "hevc_configuration_unverified",
+        ),
         (
             "varying",
             Some(plurx_core::hevc_configuration::Proof {
                 refusal: Some("changed PPS".into()),
+                parser: plurx_core::hevc_configuration::PARSER,
                 ..good
             }),
             "hevc_configuration_unsupported",

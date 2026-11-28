@@ -820,8 +820,15 @@ impl VodServe {
         } else if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
-            self.try_cluster_fragment_index_matching(file, video, viewer, purpose, issued_index)
-                .await
+            self.try_cluster_fragment_index_matching(
+                file,
+                video,
+                viewer,
+                purpose,
+                issued_index,
+                !settings.hevc_unverified_copy,
+            )
+            .await
         } else {
             Ok(None)
         };
@@ -906,7 +913,7 @@ impl VodServe {
                             && Some(proof.source_node_id.as_str())
                                 == self.shared.cluster_node_id.as_deref()
                     })
-                    .and_then(|proof| proof.refusal.as_deref());
+                    .and_then(|proof| proof.current_refusal());
                 let mut preparation = if cluster_cache_enabled {
                     "HEVC copy needs preparation".to_owned()
                 } else {
@@ -3337,6 +3344,7 @@ impl VodServe {
                 video,
                 fences.viewer.as_ref(),
                 AttachmentPurpose::Playback,
+                !settings.hevc_unverified_copy,
             )
             .await
         } else {
@@ -3411,7 +3419,7 @@ impl VodServe {
                             && Some(proof.source_node_id.as_str())
                                 == self.shared.cluster_node_id.as_deref()
                     })
-                    .and_then(|proof| proof.refusal.as_deref());
+                    .and_then(|proof| proof.current_refusal());
                 let mut preparation = if cluster_cache_enabled {
                     "HEVC copy needs preparation".to_owned()
                 } else {
@@ -3883,6 +3891,7 @@ mod principal_demand_tests {
                 CopyVideoOptions::new(true, false),
                 Some(&viewer),
                 AttachmentPurpose::Playback,
+                true,
             )
             .await
             .expect_err("Shared index needs source admission");

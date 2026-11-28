@@ -176,7 +176,9 @@ impl ObservedCopyMux {
         origin: SourceTimestamp,
         canonical_title_start: u64,
         tracks: TrackDurations,
-        retain_parameter_sets: bool,
+        // The copy's video recipe: whether it keeps its in-band parameter
+        // sets, and whether it promotes them into the decoder record.
+        video: plurx_core::transcode::CopyVideoOptions,
         inspect_hevc: bool,
         memory: Arc<crate::admission::CopyMemoryPermit>,
     ) -> Result<Self, String> {
@@ -205,12 +207,12 @@ impl ObservedCopyMux {
             pending_clock: VecDeque::new(),
             queued_bytes: 0,
             queued_fragments: 0,
-            trace: inspect_hevc.then(Trace::default),
+            trace: inspect_hevc.then(|| Trace::for_copy(video.promotes_parameter_sets())),
             inspected: VecDeque::new(),
             inspection: None,
             row_inspections: BTreeMap::new(),
             tracks,
-            retain_parameter_sets,
+            retain_parameter_sets: video.retains_hevc_parameter_sets(),
             inspect_hevc,
             first_pair: true,
             media_eof: false,
@@ -995,7 +997,7 @@ mod hold_tests {
                 audio_ms: 0,
                 audio_bits_per_second: 0,
             },
-            false,
+            plurx_core::transcode::CopyVideoOptions::new(false, false),
             false,
             memory,
         )

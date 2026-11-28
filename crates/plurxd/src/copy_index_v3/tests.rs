@@ -47,6 +47,7 @@ fn sealed_index(source_sha256: &str, indexed_hdr10: bool) -> FragmentIndex {
         stream_index: 0,
         slices: 9,
         refusal: None,
+        parser: 0,
     });
     index.parameter_sets_constant = true;
     index
