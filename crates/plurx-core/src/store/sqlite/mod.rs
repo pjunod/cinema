@@ -1378,11 +1378,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_managed_schema::FILE_ROOT_MIGRATION,
     // v138: a per-file analysis request reads only the library root holding its file.
     super::analysis_source_scope::SCHEMA,
-    // v139: source leases expand: one lease row per source reader. It
+    // v139: monotonic scanner authority and aggregate provenance.
+    super::dv_title_jobs::MIGRATION_V3,
+    // v140: source leases expand: one lease row per source reader. It
     // replaces the v137/v138 resource views with root-keyed projections that
     // keep their per-file root narrowing.
     super::source_leases::EXPAND,
-    // v140: source leases contract: the v1 source-owner objects go. A
+    // v141: source leases contract: the v1 source-owner objects go. A
     // single SQLite process has no older binary to wait for.
     super::source_leases::CONTRACT,
 ];

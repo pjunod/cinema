@@ -2593,6 +2593,7 @@ async fn a_waiting_viewer_attaches_and_renews_its_demand_on_the_title_scan() {
         viewer: "viewer-1".into(),
         request: recipe.clone(),
         scanner_digest: "a".repeat(64),
+        scanner_generation: 1,
         deadline_ms: deadline,
         now_ms: now,
     };

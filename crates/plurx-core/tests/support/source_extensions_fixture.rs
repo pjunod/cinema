@@ -1000,14 +1000,14 @@ fn verify_current_source_lease_rewind_shape(connection: &rusqlite::Connection) {
     );
 }
 
-/// Rewind an owned, empty v134-v135 source-lease tail to pre-lease v133:
+/// Rewind an owned, empty v140/v141 source-lease tail to pre-lease v139:
 /// drop the lease objects and restore the v1 source owners and the four
 /// dependents the expand replaced, from their own published text.
-fn rewind_empty_source_leases_to_v138(connection: &rusqlite::Connection) {
+fn rewind_empty_source_leases_to_v139(connection: &rusqlite::Connection) {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("fixture source lease ordinal");
-    if version != 140 {
+    if version != 141 {
         return;
     }
     verify_current_source_lease_rewind_shape(connection);
@@ -1021,7 +1021,7 @@ fn rewind_empty_source_leases_to_v138(connection: &rusqlite::Connection) {
         "historical fixture must not discard source leases"
     );
     let mut plan = source_lease_rewind_plan();
-    plan.push("PRAGMA user_version=138;".to_owned());
+    plan.push("PRAGMA user_version=139;".to_owned());
     connection
         .execute_batch(&plan.join("\n"))
         .expect("published source lease rewind");
@@ -1149,7 +1149,7 @@ pub(crate) const CLAIM_EFFECTS_V1: [&str; 2] = [
     include_str!("../fixtures/background-job-claim-effects-v1.sql"),
 ];
 
-/// Rewind an owned, empty v127-v140 coordination tail to published v126;
+/// Rewind an owned, empty v127–v141 coordination tail to published v126;
 /// a fixture already at or below v126 is left alone. The caller owns
 /// atomicity (see [`within_fixture_savepoint`]).
 pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
@@ -1181,6 +1181,28 @@ pub(crate) fn rewind_empty_source_extensions_to_v121(connection: &rusqlite::Conn
 
 const ANALYSIS_SCOPE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('analysis_required_resources','analysis_source_scope_schema') AND sql IS NOT NULL ORDER BY name";
 
+/// Restore the historical title extension without dropping revisions or
+/// changing SQLite's AUTOINCREMENT sequence.
+fn rewind_title_v3_to_v138(conn: &rusqlite::Connection) {
+    use title_extension_fixture::{
+        assert_title_fixture_generation, published_title_v2_restore_plan,
+    };
+    let version = conn
+        .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+        .expect("title generation ordinal");
+    if version != 139 {
+        return;
+    }
+    assert_title_fixture_generation(conn, 3);
+    let mut plan = published_title_v2_restore_plan();
+    plan.push("PRAGMA user_version=138;".into());
+    within_fixture_savepoint(conn, || {
+        conn.execute_batch(&plan.join("\n"))
+            .expect("restore v2 title extension");
+        assert_title_fixture_generation(conn, 2);
+    });
+}
+
 /// Rewind v138 (analysis reads only its file's root) and v137 (managed v7:
 /// a per-file job reads only its file's root) to v136. Each requires its exact
 /// published shape and marker, then restores the original analysis view and
@@ -1188,8 +1210,9 @@ const ANALYSIS_SCOPE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE
 /// queued work or reservation is discarded.
 fn rewind_file_root_scope_to_v136(conn: &rusqlite::Connection) {
     // Appended extensions rewind in reverse migration order: the lease
-    // tail (v139/v140) restores the exact v137/v138 views first.
-    rewind_empty_source_leases_to_v138(conn);
+    // tail (v140/v141) restores the exact pre-lease catalog before title v3.
+    rewind_empty_source_leases_to_v139(conn);
+    rewind_title_v3_to_v138(conn);
     let ordinal = |conn: &rusqlite::Connection| {
         conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .expect("file-root scope ordinal")

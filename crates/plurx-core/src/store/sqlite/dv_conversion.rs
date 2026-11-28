@@ -1787,7 +1787,10 @@ mod tests {
             // v6 view and marker and the original analysis view, first.
             "INSERT INTO subtitle_managed_schema VALUES(1,7)",
             "CREATE TABLE IF NOT EXISTS analysis_source_scope_schema",
-            // v139/v140: the shared source-extension fixture drops the empty
+            // v139: the shared title rewind restores the exact v2 trigger
+            // definitions and marker before removing the authority columns.
+            "INSERT INTO dv_title_jobs_schema VALUES(1,3)",
+            // v140/v141: the shared source-extension fixture drops the empty
             // lease table and restores the v1 owners and replaced dependents.
             "CREATE TABLE source_leases",
             "UPDATE source_lease_schema SET version=3",

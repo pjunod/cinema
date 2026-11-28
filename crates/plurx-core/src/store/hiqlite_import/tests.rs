@@ -520,7 +520,7 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     // F+ curve titles, scenes and outcomes (SQLite v134), 118 with the
     // six curation tables (SQLite v135). The source-lease table replaces the
     // two v1 owner tables and receipt-to-lease provenance adds one (SQLite
-    // v139), leaving the count unchanged.
+    // v140), leaving the count unchanged.
     assert_eq!(names.len(), 118, "review every imported durable table");
 }
 

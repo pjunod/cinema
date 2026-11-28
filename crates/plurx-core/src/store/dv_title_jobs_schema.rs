@@ -2,25 +2,21 @@
 use crate::error::StoreError;
 use std::sync::LazyLock;
 pub(crate) const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name GLOB 'dv_title_jobs_*' AND sql IS NOT NULL ORDER BY name";
-#[cfg(feature = "hiqlite-store")]
-pub(crate) const MARKER_SQL_V1: &str =
-    "SELECT count(*) AS count FROM dv_title_jobs_schema WHERE singleton=1 AND version=1";
 pub(crate) const MARKER_SQL: &str =
-    "SELECT count(*) AS count FROM dv_title_jobs_schema WHERE singleton=1 AND version=2";
+    "SELECT count(*) AS count FROM dv_title_jobs_schema WHERE singleton=1 AND version=3";
 const DEPENDENCIES: &str = "CREATE TABLE files(id INTEGER PRIMARY KEY,path TEXT,size INTEGER,mtime INTEGER,video_codec TEXT,dv_profile INTEGER,dv_rpu_present INTEGER,probe_json TEXT,scanned_at INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,owner_node_id TEXT,owner_boot_id TEXT,claim_id TEXT,lease_expires_ms INTEGER,result_ref TEXT,updated_at_ms INTEGER); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT); CREATE TABLE background_job_waiters(job_id TEXT,state TEXT,result_ref TEXT,updated_at_ms INTEGER,consumer_kind TEXT,consumer_ref TEXT);";
 #[cfg(feature = "hiqlite-store")]
-pub(crate) fn statements() -> Vec<String> {
-    super::dv_title_jobs::SCHEMA
-        .split("-- next statement")
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-#[cfg(feature = "hiqlite-store")]
-pub(crate) fn migration_statements() -> Vec<String> {
-    super::dv_title_jobs::MIGRATION_V2
-        .split("-- next statement")
+pub(crate) fn migration_statements(version: Option<i64>) -> Vec<String> {
+    use super::dv_title_jobs::{MIGRATION_V2, MIGRATION_V3, SCHEMA_V2};
+    let migrations: &[&str] = match version {
+        None => &[SCHEMA_V2, MIGRATION_V3],
+        Some(1) => &[MIGRATION_V2, MIGRATION_V3],
+        Some(2) => &[MIGRATION_V3],
+        _ => unreachable!("validated title schema version"),
+    };
+    migrations
+        .iter()
+        .flat_map(|migration| migration.split("-- next statement"))
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
@@ -36,9 +32,18 @@ static SHAPE: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
     let conn = rusqlite::Connection::open_in_memory().expect("title schema fixture");
     conn.execute_batch(DEPENDENCIES)
         .expect("title schema dependencies");
-    conn.execute_batch(super::dv_title_jobs::SCHEMA)
+    conn.execute_batch(super::dv_title_jobs::SCHEMA_V2)
         .expect("title schema");
+    conn.execute_batch(super::dv_title_jobs::MIGRATION_V3)
+        .expect("scanner authority migration");
     rows(&conn).expect("title schema shape")
+});
+static V2_SHAPE: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
+    let conn = rusqlite::Connection::open_in_memory().expect("title v2 fixture");
+    conn.execute_batch(DEPENDENCIES).expect("dependencies");
+    conn.execute_batch(super::dv_title_jobs::SCHEMA_V2)
+        .expect("v2 schema");
+    rows(&conn).expect("v2 shape")
 });
 static LEGACY_SHAPE: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
     let conn = rusqlite::Connection::open_in_memory().expect("legacy title fixture");
@@ -61,6 +66,8 @@ pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreEr
     if shape.is_empty() {
         Ok(None)
     } else if canonical(shape) == canonical(&SHAPE) {
+        Ok(Some(3))
+    } else if canonical(shape) == canonical(&V2_SHAPE) {
         Ok(Some(2))
     } else if canonical(shape) == canonical(&LEGACY_SHAPE) {
         Ok(Some(1))
@@ -71,7 +78,7 @@ pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreEr
     }
 }
 pub(crate) fn verify_sqlite(conn: &rusqlite::Connection) -> Result<(), StoreError> {
-    if version(&rows(conn)?)? != Some(2)
+    if version(&rows(conn)?)? != Some(3)
         || conn.query_row(MARKER_SQL, [], |row| row.get::<_, i64>(0))? != 1
     {
         return Err(StoreError::Migration(
@@ -87,18 +94,88 @@ mod tests {
     fn title_job_schema_refuses_partial_shape_and_has_backend_parity() {
         let conn = rusqlite::Connection::open_in_memory().expect("fixture");
         conn.execute_batch(DEPENDENCIES).expect("dependencies");
-        conn.execute_batch(super::super::dv_title_jobs::SCHEMA)
-            .expect("install");
+        conn.execute_batch(super::super::dv_title_jobs::SCHEMA_V2)
+            .expect("install v2");
+        conn.execute_batch(super::super::dv_title_jobs::MIGRATION_V3)
+            .expect("upgrade");
         verify_sqlite(&conn).expect("complete");
         #[cfg(feature = "hiqlite-store")]
-        for sql in statements() {
-            conn.execute_batch(&sql)
-                .expect("idempotent replica statement");
+        {
+            let replica = rusqlite::Connection::open_in_memory().expect("replica");
+            replica.execute_batch(DEPENDENCIES).expect("dependencies");
+            for sql in migration_statements(None) {
+                replica.execute_batch(&sql).expect("replica statement");
+            }
+            assert_eq!(
+                rows(&conn).expect("SQLite schema shape"),
+                rows(&replica).expect("replica schema shape")
+            );
         }
-        verify_sqlite(&conn).expect("same schema");
         conn.execute_batch("DROP TRIGGER dv_title_jobs_file_update")
             .expect("partial fixture");
         assert!(verify_sqlite(&conn).is_err());
+    }
+
+    #[test]
+    fn title_generation_guard_refuses_legacy_rotation_and_preserves_aggregate_provenance() {
+        let conn = rusqlite::Connection::open_in_memory().expect("fixture");
+        conn.execute_batch(DEPENDENCIES).expect("dependencies");
+        conn.execute_batch(super::super::dv_title_jobs::SCHEMA_V2)
+            .expect("v2 schema");
+        conn.execute_batch(
+            r#"
+INSERT INTO files VALUES(1,'/media/movie.mkv',100,1,'hevc',7,1,
+ '{"plurx_dv_title_v1":{"complete":true}}',1);
+UPDATE dv_title_jobs_demand SET scanner_digest='old';
+"#,
+        )
+        .expect("published legacy title");
+        conn.execute_batch(super::super::dv_title_jobs::MIGRATION_V3)
+            .expect("v3 schema");
+
+        let demand = || {
+            conn.query_row(
+            "SELECT revision,scanner_digest,scanner_generation,aggregate_revision FROM dv_title_jobs_demand",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<i64>>(3)?)),
+        ).expect("title demand")
+        };
+        assert_eq!(demand(), (1, "old".into(), 0, Some(1)));
+
+        let rotate = |request| {
+            conn.execute(
+                r#"INSERT INTO background_job_commands VALUES('bind','bind_dv_title',?1,
+             '{"previous_revision":1,"revision":2,"file_id":1,"rotate":true}')"#,
+                [request],
+            )
+        };
+        assert_eq!(
+            rotate(r#"{"scanner":"new"}"#).expect("legacy bind skips"),
+            0
+        );
+        let carried = conn
+            .execute("UPDATE dv_title_jobs_demand SET scanner_digest='new'", [])
+            .expect("legacy carry-forward skips conflicting bindings");
+        assert_eq!(carried, 0, "legacy worker can still look for other work");
+        assert_eq!(demand(), (1, "old".into(), 0, Some(1)));
+
+        rotate(r#"{"scanner":"new","generation":1}"#).expect("ordered bind");
+        assert_eq!(demand(), (2, "new".into(), 1, None));
+        let repeat_bind = conn.execute(
+            r#"INSERT INTO background_job_commands VALUES('bind','bind_dv_title','{"scanner":"new"}',
+                '{"previous_revision":2,"revision":2,"file_id":1,"rotate":false}')"#,
+            [],
+        ).expect("legacy worker skips retained aggregate");
+        assert_eq!(repeat_bind, 0, "legacy worker must not claim and reuse");
+
+        let complete: bool = conn
+            .query_row(
+                "SELECT json_extract(probe_json,'$.plurx_dv_title_v1.complete') FROM files",
+                [],
+                |r| r.get(0),
+            )
+            .expect("retained publication");
+        assert!(complete);
     }
 
     #[test]
@@ -132,7 +209,10 @@ mod tests {
             .expect("stranded legacy demands");
         conn.execute_batch(super::super::dv_title_jobs::MIGRATION_V2)
             .expect("upgrade");
-        verify_sqlite(&conn).expect("current shape");
+        assert_eq!(
+            version(&rows(&conn).expect("title v2 schema shape")).expect("title v2 version"),
+            Some(2)
+        );
         let mut query = conn
             .prepare("SELECT terminal FROM dv_title_jobs_demand ORDER BY file_id")
             .expect("query");
@@ -153,11 +233,13 @@ mod tests {
             replica
                 .execute_batch(super::super::dv_title_jobs::SCHEMA_V1)
                 .expect("v1");
-            for sql in migration_statements() {
+            for sql in migration_statements(Some(1)) {
                 replica
                     .execute_batch(&sql)
                     .expect("replica upgrade statement");
             }
+            conn.execute_batch(super::super::dv_title_jobs::MIGRATION_V3)
+                .expect("v3");
             assert_eq!(
                 rows(&replica).expect("replica shape"),
                 rows(&conn).expect("sqlite shape")
@@ -176,7 +258,7 @@ mod tests {
                 "INSERT INTO files VALUES(1,'/media/movie.mkv',100,1,'hevc',7,1,'{}',1);",
             )
             .expect("pre-migration probed source");
-            conn.execute_batch(super::super::dv_title_jobs::SCHEMA)
+            conn.execute_batch(super::super::dv_title_jobs::SCHEMA_V2)
                 .expect("initial seed");
             let revision: i64 = conn
                 .query_row("SELECT revision FROM dv_title_jobs_demand", [], |r| {
@@ -185,7 +267,7 @@ mod tests {
                 .expect("one initial demand");
             conn.execute_batch("UPDATE files SET size=101 WHERE id=1")
                 .expect("source changed without fresh probe");
-            conn.execute_batch(super::super::dv_title_jobs::SCHEMA)
+            conn.execute_batch(super::super::dv_title_jobs::SCHEMA_V2)
                 .expect("idempotent migration replay");
             let count: i64 = conn
                 .query_row("SELECT count(*) FROM dv_title_jobs_demand", [], |r| {
@@ -212,7 +294,7 @@ mod tests {
                 conn.pragma_update(None, "recursive_triggers", recursive)
                     .expect("trigger mode");
                 conn.execute_batch(DEPENDENCIES).expect("dependencies");
-                conn.execute_batch(super::super::dv_title_jobs::SCHEMA)
+                conn.execute_batch(super::super::dv_title_jobs::SCHEMA_V2)
                     .expect("schema");
                 if reverse_after_order {
                     let source_cleanup: String = conn
@@ -305,7 +387,7 @@ mod tests {
             conn.pragma_update(None, "recursive_triggers", recursive)
                 .expect("trigger mode");
             conn.execute_batch(DEPENDENCIES).expect("dependencies");
-            conn.execute_batch(super::super::dv_title_jobs::SCHEMA)
+            conn.execute_batch(super::super::dv_title_jobs::SCHEMA_V2)
                 .expect("schema");
             conn.execute_batch(
                 "INSERT INTO files VALUES(1,'/media/movie.mkv',100,1,'hevc',7,1,'{}',1);",

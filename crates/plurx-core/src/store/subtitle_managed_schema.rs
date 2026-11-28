@@ -1237,7 +1237,7 @@ mod tests {
     #[test]
     fn file_root_v7_lets_a_reader_on_one_disk_claim_while_another_disk_is_busy() {
         let conn = rusqlite::Connection::open_in_memory().expect("SQLite");
-        // The source-lease expand (v139) carries v7's per-file root narrowing
+        // The source-lease expand (v140) carries v7's per-file root narrowing
         // into its root-keyed view, so claim against that current shape.
         SqliteStore::apply_migrations_for_test(
             &conn,

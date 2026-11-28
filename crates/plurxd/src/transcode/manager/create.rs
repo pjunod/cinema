@@ -2163,8 +2163,7 @@ impl TranscodeManager {
             FelGate::Serve => Ok(()),
             FelGate::Decline(reason) => Err(reason),
             FelGate::Measure => {
-                self.request_fel_qualification(file.id, scanner, identity)
-                    .await;
+                self.request_fel_qualification(file.id, scanner).await;
                 Err(Self::fel_being_measured().into())
             }
         }
@@ -2326,12 +2325,7 @@ impl TranscodeManager {
     /// that cannot measure (no capable GPU) may pick the job up, and a play
     /// must not turn that into repeated full-title rescans.
     #[cfg(target_os = "linux")]
-    pub(crate) async fn request_fel_qualification(
-        &self,
-        file_id: i64,
-        scanner: &str,
-        identity: &str,
-    ) {
+    pub(crate) async fn request_fel_qualification(&self, file_id: i64, scanner: &str) {
         {
             let mut requests = self
                 .fel_requalification_requests
@@ -2344,11 +2338,13 @@ impl TranscodeManager {
             }
             requests.insert(file_id, now);
         }
-        let binding =
-            plurx_core::transcode::dv_fel_qualification::requalify_binding(scanner, identity);
         match self
             .store
-            .request_dv_fel_requalification(file_id, &binding)
+            .request_dv_fel_requalification(
+                file_id,
+                scanner,
+                crate::dv_tools::TITLE_SCANNER_GENERATION,
+            )
             .await
         {
             Ok(true) => {

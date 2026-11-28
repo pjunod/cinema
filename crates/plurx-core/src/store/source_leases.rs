@@ -228,8 +228,8 @@ pub(crate) const CONTRACT: &str = concat!(
     root_service_admission!()
 );
 /// SQLite schema version before the expand and after it.
-pub(crate) const PRE_LEASE_VERSION: usize = 138;
-pub(crate) const EXPANDED_VERSION: usize = 139;
+pub(crate) const PRE_LEASE_VERSION: usize = 139;
+pub(crate) const EXPANDED_VERSION: usize = 140;
 /// The SQLite schema that first carries `source_leases` (import plans).
 pub(crate) const SQLITE_INTRODUCED_SCHEMA: i64 = EXPANDED_VERSION as i64;
 

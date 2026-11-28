@@ -13812,9 +13812,18 @@ async fn replicated_v1_source_store_expands_carries_holders_and_contracts_when_e
     ));
     // The v1 store: v1 source owners, the two-slot claim effects, and a
     // live job reader recorded only by its job and its reservation.
-    let rewind = replicated_source_lease_rewind(&client)
+    use queue_fixture::{
+        published_title_v2_restore_plan, title_fixture_shape, TITLE_FIXTURE_SHAPE_SQL,
+    };
+    assert_eq!(
+        extension_shape(&client, TITLE_FIXTURE_SHAPE_SQL).await,
+        title_fixture_shape(3)
+    );
+    require_replicated_fixture_marker(&client, "dv_title_jobs_schema", 3).await;
+    let mut rewind = replicated_source_lease_rewind(&client)
         .await
         .expect("current store has a lease tail");
+    rewind.extend(published_title_v2_restore_plan());
     client
         .txn(
             rewind
@@ -13826,7 +13835,12 @@ async fn replicated_v1_source_store_expands_carries_holders_and_contracts_when_e
         .expect("v1 source fixture")
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .expect("atomic v1 source fixture");
+        .expect("atomic source v1 and title v2 fixture");
+    assert_eq!(
+        extension_shape(&client, TITLE_FIXTURE_SHAPE_SQL).await,
+        title_fixture_shape(2)
+    );
+    require_replicated_fixture_marker(&client, "dv_title_jobs_schema", 2).await;
     client
         .txn([
             ("CREATE TABLE cluster_nodes(node_id TEXT PRIMARY KEY,last_seen_at INTEGER,removed_at INTEGER)", hiqlite::params!()),
@@ -13860,10 +13874,18 @@ async fn replicated_v1_source_store_expands_carries_holders_and_contracts_when_e
         "the fixture has the v1 two-slot claim effects"
     );
 
-    let opened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
-        .await
-        .expect("first lease-aware start");
-    drop(opened);
+    let other_telemetry = cluster._root.path().join("source-lease-upgrade-peer.db");
+    let (first, second) = tokio::try_join!(
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry),
+        HiqliteAuthStore::open_or_migrate(client.clone(), &other_telemetry),
+    )
+    .expect("concurrent starts settle the title and lease expansions");
+    drop((first, second));
+    assert_eq!(
+        extension_shape(&client, TITLE_FIXTURE_SHAPE_SQL).await,
+        title_fixture_shape(3)
+    );
+    require_replicated_fixture_marker(&client, "dv_title_jobs_schema", 3).await;
     assert_eq!(text(&client, lease_version).await, ["2"], "expanded");
     assert!(
         text(&client, claim_effects).await[0].contains("NOT LIKE 'source_io%'"),
@@ -14220,6 +14242,17 @@ async fn replicated_scan_request_drops(client: &Client) -> Vec<String> {
     validated_scan_request_drops(&shape, (marker, marker), rows[0].value)
 }
 
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn extension_shape(client: &Client, sql: &str) -> Vec<(String, String)> {
+    client
+        .query_consistent(sql.to_owned(), hiqlite::params!())
+        .await
+        .expect("extension shape inventory")
+        .iter_mut()
+        .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
+        .collect()
+}
+
 /// Plan removal of an exact, empty replicated fixture extension before an
 /// older migration reconstructs its dependencies.
 /// A historical queue fixture cannot retain half of the independent managed
@@ -14230,15 +14263,6 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_unactivated_contract_baseline(client).await;
     // These independently recognized current extensions must be validated
     // before the queue teardown. Their drops join the one transaction below.
-    async fn extension_shape(client: &Client, sql: &str) -> Vec<(String, String)> {
-        client
-            .query_consistent(sql.to_owned(), hiqlite::params!())
-            .await
-            .expect("extension shape inventory")
-            .iter_mut()
-            .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
-            .collect()
-    }
     let coordination_drops = replicated_coordination_drops(client).await;
     let scan_request_drops = replicated_scan_request_drops(client).await;
     let source_drops = replicated_source_tail_drops(client, |_| true).await;
@@ -14293,14 +14317,14 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         &tail_counts,
         &tail_markers,
     );
-    require_replicated_fixture_marker(client, "dv_title_jobs_schema", 2).await;
+    require_replicated_fixture_marker(client, "dv_title_jobs_schema", 3).await;
     require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_managed_schema", 7).await;
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
-            "SELECT count(*) AS value FROM dv_title_jobs_schema WHERE singleton=1 AND version=2",
+            "SELECT count(*) AS value FROM dv_title_jobs_schema WHERE singleton=1 AND version=3",
             hiqlite::params!(),
         )
         .await
@@ -14312,7 +14336,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_eq!(title_data.len(), 1);
     let title_drops = queue_fixture::validated_empty_title_rewind(
         &title_shape,
-        2,
+        3,
         title_marker[0].value,
         title_data[0].value,
     );

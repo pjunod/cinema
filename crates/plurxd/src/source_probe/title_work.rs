@@ -138,6 +138,7 @@ impl TitleTask {
             pipeline
         };
         let scanner = tools.title_scanner_digest();
+        let generation = crate::dv_tools::TITLE_SCANNER_GENERATION;
         #[cfg(target_os = "linux")]
         let fel = fel_backend(state, &tools).await;
         #[cfg(not(target_os = "linux"))]
@@ -155,6 +156,7 @@ impl TitleTask {
                 .store
                 .carry_forward_dv_title_verdicts(
                     &scanner,
+                    generation,
                     &crate::dv_tools::TITLE_SCANNER_PREDECESSORS
                         .iter()
                         .map(|digest| (*digest).to_owned())
@@ -192,7 +194,7 @@ impl TitleTask {
                 // A targeted lookup moves neither discovery position.
                 let demands = state
                     .store
-                    .dv_title_demand_for_file(&scanner, file_id, now_ms())
+                    .dv_title_demand_for_file(&scanner, generation, file_id, now_ms())
                     .await?
                     .into_iter()
                     .collect();
@@ -200,7 +202,7 @@ impl TitleTask {
             }
             TitleDispatch::Maintenance => {
                 let (demands, after) = maintenance
-                    .next_page(state.store.as_ref(), &scanner, now_ms())
+                    .next_page(state.store.as_ref(), &scanner, generation, now_ms())
                     .await?;
                 (demands, Some(after))
             }
@@ -213,8 +215,14 @@ impl TitleTask {
             if let Some(after) = after.as_deref_mut() {
                 *after = demand.probe_revision;
             }
+            let scanner_matches = demand.scanner_digest.as_deref() == Some(scanner.as_str());
+            if demand.scanner_generation > generation
+                || (demand.scanner_generation == generation && !scanner_matches)
+            {
+                continue;
+            }
             if playback_only {
-                if demand.scanner_digest.as_deref() != Some(scanner.as_str()) {
+                if !scanner_matches {
                     continue;
                 }
             } else {
@@ -315,14 +323,29 @@ impl TitleTask {
                     continue;
                 }
             }
-            let Some(revision) = state
-                .store
-                .bind_dv_title_demand(demand.probe_revision, &scanner)
-                .await?
-            else {
-                continue;
+            // Existing current work already has its claimable binding. New
+            // work needs the binding first so enqueue can validate its revision.
+            let revision = if scanner_matches && demand.scanner_generation == generation {
+                demand.probe_revision
+            } else {
+                let Some(revision) = state
+                    .store
+                    .bind_dv_title_demand(demand.probe_revision, &scanner, generation, now_ms())
+                    .await?
+                else {
+                    continue;
+                };
+                revision
             };
             let reused = reusable_aggregate(&demand, revision);
+            let existing_job = if scanner_matches && revision == demand.probe_revision {
+                demand
+                    .active_job_id
+                    .as_ref()
+                    .or(demand.queued_job_id.as_ref())
+            } else {
+                None
+            };
             demand.probe_revision = revision;
             use sha2::{Digest, Sha256};
             let mut fel_requests: Vec<_> =
@@ -346,12 +369,8 @@ impl TitleTask {
                 .expect("title request identity"),
             ));
             let now = now_ms();
-            let id = if let Some(id) = demand
-                .active_job_id
-                .clone()
-                .or_else(|| demand.queued_job_id.clone())
-            {
-                id
+            let id = if let Some(id) = existing_job {
+                id.clone()
             } else {
                 let outcome = state
                     .store
@@ -727,7 +746,7 @@ async fn requalify_stale_fel_titles(state: &AppState, tools: &ToolSet, scanner: 
             for file_id in titles {
                 state
                     .transcode
-                    .request_fel_qualification(file_id, scanner, &identity)
+                    .request_fel_qualification(file_id, scanner)
                     .await;
             }
         }
@@ -735,17 +754,12 @@ async fn requalify_stale_fel_titles(state: &AppState, tools: &ToolSet, scanner: 
     }
 }
 
-/// The aggregate this title's job may settle with instead of reading the
-/// file: one stored under the generation the worker's bind left unchanged.
-/// Only a publisher bound to that generation's scanner stores one (an index
-/// pass's ride-along, or an earlier job), and a bind to another scanner
-/// rotates the generation and drops it in the same transaction — so a
-/// generation that moved, or a document read before it moved, reuses nothing.
+/// A job may reuse only an aggregate for the revision it will claim.
 pub(super) fn reusable_aggregate(
     demand: &TitleDemand,
     bound_revision: i64,
 ) -> Option<plurx_core::scan::dv_title::DvTitleStats> {
-    if bound_revision != demand.probe_revision {
+    if bound_revision != demand.probe_revision || !demand.aggregate_current {
         return None;
     }
     plurx_core::scan::dv_title::DvTitleStats::from_probe_json(&demand.probe_json)
