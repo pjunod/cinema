@@ -176,8 +176,10 @@ final class AppModel: ObservableObject {
         #endif
         #if DEBUG
         let savedToken = settings.acceptanceBootstrapToken(active: acceptance != nil)
+        let expectedInstance = acceptance == nil ? settings.instanceId : settings.acceptanceExpectedInstanceId
         #else
         let savedToken = settings.token
+        let expectedInstance = settings.instanceId
         #endif
         guard !savedOrigin.isEmpty else {
             #if DEBUG
@@ -202,7 +204,7 @@ final class AppModel: ObservableObject {
                 let server = try await makeAPI(savedOrigin).serverInfo()
                 guard generation == authenticationGeneration else { return }
                 guard let actual = server.instanceId,
-                      let expected = settings.acceptanceExpectedInstanceId,
+                      let expected = expectedInstance,
                       !expected.isEmpty,
                       actual.caseInsensitiveCompare(expected) == .orderedSame
                 else {
@@ -251,7 +253,7 @@ final class AppModel: ObservableObject {
             Session.shared.setCredentials(origin: resolved, token: nil)
             // A saved address can now name another server. Prove the saved
             // instance without credentials before sending its bearer there.
-            if let expected = settings.instanceId, !expected.isEmpty {
+            if let expected = expectedInstance, !expected.isEmpty {
                 let server = try await requireAPI().serverInfo()
                 guard generation == authenticationGeneration else { return }
                 guard server.instanceId?.caseInsensitiveCompare(expected) == .orderedSame else {

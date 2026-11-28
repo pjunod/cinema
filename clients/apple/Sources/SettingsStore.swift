@@ -88,12 +88,13 @@ struct SettingsStore {
     }
     #if DEBUG
     /// A supplied acceptance bearer belongs to this disposable server window,
-    /// not to the saved Keychain session. Read the explicit argument domain
+    /// independent of the saved Keychain session. Read the launch value
     /// before `token` can migrate a legacy preference into the vault.
     func acceptanceBootstrapToken(active: Bool, argumentDomain: [String: Any]? = nil) -> String? {
         if active {
+            let launchArguments = argumentDomain ?? defaults.volatileDomain(forName: UserDefaults.argumentDomain)
             let supplied = ProcessInfo.processInfo.environment["PLURX_LAB_BEARER"]
-                ?? (argumentDomain ?? defaults.volatileDomain(forName: UserDefaults.argumentDomain))[Key.token] as? String
+                ?? (launchArguments[Key.token] as? String)
             if let supplied, !supplied.isEmpty { return supplied }
         }
         return token
