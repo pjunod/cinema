@@ -6,7 +6,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 
 | File | Answers | |
 |---|---|---|
-| [Split HLS as the default](SPLIT-HLS-DEFAULT-INVENTORY.md) | What split layouts ship, what a split default must change on each surface and client, and how its baseline is measured. | open |
+| [Split HLS as the default](SPLIT-HLS-DEFAULT-INVENTORY.md) | Split layouts today, the client matrix, slices and baseline. | open |
 | [Split HLS contract](SPLIT-HLS-RENDITION-CONTRACT.md) | One writer for split masters, the split capability, protocol 13. | building |
 | [One video for two VOD soundtracks](SHARED-VIDEO-MULTILINGUAL-VOD.md) | How to share indexed copy video across language tracks and prove continuous pictures and a single stored video. | open |
 | [MPV startup](MPV-LIVE-STARTUP.md) | MPV admission. | open |
