@@ -20,13 +20,21 @@ import tv.plurx.app.data.AISubtitleStart
 import tv.plurx.app.data.AISubtitleTiming
 import tv.plurx.app.data.MediaFileDto
 import tv.plurx.app.data.Session
+import tv.plurx.app.player.PreplayTracks
 import tv.plurx.app.player.captionRead
 import tv.plurx.app.ui.components.TvTextButton
 import tv.plurx.app.ui.theme.Muted
 import java.util.UUID
 
 @Composable
-internal fun AISubtitleItemSection(vm: AppViewModel, file: MediaFileDto, enabled: Boolean, choose: (Long) -> Unit) {
+internal fun AISubtitleItemSection(
+    vm: AppViewModel,
+    file: MediaFileDto,
+    enabled: Boolean,
+    tracks: PreplayTracks,
+    refresh: () -> Unit,
+    choose: (Long) -> Unit,
+) {
     val auth = Session.playbackAuthorization().generation
     val scope = rememberCoroutineScope()
     var opened by remember(file.id, auth) { mutableStateOf(false) }
@@ -44,12 +52,14 @@ internal fun AISubtitleItemSection(vm: AppViewModel, file: MediaFileDto, enabled
         it.language?.let { code -> java.util.Locale.forLanguageTag(code).displayLanguage == languageName } == true &&
             !it.forced && it.track_id !in removed
     }
-    suspend fun fetch(): AISubtitleOptions = captionRead(vm.api().aiSubtitleOptions(file.id, target = language))
+    suspend fun fetch(): AISubtitleOptions = captionRead(vm.api().aiSubtitleOptions(file.id, target = language, audioIndex = tracks.audio))
     fun start(route: String, quality: String? = null) {
         busy = true
         scope.launch {
             try {
-                val request = AISubtitleStart(UUID.randomUUID().toString(), route = route, quality = quality)
+                val request = AISubtitleStart(
+                    UUID.randomUUID().toString(), target = "en", route = route, quality = quality, audio_index = tracks.audio,
+                )
                 val result = captionRead<AISubtitleOperation>(vm.api().aiSubtitleStart(file.id, request))
                 if (current()) operation = result
             } catch (e: CancellationException) { throw e }
@@ -66,15 +76,19 @@ internal fun AISubtitleItemSection(vm: AppViewModel, file: MediaFileDto, enabled
             if (operation == null) operation = options.operation
             while (current() && operation?.active == true) {
                 delay(3_000)
-                val result = fetch()
-                if (current()) operation = result.operation
+                val id = operation?.id ?: break
+                val result = captionRead<AISubtitleOperation>(vm.api().aiSubtitleOperation(id))
+                if (current() && operation?.id == id && result.id == id) operation = result
             }
             val done = operation
             if (current() && done?.state == "complete") {
                 val track = vm.decision(file.id).subtitles.singleOrNull { track ->
                     done.track_id?.let { track.downloaded_subtitle_id == it } ?: (track.index == done.track_index)
                 }
-                if (current() && track != null) choose(track.index)
+                if (current() && track != null) {
+                    choose(track.index)
+                    refresh()
+                }
             }
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { if (current()) status = e.message ?: "Subtitle status unavailable." }
@@ -113,7 +127,11 @@ internal fun AISubtitleItemSection(vm: AppViewModel, file: MediaFileDto, enabled
                     scope.launch {
                         try {
                             val downloaded = vm.api().aiSubtitleDownload(file.id, AISubtitleDownload(match.file_id, match.language))
-                            if (current()) { choose(downloaded.subtitle_index); status = "Subtitle downloaded." }
+                            if (current()) {
+                                choose(downloaded.subtitle_index)
+                                refresh()
+                                status = "Subtitle downloaded."
+                            }
                         } catch (e: CancellationException) { throw e }
                         catch (e: Exception) { if (current()) status = e.message ?: "Subtitle download failed." }
                         finally { busy = false }
@@ -152,7 +170,17 @@ internal fun AISubtitleItemSection(vm: AppViewModel, file: MediaFileDto, enabled
                         try {
                             val response = vm.api().aiSubtitleDelete(file.id, index, stable)
                             check(response.isSuccessful) { "Could not delete the subtitle." }
-                            if (current()) { removed = removed + stable; status = "AI subtitle deleted." }
+                            if (current()) {
+                                removed = removed + stable
+                                val selected = file.subtitle_streams.firstOrNull { it.index == tracks.subtitle?.index }
+                                if (selected?.track_id == stable) choose(-1)
+                                else if (selected?.track_id != null) {
+                                    val next = vm.decision(file.id).subtitles.firstOrNull { it.downloaded_subtitle_id == selected.track_id }
+                                    if (current()) choose(next?.index ?: -1)
+                                }
+                                refresh()
+                                status = "AI subtitle deleted."
+                            }
                         } catch (e: CancellationException) { throw e }
                         catch (e: Exception) { if (current()) status = e.message ?: "Could not delete the subtitle." }
                         finally { busy = false }

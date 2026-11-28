@@ -45,10 +45,14 @@ test('AI item action publishes a stable stored track without reopening playback'
   }
   else if(k==='/files/120/ai-subtitles'){
    if(route.request().method()==='POST'){started=true;mutations.push(route.request().postDataJSON());}
-   else if(started){generationPublished=++generationReads>=3;}
+
    const op={id:'generation-one',route:'audio',state:generationPublished?'complete':'working',progress:generationPublished?1:.3,track_id:generationPublished?stored.track_id:null};
    answer=route.request().method()==='POST'?op:{target:'en',allowed:!generationPublished,route:'audio',
     label:'Create from the audio',existing_index:generationPublished?stored.index:null,operation:started?op:null,alternatives:[]};
+  }
+  else if(k==='/ai-subtitles/operations/generation-one'){
+   generationPublished=++generationReads>=3;
+   answer={id:'generation-one',route:'audio',state:generationPublished?'complete':'working',progress:generationPublished?1:.3,track_id:generationPublished?stored.track_id:null};
   }
   else if(/^\/files\/120\/subs\/2(?:\.vtt)?$/.test(k))return route.fulfill({
    contentType:'text/vtt',body:'WEBVTT\n\n00:00.000 --> 00:50.000\nGenerated English captions.\n'});

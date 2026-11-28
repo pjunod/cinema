@@ -2908,6 +2908,10 @@ final class PlayerController: ObservableObject {
     }
 
     func selectSubtitle(_ index: Int?) {
+        selectSubtitle(index, refreshNativeRenditions: false)
+    }
+
+    private func selectSubtitle(_ index: Int?, refreshNativeRenditions: Bool) {
         let cold = started && decision == nil
         let requestedIndex = index ?? PrePlaySelection.subtitleOff
         guard progressiveCaptionOutputSelected || index != selectedSubtitle
@@ -2947,13 +2951,15 @@ final class PlayerController: ObservableObject {
             restartInitialDecision(lifecycle: lifecycleGeneration)
             return
         }
-        let route = Self.subtitleSelectionRoute(
+        let selectionRoute = Self.subtitleSelectionRoute(
             for: index,
             tracks: subtitles,
             activeBurn: activeBurnedSubtitle,
             isDirectPlayback: isDirectPlayback,
             activeOverlay: activeOverlay
         )
+        let route: SubtitleSelectionRoute = refreshNativeRenditions && selectionRoute == .mediaSelection && !isDirectPlayback
+            ? .reopen : selectionRoute
         let destination = seekState.selection(
             at: positionForPlaybackIntent(),
             durationMs: knownDurationMs,
@@ -4725,6 +4731,7 @@ final class PlayerController: ObservableObject {
 
     func selectAISubtitles(route: String = "auto", language: String? = nil) {
         if progressiveCaptions.selected && route == "auto" { selectSubtitle(nil); return }
+        guard progressiveCaptions.aiOptions?.canStart == true else { return }
         prepareProgressiveCaptionSelection {
             self.progressiveCaptions.requestAI(route: route, language: language) { [weak self] id, embeddedIndex in
                 self?.useStoredAISubtitle(id, embeddedIndex: embeddedIndex)
@@ -4759,23 +4766,24 @@ final class PlayerController: ObservableObject {
     }
 
     private func useStoredAISubtitle(_ id: String?, embeddedIndex: Int?) {
-        guard started, let model, let context = fileContext else { return }
-        let attempt = snapshotAttempt(), lifecycle = lifecycleGeneration
+        guard started, let model, let context = fileContext,
+              let viewer = progressiveCaptions.aiPlaybackId else { return }
+        let lifecycle = lifecycleGeneration
         Task {
             do {
                 let quality: PlaybackQuality = selectedHeight.map(Self.initialQuality(height:)) ?? (selectedQualityIsOriginal ? .original : .auto)
                 let refreshed = try await requestPlaybackDecision(model, context,
                     PrePlaySelection(audioIndex: selectedAudio, subtitleIndex: PrePlaySelection.subtitleOff), quality)
                 guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
-                      attemptStillCurrent(attempt, fence: .translatedCaptionDecision),
+                      progressiveCaptions.aiPlaybackId == viewer,
                       refreshed.decision.fileId == fileId,
                       let track = refreshed.decision.subtitles?.first(where: { track in
                           id.map { track.downloadedSubtitleId == $0 } ?? (track.index == embeddedIndex)
                       }) else { return }
                 decision?.subtitles = refreshed.decision.subtitles
-                selectSubtitle(track.index)
+                selectSubtitle(track.index, refreshNativeRenditions: true)
             } catch {
-                if isCurrentLifecycle(lifecycle), attemptStillCurrent(attempt, fence: .translatedCaptionFailure) {
+                if isCurrentLifecycle(lifecycle), progressiveCaptions.aiPlaybackId == viewer {
                     showPlaybackNotice(error.localizedDescription)
                 }
             }

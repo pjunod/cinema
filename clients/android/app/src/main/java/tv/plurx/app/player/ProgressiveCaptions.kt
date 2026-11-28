@@ -356,9 +356,10 @@ internal class ProgressiveCaptions(
         val playback = UUID.randomUUID().toString()
         val transport = api()
         aiPlayback = playback
+        aiSeekTarget = null
         aiSelected = true
         status = "Preparing AI subtitles…"
-        val request = AISubtitleStart(UUID.randomUUID().toString(), route = route, playback_id = playback,
+        val request = AISubtitleStart(UUID.randomUUID().toString(), target = "en", route = route, playback_id = playback,
             position_ms = position().coerceAtMost(14_399_999), audio_index = sourceAudio(), spoken_language = language)
         // Read the start receipt even if this controller gives up its viewer.
         cleanupScope.launch {
@@ -380,9 +381,13 @@ internal class ProgressiveCaptions(
         }
     }
 
+    private var aiSeekTarget: Long? = null
+
     private suspend fun pollAI(transport: PlurxApi, id: String, playback: String, g: Long, complete: (String?, Long?) -> Unit) {
         while (current(g) && aiPlayback == playback) {
-            val at = position().coerceAtMost(14_399_999)
+            val actual = position().coerceIn(0, 14_399_999)
+            if (aiSeekTarget?.let { kotlin.math.abs(actual - it) <= 1_500 } == true) aiSeekTarget = null
+            val at = aiSeekTarget ?: actual
             val traversal = aiTraversal
             try {
                 val began = SystemClock.elapsedRealtime()
@@ -411,7 +416,7 @@ internal class ProgressiveCaptions(
                 if (refusalStatusOf(e) in listOf(401, 403)) { off(); return }
                 status = "Reconnecting to AI subtitles…"
             }
-            delay(2_000)
+            kotlinx.coroutines.withTimeoutOrNull(2_000) { renewalWake.receive() }
         }
     }
 
@@ -743,9 +748,14 @@ internal class ProgressiveCaptions(
         reconcile()
     }
 
-    fun viewerSeek() {
+    fun viewerSeek(targetMs: Long? = null) {
         if (!current(generation)) return
-        if (aiSelected) { aiTraversal++; lastHeartbeat = 0; clearCues() }
+        if (aiSelected) {
+            aiSeekTarget = targetMs?.coerceIn(0, 14_399_999)
+            aiTraversal++
+            lastHeartbeat = 0
+            clearCues()
+        }
         intent.continuity.viewerSeekRequested(); renewalWake.trySend(Unit)
     }
     fun executionAttached() {

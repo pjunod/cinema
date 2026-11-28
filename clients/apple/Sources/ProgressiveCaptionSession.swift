@@ -43,7 +43,7 @@ final class ProgressiveCaptionSession: ObservableObject {
     @Published private(set) var aiOptions: AISubtitleOptions?
     private var aiOperation: AISubtitleOperation?
     var aiRoute: String? { aiOperation?.route }
-    private var aiPlaybackId: String?
+    private(set) var aiPlaybackId: String?
     @Published private(set) var status = "Choose a spoken language and caption action."
     @Published private(set) var coverageStatus = ""
     @Published private(set) var operation: CaptionOperation?

@@ -3005,6 +3005,20 @@ struct PlayerView: View {
         return choices
     }
 
+    private var aiSubtitleRemoteLanguageChoices: [RemoteChoice] {
+        guard controller.progressiveCaptions.selected, controller.progressiveCaptions.aiRoute != "text" else { return [] }
+        let change = RemoteChoice(id: "ai-language", label: "Wrong language?", selected: false) {
+            choosingAISpokenLanguage.toggle()
+        }
+        guard choosingAISpokenLanguage else { return [change] }
+        return [change] + ["en", "de", "es", "fr", "it", "pt", "ja", "ko", "zh", "ar", "tr"].map { language in
+            RemoteChoice(id: "ai-language-\(language)", label: Self.languageName(language) ?? language, selected: false) {
+                choosingAISpokenLanguage = false
+                controller.selectAISubtitles(route: "audio", language: language)
+            }
+        }
+    }
+
     private func remoteChoices(_ kind: CinemaRemoteTrackKind) -> [RemoteChoice] {
         switch kind {
         case .audio:
@@ -3014,12 +3028,12 @@ struct PlayerView: View {
         case .subtitles:
             return [RemoteChoice(id: "off", label: "Off", selected: controller.captionIntent == .off) { controller.selectSubtitle(nil) }] + controller.subtitles.map { track in
                 RemoteChoice(id: String(track.index), label: Self.subtitleLabel(track), selected: controller.selectedSubtitle == track.index) { controller.selectSubtitle(track.index) }
-            } + (controller.progressiveCaptions.aiOptions?.allowed == true ? [
+            } + ((controller.progressiveCaptions.selected || controller.progressiveCaptions.aiOptions?.canStart == true) ? [
                 RemoteChoice(id: "progressive", label: controller.progressiveCaptions.selected ? "Stop AI subtitles" : "AI subtitles",
                              selected: controller.progressiveCaptions.selected, detail: controller.progressiveCaptions.aiOptions?.label) {
                     controller.selectAISubtitles()
                 }
-            ] : []) + aiSubtitleRemoteOptions
+            ] : []) + aiSubtitleRemoteOptions + aiSubtitleRemoteLanguageChoices
         case .quality:
             return [RemoteChoice(id: "auto", label: "Auto", selected: controller.selectedHeight == nil && !controller.selectedQualityIsOriginal) { controller.selectQuality(nil) },
                     RemoteChoice(id: "original", label: "Original", selected: controller.selectedQualityIsOriginal) { controller.selectOriginalQuality() }] + controller.qualityRungs.map { rung in
@@ -3316,7 +3330,7 @@ struct PlayerView: View {
                 }
             }
         }
-        if controller.progressiveCaptions.selected || controller.progressiveCaptions.aiOptions?.allowed == true {
+        if controller.progressiveCaptions.selected || controller.progressiveCaptions.aiOptions?.canStart == true {
             Button {
                 controller.selectAISubtitles()
                 #if os(iOS)

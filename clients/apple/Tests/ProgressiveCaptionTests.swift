@@ -222,6 +222,18 @@ private final class CaptionFixtureProtocol: URLProtocol {
 
 @MainActor
 final class ProgressiveCaptionTests: XCTestCase {
+    func testAIEntryRequiresAnAvailableRouteAndNoExistingEnglishTrack() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let available = Data(#"{"allowed":true,"route":"audio","alternatives":[]}"#.utf8)
+        let existing = Data(#"{"allowed":true,"existing_index":0,"alternatives":[]}"#.utf8)
+        let denied = Data(#"{"allowed":false,"route":"audio","alternatives":[]}"#.utf8)
+        XCTAssertTrue(try decoder.decode(AISubtitleOptions.self, from: available).canStart)
+        XCTAssertFalse(try decoder.decode(AISubtitleOptions.self, from: existing).canStart)
+        XCTAssertFalse(try decoder.decode(AISubtitleOptions.self, from: denied).canStart)
+    }
+
+
     private var subscriptions: Set<AnyCancellable> = []
     private var transport: URLSession!
     private var fixture: CaptionFixture!

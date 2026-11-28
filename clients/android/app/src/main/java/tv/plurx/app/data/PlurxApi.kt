@@ -35,6 +35,8 @@ interface PlurxApi {
         @Query("audio_index") audioIndex: Long? = null): Response<ResponseBody>
     @Streaming @POST("files/{id}/ai-subtitles")
     suspend fun aiSubtitleStart(@Path("id") id: Long, @Body body: AISubtitleStart): Response<ResponseBody>
+    @Streaming @GET("ai-subtitles/operations/{id}")
+    suspend fun aiSubtitleOperation(@Path("id") id: String): Response<ResponseBody>
     @Streaming @PUT("ai-subtitles/operations/{id}/viewer")
     suspend fun aiSubtitleViewer(@Path("id") id: String, @Body body: AISubtitleViewer): Response<ResponseBody>
     @DELETE("ai-subtitles/operations/{id}/viewer")

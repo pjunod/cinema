@@ -401,11 +401,12 @@ function aiCaptionBindItem(node,file,preplay=null){
     if(itemState.polling||!ownsFile()||!aiCaptionActive(itemState.operation))return;
     itemState.polling=true;
     try{
-      const options=await api(aiCaptionPath(file));
-      if(!ownsFile())return;
-      itemState.operation=options.operation;
+      const id=itemState.operation.id;
+      const operation=await api(aiCaptionOperationPath(id));
+      if(!ownsFile()||itemState.operation.id!==id||operation.id!==id)return;
+      itemState.operation=operation;
       show();
-      if(options.operation?.state==="complete")await refreshTracks();
+      if(operation.state==="complete")await refreshTracks();
     }catch(error){if(current())status.textContent=error.message;}
     finally{
       if(aiCaptionActive(itemState.operation)){

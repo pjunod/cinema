@@ -1873,7 +1873,7 @@ class Controller internal constructor(
         stallGuard.viewerSeek {
             playbackControl.clearVerdict()
             val pending = begin()
-            progressiveCaptions.viewerSeek()
+            progressiveCaptions.viewerSeek(pending.targetMs)
             sampleTargetPresentationDeadline()
             val publicationEpoch = mediaMutationEpoch
             seekJob?.cancel()

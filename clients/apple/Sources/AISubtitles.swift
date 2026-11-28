@@ -14,6 +14,8 @@ struct AISubtitleOptions: Decodable {
     let existingIndex: Int?
     let searchOnline: Bool?
     let operation: AISubtitleOperation?
+
+    var canStart: Bool { allowed && existingIndex == nil && route != nil }
 }
 
 struct AISubtitleOperation: Decodable {
@@ -190,7 +192,8 @@ struct AISubtitleSettingsView: View {
 struct AISubtitleItemView: View {
     @EnvironmentObject private var model: AppModel
     let file: MediaFile
-    let changed: () async -> Void
+    let audioIndex: Int?
+    let changed: (_ trackId: String?, _ index: Int?) async -> Void
     @State private var options: AISubtitleOptions?
     @State private var operation: AISubtitleOperation?
     @State private var status = ""
@@ -204,6 +207,7 @@ struct AISubtitleItemView: View {
         var id: Int { fileId }
     }
     private struct Search: Decodable { let results: [OnlineMatch] }
+    private struct Download: Decodable { let subtitleIndex: Int }
     private struct Timing: Decodable { let offsetMs: Int }
 
     private var path: String { "files/\(file.id)/ai-subtitles" }
@@ -214,7 +218,7 @@ struct AISubtitleItemView: View {
 
     var body: some View {
         Form {
-            if let options, options.allowed, options.existingIndex == nil {
+            if let options, options.canStart {
                 Button(options.label ?? "AI subtitles") { Task { await start(route: "auto") } }
                     .disabled(busy || operation?.active == true)
                 ForEach(options.alternatives, id: \.route) { choice in
@@ -249,21 +253,35 @@ struct AISubtitleItemView: View {
             while operation?.active == true && !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
                 if Task.isCancelled { return }
-                await load()
+                await poll()
             }
+        }
+    }
+
+    @MainActor private func poll() async {
+        guard let id = operation?.id else { return }
+        do {
+            let reply: CaptionHTTPReply<AISubtitleOperation> = try await api.caption("ai-subtitles/operations/\(id)")
+            guard !Task.isCancelled, operation?.id == id, reply.value.id == id else { return }
+            operation = reply.value
+            if reply.value.state == "complete" {
+                status = "English AI subtitles are ready."
+                await changed(reply.value.trackId, reply.value.trackIndex)
+            } else if !reply.value.active {
+                status = "AI subtitles could not finish."
+            }
+        } catch {
+            if !Task.isCancelled { status = error.localizedDescription }
         }
     }
 
     @MainActor private func load() async {
         do {
-            let reply: CaptionHTTPReply<AISubtitleOptions> = try await api.caption(path, query: [URLQueryItem(name: "target", value: language)])
-            let before = operation
+            var query = [URLQueryItem(name: "target", value: language)]
+            if let audioIndex { query.append(URLQueryItem(name: "audio_index", value: String(audioIndex))) }
+            let reply: CaptionHTTPReply<AISubtitleOptions> = try await api.caption(path, query: query)
             options = reply.value
-            operation = reply.value.operation
-            if before?.active == true && operation?.state == "complete" {
-                status = "English AI subtitles are ready."
-                await changed()
-            }
+            if operation == nil { operation = reply.value.operation }
         } catch { if !Task.isCancelled { status = error.localizedDescription } }
     }
 
@@ -273,10 +291,11 @@ struct AISubtitleItemView: View {
         var body: [String: CaptionValue] = ["request_id": .string(UUID().uuidString.lowercased()),
             "target": .string("en"), "route": .string(route)]
         if let quality { body["quality"] = .string(quality) }
+        if let audioIndex { body["audio_index"] = .integer(audioIndex) }
         do {
             let reply: CaptionHTTPReply<AISubtitleOperation> = try await api.caption(path, method: "POST", body: body)
             operation = reply.value
-            if reply.value.state == "complete" { await changed() }
+            if reply.value.state == "complete" { await changed(reply.value.trackId, reply.value.trackIndex) }
         } catch { status = error.localizedDescription }
     }
 
@@ -295,10 +314,10 @@ struct AISubtitleItemView: View {
         busy = true
         defer { busy = false }
         do {
-            _ = try await api.captionBytes("files/\(file.id)/subtitles/download", method: "POST",
+            let reply: CaptionHTTPReply<Download> = try await api.caption("files/\(file.id)/subtitles/download", method: "POST",
                 body: ["provider_file_id": .integer(match.id), "language": .string(match.language)])
             status = "Subtitle downloaded."
-            await changed()
+            await changed(nil, reply.value.subtitleIndex)
         } catch { status = error.localizedDescription }
     }
 
@@ -325,7 +344,7 @@ struct AISubtitleItemView: View {
             _ = try await api.captionBytes("files/\(file.id)/subtitles/\(track.index)", method: "DELETE",
                 query: [URLQueryItem(name: "track_id", value: id)])
             status = "AI subtitle deleted."
-            await changed()
+            await changed(id, nil)
         } catch { status = error.localizedDescription }
     }
 }

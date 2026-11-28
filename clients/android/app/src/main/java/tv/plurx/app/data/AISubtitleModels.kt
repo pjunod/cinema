@@ -32,7 +32,7 @@ data class AISubtitleOperation(
 @Serializable
 data class AISubtitleStart(
     val request_id: String,
-    val target: String = "en",
+    val target: String,
     val route: String = "auto",
     val playback_id: String? = null,
     val position_ms: Long? = null,
