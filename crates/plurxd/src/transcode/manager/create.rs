@@ -1165,8 +1165,10 @@ impl TranscodeManager {
         } else {
             let (vod_lookup_at, vod_settings, live_recovery_enabled) =
                 vod_policy.expect("VOD startup policy");
-            let vod = self
-                .try_vod_session(
+            // VOD attaches probe and rendition subgraphs under this same
+            // create worker. Keep their future states off its poll stack.
+            let vod = Box::pin(
+                self.try_vod_session(
                     vod_settings,
                     req,
                     priority,
@@ -1185,8 +1187,9 @@ impl TranscodeManager {
                     retained_capture,
                     planned_source,
                     plan,
-                )
-                .await;
+                ),
+            )
+            .await;
             tracing::info!(
                 target: "plurxd::transcode",
                 file_id = req.file_id,
@@ -4647,7 +4650,7 @@ impl TranscodeManager {
         for batch in requests.chunks(4) {
             let mut preparations = Vec::with_capacity(batch.len());
             for audio in batch {
-                preparations.push(self.prepare_vod_encoding(audio, file));
+                preparations.push(Box::pin(self.prepare_vod_encoding(audio, file)));
             }
             let outcomes = futures_util::future::join_all(preparations).await;
             for (request, outcome) in batch.iter().zip(outcomes) {
