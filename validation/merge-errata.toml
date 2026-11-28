@@ -826,3 +826,7 @@ reason = """The #1888 landing omitted the pull request's regression fields for t
 [[errata]]
 commit = "9ac590543804c8909dde1b8ff4081ff395364053"
 reason = """The T4 merge for #2003 into effort/ai-subtitles combined two test names into a Regression-Test field that could not resolve. The existing regressions are crates/plurx-core/tests/subtitle_translation_contract.rs::four_hour_caption_over_the_inline_cap_retains_a_stored_track and crates/plurxd/src/subtitle_translation/api_http_tests.rs::create_reuses_the_recipe_and_stop_releases_only_the_requesting_viewer. Both passed on the merged source and resolve in the merge tree. This record supplies the precise paths for the immutable merge message."""
+
+[[errata]]
+commit = "152c727fccd4eae9725e7e285279662dda83e45e"
+reason = """The T6 merge for #2008 copied the speech-tier regression from corrective commit ce09bf530b4bf89613d748c42790a5a00be305a8 with the wrong source path. The test is crates/plurxd/src/subtitle_translation/runtime.rs::context_attributed_speech_leaves_core_empty_but_silent_recognizer_still_fails. Its companion crates/plurx-core/src/store/subtitle_text_translation.rs::scheduled_text_publication_requires_ahead_of_time_at_claim_and_publish was referenced correctly. Both resolve in the immutable merge tree. Full qualification run 9838 reported the wrong path."""
