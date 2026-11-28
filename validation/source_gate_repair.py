@@ -83,7 +83,10 @@ WORKFLOW = 'ci.yml'
 # preflight, check and every other job are byte-identical.
 # Re-reviewed for the TV navigation evidence retention: only that upload
 # step's `retention-days` (90 -> 14) and its comment change.
-WORKFLOW_SHA256 = 'b02733d7fefa813b15a168347c51233b1d6b73fc77c97e7ca4bdded84883c5c1'
+# Re-reviewed for the bounded legacy Store deadline (120 -> 150 minutes).
+# Resource bounds, retained evidence and test commands are unchanged.
+# The source-lease workflow uses the consolidated reader and rollout checks.
+WORKFLOW_SHA256 = '8b2a7c90598e13d0bf658f40eac2f5bbf19d571b90dff132a37c22c22d597c9d'
 
 
 def prior_run(api, value, binding, repository, *, current_run=None):

@@ -3362,22 +3362,20 @@ with a newly issued token. Never copy the removed directory back into service.
 
 ## Rolling upgrades
 
-Settings → Cluster reports each node's build, media protocol
-(`PROTOCOL_VERSION` in `crates/plurxd/src/media_pool.rs`), and eligible-owner
-status. Placement requires a fresh, exact-protocol advertisement, available
-egress and an encoder; the card explains refusals. Different protocols form
-separate placement cohorts. Build skew alone does not prevent placement.
+Settings → Cluster reports each node's build, media protocol and owner
+eligibility. Placement requires a fresh, exact-protocol advertisement, an
+available encoder and egress. Build skew alone permits placement.
 
-1. Upgrade one node at a time. Confirm ready, the new build/protocol and
-   eligible-owner status before proceeding.
-2. Keep an eligible owner in each protocol cohort while its ingress serves
-   requests. Without one, old ingress can only start locally.
-3. Drain old ingress and finish or move its sessions before upgrading the
-   last old node: new-protocol workers cannot accept old placement.
+1. Upgrade one node at a time. Confirm readiness, the reported protocol and
+   owner eligibility.
+2. Keep an eligible owner in each active ingress cohort.
+3. Drain old ingress and its sessions before upgrading the last old node.
 
-Strict media-pool envelope changes require a protocol bump and dated note
-here (`make paperwork` checks this). Newest first:
+Strict envelope changes require a `PROTOCOL_VERSION` bump and a dated note
+here. Newest first:
 
+- 2026-11-27: protocol 14 — records the issued VOD copy layout and soundtrack
+  URLs at activation. Drain by cohort before removing the last old owner.
 - 2026-11-27: protocol 13 — an offer for a predicted split copy carries
   `output_contract` `hls-split-fmp4-v1` and no soundtrack, so every language
   places on and reuses one shared video. Drain by cohort as above.

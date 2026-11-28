@@ -2472,7 +2472,17 @@ async fn staging_route_with_incumbent_on(
     playback_id: &str,
     incumbent: Option<plurx_core::playback::candidate::QualityCandidate>,
 ) -> (HlsDeliveryFixture, String, MediaSessionRoute) {
-    let (source_size, source_mtime, recovery_epoch) = if incumbent.is_some() {
+    staging_route_with_recovery_on(fixture, session_id, playback_id, incumbent, false).await
+}
+
+async fn staging_route_with_recovery_on(
+    fixture: HlsDeliveryFixture,
+    session_id: String,
+    playback_id: &str,
+    incumbent: Option<plurx_core::playback::candidate::QualityCandidate>,
+    original: bool,
+) -> (HlsDeliveryFixture, String, MediaSessionRoute) {
+    let (source_size, source_mtime, recovery_epoch) = if incumbent.is_some() || original {
         let file = fixture
             .store
             .get_file(fixture.file_id())
@@ -2491,6 +2501,7 @@ async fn staging_route_with_incumbent_on(
     let incarnation_id = uuid::Uuid::new_v4().to_string();
     let predecessor_request = crate::transcode::SessionRequest {
         split_audio: false,
+        vod_copy_layout: None,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2506,7 +2517,7 @@ async fn staging_route_with_incumbent_on(
         file_id: fixture.file_id(),
         playback_id: playback_id.to_owned(),
         request_id: Some(incarnation_id.clone()),
-        automatic: true,
+        automatic: !original,
         previous_session_id: None,
         reopen_reason: None,
         kind: crate::transcode::SessionKind::Copy {

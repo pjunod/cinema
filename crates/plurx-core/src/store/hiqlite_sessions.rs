@@ -3749,14 +3749,13 @@ impl MediaSessionStore for HiqliteAuthStore {
         &self,
         seal: &crate::store::PreparedOutputSeal,
     ) -> Result<bool, StoreError> {
-        let proof = seal.proof_json()?;
+        let (sealed_recipe, sealed_response) = seal.sealed_json()?;
         let applied = timeout_store(self.session_client().execute(
             "seal_prepared_output",
             crate::store::prepared_output::SEAL,
             params!(
                 seal.already_complete,
                 seal.expected_recipe_json.as_str(),
-                proof,
                 seal.expected_response_json.as_str(),
                 seal.incarnation_id.as_str(),
                 seal.session_id.as_str(),
@@ -3769,6 +3768,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                 seal.predecessor_incarnation_id.as_str(),
                 seal.predecessor_owner_node_id.as_str(),
                 seal.predecessor_owner_epoch,
+                sealed_recipe,
+                sealed_response,
             ),
         ))
         .await?;
@@ -3784,7 +3785,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "only a complete seal can be confirmed by a read".into(),
             ));
         }
-        let proof = seal.proof_json()?;
+        let (sealed_recipe, sealed_response) = seal.sealed_json()?;
         let rows = timeout_store(
             self.session_client()
                 // authority: a seal's ownership predicate is confirmed on committed state.
@@ -3794,7 +3795,6 @@ impl MediaSessionStore for HiqliteAuthStore {
                     params!(
                         seal.already_complete,
                         seal.expected_recipe_json.as_str(),
-                        proof,
                         seal.expected_response_json.as_str(),
                         seal.incarnation_id.as_str(),
                         seal.session_id.as_str(),
@@ -3807,6 +3807,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                         seal.predecessor_incarnation_id.as_str(),
                         seal.predecessor_owner_node_id.as_str(),
                         seal.predecessor_owner_epoch,
+                        sealed_recipe,
+                        sealed_response,
                     ),
                 ),
         )
@@ -4399,7 +4401,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                         AND preparation.deadline_ms > $2)
                     AND EXISTS (SELECT 1 FROM media_sessions
                       WHERE incarnation_id = $1 AND {owner_3} AND playback_id = $4
-                        AND state = 'active')
+                        AND state = 'active'
+                        AND CASE WHEN json_valid(recipe_json) THEN
+                          COALESCE(json_extract(recipe_json, '$.request.vod_copy_layout.kind'), '') <> 'pending_v1'
+                          ELSE TRUE END)
                     AND ($8 = ''
                       OR NOT EXISTS (SELECT 1 FROM media_session_terminal_acks
                         WHERE session_id = $8)
