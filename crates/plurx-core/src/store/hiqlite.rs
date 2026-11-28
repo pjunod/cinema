@@ -4371,7 +4371,7 @@ impl HiqliteAuthStore {
         ))
     }
 
-    async fn source_arbitration_shape(&self) -> Result<Option<bool>, StoreError> {
+    async fn source_arbitration_layout_has_v1_marker(&self) -> Result<Option<bool>, StoreError> {
         let expected = super::background_jobs_resources::source_arbitration_objects()?;
         let names = expected
             .iter()
@@ -4392,23 +4392,44 @@ impl HiqliteAuthStore {
                 "foreground source arbitration extension has incompatible shape".into(),
             ));
         }
-        // The source-lease contract drops the v1 marker with the v1 tables;
-        // its own marker then closes this extension.
-        let marker_sql = if installed
-            .iter()
-            .any(|row| row.name == "background_source_schema")
-        {
-            "SELECT count(*) AS count FROM background_source_schema WHERE singleton=1 AND version=1"
-        } else {
-            "SELECT count(*) AS count FROM source_lease_schema WHERE singleton=1 AND version=3"
+        Ok(Some(
+            rows.iter()
+                .any(|(name, _)| name == "background_source_schema"),
+        ))
+    }
+
+    async fn source_arbitration_shape(&self) -> Result<Option<bool>, StoreError> {
+        let Some(has_v1_marker) = self.source_arbitration_layout_has_v1_marker().await? else {
+            return Ok(None);
         };
+        if !has_v1_marker {
+            return Ok(Some(self.source_leases_schema_version().await? == Some(3)));
+        }
         let marker = self
             .client()
             // authority: reader admission requires the committed source-arbitration singleton.
-            .query_consistent_map::<CountRow, _>("source_arbitration_shape", marker_sql, params!())
-            .await?;
-        Ok(Some(matches!(marker.as_slice(),[row] if row.count==1)))
+            .query_consistent_map::<CountRow, _>(
+                "source_arbitration_shape",
+                "SELECT count(*) AS count FROM background_source_schema WHERE singleton=1 AND version=1",
+                params!(),
+            )
+            .await;
+        match marker {
+            Ok(rows) => Ok(Some(matches!(rows.as_slice(), [row] if row.count == 1))),
+            Err(error) => {
+                // Another startup may have contracted since our catalogue read.
+                // Only the exact contracted layout can settle a vanished v1 marker.
+                if self.source_arbitration_layout_has_v1_marker().await? == Some(false)
+                    && self.source_leases_schema_version().await? == Some(3)
+                {
+                    Ok(Some(true))
+                } else {
+                    Err(error)
+                }
+            }
+        }
     }
+
     async fn install_source_arbitration_schema(
         &self,
         admission: SchemaMigrationAdmission<'_>,
@@ -5517,13 +5538,13 @@ impl HiqliteAuthStore {
         ))
     }
 
-    async fn source_leases_schema_version(&self) -> Result<Option<i64>, StoreError> {
+    async fn source_leases_catalogue_version(&self) -> Result<Option<i64>, StoreError> {
         let rows = self
             .client()
-            // authority: committed lease shape and marker decide expand and contract.
+            // authority: the committed lease catalogue decides expand and contract.
             .query_consistent_map::<RemoteShapeRow, _>(
                 "source_leases_schema_version",
-                super::source_leases::SHAPE_SQL,
+                super::source_leases::shape_sql(),
                 params!(),
             )
             .await?;
@@ -5531,24 +5552,37 @@ impl HiqliteAuthStore {
             .into_iter()
             .map(|r| (r.name, r.sql))
             .collect::<Vec<_>>();
-        let version = super::source_leases::version(&shape)?;
-        if let Some(version) = version {
-            let rows = self
-                .client()
-                // authority: admission must observe the committed marker paired with the shape.
-                .query_consistent_map::<CountRow, _>(
-                    "source_leases_schema_version",
-                    "SELECT count(*) AS count FROM source_lease_schema WHERE singleton=1 AND version=$1",
-                    params!(version),
-                )
-                .await?;
-            if !matches!(rows.as_slice(), [row] if row.count == 1) {
-                return Err(StoreError::Migration(
-                    "source lease schema marker missing".into(),
-                ));
+        super::source_leases::version(&shape)
+    }
+
+    async fn source_leases_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let Some(version) = self.source_leases_catalogue_version().await? else {
+            return Ok(None);
+        };
+        let rows = self
+            .client()
+            // authority: pair the marker with the observed catalogue or its exact successor.
+            .query_consistent_map::<CountRow, _>(
+                "source_leases_schema_version",
+                "SELECT version AS count FROM source_lease_schema WHERE singleton=1",
+                params!(),
+            )
+            .await?;
+        match rows.as_slice() {
+            [row] if row.count == version => Ok(Some(version)),
+            [row] if version == 2 && row.count == 3 => {
+                if self.source_leases_catalogue_version().await? == Some(3) {
+                    Ok(Some(3))
+                } else {
+                    Err(StoreError::Migration(
+                        "source lease schema marker does not match catalogue".into(),
+                    ))
+                }
             }
+            _ => Err(StoreError::Migration(
+                "source lease schema marker does not match catalogue".into(),
+            )),
         }
-        Ok(version)
     }
 
     /// Source leases, installed last. The expand runs on the first start of a

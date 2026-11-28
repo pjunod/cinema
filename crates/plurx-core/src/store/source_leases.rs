@@ -227,8 +227,6 @@ pub(crate) const CONTRACT: &str = concat!(
     "\n-- next statement\n",
     root_service_admission!()
 );
-/// The claim-effects trigger the expand rewrites; part of the lease shape.
-pub(crate) const CLAIM_EFFECTS: &str = "background_job_claim_effects";
 /// SQLite schema version before the expand and after it.
 pub(crate) const PRE_LEASE_VERSION: usize = 138;
 pub(crate) const EXPANDED_VERSION: usize = 139;
@@ -307,7 +305,41 @@ pub(crate) fn lease_id_valid(lease_id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'-' | b'_' | b'.'))
 }
 
-pub(crate) const SHAPE_SQL: &str = "SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE (name GLOB 'source_lease*' OR name='background_job_claim_effects') AND sql IS NOT NULL ORDER BY name";
+// Include the objects the lease migrations replace or remove. Validating
+// each extension in isolation could accept a published predecessor beside
+// leases that depend on the new admission and resource views.
+const REWRITTEN_OBJECTS: &[&str] = &[
+    "analysis_required_resources",
+    "background_job_claim_effects",
+    "background_job_enqueue_command",
+    "background_job_maintenance_command",
+    "background_job_required_resources",
+    "background_source_current_owners",
+    "background_source_custody",
+    "background_source_custody_owner_work",
+    "background_source_pause_effects",
+    "background_source_resume_effects",
+    "background_source_schema",
+    "background_storage_domain_affected_jobs",
+    "background_storage_domain_disturbed",
+    "background_storage_domain_holders",
+    "dispatch_turn_contenders",
+    "dispatch_turn_independent",
+    "dispatch_turn_library_resources",
+    "dispatch_turn_ordinary_occupancy",
+    "foreground_source_owners",
+    "foreground_source_permissions",
+    "foreground_source_required_resources",
+    "source_io_occupancy",
+];
+
+pub(crate) fn shape_sql() -> String {
+    format!(
+        "SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL
+         AND (name GLOB 'source_lease*' OR name IN ('{}')) ORDER BY name",
+        REWRITTEN_OBJECTS.join("','")
+    )
+}
 
 /// Statements of an extension text, one per `-- next statement`.
 pub(crate) fn statements(sql: &str) -> Vec<String> {
@@ -321,7 +353,9 @@ pub(crate) fn statements(sql: &str) -> Vec<String> {
 fn shape(catalogue: &[(String, String)]) -> Vec<(String, String)> {
     catalogue
         .iter()
-        .filter(|(name, _)| name.starts_with("source_lease") || name == CLAIM_EFFECTS)
+        .filter(|(name, _)| {
+            name.starts_with("source_lease") || REWRITTEN_OBJECTS.contains(&name.as_str())
+        })
         .map(|(name, sql)| (name.clone(), canonical(sql)))
         .collect()
 }
@@ -380,8 +414,8 @@ pub(crate) fn contracted_catalogue() -> Result<Vec<(String, String)>, StoreError
 }
 
 /// `None`: no lease objects (v1 only). `Some(2)`: expanded. `Some(3)`:
-/// contracted. Anything else, including lease objects beside a claim-effects
-/// trigger the expand did not write, is a partial or mutated catalogue.
+/// contracted. An installed generation requires the exact objects written by
+/// its migration, including the views and triggers borrowed from earlier steps.
 pub(crate) fn version(installed: &[(String, String)]) -> Result<Option<i64>, StoreError> {
     let installed = shape(installed);
     if !installed

@@ -289,6 +289,11 @@ Main had moved 1,645 commits on before the batch could land. The port merges mai
   only orphaned ledger entries skips the retirement update. This keeps
   repeated compilation of the lease-aware trigger graph out of the
   maintenance transaction.
+- **Contract admission.** The replicated contract waits for current
+  capability proofs and for staged joins to finish. Catalogue validation
+  checks the resource and admission definitions for the observed generation.
+  Concurrent startup can reconcile a removed v1 marker or advanced v2 marker
+  against the exact contracted catalogue.
 
 The claim's lease terms remain the same macros used by source registration,
 analysis and resume. Claim, replica verdict and candidate listing wrap those

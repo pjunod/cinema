@@ -3378,7 +3378,11 @@ fn reduction_reference_key(reference: &hiqlite::ReductionFenceReference) -> Stri
 /// guard), as SQL evaluated inside the installer's transaction.
 #[cfg(feature = "hiqlite-store")]
 pub(crate) fn source_leases_ready_predicate() -> String {
-    capability_ready_predicate(SOURCE_LEASES_CAPABILITY)
+    format!(
+        "{} AND {}",
+        capability_ready_predicate(SOURCE_LEASES_CAPABILITY),
+        no_join_in_flight_predicate()
+    )
 }
 
 /// "Every active node proves `capability` with the binary it is running now."

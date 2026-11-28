@@ -13887,16 +13887,41 @@ async fn replicated_v1_source_store_expands_carries_holders_and_contracts_when_e
     );
     client
         .execute(
+            "INSERT INTO cluster_node_join_staging VALUES('node-b')",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("stage the join before its first capability heartbeat");
+    drop(
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+            .await
+            .expect("restart with a committed member still joining"),
+    );
+    assert_eq!(
+        text(&client, catalogue).await,
+        expanded,
+        "a staged member must finish joining before the contract drops v1 objects"
+    );
+    client
+        .execute(
+            "DELETE FROM cluster_node_join_staging WHERE node_id='node-b'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("finish the join");
+    client
+        .execute(
             "INSERT INTO cluster_node_capabilities VALUES('node-b','source_leases_v2',20)",
             hiqlite::params!(),
         )
         .await
         .expect("node-b runs a lease-aware binary");
-    drop(
-        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
-            .await
-            .expect("start after every node is ready"),
-    );
+    let (first, second) = tokio::try_join!(
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry),
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry),
+    )
+    .expect("concurrent starts settle the same contract");
+    drop((first, second));
     assert_eq!(text(&client, lease_version).await, ["3"], "contracted");
     let contracted = text(&client, catalogue).await;
     assert!(
@@ -13905,6 +13930,34 @@ async fn replicated_v1_source_store_expands_carries_holders_and_contracts_when_e
             .any(|row| row.contains(" foreground_source_owners ")),
         "the v1 source owners are gone"
     );
+    let root_view = "background_job_required_resources";
+    let current_root_view = text(
+        &client,
+        "SELECT sql AS value FROM sqlite_master WHERE name='background_job_required_resources'",
+    )
+    .await;
+    let pre_lease_root_view = include_str!("../src/store/subtitle_managed_resources_v7.sql")
+        .split("-- next statement")
+        .find(|sql| sql.contains("CREATE VIEW IF NOT EXISTS background_job_required_resources AS"))
+        .expect("published pre-lease job resource view");
+    for ddl in [pre_lease_root_view, &current_root_view[0]] {
+        client
+            .txn([
+                (format!("DROP VIEW {root_view}"), hiqlite::params!()),
+                (ddl.to_owned(), hiqlite::params!()),
+            ])
+            .await
+            .expect("replace job resource view")
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("both catalogue changes applied");
+        if ddl == pre_lease_root_view {
+            assert!(matches!(
+                HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry).await,
+                Err(StoreError::Migration(reason)) if reason.contains("source lease schema partial or incompatible")
+            ));
+        }
+    }
     let reopened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("restart a contracted store");
