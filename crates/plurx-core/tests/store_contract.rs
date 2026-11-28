@@ -13525,8 +13525,7 @@ async fn replicated_source_tail_drops(
         .chain(validated_source_tail_drops(
             &source_shape,
             &source_counts,
-            true,
-            true,
+            139,
             remove,
         ))
         .collect()

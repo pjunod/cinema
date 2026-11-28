@@ -97,8 +97,7 @@ fn source_tail_objects(connection: &rusqlite::Connection) -> Vec<(String, String
 pub(crate) fn validated_source_tail_drops(
     objects: &[(String, String, String)],
     counts: &[(String, i64)],
-    dispatch: bool,
-    live_titles: bool,
+    schema_version: i64,
     remove: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     let expected = rusqlite::Connection::open_in_memory().expect("published source tail witness");
@@ -111,14 +110,19 @@ pub(crate) fn validated_source_tail_drops(
     expected
         .execute_batch(SOURCE_FIXTURE_SCHEMA)
         .expect("published v122 source extension");
-    if dispatch {
+    if schema_version >= 124 {
         expected
             .execute_batch(include_str!("../../src/store/background_job_turns.sql"))
             .expect("published v124 dispatch extension");
-        if live_titles {
+        if schema_version >= 136 {
             expected
                 .execute_batch(include_str!("../../src/store/background_job_turns_v2.sql"))
                 .expect("published v136 dispatch migration");
+        }
+        if schema_version >= 139 {
+            expected
+                .execute_batch(include_str!("../../src/store/background_job_turns_v3.sql"))
+                .expect("published v139 dispatch authority");
         }
     }
     assert_eq!(
@@ -335,8 +339,7 @@ fn source_extension_rewind_plan(
     statements.extend(validated_source_tail_drops(
         &objects,
         &counts,
-        version >= 124,
-        false,
+        version,
         |_| true,
     ));
     let marker: i64 = connection
@@ -906,11 +909,80 @@ const ANALYSIS_SCOPE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE
 /// published shape and marker, then restores the original analysis view and
 /// the managed v6 view with marker 6. Only views and markers change, so no
 /// queued work or reservation is discarded.
-/// Rewind v140 (translation continuity follows `subtitles.ai.v1`) and v139
-/// (the held translation viewer follows it) to v138 by restoring the
-/// published trigger and view. Only one view and one trigger change, so no
-/// queued work or reservation is discarded.
+/// Restore the published predecessor trigger only when the exact v141
+/// finish extension has no demands, stored tracks, or schedule exclusions.
+fn rewind_empty_translation_finish_to_v140(conn: &rusqlite::Connection) {
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .expect("AI finish ordinal");
+    if version != 141 {
+        return;
+    }
+    let fixture = rusqlite::Connection::open_in_memory().expect("AI finish witness");
+    fixture
+        .execute_batch(
+            "CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER);
+             CREATE TABLE background_jobs(kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT);",
+        )
+        .expect("translation fixture dependencies");
+    let legacy = include_str!("../../src/store/subtitle_translation.sql");
+    let retarget = include_str!("../../src/store/subtitle_translation_retarget.sql");
+    fixture.execute_batch(legacy).expect("published translation");
+    fixture.execute_batch(retarget).expect("published retarget");
+    let mutate_sql = |db: &rusqlite::Connection| {
+        db.query_row(
+            "SELECT sql FROM sqlite_master WHERE name='subtitle_translation_mutate'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .expect("published translation mutation trigger")
+    };
+    let former_trigger = mutate_sql(&fixture);
+    fixture
+        .execute_batch(include_str!("../../src/store/subtitle_translation_finish.sql"))
+        .expect("published AI finish extension");
+    let finish_shape = |db: &rusqlite::Connection| {
+        db.prepare(
+            "SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL AND
+              (name='subtitle_translation_mutate' OR tbl_name IN (
+               'subtitle_translation_finish_demands','subtitle_translation_stored_tracks',
+               'subtitle_translation_schedule_exclusions')) ORDER BY name",
+        )
+        .expect("finish inventory")
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("finish rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete finish inventory")
+    };
+    assert_eq!(
+        finish_shape(conn),
+        finish_shape(&fixture),
+        "exact AI finish schema"
+    );
+    let count: i64 = conn.query_row(
+        "SELECT (SELECT count(*) FROM subtitle_translation_finish_demands)
+              + (SELECT count(*) FROM subtitle_translation_stored_tracks)
+              + (SELECT count(*) FROM subtitle_translation_schedule_exclusions)",
+        [],
+        |r| r.get(0),
+    ).expect("finish data inventory");
+    assert_eq!(count, 0, "AI finish data cannot be discarded");
+    conn.execute_batch(&format!(
+        "SAVEPOINT rewind_ai_finish;
+         DROP TRIGGER subtitle_translation_mutate;
+         DROP TABLE subtitle_translation_finish_demands;
+         DROP TABLE subtitle_translation_stored_tracks;
+         DROP TABLE subtitle_translation_schedule_exclusions;
+         {former_trigger};
+         PRAGMA user_version=140;
+         RELEASE rewind_ai_finish;"
+    ))
+    .expect("published AI finish rewind");
+}
+
+/// Restore the published v138 continuity trigger and dispatch view.
 fn rewind_ai_authority_to_v138(conn: &rusqlite::Connection) {
+    rewind_empty_translation_finish_to_v140(conn);
     let version = conn
         .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
         .expect("AI authority ordinal");
