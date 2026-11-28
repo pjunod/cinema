@@ -790,15 +790,14 @@ async fn a_successor_close_rebinds_the_charge_and_a_restart_before_its_prepare_r
         .expect("no original selector remains")
         .drain()
         .expect("join original journal");
+    // A restart is a new daemon instance over the same journal.
+    let mut restarted = super::super::daemon_owner(
+        "finite-cleanup-node".into(),
+        "finite-cleanup-cluster".into(),
+    );
+    restarted.owner_id = Uuid::new_v4();
     let reopened = NodeResourceRuntime::open_with_rendition_root(
-        super::super::tests::options(
-            root.path(),
-            super::super::daemon_owner(
-                "finite-cleanup-node".into(),
-                "finite-cleanup-cluster".into(),
-            ),
-            InstallationContext::Existing,
-        ),
+        super::super::tests::options(root.path(), restarted, InstallationContext::Existing),
         root.path().join("renditions"),
     )
     .expect("reopened runtime");
