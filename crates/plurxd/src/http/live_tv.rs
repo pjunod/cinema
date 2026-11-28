@@ -587,7 +587,7 @@ pub(crate) async fn start_session(
     if request.allows_split() {
         request.split_ingress = tokio::time::timeout_at(
             stage_deadline(Duration::from_millis(750), deadline),
-            state.cluster.live_tv_split_ready(),
+            state.cluster.permits_live_tv_split_ingress(),
         )
         .await
         .is_ok_and(|result| result.unwrap_or(false));
