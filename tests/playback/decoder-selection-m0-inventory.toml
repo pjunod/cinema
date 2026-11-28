@@ -28,7 +28,7 @@ source = "crates/plurxd/src/transcode.rs"
 anchor = "async fn start_with_audio_offset("
 obligation = "resolve once from the held source for command, identity, and admission"
 m2_state = "migrated"
-m2_anchor = "let args = transcode::hls_args(&plan, &execution);"
+m2_anchor = "transcode::hls_args(&plan, &execution)"
 
 [[surfaces]]
 id = "builder.live_tv_hls"
