@@ -3662,6 +3662,10 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_full_runtime_job_allowances_preserve_the_existing_suites(self):
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        package = jobs["package_smoke"]
+        self.assertIn("timeout-minutes: ${{ matrix.timeout_minutes }}", package)
+        self.assertRegex(package, r"(?m)^ +\- arch: amd64\n +timeout_minutes: 90$")
+        self.assertRegex(package, r"(?m)^ +\- arch: arm64\n +timeout_minutes: 175$")
         for name, minutes in (("preflight", 30), ("check", 180), ("cluster_store_legacy", 150), ("cluster_wal", 60)):
             with self.subTest(job=name):
                 self.assertRegex(jobs[name], rf"(?m)^    timeout-minutes: {minutes}$")
