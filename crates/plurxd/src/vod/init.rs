@@ -161,29 +161,13 @@ async fn probe_init_head(
             encoding.media_plan(recipe.file.duration_ms.unwrap_or(0)),
         ))
     });
-    let head = async {
-        match copied {
-            Some(copied) => {
-                read_regenerated_head(
-                    owner,
-                    stdout,
-                    HEAD_REGENERATION_TIMEOUT,
-                    HEAD_REGENERATION_MAX_BYTES,
-                    Some(copied),
-                )
-                .await
-            }
-            None => {
-                read_regenerated_head_before(
-                    owner,
-                    stdout,
-                    HEAD_REGENERATION_TIMEOUT,
-                    HEAD_REGENERATION_MAX_BYTES,
-                )
-                .await
-            }
-        }
-    };
+    let head = read_regenerated_head(
+        owner,
+        stdout,
+        HEAD_REGENERATION_TIMEOUT,
+        HEAD_REGENERATION_MAX_BYTES,
+        copied,
+    );
     let (muxer, diagnostic) = tokio::join!(head, crate::ffmpeg::drain_diagnostics(stderr));
     let diagnostic = crate::ffmpeg::classify_diagnostic(&diagnostic);
     if !diagnostic.informational.is_empty() {
@@ -218,6 +202,7 @@ async fn probe_init_head(
 /// Read exactly one regeneration child's muxer head within the supplied
 /// budget, then always kill and confirm-reap the child before returning. The
 /// owner also transfers reap to a detached task if this future is cancelled.
+#[cfg(test)]
 pub(super) async fn read_regenerated_head_before(
     child: impl Into<HeadChildOwner>,
     stdout: tokio::process::ChildStdout,
