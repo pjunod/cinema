@@ -634,10 +634,23 @@ async fn hevc_vod_checks_proof_before_reusing_a_cached_rendition() {
             }),
             "hevc_configuration_unverified",
         ),
+        // A refusal stored by the reader before the glued-line and
+        // promoting-copy fixes is not a fact about the source: the title is
+        // analysed again, never refused outright on it.
+        (
+            "stale refusal",
+            Some(plurx_core::hevc_configuration::Proof {
+                refusal: Some("HEVC parameter sets change; immutable copy is unsafe".into()),
+                parser: 0,
+                ..good.clone()
+            }),
+            "hevc_configuration_unverified",
+        ),
         (
             "varying",
             Some(plurx_core::hevc_configuration::Proof {
                 refusal: Some("changed PPS".into()),
+                parser: plurx_core::hevc_configuration::PARSER,
                 ..good
             }),
             "hevc_configuration_unsupported",

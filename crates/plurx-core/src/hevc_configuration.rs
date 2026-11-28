@@ -7,6 +7,14 @@
 use serde::{Deserialize, Serialize};
 
 pub const REVISION: u32 = 1;
+/// The generation of the trace reader that wrote a [`Proof`]. It is not part
+/// of [`REVISION`], which feeds every HEVC index identity: raising that would
+/// re-index every HEVC file. Generation 2 reads trace lines glued onto another
+/// thread's message and a promoting copy's in-band sets; generation 1 (absent
+/// on stored proofs) dropped the first and refused the second, so its
+/// refusals are not facts about the source and are analysed again. Its
+/// permits stay valid: it could only refuse wrongly, never permit.
+pub const PARSER: u32 = 2;
 const MAX_LINE: usize = 8192;
 const MAX_PARAMETER: usize = 65536;
 /// What makes a stderr line part of the trace. The index child shares one
@@ -153,6 +161,15 @@ pub struct Proof {
     pub slices: u64,
     /// None means verified; a reason means this complete scan refused copy.
     pub refusal: Option<String>,
+    /// The trace reader generation that wrote this proof ([`PARSER`]); 0 on
+    /// proofs stored before the field existed. Left out of the stored form at
+    /// 0, so those keep their exact bytes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub parser: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl Proof {
@@ -176,11 +193,23 @@ impl Proof {
     /// A completed refusal is still a current analysis; do not rescan it
     /// until source identity or analyzer revision changes.
     pub fn current_on_node(&self, object: &str, node: &str) -> bool {
-        self.revision == REVISION
+        self.current_refusal_or_permit()
+            && self.revision == REVISION
             && !object.is_empty()
             && !node.is_empty()
             && self.source_node_id == node
             && self.source_object_version == object
+    }
+
+    /// This proof's refusal, when the reader that wrote it can be trusted to
+    /// have refused: a refusal from an older [`PARSER`] is not a fact about
+    /// the source.
+    pub fn current_refusal(&self) -> Option<&str> {
+        self.refusal.as_deref().filter(|_| self.parser >= PARSER)
+    }
+
+    fn current_refusal_or_permit(&self) -> bool {
+        self.refusal.is_none() || self.parser >= PARSER
     }
 
     pub fn permits_on_node(&self, object: &str, node: &str) -> bool {
@@ -672,6 +701,7 @@ impl Trace {
             source_sha256: None,
             slices: self.slices,
             refusal: self.refusal,
+            parser: PARSER,
         }
     }
 }
@@ -1371,5 +1401,37 @@ mod tests {
             range(&mut Trace::for_copy(true), &lines),
             Err(PARAMETER_SETS_CHANGE.to_owned())
         );
+    }
+
+    /// The 118 index refusals stored on the Source node before #1996 were
+    /// written by a reader that dropped glued lines and refused promoting
+    /// copies. Such a refusal is not current, so the title is analysed again;
+    /// a permit from the same reader stays valid, since it could only refuse
+    /// wrongly. A stored proof without the field keeps its exact bytes.
+    #[test]
+    fn a_refusal_from_an_older_reader_is_analysed_again() {
+        let stored = r#"{"revision":1,"source_object_version":"object","source_node_id":"node","source_sha256":null,"stream_index":0,"slices":10,"refusal":"source extradata lacks a complete decoder configuration"}"#;
+        let old: Proof = serde_json::from_str(stored).expect("stored proof");
+        assert_eq!(old.parser, 0);
+        assert_eq!(serde_json::to_string(&old).expect("proof"), stored);
+        assert!(!old.current_on_node("object", "node"));
+        assert_eq!(old.current_refusal(), None);
+
+        let permit = Proof {
+            refusal: None,
+            ..old.clone()
+        };
+        assert!(permit.current_on_node("object", "node"));
+        assert!(permit.permits_on_node("object", "node"));
+
+        let mut trace = Trace::default();
+        trace.feed(record().concat().as_bytes());
+        trace.feed(line("Packet: 10 bytes, key frame, pts 0, dts 0, duration 41.").as_bytes());
+        let mut proof = trace.finish("object".into(), 0);
+        proof.source_node_id = "node".into();
+        assert_eq!(proof.parser, PARSER);
+        assert!(proof.refusal.is_some(), "a packet with no slice is refused");
+        assert!(proof.current_on_node("object", "node"));
+        assert_eq!(proof.current_refusal(), proof.refusal.as_deref());
     }
 }

@@ -910,6 +910,7 @@ impl CopyObservationSet {
                 stream_index: 0,
                 slices,
                 refusal: None,
+                parser: plurx_core::hevc_configuration::PARSER,
             });
         }
         // The whole-title HDR10 maximum the legacy index pass computes, from
