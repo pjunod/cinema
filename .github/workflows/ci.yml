@@ -2274,10 +2274,6 @@ jobs:
       cancel-in-progress: false
     needs: [scope, preflight]
     if: github.server_url != 'https://github.com' && (needs.scope.outputs.release_build == 'true' || needs.scope.outputs.container == 'true')
-    # Native ARM run 9909 completed the daemon release build after 82 minutes
-    # and reached the separate cluster-check build before the 90-minute limit.
-    # Both builds, binary binding and image/restore smoke must fit below the
-    # runner's three-hour ceiling.
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
@@ -2292,7 +2288,7 @@ jobs:
             runs_on: '["ci-nonvoter-heavy-amd64"]'
           - arch: arm64
             concurrency_group: plurx-apple-silicon-heavy
-            timeout_minutes: 175
+            timeout_minutes: 150
             target: aarch64-unknown-linux-gnu
             kernel_machine: aarch64
             docker_machine: aarch64
