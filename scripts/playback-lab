@@ -380,7 +380,8 @@ Usage:
                              [--case TEXT] [--exclude-case TEXT] [--observe SECONDS]
                              [--network-profile NAME] [--json PATH] [--junit PATH]
                              [--preparation-measurement] [--frame-diagnostics] [--d3-acquisition]
-                             [--server-metrics] [--fixtures DIR] [--server PATH]
+                             [--server-metrics] [--hls-layout muxed|split]
+                             [--fixtures DIR] [--server PATH]
                              [--chrome PATH] [--edge PATH]
                              [--firefox PATH] [--geckodriver PATH]
                              [--headed] [--keep-runtime]
@@ -4392,6 +4393,88 @@ function serverMetricDelta(before, after) {
   return reset ? { ...delta, reset: true } : delta;
 }
 
+function observedHlsLayout(metrics) {
+  const roles = new Set();
+  for (const [series, value] of Object.entries(metrics?.delta || {})) {
+    if (!(value > 0) || !series.startsWith("plurx_hls_response_bytes_total{")
+        || !series.includes('resource="segment"')) continue;
+    const role = /(?:[{,])role="(muxed|video|audio)"(?:[,}])/.exec(series)?.[1];
+    if (role) roles.add(role);
+  }
+  if (metrics?.delta?.reset) return "unobserved";
+  if (roles.has("video") && roles.has("audio")) return roles.has("muxed") ? "mixed" : "split";
+  return roles.size === 1 && roles.has("muxed") ? "muxed" : "unobserved";
+}
+
+// Sample the isolated daemon and its descendants without assuming they stay
+// alive for the whole case. Producer exits between samples leave a lower bound.
+async function sampleHlsCaseResources(server) {
+  const first = new Map(), last = new Map();
+  let baselineKiB = null, highKiB = null, samples = 0;
+  let pending;
+  const sample = async () => {
+    const [processes, allocation] = await Promise.allSettled([
+      runProcess("ps", ["-A", "-o", "pid=,ppid=,time="], { quiet: true }),
+      runProcess("du", ["-sk", server.dataDir], { quiet: true }),
+    ]);
+    if (allocation.status === "fulfilled") {
+      const size = Number.parseInt(allocation.value.stdout.trim(), 10);
+      if (Number.isFinite(size)) {
+        baselineKiB ??= size;
+        highKiB = Math.max(highKiB ?? size, size);
+      }
+    }
+    if (processes.status !== "fulfilled") return;
+    const rows = processes.value.stdout.trim().split("\n").map(line => {
+      const [pid, parent, clock] = line.trim().split(/\s+/);
+      const [days, time] = clock?.includes("-") ? clock.split("-") : [0, clock];
+      return { pid: Number(pid), parent: Number(parent),
+        cpu: Number(days) * 86400 + (time || "").split(":").reduce((sum, value) => sum * 60 + Number(value), 0) };
+    });
+    const owned = new Set([server.child.pid]);
+    let changed;
+    do {
+      changed = false;
+      for (const { pid, parent } of rows) {
+        if (owned.has(parent) && !owned.has(pid)) { owned.add(pid); changed = true; }
+      }
+    } while (changed);
+    if (!rows.some(row => row.pid === server.child.pid)) return;
+    for (const { pid, cpu } of rows) {
+      if (!owned.has(pid) || !Number.isFinite(cpu)) continue;
+      if (!first.has(pid)) first.set(pid, samples === 0 ? cpu : 0);
+      last.set(pid, Math.max(last.get(pid) || 0, cpu));
+    }
+    samples++;
+  };
+  await sample();
+  const timer = setInterval(() => {
+    if (!pending) pending = sample().finally(() => { pending = null; });
+  }, 2_000);
+  return async () => {
+    clearInterval(timer);
+    await pending;
+    await sample();
+    return {
+      sample_count: samples,
+      observed_processes: last.size,
+      cpu_seconds_sampled_lower_bound: samples > 1
+        ? Math.round([...last].reduce((sum, [pid, cpu]) => sum + Math.max(0, cpu - first.get(pid)), 0) * 1000) / 1000
+        : null,
+      daemon_data_allocated_kib_peak_delta: highKiB === null ? null : highKiB - baselineKiB,
+    };
+  };
+}
+
+async function claimLabHlsLayout(driver, layout) {
+  await driver.exec(`
+    const original = openSession;
+    openSession = (file, opts, ...rest) => original(file,
+      opts?.presentation === 'direct' ? opts : {...opts, split_audio: ${layout === "split"}}, ...rest);
+    return true;
+  `);
+}
+
 async function readServerMetrics(server) {
   const response = await fetch(`${server.baseUrl}/metrics`, {
     headers: server.token ? { authorization: `Bearer ${server.token}` } : {},
@@ -4808,6 +4891,10 @@ async function writeFatalRunReport(options, error) {
 
 async function runSuite(manifest, options, dependencies = {}) {
   const suite = options.suite || "smoke";
+  const hlsLayout = options.hls_layout;
+  if (hlsLayout !== undefined && !["muxed", "split"].includes(hlsLayout)) {
+    throw new Error("--hls-layout must be muxed or split");
+  }
   const preparationMeasurement = enabledOption(options.preparation_measurement);
   const browserName = options.browser || "chrome";
   if (!new Set(["chrome", "safari", "edge", "firefox"]).has(browserName)) {
@@ -4917,9 +5004,11 @@ async function runSuite(manifest, options, dependencies = {}) {
       const fixture = plan.fixtures.get(testCase.fixture);
       process.stdout.write(`CASE    ${String(index + 1).padStart(2)}/${plan.cases.length} ${testCase.name}\n`);
       const caseLogStart = Date.now();
-      const metricsBefore = enabledOption(options.server_metrics)
+      if (hlsLayout) await claimLabHlsLayout(driver, hlsLayout);
+      const metricsBefore = (hlsLayout || enabledOption(options.server_metrics))
         ? await readServerMetrics(server).catch((error) => error)
         : null;
+      const finishHlsResources = hlsLayout ? await sampleHlsCaseResources(server) : null;
       let result;
       try {
         result = await (dependencies.runOneCase || runOneCase)(
@@ -4937,14 +5026,23 @@ async function runSuite(manifest, options, dependencies = {}) {
         // Read once after the verdict has been computed, never at the sampling
         // cadence. Truncation and observer overhead are explicit diagnostics;
         // these records do not participate in any score or threshold.
+        if (finishHlsResources) {
+          const resources = await finishHlsResources();
+          if (result) result.hls_resources = resources;
+        }
         if (metricsBefore && result) {
-          // Diagnostic only: never scored, and a failed read is recorded
-          // rather than failing the case.
           result.server_metrics = metricsBefore instanceof Error
             ? { read_error: metricsBefore.message }
             : await readServerMetrics(server)
               .then((after) => ({ delta: serverMetricDelta(metricsBefore, after) }))
               .catch((error) => ({ read_error: error.message }));
+          if (hlsLayout) {
+            result.hls_layout = { requested: hlsLayout, observed: observedHlsLayout(result.server_metrics) };
+            if (result.status === "passed" && result.hls_layout.observed !== hlsLayout) {
+              result.status = "failed";
+              result.errors.push(`requested ${hlsLayout} HLS, observed ${result.hls_layout.observed}`);
+            }
+          }
         }
         if(enabledOption(options.frame_diagnostics)&&result){
           try{
@@ -5043,6 +5141,7 @@ async function runSuite(manifest, options, dependencies = {}) {
     schema_version: 1,
     generated_at: new Date().toISOString(),
     suite,
+    ...(hlsLayout ? { requested_hls_layout: hlsLayout } : {}),
     browser: browserInfo,
     network_profile: shaper?.profile || profile,
     shaping: shaper ? shaper.telemetry() : null,

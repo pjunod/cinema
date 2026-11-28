@@ -253,6 +253,23 @@
         }
       ]
     },
+    "split-hls-capacity": {
+      "requires_vod": true,
+      "cases": [
+        {
+          "fixture": "copy-h264-dual-aac-1080",
+          "quality": "original",
+          "operation": "steady",
+          "require_vod": true
+        },
+        {
+          "fixture": "transcode-mpeg4-mp3-720",
+          "quality": "auto",
+          "operation": "steady",
+          "require_vod": true
+        }
+      ]
+    },
     "shared-video": {
       "requires_vod": true,
       "cases": [
