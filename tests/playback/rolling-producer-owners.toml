@@ -7398,7 +7398,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 "crates/plurxd/src/ffmpeg.rs" = 22
 "crates/plurxd/src/ffmpeg/linux_dolby.rs" = 3
 "crates/plurxd/src/ffmpeg/output_pipe.rs" = 1
-"crates/plurxd/src/ffmpeg/tests.rs" = 12
+# The brokered packet probe test constructs an isolated test-process command
+# and the FFprobe command that the existing bounded runner owns.
+"crates/plurxd/src/ffmpeg/tests.rs" = 14
 "crates/plurxd/src/ffmpeg_support.rs" = 3
 "crates/plurxd/src/fontenv.rs" = 1
 "crates/plurxd/src/fontenv_tests.rs" = 2
@@ -7540,7 +7542,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 "crates/plurxd/src/dv_tools.rs" = 2
 "crates/plurxd/src/ffmpeg.rs" = 3
 "crates/plurxd/src/ffmpeg/output_pipe.rs" = 1
-"crates/plurxd/src/ffmpeg/tests.rs" = 2
+# The brokered packet probe test joins its isolated test process with output().
+"crates/plurxd/src/ffmpeg/tests.rs" = 3
 "crates/plurxd/src/fontenv_tests.rs" = 2
 "crates/plurxd/src/fragindex.rs" = 1
 "crates/plurxd/src/fragindex/refit_acceptance_tests.rs" = 1
