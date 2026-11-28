@@ -1178,6 +1178,15 @@ impl Shared {
     /// the same per-key gate through session attach, while maintenance skips
     /// a key whose build/attach is active; different keys never wait for it.
     pub(super) async fn purge_if_dormant(self: &Arc<Shared>, key: &str, ttl: Duration) {
+        self.purge_dormant(key, ttl, None).await;
+    }
+
+    async fn purge_dormant(
+        self: &Arc<Self>,
+        key: &str,
+        ttl: Duration,
+        pressure_donor: Option<&Arc<Rendition>>,
+    ) {
         if crate::playback_cache::is_pinned(&self.base.join(key)) {
             return;
         }
@@ -1224,6 +1233,16 @@ impl Shared {
         // the node-wide registry while awaiting a rendition-local lock.
         let manifest = rendition.manifest.lock().await;
         if manifest.is_admitted() {
+            return;
+        }
+        if pressure_donor.is_some_and(|donor| {
+            !Arc::ptr_eq(donor, &rendition)
+                || manifest.is_reserved()
+                || rendition.preparation().is_some()
+                || crate::playback_cache::is_pinned(rendition.dir.path())
+                || self.pool.blocked_on(key).is_some()
+                || !self.pool.retained(key).is_empty()
+        }) {
             return;
         }
         let removed = {
@@ -1325,6 +1344,192 @@ impl Shared {
             );
         });
         let _ = settlement.await;
+    }
+
+    /// A blocked reader can free ordinary working-set space owned by other
+    /// renditions. The caller never waits for donor locks with its own held.
+    pub(super) fn reclaim_working_set(self: &Arc<Self>, requester: &str, release_limit: u64) {
+        if self.working_set.load(Relaxed) <= release_limit {
+            return;
+        }
+        let mut requests = self
+            .working_set_requests
+            .lock()
+            .expect("working-set requests");
+        requests.insert(requester.to_owned(), release_limit);
+        let Ok(reclaim) = Arc::clone(&self.working_set_reclaim).try_lock_owned() else {
+            return;
+        };
+        let shared = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let requests = {
+                    let mut pending = shared
+                        .working_set_requests
+                        .lock()
+                        .expect("working-set requests");
+                    if pending.is_empty() {
+                        // Unlock while still holding the inbox: a concurrent
+                        // caller either left a pending request for this worker
+                        // or observes an available sweep gate and starts one.
+                        drop(reclaim);
+                        return;
+                    }
+                    std::mem::take(&mut *pending)
+                };
+                shared.reclaim_for_blocked_readers(requests).await;
+            }
+        });
+    }
+
+    async fn reclaim_for_blocked_readers(self: &Arc<Self>, requests: HashMap<String, u64>) {
+        let release_limit = || {
+            requests
+                .iter()
+                .filter(|(key, _)| self.pool.blocked_on(key).is_some())
+                .map(|(_, limit)| *limit)
+                .min()
+        };
+        if release_limit().is_none() {
+            return;
+        }
+        let mut donors = {
+            let renditions = self.renditions.lock().await;
+            renditions
+                .values()
+                .filter(|rendition| {
+                    !requests.contains_key(&rendition.key)
+                        && !rendition.ephemeral_processing
+                        && rendition.private_storage.is_none()
+                })
+                .map(|rendition| {
+                    let since = *rendition.dormant_since.lock().expect("dormant lock");
+                    (since, Arc::clone(rendition))
+                })
+                .collect::<Vec<_>>()
+        };
+        donors.sort_unstable_by_key(|(since, _)| (since.is_none(), *since));
+        let before = self.working_set.load(Relaxed);
+        for (_, donor) in donors.iter().take_while(|(since, _)| since.is_some()) {
+            if !release_limit().is_some_and(|limit| self.working_set.load(Relaxed) > limit) {
+                break;
+            }
+            self.purge_dormant(&donor.key, Duration::ZERO, Some(donor))
+                .await;
+        }
+        let mut donors = donors
+            .into_iter()
+            .map(|(_, donor)| donor)
+            .collect::<Vec<_>>();
+        let mut trimmed = 0_u64;
+        // A busy attachment or reader transition is temporary. Give only
+        // those donors one bounded retry, without scheduling another driver
+        // pass when every remaining byte is protected.
+        for attempt in 0..2 {
+            let mut busy = Vec::new();
+            for donor in donors {
+                let Some(limit) = release_limit() else {
+                    break;
+                };
+                let wanted = self.working_set.load(Relaxed).saturating_sub(limit);
+                if wanted == 0 {
+                    break;
+                }
+                match self.trim_working_set_donor(&donor, wanted).await {
+                    Some(bytes) => trimmed += bytes,
+                    None => busy.push(donor),
+                }
+            }
+            if attempt == 1 || busy.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            donors = busy;
+        }
+        if trimmed > 0 {
+            self.kick_all();
+        }
+        tracing::debug!(
+            target: "plurxd::vodserve", requests = requests.len(), before,
+            after = self.working_set.load(Relaxed), trimmed,
+            "node-wide working-set pressure sweep"
+        );
+    }
+
+    async fn trim_working_set_donor(
+        self: &Arc<Self>,
+        donor: &Arc<Rendition>,
+        wanted: u64,
+    ) -> Option<u64> {
+        let Ok(_build) = self.rendition_build_gate(&donor.key).try_lock_owned() else {
+            return None;
+        };
+        if donor.closed.load(Relaxed)
+            || donor.ephemeral_processing
+            || donor.private_storage.is_some()
+            || donor.preparation().is_some()
+            || crate::playback_cache::is_pinned(donor.dir.path())
+        {
+            return Some(0);
+        }
+        let intervals = match self.store.quality_reserved_intervals(&donor.key).await {
+            Ok(intervals) => intervals,
+            Err(error) => {
+                tracing::warn!(target: "plurxd::vodserve", rendition = %donor.key, %error,
+                    "retaining donor media with unknown continuous dependencies");
+                return Some(0);
+            }
+        };
+        let Ok(mut windows) = continuous_dependency_windows(&donor.plan, &intervals) else {
+            return Some(0);
+        };
+        let mut manifest = donor.manifest.lock().await;
+        if manifest.is_admitted() || manifest.is_reserved() {
+            return Some(0);
+        }
+        // Some attachment paths acquire readers before manifest. Never wait
+        // for readers while holding a manifest that attachment may need.
+        let Ok(readers) = donor.readers.try_lock() else {
+            return None;
+        };
+        windows.extend(
+            readers
+                .values()
+                .filter(|reader| !reader.authority_only)
+                .map(|reader| reader_window(reader, donor.seconds_per_segment)),
+        );
+        windows.extend(
+            self.pool
+                .retained(&donor.key)
+                .into_iter()
+                .chain(
+                    self.pool
+                        .demands(&donor.key)
+                        .into_iter()
+                        .map(|wait| wait.index),
+                )
+                .map(|index| ReaderWindow {
+                    back: 0,
+                    playhead: index,
+                    frontier: index,
+                    ahead: 0,
+                }),
+        );
+        match donor.dir.make_room(&mut manifest, &windows, wanted).await {
+            Ok(freed) => {
+                donor.free_unadmitted(self, freed.bytes);
+                if let Some(error) = freed.error {
+                    tracing::warn!(target: "plurxd::vodserve", rendition = %donor.key,
+                        bytes = freed.bytes, %error, "working-set donor sweep stopped early");
+                }
+                Some(freed.bytes)
+            }
+            Err(error) => {
+                tracing::warn!(target: "plurxd::vodserve", rendition = %donor.key, %error,
+                    "evicting working-set donor media");
+                Some(0)
+            }
+        }
     }
 
     /// Kick EVERY rendition's driver — for events that change the node-wide
