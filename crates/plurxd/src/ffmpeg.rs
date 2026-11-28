@@ -1037,18 +1037,13 @@ async fn held_source_packet_probe(
         (source_path, held_identity)
     };
 
-    let input = match crate::background_jobs::source_budget() {
-        Some(budget) => Some(
-            crate::source_input::SourceInput::open_background_held(
-                crate::fragment_index_cluster::SourceFence::clone_current_held(source)
-                    .map_err(HeldPacketProbeError::Source)?,
-                "application/octet-stream",
-                budget,
-            )
+    // Audio copy evidence reads the full source during foreground preparation.
+    let input = if payload_hash || crate::background_jobs::source_budget().is_some() {
+        crate::source_input::SourceInput::open_current_held(source, "held-packet-probe")
             .await
-            .map_err(HeldPacketProbeError::Source)?,
-        ),
-        None => None,
+            .map_err(HeldPacketProbeError::Source)?
+    } else {
+        None
     };
     let mut command = tokio::process::Command::new(ffprobe_bin());
     #[cfg(unix)]

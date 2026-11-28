@@ -8,7 +8,7 @@
       "id": "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete",
       "file": "crates/plurxd/src/library_work.rs",
       "name": "library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete",
-      "item_sha256": "6c4a52cd92e8bdfe975682424c4c5e98f5635df621ad4e4a6143497dcdae548c"
+      "item_sha256": "7c7caeacab1859ad0e604ee44f9ce81e878bfb5fbad0cc52faca5f9cec84f34f"
     },
     {
       "id": "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop",
@@ -984,7 +984,7 @@
         "anchor": "pub(crate) async fn finish(mut self) {",
         "scope": "item",
         "item": "impl ActiveBackgroundJob > fn finish",
-        "item_sha256": "bcd717cfa13d70b34dbbd5e82e6dbb167e6cc87882970eb35b9af4e0a53fe056"
+        "item_sha256": "1765a3c8fa9b43d623146c25aad8ddf6d3d04201612142a06ec6fbaea9898141"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1213,7 +1213,7 @@
         "anchor": "pub(crate) async fn finish(",
         "scope": "item",
         "item": "impl ActiveBackgroundJob > fn finish",
-        "item_sha256": "bcd717cfa13d70b34dbbd5e82e6dbb167e6cc87882970eb35b9af4e0a53fe056"
+        "item_sha256": "1765a3c8fa9b43d623146c25aad8ddf6d3d04201612142a06ec6fbaea9898141"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1269,7 +1269,7 @@
         "anchor": "let heartbeat = tokio::spawn(async move {",
         "scope": "item",
         "item": "impl ActiveBackgroundJob > fn start",
-        "item_sha256": "d55b060a78d6fb4916ee3d111e6c1b625aca4efac15a8cf58caffd1ae0aece99"
+        "item_sha256": "e471094454a190bb5c3761fecaf3bdb2524569632311332b53b6993f90f7c31c"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1305,7 +1305,7 @@
         "anchor": "pub(crate) async fn finish(",
         "scope": "item",
         "item": "impl ActiveBackgroundJob > fn finish",
-        "item_sha256": "bcd717cfa13d70b34dbbd5e82e6dbb167e6cc87882970eb35b9af4e0a53fe056"
+        "item_sha256": "1765a3c8fa9b43d623146c25aad8ddf6d3d04201612142a06ec6fbaea9898141"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1396,7 +1396,7 @@
         "anchor": "pub(crate) async fn finish(",
         "scope": "item",
         "item": "impl ActiveBackgroundJob > fn finish",
-        "item_sha256": "bcd717cfa13d70b34dbbd5e82e6dbb167e6cc87882970eb35b9af4e0a53fe056"
+        "item_sha256": "1765a3c8fa9b43d623146c25aad8ddf6d3d04201612142a06ec6fbaea9898141"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1499,7 +1499,7 @@
       "used_by": "finish",
       "scope": "item",
       "item": "fn settle_joined_source_custody",
-      "item_sha256": "df470fc838d86855777b4b645510f2d77ce2fc1fd0c5b593957f86cd19f42881"
+      "item_sha256": "d72a3f3c9e75c766cafcc33a40afc137b187cb31bbb5df538765b4218fb93843"
     },
     {
       "file": "crates/plurxd/src/background_jobs.rs",
@@ -1555,7 +1555,7 @@
       "used_by": "start",
       "scope": "item",
       "item": "fn settle_unstarted_job_source",
-      "item_sha256": "257d5f01247be1dd24e1daef59cae1abd311735c2ed697760f57da1a0bbf422a"
+      "item_sha256": "1617a8d46ae39dcb35d234a274552931e590f31d7654ed70af3d021f785f5066"
     },
     {
       "file": "crates/plurxd/src/background_jobs.rs",

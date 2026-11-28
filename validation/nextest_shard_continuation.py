@@ -113,6 +113,9 @@ RUNTIME_INPUTS = {'clients/android/app/build.gradle.kts',
 # pinned plurx-ci image (gcc for Kani's goto-cc): only that job's container,
 # prerequisite checks and ownership restore change; every compile and test
 # command, image and resource bound of the pinned recipes is unchanged.
+# rust-unit-inputs.toml re-reviewed for main a264d328b (#1986): one new
+# [[dynamic]] declaration for media_identity_reads_go_through_media_io's
+# source walk; no shard, recipe or existing declaration changes.
 HARNESS = {'.config/nextest.toml': 'b68e6d071b1e441727237de221cb60ac32e78f0ddff3d9636d9004f1e8d38c81',
  '.github/workflows/main-fast-lane.yml': '1d145bca0a46ba2d1173ccb4f274fdb7cfcf6e55fa322ecbb4c0251e84020b3f',
  '.github/workflows/rust-units.yml': '9bac3e8aebfe7fc16025588bef9283799f3c396a68c318f4efcf559422488548',
@@ -542,7 +545,7 @@ def authenticate(api, record, binding, candidate, repository, *, current_run=Non
             'mandatory_new_ids': sorted(identity for row in record['changes'].values()
                 for identity in row.get('compile_only', {}).get('new_ids', [])),
             'serial_ids': sorted(test for row in plan['crates'].values() for test in row['serial']),
-            'outcomes': outcomes, 'root_ownership_passed': False,
+            'outcomes': outcomes,
             'compile_only_ignored_ids': [IGNORED_COMPILE_ID] if any(
                 row.get('compile_only', {}).get('kind') == 'ignored-test-only' for row in record['changes'].values()) else []}
 

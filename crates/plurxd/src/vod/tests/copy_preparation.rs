@@ -953,10 +953,7 @@ async fn indexed_resume_preparation_reaps_before_releasing_custody_and_play_uses
     else {
         panic!("test source custody must be admitted");
     };
-    assert!(store
-        .activate_background_source_custody(custody.clone(), uuid::Uuid::new_v4().to_string())
-        .await
-        .expect("activate source custody"));
+    // The registered read-preparation lease is already the active reader.
     let cancel = tokio_util::sync::CancellationToken::new();
     let budget = crate::background_jobs::SourceReadBudget::from_existing_custody(
         Arc::clone(&store),
