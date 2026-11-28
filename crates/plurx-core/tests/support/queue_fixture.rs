@@ -11,6 +11,8 @@ use plurx_core::store::Store;
 pub(crate) use self::source_extensions_fixture::title_extension_fixture::{
     require_fixture_marker, validated_empty_title_rewind, TITLE_FIXTURE_SHAPE_SQL,
 };
+use self::source_extensions_fixture::translation_fixture_shape_at;
+pub(crate) use self::source_extensions_fixture::TRANSLATION_FIXTURE_SHAPE_SQL;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -568,10 +570,6 @@ pub(crate) fn remove_jellyfin_compatibility_schema(connection: &rusqlite::Connec
         .expect("remove v98-v101 Jellyfin compatibility schema");
 }
 
-/// The published v112 object witness shared by SQLite and replicated fixtures.
-#[allow(dead_code)]
-pub(crate) const TRANSLATION_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'subtitle_translation_*' OR tbl_name GLOB 'subtitle_translation_*') AND sql IS NOT NULL ORDER BY name";
-
 #[allow(dead_code)]
 pub(crate) fn translation_fixture_shape() -> Vec<(String, String)> {
     translation_fixture_shape_at(0)
@@ -579,48 +577,11 @@ pub(crate) fn translation_fixture_shape() -> Vec<(String, String)> {
 
 #[allow(dead_code)]
 pub(crate) fn current_translation_fixture_shape() -> Vec<(String, String)> {
-    translation_fixture_shape_at(2)
-}
-
-fn translation_fixture_shape_at(version: u8) -> Vec<(String, String)> {
-    assert!(
-        version <= 2,
-        "only published translation shapes are recognized"
-    );
-    let expected = rusqlite::Connection::open_in_memory().expect("translation shape witness");
-    expected.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT);")
-        .expect("translation metadata dependencies");
-    expected
-        .execute_batch(include_str!("../../src/store/subtitle_translation.sql"))
-        .expect("published legacy translation objects");
-    if version >= 1 {
-        expected
-            .execute_batch(include_str!(
-                "../../src/store/subtitle_translation_retarget.sql"
-            ))
-            .expect("published retarget translation objects");
-    }
-    if version == 2 {
-        expected
-            .execute_batch(include_str!(
-                "../../src/store/subtitle_translation_continuity.sql"
-            ))
-            .expect("published continuity translation objects");
-    }
-    let shape = expected
-        .prepare(TRANSLATION_FIXTURE_SHAPE_SQL)
-        .expect("translation shape query")
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .expect("translation shape rows")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("complete translation shape");
-    shape
+    translation_fixture_shape_at(4)
 }
 
 fn translation_fixture_version(actual: &[(String, String)]) -> u8 {
-    (0..=2)
+    (0..=4)
         .find(|version| actual == translation_fixture_shape_at(*version))
         .expect("only an exact published translation shape may be rewound")
 }
@@ -681,8 +642,18 @@ pub(crate) fn validated_empty_translation_rewind(
         "subtitle_translation_operations",
         "subtitle_translation_schema",
     ];
-    if version == 2 {
+    if version >= 2 {
         ordered.insert(0, "subtitle_translation_range_continuities");
+    }
+    if version == 4 {
+        ordered.splice(
+            ..0,
+            [
+                "subtitle_translation_finish_demands",
+                "subtitle_translation_stored_tracks",
+                "subtitle_translation_schedule_exclusions",
+            ],
+        );
     }
     assert_eq!(
         tables,

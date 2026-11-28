@@ -909,6 +909,58 @@ const ANALYSIS_SCOPE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE
 /// published shape and marker, then restores the original analysis view and
 /// the managed v6 view with marker 6. Only views and markers change, so no
 /// queued work or reservation is discarded.
+/// The published v112 object witness shared by SQLite and replicated fixtures.
+#[allow(dead_code)]
+pub(crate) const TRANSLATION_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'subtitle_translation_*' OR tbl_name GLOB 'subtitle_translation_*') AND sql IS NOT NULL ORDER BY name";
+
+pub(crate) fn translation_fixture_shape_at(version: u8) -> Vec<(String, String)> {
+    assert!(
+        version <= 4,
+        "only published translation shapes are recognized"
+    );
+    let expected = rusqlite::Connection::open_in_memory().expect("translation shape witness");
+    expected.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT);")
+        .expect("translation metadata dependencies");
+    expected
+        .execute_batch(include_str!("../../src/store/subtitle_translation.sql"))
+        .expect("published legacy translation objects");
+    if version >= 1 {
+        expected
+            .execute_batch(include_str!(
+                "../../src/store/subtitle_translation_retarget.sql"
+            ))
+            .expect("published retarget translation objects");
+    }
+    if version >= 2 {
+        expected
+            .execute_batch(include_str!(
+                "../../src/store/subtitle_translation_continuity.sql"
+            ))
+            .expect("published continuity translation objects");
+    }
+    if version >= 3 {
+        expected
+            .execute_batch(include_str!("../../src/store/subtitle_translation_authority.sql"))
+            .expect("published translation authority");
+    }
+    if version >= 4 {
+        expected
+            .execute_batch(include_str!("../../src/store/subtitle_translation_finish.sql"))
+            .expect("published translation finish extension");
+    }
+    translation_shape(&expected)
+}
+
+fn translation_shape(connection: &rusqlite::Connection) -> Vec<(String, String)> {
+    connection
+        .prepare(TRANSLATION_FIXTURE_SHAPE_SQL)
+        .expect("translation shape query")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("translation shape rows")
+        .collect::<Result<_, _>>()
+        .expect("complete translation shape")
+}
+
 /// Restore the published predecessor trigger only when the exact v141
 /// finish extension has no demands, stored tracks, or schedule exclusions.
 fn rewind_empty_translation_finish_to_v140(conn: &rusqlite::Connection) {
@@ -918,47 +970,15 @@ fn rewind_empty_translation_finish_to_v140(conn: &rusqlite::Connection) {
     if version != 141 {
         return;
     }
-    let fixture = rusqlite::Connection::open_in_memory().expect("AI finish witness");
-    fixture
-        .execute_batch(
-            "CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER);
-             CREATE TABLE background_jobs(kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT);",
-        )
-        .expect("translation fixture dependencies");
-    let legacy = include_str!("../../src/store/subtitle_translation.sql");
-    let retarget = include_str!("../../src/store/subtitle_translation_retarget.sql");
-    fixture.execute_batch(legacy).expect("published translation");
-    fixture.execute_batch(retarget).expect("published retarget");
-    let mutate_sql = |db: &rusqlite::Connection| {
-        db.query_row(
-            "SELECT sql FROM sqlite_master WHERE name='subtitle_translation_mutate'",
-            [],
-            |r| r.get::<_, String>(0),
-        )
-        .expect("published translation mutation trigger")
-    };
-    let former_trigger = mutate_sql(&fixture);
-    fixture
-        .execute_batch(include_str!("../../src/store/subtitle_translation_finish.sql"))
-        .expect("published AI finish extension");
-    let finish_shape = |db: &rusqlite::Connection| {
-        db.prepare(
-            "SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL AND
-              (name='subtitle_translation_mutate' OR tbl_name IN (
-               'subtitle_translation_finish_demands','subtitle_translation_stored_tracks',
-               'subtitle_translation_schedule_exclusions')) ORDER BY name",
-        )
-        .expect("finish inventory")
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-        .expect("finish rows")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("complete finish inventory")
-    };
     assert_eq!(
-        finish_shape(conn),
-        finish_shape(&fixture),
+        translation_shape(conn),
+        translation_fixture_shape_at(4),
         "exact AI finish schema"
     );
+    let former_trigger = translation_fixture_shape_at(3)
+        .into_iter()
+        .find_map(|(name, sql)| (name == "subtitle_translation_mutate").then_some(sql))
+        .expect("published translation mutation trigger");
     let count: i64 = conn.query_row(
         "SELECT (SELECT count(*) FROM subtitle_translation_finish_demands)
               + (SELECT count(*) FROM subtitle_translation_stored_tracks)
