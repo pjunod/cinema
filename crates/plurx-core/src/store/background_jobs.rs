@@ -149,7 +149,8 @@ macro_rules! text_admission {
 
 macro_rules! translation_admission {
     ($payload:literal,$now:literal,$job:literal) => { translation_admission!($payload,$now,$job,"0") };
-    ($payload:literal,$now:literal,$job:literal,$fence:literal) => { concat!(r#"EXISTS (SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id
+    ($payload:literal,$now:literal,$job:literal,$fence:literal) => { translation_admission!($payload,$now,$job,$fence,"1") };
+    ($payload:literal,$now:literal,$job:literal,$fence:literal,$allow_finish:literal) => { concat!(r#"EXISTS (SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id
       JOIN settings config ON config.key='subtitles.ai.v1'
       WHERE op.id=COALESCE(json_extract("#,$payload,r#",'$.operation_id'),json_extract("#,$payload,r#",'$.recipe.operation_id'))
       AND op.operation_epoch=COALESCE(json_extract("#,$payload,r#",'$.operation_epoch'),json_extract("#,$payload,r#",'$.recipe.operation_epoch'))
@@ -162,7 +163,8 @@ macro_rules! translation_admission {
       AND f.size=json_extract(op.source_json,'$.source_size') AND f.mtime=json_extract(op.source_json,'$.source_mtime')
       AND CASE WHEN json_valid(config.value) THEN json_extract(config.value,'$.version')=1
         AND json_type(config.value,'$.from_audio')='true' ELSE 0 END
-      AND EXISTS (SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id
+      AND (("#,$allow_finish,r#" AND EXISTS(SELECT 1 FROM subtitle_translation_finish_demands finish WHERE finish.operation_id=op.id))
+      OR EXISTS (SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id
         WHERE d.operation_id=op.id AND d.operation_epoch=op.operation_epoch AND d.released=0
         AND d.expires_at_ms>"#,$now,r#" AND (u.is_admin=1 OR EXISTS(SELECT 1 FROM settings ai_who WHERE ai_who.key='subtitles.ai.v1' AND CASE WHEN json_valid(ai_who.value) THEN json_extract(ai_who.value,'$.version')=1 AND json_extract(ai_who.value,'$.who')='everyone' ELSE 0 END))
         AND (json_extract("#,$payload,r#",'$.kind')='subtitle_translation_prepare' OR
@@ -170,7 +172,7 @@ macro_rules! translation_admission {
         AND CAST(d.position_ms/json_extract(op.profile_json,'$.core_ms') AS INTEGER)+min(2,CAST(d.playback_rate AS INTEGER)+1)
         OR EXISTS(SELECT 1 FROM subtitle_translation_range_continuities continuity
           WHERE continuity.job_id="#,$job,r#" AND continuity.fence="#,$fence,r#"
-          AND continuity.demand_id=d.id AND continuity.continuity_id=d.continuity_id)))
+          AND continuity.demand_id=d.id AND continuity.continuity_id=d.continuity_id))))
       AND (json_extract("#,$payload,r#",'$.kind')='subtitle_translation_prepare' OR
         (op.asset_id=json_extract("#,$payload,r#",'$.recipe.asset_id') AND EXISTS (
           SELECT 1 FROM subtitle_translation_assets a WHERE a.id=op.asset_id AND a.retired_at_ms IS NULL
@@ -762,7 +764,9 @@ macro_rules! claim_maintenance_reader {
     translation_admission!(
         "live_range.payload_json",
         "json_extract($1,'$.now_ms')",
-        "live_range.id"
+        "live_range.id",
+        "0",
+        "0"
     ),
     r#")))
               OR (interest.consumer_kind = 'subtitle_source' AND EXISTS (
@@ -795,7 +799,8 @@ macro_rules! claim_maintenance_reader {
         "live_range.payload_json",
         "json_extract($1,'$.now_ms')",
         "live_range.id",
-        "live_range.fence"
+        "live_range.fence",
+        "0"
     ),
     r#")))
                     OR (interest.consumer_kind = 'subtitle_source' AND EXISTS (

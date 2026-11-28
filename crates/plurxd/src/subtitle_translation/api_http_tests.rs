@@ -223,6 +223,7 @@ async fn seed_operation(f: &Fixture, language: &str) -> (CreateRequest, Value) {
                 position_ms: 0,
                 playback_rate: 1.0,
                 paused: false,
+                finish: false,
                 continuity_id: None,
             },
         })
@@ -1487,6 +1488,7 @@ async fn seed_operation_as(f: &Fixture, user: &User, language: &str) -> Value {
                 position_ms: 0,
                 playback_rate: 1.0,
                 paused: false,
+                finish: false,
                 continuity_id: None,
             },
         })

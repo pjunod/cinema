@@ -4814,28 +4814,38 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let current = self.subtitle_translation_schema_version().await?;
-        if current == Some(3) {
+        if current == Some(4) {
             return Ok(());
         }
+        let finish = super::subtitle_translation_schema::finish_statements;
         let statements = match current {
             Some(0) => super::subtitle_translation_schema::retarget_statements()
                 .into_iter()
                 .chain(super::subtitle_translation_schema::continuity_statements())
                 .chain(super::subtitle_translation_schema::authority_statements())
+                .chain(finish())
                 .collect(),
             Some(1) => super::subtitle_translation_schema::continuity_statements()
                 .into_iter()
                 .chain(super::subtitle_translation_schema::authority_statements())
+                .chain(finish())
                 .collect(),
-            Some(2) => super::subtitle_translation_schema::authority_statements(),
+            Some(2) => super::subtitle_translation_schema::authority_statements()
+                .into_iter()
+                .chain(finish())
+                .collect(),
+            Some(3) => finish().collect(),
             _ => super::subtitle_translation_schema::statements(),
         }
         .into_iter()
+        .chain(std::iter::once(
+            super::subtitle_translation_schema::SUPERSEDE_LEGACY_JOBS.to_owned(),
+        ))
         .map(|sql| (sql, params!()))
         .collect::<Vec<_>>();
         admit_schema_migration(admission)?;
         let result = self.schema_migration_transaction(statements).await;
-        if self.subtitle_translation_schema_version().await? == Some(3) {
+        if self.subtitle_translation_schema_version().await? == Some(4) {
             return Ok(());
         }
         result?;

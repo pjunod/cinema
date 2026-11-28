@@ -363,7 +363,7 @@
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
         "scope": "item",
         "item": "#![cfg_attr(plurx_dv_segment_probe, allow(dead_code))] #![cfg_attr(test, allow(clippy::disallowed_methods))] file > fn spawn_background_loops",
-        "item_sha256": "73336ee89d0ae361c029fac35330ceb8ed9ba423f3e5ab1070b120c4e86a3887"
+        "item_sha256": "a2c8a0ca0661736f8d53262baaccf0d875a32620859a663becbd8c4ac556826f"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
@@ -395,7 +395,7 @@
         "anchor": "/// Exact shapes: original=0, producer-retarget=1, claim-continuity=2,",
         "scope": "item",
         "item": "fn version",
-        "item_sha256": "c92c41ed922488d70c4d7248ba83c9b4e9485634bd1228bd86ca7cf6507a1441"
+        "item_sha256": "162b79d16b1b4b77e5f44b3d8e6bffffa1fc3f2ea89903d8825bbf8954bcbf98"
       },
       {
         "table": "caption retarget queue effects remain kind-scoped outside selected library model",
@@ -404,6 +404,14 @@
         "scope": "item",
         "item": "trigger subtitle_translation_mutate",
         "item_sha256": "524a9e9a41bc7a7e916fd31c5397bae3795f0732ee442326fe1e08ddde42a549"
+      },
+      {
+        "table": "caption finish demand and viewer release effects remain kind-scoped outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_finish.sql",
+        "anchor": "last_error_code='producer_retargeted'",
+        "scope": "item",
+        "item": "trigger subtitle_translation_mutate",
+        "item_sha256": "5eea831521c9739d4ad33eb75f203b3548ec635577037a34d06f40ab20acd637"
       },
       {
         "table": "caption claim-continuity effects remain kind-scoped outside selected library model",

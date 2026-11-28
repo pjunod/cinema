@@ -463,28 +463,18 @@ pub(crate) struct GenerationRequest {
     version: u8,
     audio_index: i64,
     language: String,
-    model_id: String,
+    #[serde(rename = "model_id")]
+    _model_id: String,
     source_size: String,
     source_mtime: String,
 }
 pub(crate) async fn generate(
-    _admin: crate::http::extract::AdminUser,
+    crate::http::extract::AdminUser(admin): crate::http::extract::AdminUser,
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(id): axum::extract::Path<i64>,
     axum::Json(body): axum::Json<Value>,
 ) -> Result<axum::Json<Value>, ApiError> {
     let settings = config::read(state.store.as_ref()).await?;
-    if !settings.effective_enabled {
-        return Err(ApiError::Conflict(if settings.mode_status==config::ModeStatus::ConfigurationConflict{"Subtitle configuration changed in another administrator or older server; review Settings"}else{"Enable subtitle generation in Settings first"}.into()));
-    }
-    if settings.mode == config::Mode::Advanced && body == json!({}) {
-        return crate::subtitle_transcription::enqueue(
-            _admin,
-            axum::extract::State(state),
-            axum::extract::Path(id),
-        )
-        .await;
-    }
     let file = state
         .store
         .get_file(id)
@@ -517,7 +507,7 @@ pub(crate) async fn generate(
             version: 1,
             audio_index: audio.index,
             language,
-            model_id: settings.model_id.clone(),
+            _model_id: settings.model_id.clone(),
             source_size: file.size.to_string(),
             source_mtime: file.mtime.to_string(),
         }
@@ -550,43 +540,36 @@ pub(crate) async fn generate(
             "The selected language disagrees with the audio tag".into(),
         ));
     }
-    if settings.mode == config::Mode::Advanced {
-        if request.model_id != "advanced" {
-            return Err(ApiError::BadRequest(
-                "Choose the configured Advanced model".into(),
-            ));
+    let mut result = crate::subtitle_translation::schedule::start_finish_only(
+        &state,
+        &file,
+        audio,
+        language,
+        plurx_core::store::subtitle_translation::SpeechTask::Transcribe,
+        admin.id,
+    )
+    .await?;
+    match result["outcome"].as_str() {
+        Some("accepted") => {
+            result["file_id"] = json!(file.id.to_string());
+            result["source_size"] = json!(file.size.to_string());
+            result["source_mtime"] = json!(file.mtime.to_string());
+            Ok(axum::Json(result))
         }
-        let languages =
-            crate::subtitle_transcription::model_languages(&settings.advanced.model_path).await;
-        if !languages.contains(&language) {
-            return Err(ApiError::BadRequest(
-                "The configured Advanced model does not support that language".into(),
-            ));
-        }
-        let (outcome, key) = crate::subtitle_transcription::enqueue_advanced_selected(
-            &state,
-            &file,
-            request.audio_index,
-            &language,
-        )
-        .await?;
-        return generation_response(outcome, &key, &file);
+        Some("disabled") => Err(ApiError::Conflict(
+            "Enable AI subtitles from audio first".into(),
+        )),
+        Some("demand_quota") => Err(ApiError::typed(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "ai_subtitles_busy",
+            "AI subtitle work is at capacity",
+        )),
+        _ => Err(ApiError::Conflict(
+            "The subtitle request is no longer current".into(),
+        )),
     }
-    let model = catalog()
-        .models
-        .iter()
-        .find(|model| model.id == request.model_id)
-        .ok_or_else(|| ApiError::BadRequest("Choose a catalog model".into()))?;
-    if !model.languages.contains(&language) {
-        return Err(ApiError::BadRequest(
-            "The selected model does not support that language".into(),
-        ));
-    }
-    let enqueue = generation_enqueue(&file, request.audio_index, &language, model)?;
-    let key = enqueue.request.consumer_ref.clone();
-    let outcome = state.store.enqueue_job(enqueue).await?;
-    generation_response(outcome, &key, &file)
 }
+#[cfg(test)]
 fn generation_enqueue(
     file: &plurx_core::domain::MediaFile,
     audio_index: i64,
@@ -614,20 +597,6 @@ fn generation_enqueue(
             retain_identity: false,
         },
     })
-}
-
-fn generation_response(
-    outcome: EnqueueOutcome,
-    key: &str,
-    file: &plurx_core::domain::MediaFile,
-) -> Result<axum::Json<Value>, ApiError> {
-    let mut value = serde_json::to_value(outcome)
-        .map_err(|_| ApiError::Internal("Could not encode subtitle request".into()))?;
-    value["file_id"] = json!(file.id.to_string());
-    value["artifact_key"] = json!(key);
-    value["source_size"] = json!(file.size.to_string());
-    value["source_mtime"] = json!(file.mtime.to_string());
-    Ok(axum::Json(value))
 }
 
 // This recipe revision binds PCM silence/EOF normalization independently of
@@ -661,6 +630,7 @@ fn managed_recipe_current(payload: &JobPayload, model: &CatalogModel) -> bool {
         _ => false,
     }
 }
+#[cfg(test)]
 fn managed_payload(
     file: &plurx_core::domain::MediaFile,
     audio_index: i64,
@@ -1147,7 +1117,9 @@ async fn prepare_generation_source(
     })))
 }
 
+#[cfg(test)]
 const MANAGED_SCHEDULE_KEY: &str = "subtitles.transcription.managed.schedule.v1";
+#[cfg(test)]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Schedule {
@@ -1156,6 +1128,7 @@ struct Schedule {
     next_run_ms: i64,
     cursor: i64,
 }
+#[cfg(test)]
 impl Schedule {
     fn current(raw: Option<&str>, revision: &str) -> Self {
         raw.filter(|raw| raw.len() <= 512)
@@ -1197,6 +1170,7 @@ async fn next_candidates(
     Ok(page)
 }
 
+#[cfg(test)]
 async fn automatic_page(
     state: &AppState,
     settings: &config::Snapshot,
@@ -1290,23 +1264,6 @@ pub(crate) async fn worker_pass(
     use plurx_core::store::background_jobs::{ClaimJob, JobKind, JobSettlement};
     let authority = state.jobs.execution_authority();
     let settings = config::read_applied(&state.applied).await?;
-    if settings.mode == config::Mode::Managed
-        && settings.effective_enabled
-        && settings.interval_mins > 0
-        && authority
-            .may_execute_job(JobKind::SubtitleTranscribeManaged)
-            .await
-    {
-        if let Some(lease) = state
-            .jobs
-            .acquire_job("subtitle-transcription:sweep".into())
-            .await?
-        {
-            let result = automatic_page(state, &settings, &lease).await;
-            lease.release().await?;
-            result?;
-        }
-    }
     let mut kinds = vec![JobKind::SubtitleModelOperation];
     if settings.mode == config::Mode::Managed && settings.effective_enabled {
         kinds.push(JobKind::SubtitleTranscribeManaged);

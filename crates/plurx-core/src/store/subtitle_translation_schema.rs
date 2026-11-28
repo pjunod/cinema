@@ -7,6 +7,12 @@ pub(crate) const RETARGET_MIGRATION: &str = include_str!("subtitle_translation_r
 pub(crate) const CONTINUITY_MIGRATION: &str = include_str!("subtitle_translation_continuity.sql");
 /// AI subtitles: continuity capture follows the `subtitles.ai.v1` user rule.
 pub(crate) const AUTHORITY_MIGRATION: &str = include_str!("subtitle_translation_authority.sql");
+pub(crate) const FINISH_MIGRATION: &str = include_str!("subtitle_translation_finish.sql");
+pub(crate) const SUPERSEDE_LEGACY_JOBS: &str = r#"UPDATE background_jobs
+ SET state='cancelled',last_error_code='superseded',
+     owner_node_id=NULL,owner_boot_id=NULL,claim_id=NULL,lease_expires_ms=NULL,revision=revision+1
+ WHERE kind IN ('subtitle_transcribe','subtitle_transcribe_managed')
+ AND state IN ('queued','running','cancelling') AND revision<9223372036854775807"#;
 pub(crate) const SCHEMA_PRE_AUTHORITY: &str = concat!(
     include_str!("subtitle_translation.sql"),
     "\n-- next statement\n",
@@ -19,7 +25,7 @@ pub(crate) const SCHEMA_PRE_CONTINUITY: &str = concat!(
     "\n-- next statement\n",
     include_str!("subtitle_translation_retarget.sql")
 );
-pub(crate) const SCHEMA: &str = concat!(
+const SCHEMA_PRE_FINISH: &str = concat!(
     include_str!("subtitle_translation.sql"),
     "\n-- next statement\n",
     include_str!("subtitle_translation_retarget.sql"),
@@ -27,6 +33,17 @@ pub(crate) const SCHEMA: &str = concat!(
     include_str!("subtitle_translation_continuity.sql"),
     "\n-- next statement\n",
     include_str!("subtitle_translation_authority.sql")
+);
+pub(crate) const SCHEMA: &str = concat!(
+    include_str!("subtitle_translation.sql"),
+    "\n-- next statement\n",
+    include_str!("subtitle_translation_retarget.sql"),
+    "\n-- next statement\n",
+    include_str!("subtitle_translation_continuity.sql"),
+    "\n-- next statement\n",
+    include_str!("subtitle_translation_authority.sql"),
+    "\n-- next statement\n",
+    include_str!("subtitle_translation_finish.sql")
 );
 pub(crate) const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name GLOB 'subtitle_translation_*' AND sql IS NOT NULL ORDER BY name";
 #[cfg(feature = "hiqlite-store")]
@@ -65,6 +82,14 @@ pub(crate) fn authority_statements() -> Vec<String> {
         .map(str::to_owned)
         .collect()
 }
+#[cfg(feature = "hiqlite-store")]
+pub(crate) fn finish_statements() -> impl Iterator<Item = String> {
+    FINISH_MIGRATION
+        .split("-- next statement")
+        .map(str::trim)
+        .filter(|sql| !sql.is_empty())
+        .map(str::to_owned)
+}
 fn rows(conn: &rusqlite::Connection) -> Result<Vec<(String, String)>, StoreError> {
     let mut query = conn.prepare(SHAPE_SQL)?;
     let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -98,8 +123,15 @@ static PRE_AUTHORITY_SHAPE: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
         .expect("pre-authority schema");
     rows(&conn).expect("pre-authority shape")
 });
+static PRE_FINISH_SHAPE: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
+    let conn = rusqlite::Connection::open_in_memory().expect("pre-finish fixture");
+    conn.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT);").expect("dependencies");
+    conn.execute_batch(SCHEMA_PRE_FINISH)
+        .expect("pre-finish schema");
+    rows(&conn).expect("pre-finish shape")
+});
 /// Exact shapes: original=0, producer-retarget=1, claim-continuity=2,
-/// AI subtitles authority=3. Partial/unknown shapes are refused.
+/// AI subtitles authority=3, finish demand=4. Partial/unknown shapes are refused.
 pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreError> {
     let canonical = |rows: &[(String, String)]| {
         rows.iter()
@@ -114,6 +146,8 @@ pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreEr
     if shape.is_empty() {
         Ok(None)
     } else if canonical(shape) == canonical(&SHAPE) {
+        Ok(Some(4))
+    } else if canonical(shape) == canonical(&PRE_FINISH_SHAPE) {
         Ok(Some(3))
     } else if canonical(shape) == canonical(&PRE_AUTHORITY_SHAPE) {
         Ok(Some(2))
@@ -135,7 +169,7 @@ pub(crate) fn retarget_already_applied(conn: &rusqlite::Connection) -> Result<bo
         |row| row.get(0),
     )?;
     match (generation, marker) {
-        (Some(1..=3), 1) => Ok(true),
+        (Some(1..=4), 1) => Ok(true),
         (Some(0), 1) => Ok(false),
         _ => Err(StoreError::Migration(
             "unrecognized progressive translation upgrade source".into(),
@@ -154,7 +188,7 @@ pub(crate) fn continuity_already_applied(conn: &rusqlite::Connection) -> Result<
         ));
     }
     match version(&rows(conn)?)? {
-        Some(2 | 3) => Ok(true),
+        Some(2..=4) => Ok(true),
         Some(1) => Ok(false),
         _ => Err(StoreError::Migration(
             "unrecognized continuity upgrade source".into(),
@@ -171,7 +205,7 @@ pub(crate) fn verify_authority_predecessor(conn: &rusqlite::Connection) -> Resul
     Ok(())
 }
 pub(crate) fn verify_sqlite(conn: &rusqlite::Connection) -> Result<(), StoreError> {
-    if version(&rows(conn)?)? != Some(3) {
+    if version(&rows(conn)?)? != Some(4) {
         return Err(StoreError::Migration(
             "progressive translation schema missing".into(),
         ));
@@ -184,6 +218,15 @@ pub(crate) fn verify_sqlite(conn: &rusqlite::Connection) -> Result<(), StoreErro
     if count != 1 {
         return Err(StoreError::Migration(
             "progressive translation marker missing".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_finish_predecessor(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    if version(&rows(conn)?)? != Some(3) {
+        return Err(StoreError::Migration(
+            "unrecognized translation finish upgrade source".into(),
         ));
     }
     Ok(())
@@ -276,6 +319,9 @@ mod tests {
             .expect("continuity upgrade");
         conn.execute_batch(AUTHORITY_MIGRATION)
             .expect("authority upgrade");
+        verify_finish_predecessor(&conn).expect("known authority shape");
+        conn.execute_batch(FINISH_MIGRATION)
+            .expect("finish upgrade");
         verify_sqlite(&conn).expect("current shape");
         conn.execute_batch("ROLLBACK").expect("crash before commit");
         assert_eq!(
@@ -288,6 +334,8 @@ mod tests {
             .expect("committed continuity upgrade");
         conn.execute_batch(AUTHORITY_MIGRATION)
             .expect("committed authority upgrade");
+        conn.execute_batch(FINISH_MIGRATION)
+            .expect("committed finish upgrade");
         verify_sqlite(&conn).expect("upgraded");
         conn.execute_batch("DROP TRIGGER subtitle_translation_mutate")
             .expect("partial shape");

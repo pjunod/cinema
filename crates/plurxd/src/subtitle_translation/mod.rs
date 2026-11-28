@@ -8,6 +8,7 @@ pub(crate) use manager::worker_pass;
 mod read_attestation;
 pub(crate) use read_attestation::ReadPreparationSlot;
 pub(crate) mod runtime;
+pub(crate) mod schedule;
 
 use crate::{http::error::ApiError, state::AppState, subtitle_models::artifacts};
 use plurx_core::{

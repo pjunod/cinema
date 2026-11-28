@@ -1,18 +1,14 @@
 //! Opt-in offline whisper.cpp jobs: fixed argv, bounded work, common queue Stop.
 use crate::http::{error::ApiError, extract::AdminUser};
 use crate::state::AppState;
-use axum::{
-    extract::{Path as ApiPath, State},
-    Json,
-};
+use axum::{extract::State, Json};
+#[cfg(test)]
+use plurx_core::store::background_jobs::{EnqueueJob, JobRequest};
 use plurx_core::{
     domain::{DownloadedSubtitle, MediaFile, SubtitleTranscription},
     error::StoreError,
     store::{
-        background_jobs::{
-            CandidateQuery, ClaimJob, EnqueueJob, EnqueueOutcome, JobKind, JobPayload, JobRequest,
-            JobSettlement,
-        },
+        background_jobs::{CandidateQuery, ClaimJob, JobKind, JobPayload, JobSettlement},
         background_jobs_transcription::{artifact_key, valid_language},
         MAX_DOWNLOADED_SUBTITLE_BYTES,
     },
@@ -161,6 +157,7 @@ struct Model {
     digest: String,
     identity: plurx_core::fs_secure::FileIdentity,
     english_only: bool,
+    #[cfg(test)]
     languages: Vec<String>,
 }
 async fn open_model(path: &str) -> Result<Model, StoreError> {
@@ -188,6 +185,7 @@ async fn open_model(path: &str) -> Result<Model, StoreError> {
     let mut buffer = vec![0_u8; 256 * 1024];
     let mut bytes = 0_u64;
     let mut english_only = false;
+    #[cfg(test)]
     let mut languages = vec![];
     loop {
         plurx_core::process::bounded::check_cancellation()
@@ -205,7 +203,10 @@ async fn open_model(path: &str) -> Result<Model, StoreError> {
             if u32::from_le_bytes(buffer[..4].try_into().expect("header width")) == 0x67676d6c {
                 let vocabulary = u32::from_le_bytes(buffer[4..8].try_into().expect("header width"));
                 english_only = vocabulary == 51864;
-                languages = languages_for_vocabulary(vocabulary);
+                #[cfg(test)]
+                {
+                    languages = languages_for_vocabulary(vocabulary);
+                }
             }
         }
         bytes += read as u64;
@@ -231,6 +232,7 @@ async fn open_model(path: &str) -> Result<Model, StoreError> {
         identity,
         digest: hex::encode(hash.finalize()),
         english_only,
+        #[cfg(test)]
         languages,
     })
 }
@@ -307,12 +309,14 @@ pub(crate) fn normalized_language(value: &str) -> String {
     }
     .to_owned()
 }
+#[cfg(test)]
 fn language_matches(existing: &str, language: &str) -> bool {
     normalized_language(existing) == normalized_language(language)
 }
 /// Exact spoken-language match first; default wins within a class, then the
 /// smallest actual audio ordinal. An absent/undefined tag is a fallback, never
 /// permission to relabel a known incompatible spoken-language track.
+#[cfg(test)]
 fn selected_audio(tracks: &[plurx_core::domain::AudioStream], language: &str) -> Option<i64> {
     let best = |unknown: bool| {
         tracks
@@ -337,6 +341,7 @@ fn selected_audio(tracks: &[plurx_core::domain::AudioStream], language: &str) ->
     };
     best(false).or_else(|| best(true))
 }
+#[cfg(test)]
 fn missing_language(file: &MediaFile, language: &str) -> bool {
     !file.subtitle_streams.iter().any(|track| {
         track
@@ -345,6 +350,7 @@ fn missing_language(file: &MediaFile, language: &str) -> bool {
             .is_some_and(|existing| language_matches(existing, language))
     })
 }
+#[cfg(test)]
 fn enqueue_request(
     file: &MediaFile,
     config: &Settings,
@@ -355,6 +361,7 @@ fn enqueue_request(
         .ok_or_else(|| StoreError::Task("no matching spoken-language audio track".into()))?;
     enqueue_request_selected(file, config, model, command, audio_index)
 }
+#[cfg(test)]
 fn enqueue_request_selected(
     file: &MediaFile,
     config: &Settings,
@@ -392,52 +399,6 @@ fn enqueue_request_selected(
         },
     })
 }
-pub async fn enqueue(
-    _admin: AdminUser,
-    State(state): State<AppState>,
-    ApiPath(id): ApiPath<i64>,
-) -> Result<Json<Value>, ApiError> {
-    let config = read_settings(&state).await?;
-    config.validate()?;
-    if !config.enabled {
-        return Err(ApiError::BadRequest(
-            "Enable offline subtitle transcription in Developer settings first".into(),
-        ));
-    }
-    let command = executable(&config.command).ok_or_else(|| {
-        ApiError::ServiceUnavailable("Local whisper-cli command unavailable".into())
-    })?;
-    let file = state
-        .store
-        .get_file(id)
-        .await?
-        .ok_or(ApiError::NotFound("file"))?;
-    if !eligible(&file) {
-        return Err(ApiError::BadRequest(
-            "Transcription requires probed finite media with audio and duration up to four hours"
-                .into(),
-        ));
-    }
-    if selected_audio(&file.audio_streams, &config.language).is_none() {
-        return Err(ApiError::BadRequest(format!("No audio track matches subtitle language {}; all audio tracks have incompatible language tags", config.language)));
-    }
-    let model = tokio::time::timeout(Duration::from_secs(60), open_model(&config.model_path))
-        .await
-        .map_err(|_| ApiError::ServiceUnavailable("Model fingerprint timed out".into()))?
-        .map_err(|error| ApiError::ServiceUnavailable(error.to_string()))?;
-    if model.english_only && normalized_language(&config.language) != "en" {
-        return Err(ApiError::ServiceUnavailable(
-            "Configured model supports English only; choose a multilingual model for this language"
-                .into(),
-        ));
-    }
-    let outcome = state
-        .store
-        .enqueue_job(enqueue_request(&file, &config, &model, &command)?)
-        .await?;
-    Ok(Json(json!(outcome)))
-}
-
 fn accepted_audio(file: &MediaFile, audio_index: i64, language: &str) -> bool {
     if audio_index < 0 {
         return false;
@@ -452,32 +413,6 @@ fn accepted_audio(file: &MediaFile, audio_index: i64, language: &str) -> bool {
 }
 
 /// Versioned requests freeze the administrator's explicit audio/language choice.
-pub(crate) async fn enqueue_advanced_selected(
-    state: &AppState,
-    file: &MediaFile,
-    audio_index: i64,
-    language: &str,
-) -> Result<(EnqueueOutcome, String), ApiError> {
-    let mut config = read_settings(state).await?;
-    config.language = normalized_language(language);
-    config.validate()?;
-    if !config.enabled || !eligible(file) || !accepted_audio(file, audio_index, &config.language) {
-        return Err(ApiError::BadRequest("advanced_request_invalid".into()));
-    }
-    let command = executable(&config.command)
-        .ok_or_else(|| ApiError::ServiceUnavailable("engine_unavailable".into()))?;
-    let model = tokio::time::timeout(Duration::from_secs(60), open_model(&config.model_path))
-        .await
-        .map_err(|_| ApiError::ServiceUnavailable("model_verification_failed".into()))?
-        .map_err(|_| ApiError::ServiceUnavailable("model_verification_failed".into()))?;
-    if !model_supports_language(&model, &config.language) {
-        return Err(ApiError::BadRequest("model_language_unsupported".into()));
-    }
-    let request = enqueue_request_selected(file, &config, &model, &command, audio_index)?;
-    let key = artifact_key(&request.payload)?;
-    Ok((state.store.enqueue_job(request).await?, key))
-}
-
 #[cfg(test)]
 async fn transcribe(
     runtime_cache_dir: &Path,
@@ -1395,6 +1330,7 @@ fn languages_for_vocabulary(vocabulary: u32) -> Vec<String> {
     }
 }
 
+#[cfg(test)]
 fn model_supports_language(model: &Model, language: &str) -> bool {
     model.languages.contains(&normalized_language(language))
 }
@@ -1521,6 +1457,7 @@ pub(crate) async fn transcribe_managed(
             model_sha256: model.sha256.clone(),
             pipeline_digest: pipeline_digest.clone(),
             adapter: engine.adapter_contract.clone(),
+            progressive_asset_id: None,
             execution: Some(plurx_core::domain::SubtitleExecution {
                 engine_sha256: engine.binary_sha256.clone(),
                 platform: engine.platform.clone(),
@@ -1838,19 +1775,6 @@ async fn pass(
     if !state.transcode.fragment_worker_idle(&admission) {
         return Ok(());
     }
-    if config.interval_mins > 0
-        && (!model.english_only || normalized_language(&config.language) == "en")
-    {
-        if let Some(lease) = state
-            .jobs
-            .acquire_job("subtitle-transcription:sweep".into())
-            .await?
-        {
-            let result = automatic_page(state, &config, model, &command, &lease).await;
-            lease.release().await?;
-            result?;
-        } // Another discovery owner never prevents this node claiming manual work.
-    }
     let page = state
         .store
         .job_candidates(CandidateQuery {
@@ -1999,6 +1923,7 @@ async fn pass(
                                 audio_index,
                             ),
                             adapter: "whisper.cpp".into(),
+                            progressive_asset_id: None,
                             execution: None,
                             generated_at_ms: crate::state::clock_ms(),
                         }),
@@ -2068,6 +1993,7 @@ async fn watch_capacity_until(available: impl Fn() -> bool) {
     }
 }
 
+#[cfg(test)]
 async fn automatic_page(
     state: &AppState,
     config: &Settings,

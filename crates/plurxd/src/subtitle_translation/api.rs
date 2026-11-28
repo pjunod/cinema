@@ -863,6 +863,7 @@ pub async fn create(
             position_ms: input.position_ms,
             playback_rate: input.playback_rate,
             paused: input.paused,
+            finish: true,
             continuity_id: input.continuity_id,
         },
         "accepted",
@@ -953,7 +954,6 @@ pub async fn stop(
     ApiPath(operation_id): ApiPath<String>,
     Json(input): Json<StopRequest>,
 ) -> Result<Response, ApiError> {
-    crate::ai_subtitles::may_start(&state, &user).await?;
     envelope(input.version, &input.request_id, input.intent_expires_at_ms)?;
     id(&operation_id)?;
     let request_digest = config::request_digest(
@@ -967,11 +967,11 @@ pub async fn stop(
         input.request_id,
         request_digest,
         input.intent_expires_at_ms,
-        TranslationAction::Stop {
+        TranslationAction::ReleaseViewer {
             operation_id,
             expected_operation_epoch: number(&input.expected_operation_epoch, true)?,
         },
-        "stopped",
+        "released",
     )
     .await
 }
@@ -2095,6 +2095,7 @@ mod tests {
                     position_ms: 0,
                     playback_rate: 1.0,
                     paused: false,
+                    finish: false,
                     continuity_id: None,
                 },
             })

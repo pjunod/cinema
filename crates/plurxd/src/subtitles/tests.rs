@@ -229,13 +229,13 @@ async fn cached_readiness_revision_delivers_exact_window_without_whole_extractio
         .await
         .expect("window");
     assert_eq!(
-        read_cached_revision(dir.path(), &file, 0, &window)
+        read_cached_revision(dir.path(), &file, 0, &window, None)
             .await
             .expect("read"),
         Some((vtt.to_vec(), false))
     );
     let whole = vtt_name(file.id, 0, file.size, file.mtime);
-    assert!(read_cached_revision(dir.path(), &file, 0, &whole)
+    assert!(read_cached_revision(dir.path(), &file, 0, &whole, None)
         .await
         .expect("read")
         .is_none());
@@ -249,26 +249,28 @@ async fn cached_readiness_revision_delivers_exact_window_without_whole_extractio
         window.replace("-w200-", "-w0200-"),
         vtt_window_name(file.id, 0, file.size, file.mtime, 200, 0),
     ] {
-        assert!(read_cached_revision(dir.path(), &file, 0, &invalid)
+        assert!(read_cached_revision(dir.path(), &file, 0, &invalid, None)
             .await
             .expect("read")
             .is_none());
     }
-    assert!(read_cached_revision(dir.path(), &file, 1, &window)
+    assert!(read_cached_revision(dir.path(), &file, 1, &window, None)
         .await
         .expect("other track")
         .is_none());
     let mut replaced = file.clone();
     replaced.mtime += 1;
-    assert!(read_cached_revision(dir.path(), &replaced, 0, &window)
-        .await
-        .expect("other source")
-        .is_none());
+    assert!(
+        read_cached_revision(dir.path(), &replaced, 0, &window, None)
+            .await
+            .expect("other source")
+            .is_none()
+    );
     tokio::fs::write(vtt_path(dir.path(), &file, 0), vtt)
         .await
         .expect("whole");
     assert_eq!(
-        read_cached_revision(dir.path(), &file, 0, &whole)
+        read_cached_revision(dir.path(), &file, 0, &whole, None)
             .await
             .expect("whole read"),
         Some((vtt.to_vec(), true))

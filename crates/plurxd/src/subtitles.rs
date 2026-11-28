@@ -968,6 +968,7 @@ async fn enlist(cached: &Path, max_bytes: u64) -> Flight {
 ///
 /// `work` is the caller's class and purpose for the extraction a miss starts.
 /// A flight already running keeps the class of the caller that started it.
+#[cfg(test)]
 pub async fn ensure_vtt(
     dir: &Path,
     file: &MediaFile,
@@ -990,6 +991,29 @@ pub(crate) async fn ensure_vtt_with_store(
     stored: &crate::subtitle_source::StoreAccess,
     work: crate::process_control::ChildWork,
 ) -> Result<PathBuf, String> {
+    if let Some((asset, generated_at_ms)) = completed_asset(file, index) {
+        if !plurx_core::store::subtitle_translation::valid_digest(asset) {
+            return Err("invalid completed subtitle identity".into());
+        }
+        let cached = dir.join(format!("ai-{}-{asset}-{generated_at_ms}.vtt", file.id));
+        let stored = stored.clone();
+        return ensure_vtt_at(
+            cached,
+            dir,
+            file,
+            index,
+            ExtractionLimits::default(),
+            move |tmp, file, index| async move {
+                let bytes = read_completed_vtt(&file, index, &stored)
+                    .await?
+                    .ok_or_else(|| "completed subtitle removed".to_owned())?;
+                tokio::fs::write(tmp, bytes)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+        )
+        .await;
+    }
     if let Some(path) = try_store_vtt(dir, file, index, stored).await? {
         return Ok(path);
     }
@@ -1357,6 +1381,9 @@ pub(crate) async fn ensure_vtt_bytes_with_store(
     stored: &crate::subtitle_source::StoreAccess,
     work: crate::process_control::ChildWork,
 ) -> Result<Vec<u8>, String> {
+    if let Some(bytes) = read_completed_vtt(file, index, stored).await? {
+        return Ok(bytes);
+    }
     let path = ensure_vtt_with_store(dir, file, index, stored, work).await?;
     read_vtt_path(&path, MAX_SIDECAR_BYTES)
         .await?
@@ -1499,6 +1526,9 @@ pub async fn read_cached_vtt(
     file: &MediaFile,
     index: i64,
 ) -> Result<Option<Vec<u8>>, String> {
+    if completed_asset(file, index).is_some() {
+        return Ok(None);
+    }
     if let Some(track) = file.downloaded_subtitle(index) {
         return Ok(Some(track.vtt.as_bytes().to_vec()));
     }
@@ -1511,8 +1541,55 @@ pub(crate) async fn read_cached_vtt_with_store(
     index: i64,
     stored: &crate::subtitle_source::StoreAccess,
 ) -> Result<Option<Vec<u8>>, String> {
+    if let Some(bytes) = read_completed_vtt(file, index, stored).await? {
+        return Ok(Some(bytes));
+    }
     let _ = try_store_vtt(dir, file, index, stored).await;
     read_cached_vtt(dir, file, index).await
+}
+
+fn completed_asset(file: &MediaFile, index: i64) -> Option<(&str, i64)> {
+    let origin = file.downloaded_subtitle(index)?.transcription.as_ref()?;
+    Some((
+        origin.progressive_asset_id.as_deref()?,
+        origin.generated_at_ms,
+    ))
+}
+
+async fn read_completed_vtt(
+    file: &MediaFile,
+    index: i64,
+    access: &crate::subtitle_source::StoreAccess,
+) -> Result<Option<Vec<u8>>, String> {
+    use plurx_core::store::{
+        subtitle_translation::SourceRevision,
+        subtitle_translation_read::{TranslationQuery, TranslationRead},
+    };
+    let Some((asset_id, _)) = completed_asset(file, index) else {
+        return Ok(None);
+    };
+    let store = access
+        .catalog()
+        .ok_or_else(|| "completed subtitle catalog unavailable".to_owned())?;
+    let rows = store
+        .read_subtitle_translation(TranslationRead {
+            user_id: 0,
+            now_ms: crate::state::clock_ms(),
+            query: TranslationQuery::CompletedVtt {
+                asset_id: asset_id.to_owned(),
+                source: SourceRevision {
+                    file_id: file.id,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                },
+            },
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    rows.first()
+        .and_then(serde_json::Value::as_str)
+        .map(|vtt| Some(vtt.as_bytes().to_vec()))
+        .ok_or_else(|| "completed subtitle removed or source changed".to_owned())
 }
 
 /// Redeem one readiness revision against the current file and track identity.
@@ -1523,9 +1600,15 @@ pub(crate) async fn read_cached_revision(
     file: &MediaFile,
     index: i64,
     revision: &str,
+    stored: Option<&crate::subtitle_source::StoreAccess>,
 ) -> Result<Option<(Vec<u8>, bool)>, String> {
     let whole = vtt_name(file.id, index, file.size, file.mtime);
     if revision == whole {
+        if let Some(stored) = stored {
+            if let Some(bytes) = read_completed_vtt(file, index, stored).await? {
+                return Ok(Some((bytes, true)));
+            }
+        }
         return read_cached_vtt(dir, file, index)
             .await
             .map(|bytes| bytes.map(|bytes| (bytes, true)));
@@ -1581,6 +1664,7 @@ async fn read_vtt_path(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>, S
 /// Hold the exact bounded subtitle inode for ffmpeg burn-in. The caller passes
 /// this descriptor through `/dev/fd/5`; later pathname replacement cannot
 /// change the bytes libass consumes.
+#[cfg(test)]
 pub async fn ensure_vtt_file(
     dir: &Path,
     file: &MediaFile,
@@ -1761,10 +1845,11 @@ async fn ensure_burn_source_with(
         crate::fragment_index_cluster::open_source_fence(file, expected_object_version).await?,
     );
     if file.downloaded_subtitle(index).is_some() {
-        return ensure_vtt_file(
+        return ensure_vtt_file_with_store(
             dir,
             file,
             index,
+            stored,
             crate::process_control::ChildWork::new(class, "downloaded subtitle for a burn"),
         )
         .await
@@ -2986,6 +3071,9 @@ pub(crate) async fn warm_vtt_with_store(
     index: i64,
     stored: &crate::subtitle_source::StoreAccess,
 ) {
+    if completed_asset(file, index).is_some() {
+        return;
+    }
     if matches!(try_store_vtt(dir, file, index, stored).await, Ok(Some(_))) {
         return;
     }
@@ -3382,6 +3470,9 @@ pub(crate) async fn extract_vtt_window(
     anchor_seconds: i64,
     window_seconds: i64,
 ) -> Result<(), String> {
+    if completed_asset(file, index).is_some() {
+        return Err("completed subtitle requires its catalog".into());
+    }
     if let Some(track) = file.downloaded_subtitle(index) {
         // The consumer slices absolute cue times to its segment. Keeping the
         // complete small track here also preserves cues spanning a window.
@@ -3828,6 +3919,7 @@ pub(crate) fn peak_window_flights_for_test(session: &str) -> usize {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 async fn extract_vtt(
     tmp: &Path,
     file: &MediaFile,
@@ -3849,6 +3941,9 @@ async fn extract_vtt_without_demux(
     index: i64,
     work: crate::process_control::ChildWork,
 ) -> Result<bool, String> {
+    if completed_asset(file, index).is_some() {
+        return Err("completed subtitle requires its catalog".into());
+    }
     if let Some(track) = file.downloaded_subtitle(index) {
         tokio::fs::write(tmp, &track.vtt)
             .await

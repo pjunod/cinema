@@ -49,6 +49,7 @@ fn create(now: i64) -> TranslationMutation {
             position_ms: 0,
             playback_rate: 1.0,
             paused: false,
+            finish: false,
             continuity_id: None,
         },
     }
@@ -525,6 +526,257 @@ async fn source_bind_cannot_replace_same_epoch_bytes_and_retry_can_revive_verifi
 
 async fn prepared(store: &SqliteStore) -> plurx_core::store::subtitle_translation::RangeRecipe {
     prepared_from(store, create(1000)).await
+}
+
+#[tokio::test]
+async fn finish_demand_publishes_each_core_after_the_viewer_leaves() {
+    use plurx_core::store::{
+        subtitle_translation_publication::PublishTranslationSegment,
+        subtitle_translation_read::{TranslationQuery, TranslationRead},
+        MediaStore,
+    };
+
+    let (_dir, store, connection) = fixture();
+    let mut request = create(1000);
+    let TranslationAction::Create { finish, .. } = &mut request.action else {
+        unreachable!()
+    };
+    *finish = true;
+    let mut recipe = prepared_from(&store, request).await;
+    let first_background_pass = 20_000;
+    let query = |now_ms, query| TranslationRead {
+        user_id: 0,
+        now_ms,
+        query,
+    };
+    assert!(store
+        .read_subtitle_translation(query(
+            first_background_pass,
+            TranslationQuery::LiveDemands {
+                operation_id: recipe.operation_id.clone(),
+                operation_epoch: recipe.operation_epoch,
+            }
+        ))
+        .await
+        .expect("viewer demands")
+        .is_empty());
+    assert_eq!(
+        store
+            .ai_subtitle_active_work(1, None, first_background_pass)
+            .await
+            .unwrap(),
+        1
+    );
+    let finish_core = TranslationQuery::FinishCore {
+        operation_id: recipe.operation_id.clone(),
+        operation_epoch: recipe.operation_epoch,
+    };
+    for core_index in 0..recipe.core_count() {
+        let now = first_background_pass + core_index * 10;
+        let next = store
+            .read_subtitle_translation(query(now, finish_core.clone()))
+            .await
+            .expect("next finish core");
+        assert_eq!(next[0]["core_index"], core_index);
+        recipe.core_index = core_index;
+        let job = range_for_consumer(
+            &store,
+            &recipe,
+            &format!("finish-{core_index}"),
+            now,
+            "subtitle_translation_range",
+        )
+        .await;
+        assert!(range_interested(&store, &job.id, now + 2).await);
+        let captured: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM subtitle_translation_range_continuities WHERE job_id=?1",
+                [&job.id],
+                |row| row.get(0),
+            )
+            .expect("finish creates no viewer continuation");
+        assert_eq!(captured, 0);
+        assert!(store
+            .publish_translation_segment(PublishTranslationSegment {
+                token: job.token.clone().expect("token"),
+                source: job.supported_payload().expect("range"),
+                segment: draft(&recipe, job.fence, "Finished <caption>"),
+                now_ms: now + 3,
+            })
+            .await
+            .expect("durable finish publication"));
+    }
+    let operation = store
+        .read_subtitle_translation(query(
+            21_000,
+            TranslationQuery::Operation {
+                operation_id: recipe.operation_id,
+            },
+        ))
+        .await
+        .expect("completed operation");
+    assert_eq!(operation[0]["state"], "complete");
+    assert_eq!(
+        store
+            .ai_subtitle_active_work(1, None, 21_000)
+            .await
+            .unwrap(),
+        0
+    );
+    let file = store.get_file(1).await.unwrap().expect("current file");
+    let caption = file.downloaded_subtitle(0).expect("completed stored track");
+    assert!(caption.vtt.contains("Finished &lt;caption&gt;"));
+    assert!(plurx_core::store::valid_downloaded_vtt(&caption.vtt));
+    assert!(caption
+        .transcription
+        .as_ref()
+        .unwrap()
+        .progressive_asset_id
+        .is_none());
+}
+
+#[tokio::test]
+async fn four_hour_caption_over_the_inline_cap_retains_a_stored_track() {
+    use plurx_core::store::{
+        subtitle_translation_publication::PublishTranslationSegment,
+        subtitle_translation_read::{TranslationQuery, TranslationRead},
+        MediaStore, MAX_DOWNLOADED_SUBTITLE_BYTES,
+    };
+
+    let (dir, store, mut conn) = fixture();
+    let mut request = create(1000);
+    let TranslationAction::Create {
+        finish,
+        duration_ms,
+        ..
+    } = &mut request.action
+    else {
+        unreachable!()
+    };
+    *finish = true;
+    *duration_ms = 4 * 60 * 60 * 1000;
+    let mut recipe = prepared_from(&store, request).await;
+    let text = "Spoken words. ".repeat(50);
+    let preceding_cores = recipe.core_count() - 1;
+    let tx = conn.transaction().expect("earlier published cores");
+    let mut accepted_bytes = 0;
+    for core_index in 0..preceding_cores {
+        recipe.core_index = core_index;
+        let segment = draft(&recipe, 1, &text);
+        let body = String::from_utf8(segment.canonical_body().unwrap()).unwrap();
+        accepted_bytes += i64::try_from(body.len()).unwrap();
+        tx.execute(
+            "INSERT INTO subtitle_translation_segments
+             (asset_id,core_index,segment_id,publication_id,digest,body,start_ms,end_ms,accepted_revision,created_at_ms)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,3000)",
+            rusqlite::params![recipe.asset_id,core_index,segment.segment_id(),uuid::Uuid::new_v4().to_string(),
+                "d".repeat(64),body,segment.start_ms,segment.end_ms,core_index+1],
+        ).expect("accepted core");
+    }
+    tx.execute(
+        "UPDATE subtitle_translation_assets SET manifest_revision=?1,accepted_bytes=?2 WHERE id=?3",
+        rusqlite::params![preceding_cores, accepted_bytes, recipe.asset_id],
+    )
+    .expect("accepted manifest");
+    tx.commit().expect("fixture committed");
+
+    recipe.core_index = preceding_cores;
+    let job = range(&store, &recipe, "long-finish", 20_000).await;
+    assert!(store
+        .publish_translation_segment(PublishTranslationSegment {
+            token: job.token.clone().expect("token"),
+            source: job.supported_payload().expect("range"),
+            segment: draft(&recipe, job.fence, &text),
+            now_ms: 20_003,
+        })
+        .await
+        .expect("atomic completion"));
+    let inline: String = conn
+        .query_row(
+            "SELECT downloaded_subtitles FROM files WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(inline, "[]");
+
+    let reopened = SqliteStore::open(&dir.path().join("store.db")).expect("reopened catalog");
+    reopened
+        .maintain_translation_cache(90_000_000)
+        .await
+        .expect("idle cache sweep");
+    let file = reopened.get_file(1).await.unwrap().expect("file");
+    let caption = file
+        .downloaded_subtitle(0)
+        .expect("asset-backed stored track");
+    assert_eq!(caption.stable_id(), recipe.asset_id);
+    assert_eq!(
+        caption
+            .transcription
+            .as_ref()
+            .unwrap()
+            .progressive_asset_id
+            .as_deref(),
+        Some(recipe.asset_id.as_str())
+    );
+    let rows = reopened
+        .read_subtitle_translation(TranslationRead {
+            user_id: 0,
+            now_ms: 90_001_000,
+            query: TranslationQuery::CompletedVtt {
+                asset_id: recipe.asset_id,
+                source: recipe.source,
+            },
+        })
+        .await
+        .expect("stored track VTT");
+    let vtt = rows[0].as_str().expect("WebVTT");
+    assert!(vtt.len() > MAX_DOWNLOADED_SUBTITLE_BYTES);
+    assert!(vtt.contains("03:59:30.000 -->"));
+}
+
+#[tokio::test]
+async fn scheduled_finish_needs_no_viewer_and_respects_the_saved_choice() {
+    let (_dir, store, conn) = fixture();
+    let mut request = create(1000);
+    request.user_id = 0;
+    let TranslationAction::Create {
+        finish,
+        playback_id,
+        ..
+    } = &mut request.action
+    else {
+        unreachable!()
+    };
+    *finish = true;
+    playback_id.clear();
+    assert_eq!(
+        store
+            .mutate_subtitle_translation(request.clone())
+            .await
+            .unwrap()["outcome"],
+        "disabled"
+    );
+    conn.execute(
+        "UPDATE settings SET value=json_set(value,'$.ahead_of_time',json('true')) WHERE key='subtitles.ai.v1'",
+        [],
+    ).unwrap();
+    request.request_id = uuid::Uuid::new_v4().to_string();
+    let result = store
+        .mutate_subtitle_translation(request)
+        .await
+        .expect("scheduled start");
+    assert_eq!(result["outcome"], "accepted");
+    assert!(result["demand_id"].is_null());
+    let id = result["job_id"].as_str().expect("preparation job");
+    let job = store.background_job(id).await.unwrap().unwrap();
+    assert_eq!(job.priority, 0);
+    assert_eq!(
+        claim(&store, id, JobKind::SubtitleTranslationPrepare, 1100)
+            .await
+            .priority,
+        0
+    );
 }
 async fn prepared_from(
     store: &SqliteStore,

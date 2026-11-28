@@ -187,7 +187,7 @@ mod cached_owner_delivery_tests {
             .await
             .expect("cached caption fixture");
         assert!(
-            crate::subtitles::read_cached_revision(&ingress.subs_dir, &file, 0, &revision)
+            crate::subtitles::read_cached_revision(&ingress.subs_dir, &file, 0, &revision, None)
                 .await
                 .expect("cached caption fixture")
                 .is_none()
@@ -274,7 +274,7 @@ mod cached_owner_delivery_tests {
                 bytes
             );
             assert!(
-                crate::subtitles::read_cached_revision(&ingress.subs_dir, &file, 0, &revision)
+                crate::subtitles::read_cached_revision(&ingress.subs_dir, &file, 0, &revision, None)
                     .await
                     .expect("cached caption fixture")
                     .is_none(),

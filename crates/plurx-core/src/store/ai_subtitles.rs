@@ -33,9 +33,12 @@ pub(super) async fn active_work<T: QueueSql>(
         .queue_sql(
             "SELECT json_object('count',
   (SELECT count(DISTINCT op.id) FROM subtitle_translation_operations op
-    JOIN subtitle_translation_demands d ON d.operation_id=op.id AND d.operation_epoch=op.operation_epoch
-    WHERE d.user_id=json_extract($1,'$.user_id') AND d.released=0
-      AND d.expires_at_ms>json_extract($1,'$.now_ms')
+    WHERE (EXISTS(SELECT 1 FROM subtitle_translation_demands d
+      WHERE d.operation_id=op.id AND d.operation_epoch=op.operation_epoch
+        AND d.user_id=json_extract($1,'$.user_id') AND d.released=0
+        AND d.expires_at_ms>json_extract($1,'$.now_ms'))
+      OR EXISTS(SELECT 1 FROM subtitle_translation_finish_demands finish
+        WHERE finish.operation_id=op.id AND finish.requested_by=json_extract($1,'$.user_id')))
       AND op.stopped=0 AND op.state NOT IN ('failed','stopped','complete')
       AND op.id IS NOT json_extract($1,'$.exclude'))
   +(SELECT count(DISTINCT j.id) FROM background_job_waiters w JOIN background_jobs j ON j.id=w.job_id

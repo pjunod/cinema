@@ -56,6 +56,7 @@ fn create() -> TranslationMutation {
             position_ms: 0,
             playback_rate: 1.0,
             paused: false,
+            finish: false,
             continuity_id: None,
         },
         1_000,

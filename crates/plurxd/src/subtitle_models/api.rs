@@ -675,6 +675,7 @@ mod tests {
                 model_sha256: "a".repeat(64),
                 pipeline_digest: "b".repeat(64),
                 adapter: "whisper.cpp".into(),
+                progressive_asset_id: None,
                 execution: None,
                 generated_at_ms: 1200,
             }),
