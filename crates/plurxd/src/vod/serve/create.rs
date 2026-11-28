@@ -1321,8 +1321,8 @@ impl VodServe {
                     remaining
                 })
             });
-            return self
-                .settle_encoded_split(requested, started?, now + budget, &fences)
+            // Keep encoded settlement out of the common create future's stack.
+            return Box::pin(self.settle_encoded_split(requested, started?, now + budget, &fences))
                 .await;
         }
         let Some(fallback) = fallback else {
