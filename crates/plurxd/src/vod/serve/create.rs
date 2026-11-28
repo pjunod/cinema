@@ -2097,11 +2097,11 @@ impl VodServe {
                     reader
                 });
             } else {
-                let split = split_readers
+                let split_reader = split_readers
                     .iter_mut()
                     .find(|(audio, _)| Arc::ptr_eq(audio, &child.rendition))
                     .map(|(_, readers)| readers);
-                let readers = if let Some(readers) = split {
+                let readers = if let Some(readers) = split_reader {
                     Some(readers)
                 } else if companion_rendition
                     .as_ref()
