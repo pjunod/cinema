@@ -113,6 +113,7 @@ jobs:
       docs_only: ${{ steps.scope.outputs.docs_only }}
       qualification: ${{ steps.scope.outputs.qualification }}
       execution_mode: ${{ steps.execution_mode.outputs.mode }}
+      rust_partitions: ${{ steps.execution_mode.outputs.rust_partitions }}
       promotion_binding: ${{ steps.promotion.outputs.promotion_binding }}
       promotion_pr: ${{ steps.promotion.outputs.promotion_pr }}
       promotion_base_sha: ${{ steps.promotion.outputs.promotion_base_sha }}
@@ -207,6 +208,11 @@ jobs:
             exit 1
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          if [ "$mode" = official-image ]; then
+            echo 'rust_partitions=["core","store","daemon"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'rust_partitions=["legacy"]' >> "$GITHUB_OUTPUT"
+          fi
       - name: Restore persistent runner workspace ownership
         if: always()
         run: |
@@ -549,6 +555,10 @@ jobs:
     # Preserve every command with a finite 120m cap. Passing full-gate duration
     # remains unmeasured; this budget is not a completion guarantee.
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: ${{ fromJSON(needs.scope.outputs.rust_partitions) }}
     env:
       CARGO_BUILD_JOBS: "1"
       RUST_TEST_THREADS: "2"
@@ -652,7 +662,7 @@ jobs:
           major: "8"
           binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
       - name: Validate HDR measurement colour conversion
-        if: needs.preflight.outputs.hdr_rgb_retained != 'true'
+        if: needs.preflight.outputs.hdr_rgb_retained != 'true' && (matrix.partition == 'legacy' || matrix.partition == 'core')
         env:
           PLURX_FFMPEG: /usr/lib/jellyfin-ffmpeg/ffmpeg
         run: make dv-rgb-conversion-check
@@ -669,8 +679,22 @@ jobs:
           WORKSPACE_RUST_EVIDENCE: ${{ inputs.workspace_rust_evidence }}
         run: python3 -m validation.workspace_rust_continuation
       - name: Run format, Clippy, unit, and SQLite contracts
-        if: inputs.workspace_rust_evidence == ''
+        if: matrix.partition == 'legacy' && inputs.workspace_rust_evidence == ''
         run: make ci-rust-gate
+      - name: Run an official Rust partition
+        if: matrix.partition != 'legacy'
+        env:
+          PARTITION: ${{ matrix.partition }}
+        run: python3 -m validation.workspace_rust_partitions --run "$PARTITION"
+      - name: Keep the official Rust partition receipt
+        if: matrix.partition != 'legacy'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: official-rust-${{ matrix.partition }}
+          path: target/validation/official-rust/official-rust-${{ matrix.partition }}.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
       - name: Compile the full workspace and execute missing Rust outcomes
         if: inputs.workspace_rust_evidence != ''
         run: python3 -m validation.workspace_rust_execute
@@ -2506,8 +2530,8 @@ jobs:
           ANDROID_DEVICE_RESULT: ${{ needs.android_device.result }}
           PACKAGE_SMOKE_RESULT: ${{ needs.package_smoke.result }}
         run: |
-          if [ "$CLUSTER_STORE_RESULT" != success ]; then
-            echo "The official image requires a successful Store verdict" >&2
+          if [ "$CLUSTER_STORE_RESULT" != success ] || [ "$CHECK_RESULT" != success ]; then
+            echo "The official image requires successful Store and Rust verdicts" >&2
             exit 1
           fi
           for result in \
@@ -2528,6 +2552,14 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Download exact workspace Rust partition receipts
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
+        with:
+          pattern: official-rust-*
+          path: target/validation/publish-rust
+          merge-multiple: true
+      - name: Require all official workspace Rust partitions
+        run: python3 -m validation.workspace_rust_partitions --verify target/validation/publish-rust
       - id: main-builder
         uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:

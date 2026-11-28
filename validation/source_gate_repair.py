@@ -88,7 +88,8 @@ WORKFLOW = 'ci.yml'
 # The source-lease workflow uses the consolidated reader and rollout checks.
 # Re-reviewed for official image Store validation: exact shards and lineage
 # are required on direct main dispatches. Promotion source evidence stays serial.
-WORKFLOW_SHA256 = '536d4024a405de15c91b2fc86c79c55f20ddf9f2965a3d158e3cb95dc59b5e86'
+# Official Rust target partitions preserve the reviewed legacy continuation recipe.
+WORKFLOW_SHA256 = '0054bda4cdbb464d3f07819ba78e7f10a112612ae74f3cae1752bf131503f64c'
 
 
 def prior_run(api, value, binding, repository, *, current_run=None):

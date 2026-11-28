@@ -263,6 +263,10 @@ RETIRED_ROOT_RECOVERY_STEP = (
 )
 
 
+# Reviewed check job with three official-only Rust partitions.
+OFFICIAL_RUST_CHECK_SHA256 = 'a92db659030cfeba6cd9a886dc853debb66fa8eff8df6f880b3e0f7ccbbaa2b0'
+
+
 def continuation_preflight_recipe(raw):
     if b'SOURCE_GATE_REPAIR_SELECTION_SHA256' not in raw:
         return raw
@@ -277,10 +281,14 @@ def continuation_preflight_recipe(raw):
                  b"        if: needs.preflight.outputs.hdr_rgb_retained != 'true'\n")
     hdr_original = b'      - name: Validate HDR measurement colour conversion\n'
     check = job_body(raw, 'check', 'cluster_store_legacy')
-    receipts.require(hdr_guard in check and check.replace(hdr_guard, hdr_original) ==
-                     job_body(original, 'check', 'cluster_store_legacy').replace(RETIRED_ROOT_RECOVERY_STEP, b''),
-                     'Ordinary continuation changed the reviewed Rust recipe')
-    return raw.replace(preflight, previous).replace(hdr_guard, hdr_original)
+    expected_check = job_body(original, 'check', 'cluster_store_legacy').replace(RETIRED_ROOT_RECOVERY_STEP, b'')
+    if b'Run an official Rust partition' in check:
+        receipts.require(retention.digest(check) == OFFICIAL_RUST_CHECK_SHA256,
+                         'Unreviewed official Rust partition job')
+    else:
+        receipts.require(hdr_guard in check and check.replace(hdr_guard, hdr_original) == expected_check,
+                         'Ordinary continuation changed the reviewed Rust recipe')
+    return raw.replace(preflight, previous).replace(check, expected_check)
 
 
 def selected_preflight_projection(raw):
