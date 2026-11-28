@@ -1911,7 +1911,11 @@ mod tests {
                         && (sql.contains("'publish_dv_title'") || sql.contains("'bind_dv_title'"))
                 })
                 .collect();
-        assert_eq!(commands.len(), 3, "bind, publish and analysis publish");
+        assert_eq!(
+            commands.len(),
+            4,
+            "bind, FEL requalification, title publish and analysis publish"
+        );
         for sql in commands {
             assert!(writes_files(sql), "{sql}");
         }
