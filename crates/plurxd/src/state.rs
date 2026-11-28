@@ -9231,6 +9231,7 @@ impl JobManager {
             source_size: file.size,
             source_mtime: file.mtime,
             scanner_digest: pending.scanner_digest,
+            scanner_generation: crate::dv_tools::TITLE_SCANNER_GENERATION,
             stats: pending.stats,
         };
         match self.store.publish_dv_title_from_analysis(output).await {

@@ -3300,7 +3300,7 @@ async fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise
     };
     let unbound = revision(store.dv_title_demands(&scanner, 0, crate::media_sessions::unix_ms()).await.expect("demand"));
     let bound = store
-        .bind_dv_title_demand(unbound, &scanner)
+        .bind_dv_title_demand(unbound, &scanner, 1, 1_000)
         .await
         .expect("bind")
         .expect("bound");
@@ -3315,7 +3315,7 @@ async fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise
     let requested = revision(store.dv_title_demands(&scanner, 0, crate::media_sessions::unix_ms()).await.expect("demand"));
     assert!(requested > bound, "{bound} -> {requested}");
     let rebound = store
-        .bind_dv_title_demand(requested, &scanner)
+        .bind_dv_title_demand(requested, &scanner, 1, 1_000)
         .await
         .expect("bind")
         .expect("bound");

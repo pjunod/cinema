@@ -1786,6 +1786,9 @@ mod tests {
             // v6 view and marker and the original analysis view, first.
             "INSERT INTO subtitle_managed_schema VALUES(1,7)",
             "CREATE TABLE IF NOT EXISTS analysis_source_scope_schema",
+            // v139: the shared title rewind restores the exact v2 trigger
+            // definitions and marker before removing the authority columns.
+            "INSERT INTO dv_title_jobs_schema VALUES(1,3)",
         ];
 
         assert!(

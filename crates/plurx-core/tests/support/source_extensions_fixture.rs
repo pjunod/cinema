@@ -901,12 +901,53 @@ pub(crate) fn rewind_empty_source_extensions_to_v121(connection: &rusqlite::Conn
 
 const ANALYSIS_SCOPE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('analysis_required_resources','analysis_source_scope_schema') AND sql IS NOT NULL ORDER BY name";
 
+/// Restore the historical title extension without dropping revisions or
+/// changing SQLite's AUTOINCREMENT sequence.
+fn rewind_title_v3_to_v138(conn: &rusqlite::Connection) {
+    use title_extension_fixture::{assert_title_fixture_generation, title_fixture_shape};
+    let version = conn
+        .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+        .expect("title generation ordinal");
+    if version != 139 {
+        return;
+    }
+    assert_title_fixture_generation(conn, 3);
+    let source = title_fixture_shape(2);
+    let mut plan = vec![
+        "DROP TRIGGER dv_title_jobs_bind_authority;".to_owned(),
+        "DROP TRIGGER dv_title_jobs_scanner_authority;".to_owned(),
+        "DROP TRIGGER dv_title_jobs_bind;".to_owned(),
+        "DROP TRIGGER dv_title_jobs_publish;".to_owned(),
+        "ALTER TABLE dv_title_jobs_demand DROP COLUMN aggregate_revision;".to_owned(),
+        "ALTER TABLE dv_title_jobs_demand DROP COLUMN scanner_generation;".to_owned(),
+        "DROP TABLE dv_title_jobs_schema;".to_owned(),
+    ];
+    for name in [
+        "dv_title_jobs_bind",
+        "dv_title_jobs_publish",
+        "dv_title_jobs_schema",
+    ] {
+        let (_, sql) = source
+            .iter()
+            .find(|(object, _)| object == name)
+            .expect("v2 witness");
+        plan.push(format!("{};", sql.trim_end_matches(';')));
+    }
+    plan.push("INSERT INTO dv_title_jobs_schema VALUES(1,2); PRAGMA user_version=138;".into());
+    within_fixture_savepoint(conn, || {
+        conn.execute_batch(&plan.join("\n"))
+            .expect("restore v2 title extension");
+        assert_title_fixture_generation(conn, 2);
+    });
+}
+
 /// Rewind v138 (analysis reads only its file's root) and v137 (managed v7:
 /// a per-file job reads only its file's root) to v136. Each requires its exact
 /// published shape and marker, then restores the original analysis view and
 /// the managed v6 view with marker 6. Only views and markers change, so no
 /// queued work or reservation is discarded.
 fn rewind_file_root_scope_to_v136(conn: &rusqlite::Connection) {
+    rewind_title_v3_to_v138(conn);
     let ordinal = |conn: &rusqlite::Connection| {
         conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .expect("file-root scope ordinal")

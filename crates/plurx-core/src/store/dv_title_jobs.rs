@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const SCHEMA_V1: &str = include_str!("dv_title_jobs.sql");
 pub(crate) const MIGRATION_V2: &str = include_str!("dv_title_jobs_v2.sql");
-pub(crate) const SCHEMA: &str = concat!(
+pub(crate) const MIGRATION_V3: &str = include_str!("dv_title_jobs_v3.sql");
+pub(crate) const SCHEMA_V2: &str = concat!(
     include_str!("dv_title_jobs.sql"),
     "\n-- next statement\n",
     include_str!("dv_title_jobs_v2.sql")
@@ -35,6 +36,10 @@ pub struct TitleDemand {
     #[serde(default)]
     pub scanner_digest: Option<String>,
     #[serde(default)]
+    pub scanner_generation: i64,
+    #[serde(default)]
+    pub aggregate_current: bool,
+    #[serde(default)]
     pub fel_head_target: Option<String>,
     #[serde(default)]
     pub fel_head_recipe: Option<String>,
@@ -56,6 +61,7 @@ impl TitleMaintenanceCursor {
         &mut self,
         store: &dyn super::BackgroundJobStore,
         scanner: &str,
+        generation: i64,
         now_ms: i64,
     ) -> Result<(Vec<TitleDemand>, &mut i64), StoreError> {
         if self.revisit_next {
@@ -69,7 +75,13 @@ impl TitleMaintenanceCursor {
             // contains an observation this worker cannot decode or read.
             self.revisit_next = false;
             let rows = store
-                .dv_title_demands_through(scanner, self.revisit_after, self.revisit_through, now_ms)
+                .dv_title_demands_through(
+                    scanner,
+                    Some(generation),
+                    self.revisit_after,
+                    self.revisit_through,
+                    now_ms,
+                )
                 .await?;
             if !rows.is_empty() {
                 return Ok((rows, &mut self.revisit_after));
@@ -83,7 +95,13 @@ impl TitleMaintenanceCursor {
         // eligible for its turn. At startup that prefix is still empty.
         self.revisit_next = self.forward_after > 0;
         let rows = store
-            .dv_title_demands(scanner, self.forward_after, now_ms)
+            .dv_title_demands_through(
+                scanner,
+                Some(generation),
+                self.forward_after,
+                i64::MAX,
+                now_ms,
+            )
             .await?;
         if rows.is_empty() {
             *self = Self::default();
@@ -101,6 +119,7 @@ pub struct TitleViewerRequest {
     pub viewer: String,
     pub request: crate::transcode::dv_fel_qualification::FelRecipeRequest,
     pub scanner_digest: String,
+    pub scanner_generation: i64,
     pub deadline_ms: i64,
     pub now_ms: i64,
 }
@@ -134,6 +153,7 @@ pub struct AnalysisTitleOutput {
     pub source_size: i64,
     pub source_mtime: i64,
     pub scanner_digest: String,
+    pub scanner_generation: i64,
     pub stats: DvTitleStats,
 }
 /// What became of an analysis pass's aggregate.
@@ -161,7 +181,7 @@ pub struct PublishTitleJob {
 
 const DEMAND_ROWS: &str = r#"
 WITH candidates AS (
- SELECT d.revision,d.terminal,d.scanner_digest,file.id,file.size,file.mtime,file.probe_json,
+ SELECT d.revision,d.terminal,d.scanner_digest,d.scanner_generation,d.aggregate_revision,file.id,file.size,file.mtime,file.probe_json,
  (SELECT json_object('node',w.target_node_id,'recipe',w.request_digest)
   FROM background_jobs j JOIN background_job_waiters w ON w.job_id=j.id
   WHERE w.consumer_kind='native_fel_head' AND w.deadline_ms>json_extract($1,'$.now')
@@ -192,7 +212,8 @@ WITH candidates AS (
 )
 SELECT json_object('file_id',file.id,'probe_revision',file.revision,
  'source_size',file.size,'source_mtime',file.mtime,'probe_json',file.probe_json,
- 'scanner_digest',file.scanner_digest,'playback_recipes',json(file.playback_recipes),
+ 'scanner_digest',file.scanner_digest,'scanner_generation',file.scanner_generation,
+ 'aggregate_current',json(CASE WHEN file.aggregate_revision=file.revision THEN 'true' ELSE 'false' END),'playback_recipes',json(file.playback_recipes),
  'playback_requested',json(CASE WHEN json_array_length(file.playback_recipes)>0 THEN 'true' ELSE 'false' END),
  'fel_head_target',json_extract(file.fel_head,'$.node'),
  'fel_head_recipe',json_extract(file.fel_head,'$.recipe'),
@@ -215,6 +236,8 @@ fn maintenance_demands_sql() -> String {
         r#"
 WHERE file.revision>json_extract($1,'$.after') AND file.revision<=json_extract($1,'$.through')
  AND (json_extract($1,'$.file_id') IS NULL OR file.id=json_extract($1,'$.file_id'))
+ AND (json_extract($1,'$.generation') IS NULL OR file.scanner_generation<json_extract($1,'$.generation')
+  OR (file.scanner_generation=json_extract($1,'$.generation') AND file.scanner_digest IS json_extract($1,'$.scanner')))
  AND (file.terminal=0 OR file.scanner_digest IS NOT json_extract($1,'$.scanner'))
  AND (json_array_length(file.playback_recipes)>0 OR NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
  THEN json_extract(file.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END))
@@ -227,12 +250,14 @@ ORDER BY file.revision LIMIT 128"#
 pub(super) async fn demands<T: QueueSql>(
     store: &T,
     scanner: &str,
+    generation: Option<i64>,
     after: i64,
     through: i64,
     now_ms: i64,
     file_id: Option<i64>,
 ) -> Result<Vec<TitleDemand>, StoreError> {
     if !digest(scanner)
+        || generation.is_some_and(|generation| generation <= 0)
         || after < 0
         || through < after
         || now_ms < 0
@@ -243,7 +268,7 @@ pub(super) async fn demands<T: QueueSql>(
     let rows = store
         .queue_sql(
             maintenance_demands_sql(),
-            encode(&serde_json::json!({"scanner":scanner,"after":after,"through":through,"now":now_ms,"file_id":file_id}))?,
+            encode(&serde_json::json!({"scanner":scanner,"generation":generation,"after":after,"through":through,"now":now_ms,"file_id":file_id}))?,
             false,
             true,
         )
@@ -268,7 +293,7 @@ WITH live AS MATERIALIZED (
  WHERE consumer_kind='playback_qualification' AND state IN ('pending','awaiting_hydration')
   AND deadline_ms>json_extract($1,'$.now') AND length(consumer_ref)=64
 ), eligible AS (
- SELECT d.revision,d.scanner_digest,f.id,f.size,f.mtime,f.probe_json,w.consumer_ref,j.id AS job_id,j.state,j.lease_expires_ms
+ SELECT d.revision,d.scanner_digest,d.scanner_generation,d.aggregate_revision,f.id,f.size,f.mtime,f.probe_json,w.consumer_ref,j.id AS job_id,j.state,j.lease_expires_ms
  FROM live w JOIN background_jobs j ON j.id=w.job_id
  JOIN dv_title_jobs_demand d ON d.file_id=json_extract(j.payload_json,'$.file_id')
  JOIN files f ON f.id=d.file_id
@@ -283,12 +308,18 @@ WITH live AS MATERIALIZED (
    OR (json_extract($1,'$.file') IS NULL AND d.revision>json_extract($1,'$.after')))
 )
 SELECT json_object('file_id',id,'probe_revision',revision,'source_size',size,'source_mtime',mtime,
- 'probe_json',probe_json,'scanner_digest',scanner_digest,'playback_requested',json('true'),
+ 'probe_json',probe_json,'scanner_digest',scanner_digest,'scanner_generation',scanner_generation,
+ 'aggregate_current',json(CASE WHEN aggregate_revision=revision THEN 'true' ELSE 'false' END),'playback_requested',json('true'),
  'playback_recipes',json_group_array(DISTINCT consumer_ref),
  'active_job_id',COALESCE(min(CASE WHEN state='running' AND lease_expires_ms>json_extract($1,'$.now') THEN job_id END),min(CASE WHEN state='queued' THEN job_id END),min(job_id)),'queued_job_id',min(CASE WHEN state='queued' THEN job_id ELSE NULL END)) AS result_json
 FROM eligible GROUP BY revision ORDER BY revision LIMIT 128
 "#.into(),encode(&serde_json::json!({"after":after,"now":now_ms,"file":file_id}))?,false,true).await?;
     rows.iter().map(|row| decode(row)).collect()
+}
+
+pub(super) enum BindAdmission {
+    Worker { now_ms: i64 },
+    Analysis,
 }
 
 /// Bind a trusted installed scanner to this revision. The command atomically
@@ -297,11 +328,17 @@ pub(super) async fn bind<T: QueueSql>(
     store: &T,
     revision: i64,
     scanner: &str,
+    generation: i64,
+    admission: BindAdmission,
 ) -> Result<Option<i64>, StoreError> {
-    if revision <= 0 || !digest(scanner) {
+    let now_ms = match admission {
+        BindAdmission::Worker { now_ms } => Some(now_ms),
+        BindAdmission::Analysis => None,
+    };
+    if revision <= 0 || !digest(scanner) || generation <= 0 || now_ms.is_some_and(|now| now < 0) {
         return Err(StoreError::Task("invalid title scanner binding".into()));
     }
-    let body = serde_json::json!({"id":uuid::Uuid::new_v4().to_string(),"revision":revision,"scanner":scanner});
+    let body = serde_json::json!({"id":uuid::Uuid::new_v4().to_string(),"revision":revision,"scanner":scanner,"generation":generation,"now_ms":now_ms});
     let rows=store.queue_sql(r#"
 INSERT INTO background_job_commands(id,operation,request_json,result_json)
 SELECT json_extract($1,'$.id'),'bind_dv_title',json($1),json_object(
@@ -310,9 +347,20 @@ SELECT json_extract($1,'$.id'),'bind_dv_title',json($1),json_object(
   THEN (SELECT seq+1 FROM sqlite_sequence WHERE name='dv_title_jobs_demand') ELSE revision END,
  'rotate',scanner_digest IS NOT NULL AND scanner_digest IS NOT json_extract($1,'$.scanner'),
  'changed',scanner_digest IS NOT json_extract($1,'$.scanner'),'bound',json('true'))
-FROM dv_title_jobs_demand WHERE revision=json_extract($1,'$.revision')
+FROM dv_title_jobs_demand d WHERE revision=json_extract($1,'$.revision')
+ AND (scanner_generation<json_extract($1,'$.generation') OR
+  (scanner_generation=json_extract($1,'$.generation') AND scanner_digest IS json_extract($1,'$.scanner')))
  AND (scanner_digest IS NULL OR scanner_digest IS json_extract($1,'$.scanner')
-  OR (SELECT seq FROM sqlite_sequence WHERE name='dv_title_jobs_demand')<9223372036854775807)
+  OR ((SELECT seq FROM sqlite_sequence WHERE name='dv_title_jobs_demand')<9223372036854775807
+   AND NOT EXISTS(SELECT 1 FROM background_jobs j
+    WHERE j.kind='dv_title_scan' AND j.state IN ('queued','running','cancelling')
+     AND json_extract(j.payload_json,'$.file_id')=d.file_id
+     AND json_extract(j.payload_json,'$.probe_revision')=d.revision
+     AND (json_extract($1,'$.now_ms') IS NULL OR EXISTS(
+      SELECT 1 FROM background_job_waiters w WHERE w.job_id=j.id
+       AND w.consumer_kind IN ('playback_qualification','native_fel_head')
+       AND w.state IN ('pending','awaiting_hydration')
+       AND w.deadline_ms>json_extract($1,'$.now_ms'))))))
 RETURNING result_json
 "#.into(),encode(&body)?,true,true).await?;
     #[derive(Deserialize)]
@@ -334,6 +382,8 @@ RETURNING result_json
 const CARRY_FORWARD_FROM: &str = r#"
 FROM dv_title_jobs_demand AS d JOIN files AS f ON f.id=d.file_id
 WHERE json_valid(f.probe_json)
+ AND d.scanner_generation<json_extract($1,'$.generation')
+ AND d.aggregate_revision=d.revision
  AND d.scanner_digest IN (SELECT value FROM json_each(json_extract($1,'$.predecessors')))
  AND json_extract(f.probe_json,'$.plurx_dv_title_v1.complete')=1
  AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan'
@@ -343,16 +393,17 @@ WHERE json_valid(f.probe_json)
 
 /// Re-point title demand from a predecessor scanner to `scanner` in place,
 /// keeping its generation, its terminal state and its published aggregate,
-/// instead of the rotation [`bind`] performs, which drops the aggregate and
-/// reads the whole title again. Everything else still rotates
-/// when the worker reaches it. A read decides first, so a pass with nothing
+/// instead of the rotation [`bind`] performs, which requires a fresh read.
+/// Everything else still rotates when the worker reaches it. A read decides first, so a pass with nothing
 /// to carry writes nothing. Returns how many titles were carried.
 pub(super) async fn carry_forward<T: QueueSql>(
     store: &T,
     scanner: &str,
+    generation: i64,
     predecessors: &[String],
 ) -> Result<u64, StoreError> {
     if !digest(scanner)
+        || generation <= 0
         || predecessors
             .iter()
             .any(|predecessor| !digest(predecessor) || predecessor == scanner)
@@ -364,16 +415,15 @@ pub(super) async fn carry_forward<T: QueueSql>(
     if predecessors.is_empty() {
         return Ok(0);
     }
-    let body = encode(&serde_json::json!({"scanner": scanner, "predecessors": predecessors}))?;
+    let body = encode(
+        &serde_json::json!({"scanner": scanner, "generation": generation, "predecessors": predecessors}),
+    )?;
     #[derive(Deserialize)]
     struct Count {
         count: u64,
     }
-    // Every maintenance turn asks, so ask the local replica, and the write
-    // re-decides. A replica that has not yet applied a predecessor's fresh
-    // aggregate answers no, and this turn may then rotate that title; only a
-    // node still running the predecessor publishes one, which happens only
-    // during a mixed-version rollout, when those nodes rotate titles anyway.
+    // Consult the local replica first. The write rechecks compatibility
+    // and scanner authority against the committed state.
     let count = format!("SELECT json_object('count',count(*)) AS result_json {CARRY_FORWARD_FROM}");
     let pending = match store.local_replica_sql(count.clone(), body.clone()).await? {
         Some(rows) => rows,
@@ -390,7 +440,8 @@ pub(super) async fn carry_forward<T: QueueSql>(
     let carried = store
         .queue_sql(
             format!(
-                "UPDATE dv_title_jobs_demand SET scanner_digest=json_extract($1,'$.scanner')
+                "UPDATE dv_title_jobs_demand SET scanner_digest=json_extract($1,'$.scanner'),
+ scanner_generation=json_extract($1,'$.generation')
 WHERE revision IN (SELECT d.revision {CARRY_FORWARD_FROM})
 RETURNING 'true' AS result_json"
             ),
@@ -434,8 +485,8 @@ pub(super) async fn publish<T: QueueSql>(
 
 /// Offer an analysis pass's aggregate to the title's demand. The demand is
 /// first bound to the pass's scanner exactly as the title worker binds it, so
-/// a different scanner's generation is rotated away and its aggregate dropped;
-/// the aggregate is then stored through the same `publish_dv_title` command a
+/// a successor may rotate demand. The fresh aggregate then replaces any
+/// retained result through the same `publish_dv_title` command a
 /// job uses, with no job attached. The demand stays open: the title worker
 /// finds this revision's aggregate already stored and settles the job without
 /// a second read of the file (and qualifies a FEL title while it holds it).
@@ -447,6 +498,7 @@ pub(super) async fn publish_from_analysis<T: QueueSql>(
         || output.source_size < 0
         || output.source_mtime < 0
         || !digest(&output.scanner_digest)
+        || output.scanner_generation <= 0
         || !output.stats.complete
         || output.stats.eligibility() == TitleEligibility::InvalidAggregate
         || encode(&output)?.len() > 64 * 1024
@@ -474,12 +526,16 @@ pub(super) async fn publish_from_analysis<T: QueueSql>(
             ("current", _) => return Ok(AnalysisTitleOutcome::Current),
             ("busy", _) => return Ok(AnalysisTitleOutcome::Busy),
             ("unbound", Some(revision)) => {
-                if bind(store, revision, &output.scanner_digest)
-                    .await?
-                    .is_none()
-                {
-                    return Ok(AnalysisTitleOutcome::NoDemand);
-                }
+                // The bind compares in-flight work again in its own write.
+                // Re-read the verdict if a concurrent enqueue wins the race.
+                bind(
+                    store,
+                    revision,
+                    &output.scanner_digest,
+                    output.scanner_generation,
+                    BindAdmission::Analysis,
+                )
+                .await?;
             }
             _ => return Ok(AnalysisTitleOutcome::NoDemand),
         }
@@ -497,12 +553,15 @@ WITH input AS (SELECT json($1) AS body), verdict AS (
    OR f.mtime IS NOT json_extract(body,'$.output.source_mtime')
    OR NOT (f.video_codec='hevc' AND f.dv_profile IN (5,7,8) AND f.dv_rpu_present=1
     AND json_valid(f.probe_json)) THEN 'no_demand'
+  WHEN d.scanner_generation>json_extract(body,'$.output.scanner_generation')
+   OR (d.scanner_generation=json_extract(body,'$.output.scanner_generation')
+    AND d.scanner_digest IS NOT json_extract(body,'$.output.scanner_digest')) THEN 'no_demand'
   WHEN d.scanner_digest IS NOT json_extract(body,'$.output.scanner_digest')
    AND EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
     AND job.state IN ('queued','running','cancelling')
     AND json_extract(job.payload_json,'$.file_id')=d.file_id) THEN 'busy'
-  WHEN d.scanner_digest IS NOT json_extract(body,'$.output.scanner_digest') THEN 'unbound'
-  WHEN d.terminal=1 AND json_type(f.probe_json,'$.plurx_dv_title_v1') IS NOT NULL THEN 'current'
+  WHEN d.scanner_generation<json_extract(body,'$.output.scanner_generation') THEN 'unbound'
+  WHEN d.terminal=1 AND d.aggregate_revision=d.revision THEN 'current'
   ELSE 'published' END AS outcome
  FROM input LEFT JOIN dv_title_jobs_demand d ON d.file_id=json_extract(body,'$.output.file_id')
  LEFT JOIN files f ON f.id=d.file_id
@@ -729,43 +788,46 @@ RETURNING 'true' AS result_json",
     Ok(!rows.is_empty())
 }
 
-/// Ask for one title to be rescanned and re-qualified: rebind its title
-/// demand to `binding`, which no scanner digest equals, so the title worker
-/// rebinds it to its scanner and runs the title job again. `false` when the
-/// title has no demand (not a Dolby Vision title the scanner covers), or when
-/// a title job for it is already queued, running or cancelling: rotating the
-/// demand would cancel that attempt, and the attempt qualifies the title
-/// anyway if it is due.
+/// Request a fresh title read for FEL requalification. The same scanner
+/// retains authority while the new revision fences old jobs and aggregate reuse.
 pub(super) async fn request_requalification<T: QueueSql>(
     store: &T,
     file_id: i64,
-    binding: &str,
+    scanner: &str,
+    generation: i64,
 ) -> Result<bool, StoreError> {
-    if file_id <= 0 || !digest(binding) {
+    if file_id <= 0 || !digest(scanner) || generation <= 0 {
         return Err(StoreError::Task("invalid FEL re-qualification".into()));
     }
-    #[derive(Deserialize)]
-    struct Revision {
-        revision: i64,
-    }
+    let body = encode(&serde_json::json!({
+        "id": uuid::Uuid::new_v4().to_string(),
+        "file_id": file_id,
+        "scanner": scanner,
+        "generation": generation,
+        "rescan": true
+    }))?;
     let rows = store
         .queue_sql(
-            "SELECT json_object('revision',d.revision) AS result_json FROM dv_title_jobs_demand d
-WHERE d.file_id=json_extract($1,'$.file_id')
+            r#"
+INSERT INTO background_job_commands(id,operation,request_json,result_json)
+SELECT json_extract($1,'$.id'),'bind_dv_title',json($1),json_object(
+ 'file_id',d.file_id,'previous_revision',d.revision,'revision',seq.seq+1,'rotate',1)
+FROM dv_title_jobs_demand d JOIN sqlite_sequence seq ON seq.name='dv_title_jobs_demand'
+WHERE d.file_id=json_extract($1,'$.file_id') AND seq.seq<9223372036854775807
+ AND d.scanner_digest=json_extract($1,'$.scanner')
+ AND d.scanner_generation<=json_extract($1,'$.generation')
  AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
   AND job.state IN ('queued','running','cancelling')
-  AND json_extract(job.payload_json,'$.file_id')=d.file_id)"
-                .into(),
-            encode(&serde_json::json!({"file_id": file_id}))?,
-            false,
+  AND json_extract(job.payload_json,'$.file_id')=d.file_id)
+RETURNING result_json
+"#
+            .into(),
+            body,
+            true,
             true,
         )
         .await?;
-    let Some(row) = rows.first() else {
-        return Ok(false);
-    };
-    let revision = decode::<Revision>(row)?.revision;
-    Ok(bind(store, revision, binding).await?.is_some())
+    Ok(!rows.is_empty())
 }
 
 /// Reopen the same complete title generation to build an admitted head
@@ -1055,6 +1117,7 @@ pub(super) async fn attach_viewer<T: QueueSql>(
         || input.now_ms < 0
         || input.deadline_ms <= input.now_ms
         || !digest(&input.scanner_digest)
+        || input.scanner_generation <= 0
         || !input.request.valid()
     {
         return Err(StoreError::Task("invalid title viewer demand".into()));
@@ -1064,8 +1127,10 @@ pub(super) async fn attach_viewer<T: QueueSql>(
     // installed scanner's authority. Reopening happens at the explicit event,
     // never in the scheduler's read-only discovery loop.
     let rows=store.queue_sql(r#"
-UPDATE dv_title_jobs_demand AS d SET scanner_digest=COALESCE(scanner_digest,json_extract($1,'$.scanner_digest')),terminal=0
+UPDATE dv_title_jobs_demand AS d SET scanner_digest=json_extract($1,'$.scanner_digest'),
+ scanner_generation=json_extract($1,'$.scanner_generation'),terminal=0
 WHERE d.file_id=json_extract($1,'$.file_id') AND (scanner_digest IS NULL OR scanner_digest=json_extract($1,'$.scanner_digest'))
+ AND scanner_generation<=json_extract($1,'$.scanner_generation')
  AND NOT EXISTS(SELECT 1 FROM background_job_waiters w JOIN background_jobs j ON j.id=w.job_id
   WHERE w.request_scope='playback-qualification' AND w.request_id=json_extract($1,'$.viewer')
    AND (w.consumer_ref=json_extract($1,'$.request.identity') OR w.consumer_ref=json_extract($1,'$.viewer'))

@@ -1378,6 +1378,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_managed_schema::FILE_ROOT_MIGRATION,
     // v138: a per-file analysis request reads only the library root holding its file.
     super::analysis_source_scope::SCHEMA,
+    // v139: monotonic scanner authority and aggregate provenance.
+    super::dv_title_jobs::MIGRATION_V3,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

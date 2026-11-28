@@ -390,6 +390,61 @@ pub fn find_quality_candidate(
     })
 }
 
+/// The public catalogue: one row per candidate ID, in first-seen order.
+///
+/// The internal catalogue keeps one row per worker that can produce a recipe,
+/// and an ID is derived from the recipe alone, so two workers with the same
+/// encoder and binary offer the same ID twice. Every public reader (the
+/// start and Decision responses, recovery's incumbent bind, link priors, the
+/// web and native clients) addresses a row by ID, so the public list repeats
+/// none.
+///
+/// Twins differ only in their worker's own evidence, which Auto selection
+/// reads: a complete cache, a production proof (`sustainable`) and the
+/// measured costs that come with them. The kept row is a real worker's row,
+/// never a merge that would claim evidence no single worker has: the twin
+/// with a complete cache, else one with a production proof, else the first
+/// (the local worker's rows come first in every catalogue). An ID whose rows
+/// carry different full recipes is a shortened-key collision and is left out
+/// entirely: neither row can be addressed without ambiguity.
+pub fn unique_public_candidates(
+    rows: impl IntoIterator<Item = QualityCandidate>,
+) -> Vec<QualityCandidate> {
+    fn evidence(row: &QualityCandidate) -> (bool, bool) {
+        (row.complete_cache, row.sustainable)
+    }
+    let mut unique: Vec<QualityCandidate> = Vec::new();
+    let mut collided = Vec::new();
+    for row in rows {
+        match unique.iter_mut().find(|kept| kept.id == row.id) {
+            None => unique.push(row),
+            Some(kept) if kept.recipe_digest != row.recipe_digest => collided.push(row.id),
+            Some(kept) => {
+                if evidence(&row) > evidence(kept) {
+                    *kept = row;
+                }
+            }
+        }
+    }
+    unique.retain(|row| !collided.contains(&row.id));
+    unique
+}
+
+/// The one public row for `id`. A response written before the public
+/// catalogue repeated no ID can still list a recipe once per worker; such
+/// twins name the same full recipe and route, so they address one row. Rows
+/// with the same ID and another recipe or route are ambiguous: `None`.
+pub fn single_public_row(
+    candidates: &[QualityCandidate],
+    id: CandidateId,
+) -> Option<&QualityCandidate> {
+    let mut matches = candidates.iter().filter(|candidate| candidate.id == id);
+    let first = matches.next()?;
+    matches
+        .all(|other| other.recipe_digest == first.recipe_digest && other.route == first.route)
+        .then_some(first)
+}
+
 #[cfg(test)]
 mod policy_regressions {
     use super::*;
@@ -419,6 +474,78 @@ mod policy_regressions {
             sustainable,
         }
     }
+    #[test]
+    fn the_public_catalogue_lists_a_recipe_offered_by_two_workers_once() {
+        let local = candidate(2160, CandidateRoute::Encode, false, false);
+        let other = candidate(1080, CandidateRoute::Encode, false, false);
+        let rows =
+            unique_public_candidates([local.clone(), other.clone(), local.clone(), other.clone()]);
+        assert_eq!(rows, vec![local, other]);
+    }
+
+    #[test]
+    fn the_public_twin_is_the_worker_row_with_the_best_evidence() {
+        let unproven = candidate(2160, CandidateRoute::Encode, false, false);
+        let mut proven = unproven.clone();
+        proven.sustainable = true;
+        proven.average_bps = Some(1); // its measured cost travels with its proof
+        let mut cached = unproven.clone();
+        cached.complete_cache = true;
+        // A proof beats none, wherever it is listed; a complete cache beats a proof.
+        assert_eq!(
+            unique_public_candidates([unproven.clone(), proven.clone()]),
+            vec![proven.clone()]
+        );
+        assert_eq!(
+            unique_public_candidates([proven.clone(), unproven.clone()]),
+            vec![proven.clone()]
+        );
+        assert_eq!(
+            unique_public_candidates([proven.clone(), cached.clone(), unproven]),
+            vec![cached]
+        );
+        // Equal evidence keeps the first row (the local worker's).
+        let mut twin = proven.clone();
+        twin.average_bps = Some(2);
+        assert_eq!(
+            unique_public_candidates([proven.clone(), twin]),
+            vec![proven]
+        );
+    }
+
+    #[test]
+    fn a_persisted_response_resolves_worker_twins_to_one_row() {
+        let incumbent = candidate(2160, CandidateRoute::Encode, false, false);
+        let other = candidate(1080, CandidateRoute::Encode, false, false);
+        let twins = [incumbent.clone(), other, incumbent.clone()];
+        assert_eq!(single_public_row(&twins, incumbent.id), Some(&incumbent));
+        let mut collided = incumbent.clone();
+        collided.recipe_digest = [1; 32];
+        assert_eq!(
+            single_public_row(&[incumbent.clone(), collided], incumbent.id),
+            None
+        );
+        let mut rerouted = incumbent.clone();
+        rerouted.route = CandidateRoute::Remux;
+        assert_eq!(
+            single_public_row(&[incumbent.clone(), rerouted], incumbent.id),
+            None
+        );
+        assert_eq!(single_public_row(&[], incumbent.id), None);
+    }
+
+    #[test]
+    fn a_shortened_id_collision_leaves_the_public_catalogue() {
+        let first = candidate(2160, CandidateRoute::Encode, false, false);
+        let mut colliding = candidate(1080, CandidateRoute::Encode, false, false);
+        colliding.id = first.id; // same 16-byte key, another full recipe
+        let kept = candidate(720, CandidateRoute::Encode, false, false);
+        assert_eq!(
+            unique_public_candidates([first, kept.clone(), colliding]),
+            vec![kept]
+        );
+    }
+
     fn aspect() -> DisplayAspect {
         DisplayAspect::from_source(3840, 2160, Some((1, 1)), Some(0))
             .expect("fixture supplies a valid policy input")

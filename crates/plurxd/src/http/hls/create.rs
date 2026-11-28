@@ -98,6 +98,25 @@ pub(crate) fn processed_candidate_kept<'a>(
     })
 }
 
+/// The start response's candidate list: every worker's dispatchable row
+/// (a partial row only from this node), one per candidate ID. Two workers
+/// offering the same recipe share its ID; `unique_public_candidates` keeps
+/// the worker row with the best evidence, the local one when evidence ties.
+pub(super) fn public_quality_candidates(
+    catalog: Option<&crate::media_pool::QualityCatalogResult>,
+    local_node: &str,
+) -> Vec<plurx_core::playback::candidate::QualityCandidate> {
+    plurx_core::playback::candidate::unique_public_candidates(
+        catalog
+            .into_iter()
+            .flat_map(|result| result.candidates.iter())
+            .filter(|entry| {
+                entry.dispatch_supported && (!entry.partial || entry.node_id == local_node)
+            })
+            .map(|entry| entry.candidate.clone()),
+    )
+}
+
 /// Replace one local descriptive row with its admitted executable facts.
 /// A shortened-ID collision is never an implicit recipe substitution.
 pub(super) fn upsert_processed_worker_candidate(
@@ -5190,17 +5209,8 @@ async fn create_with_purpose_attempt(
         quality_catalog_status: quality_catalog.as_ref().map(
             |catalog| serde_json::json!({"complete": catalog.complete, "causes": catalog.causes}),
         ),
-        quality_candidates: quality_negotiated.then(|| {
-            quality_catalog
-                .as_ref()
-                .into_iter()
-                .flat_map(|result| result.candidates.iter())
-                .filter(|entry| {
-                    entry.dispatch_supported && (!entry.partial || entry.node_id == state.node_id)
-                })
-                .map(|entry| entry.candidate.clone())
-                .collect()
-        }),
+        quality_candidates: quality_negotiated
+            .then(|| public_quality_candidates(quality_catalog.as_ref(), &state.node_id)),
         session_id: info.session_id.clone(),
         playlist_url,
         duration_ms: info.duration_ms,
@@ -7102,17 +7112,7 @@ impl PreparedSourcePlayback {
                 .as_ref()
                 .map(|context| context.candidate_id),
             quality_candidates: quality_negotiated.then(|| {
-                self.resolved
-                    .quality_catalog
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|catalog| catalog.candidates.iter())
-                    .filter(|entry| {
-                        entry.dispatch_supported
-                            && (!entry.partial || entry.node_id == state.node_id)
-                    })
-                    .map(|entry| entry.candidate.clone())
-                    .collect()
+                public_quality_candidates(self.resolved.quality_catalog.as_ref(), &state.node_id)
             }),
             session_id: info.session_id.clone(),
             playlist_url,
