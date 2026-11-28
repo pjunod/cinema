@@ -216,6 +216,8 @@ pub(super) async fn intent<T: QueueSql>(
    AND EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.user_id'))
    AND (SELECT count(*) FROM subtitle_translation_requests)<16352
    AND (SELECT count(*) FROM subtitle_translation_requests WHERE user_id=json_extract($1,'$.user_id'))<1016
+   AND (SELECT COALESCE(sum(length(CAST(outcome_json AS BLOB))),0) FROM subtitle_translation_requests)+2048<8323072
+   AND (SELECT COALESCE(sum(length(CAST(outcome_json AS BLOB))),0) FROM subtitle_translation_requests WHERE user_id=json_extract($1,'$.user_id'))+2048<507904
  ON CONFLICT(user_id,request_id) DO NOTHING"#.into(),
                 encode(&body)?, true, false,
             ).await?;
