@@ -521,8 +521,8 @@ async function saveSourceReaders(btn){
   if(btn)btn.disabled=true;
   const number=input=>input.value.trim()===""?null:Number(input.value);
   const body={source_readers_per_root:Number((/** @type {HTMLInputElement} */(document.getElementById("source-readers-per-root"))).value)};
-  const roots=[...document.querySelectorAll("[data-source-reader-root]")];
-  if(roots.length)body.source_readers_root_overrides=Object.fromEntries(roots.map(row=>[(/** @type {HTMLElement} */(row)).dataset.sourceReaderRoot,row.dataset.sourceReaderRemoved==="true"?null:number(row.querySelector("input"))]));
+  const roots=/** @type {NodeListOf<HTMLTableRowElement>} */(document.querySelectorAll("[data-source-reader-root]"));
+  if(roots.length)body.source_readers_root_overrides=Object.fromEntries([...roots].map(row=>[row.dataset.sourceReaderRoot,row.dataset.sourceReaderRemoved==="true"?null:number(row.querySelector("input"))]));
   const domains=[...document.querySelectorAll("[data-source-reader-domain]")];
   if(domains.length)body.storage_domain_source_readers=Object.fromEntries(domains.map(row=>[(/** @type {HTMLElement} */(row)).dataset.sourceReaderDomain,number(row.querySelector("input"))]));
   try{
