@@ -515,7 +515,7 @@
         "table": "proposal \u00a74.1 SQLite queue adapter",
         "scope": "item",
         "item": "impl QueueSql for SqliteStore",
-        "item_sha256": "b3a5f09752efee0c158c6766be975710198c2fb8cb95904c4f51c0f829f5a1d8"
+        "item_sha256": "5ed0910de60a9b2ed284c7cea4124fcf5d404240f44931d527d2a6c2a0a3a3df"
       },
       {
         "anchor": "impl CoordinationStore for SqliteStore {",
