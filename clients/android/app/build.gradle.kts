@@ -125,6 +125,8 @@ val plurxVersionCode: Int = providers.gradleProperty("plurxVersionCode").orNull?
     derived.standardOutput.asText.get().trim().toInt()
 }
 
+val robolectricRepositoryOverride = providers.systemProperty("robolectric.dependency.repo.url")
+
 android {
     namespace = "tv.plurx.app"
     compileSdk = 37
@@ -222,7 +224,7 @@ android {
             // Robolectric downloads framework jars outside Gradle's repositories.
             it.systemProperty(
                 "robolectric.dependency.repo.url",
-                providers.systemProperty("robolectric.dependency.repo.url")
+                robolectricRepositoryOverride
                     .orElse("https://maven-central.storage-download.googleapis.com/maven2/").get(),
             )
         }
@@ -262,10 +264,13 @@ val prepareRobolectricSdk = tasks.register<Sync>("prepareRobolectricSdk") {
     into(robolectricSdkDirectory)
 }
 tasks.withType<Test>().configureEach {
-    dependsOn(prepareRobolectricSdk)
-    inputs.dir(robolectricSdkDirectory)
-    systemProperty("robolectric.offline", "true")
-    systemProperty("robolectric.dependency.dir", robolectricSdkDirectory.get().asFile.absolutePath)
+    // An explicit repository override uses Robolectric's own resolver.
+    if (!robolectricRepositoryOverride.isPresent) {
+        dependsOn(prepareRobolectricSdk)
+        inputs.dir(robolectricSdkDirectory)
+        systemProperty("robolectric.offline", "true")
+        systemProperty("robolectric.dependency.dir", robolectricSdkDirectory.get().asFile.absolutePath)
+    }
 }
 
 dependencies {
