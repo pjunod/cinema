@@ -209,3 +209,20 @@ index and reproduces the frozen soundtrack modes and URLs. An unambiguous
 historical split master rebuilds the P49 fixed-grid AAC layout. A historical
 media playlist rebuilds a muxed session. An ambiguous native wrapper requires
 a fresh session.
+
+
+## 8. Encoded VOD uses one verified producer
+
+A VOD transcode with split capability can publish separate video and audio
+playlists for the selected AAC soundtrack. Both come from the same encoded
+window. Projection preserves sample bytes, decode times, and composition
+offsets. The video init supplies the codec, raster, and range. A processed
+Dolby Vision Profile 8.1 init also supplies the supplemental codec and HDR10
+compatibility.
+
+The owner verifies the projected init and the window containing the viewer's
+start position before sealing the master URL. Unsupported media shapes and
+projection deadline refusals keep the encoded muxed media URL. The owner
+retains the selected layout, producer identity, and both child identities
+under media-pool protocol 15. Recovery verifies those identities before
+serving the issued child URLs.

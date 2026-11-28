@@ -624,7 +624,7 @@ impl VodSharedAudioRendition {
                     "split soundtrack plan differs from its verified recipe".into(),
                 ));
             }
-            return Ok(rendition_media_playlist(plan, &self.init_id));
+            return Ok(vod_split_media_playlist(plan, &self.init_id));
         }
         continuous_media_playlist(
             plan,
@@ -648,10 +648,10 @@ fn continuous_media_playlist(
     kind: PlanEntryKind,
 ) -> Result<String, crate::fmp4::Fmp4Error> {
     validate_continuous_media_plan(plan, timescale, span, frame_ticks, kind)?;
-    Ok(rendition_media_playlist(plan, init_id))
+    Ok(vod_split_media_playlist(plan, init_id))
 }
 
-fn rendition_media_playlist(plan: &SegmentPlan, init_id: &str) -> String {
+pub fn vod_split_media_playlist(plan: &SegmentPlan, init_id: &str) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(256 + plan.entries.len() * 48);
     out.push_str("#EXTM3U\n#EXT-X-VERSION:7\n");

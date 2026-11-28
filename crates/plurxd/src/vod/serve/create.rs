@@ -1274,6 +1274,12 @@ impl VodServe {
         session_id: String,
         fences: VodCreateFences<'_>,
     ) -> Result<VodStart, String> {
+        let encoded_split = prepared
+            .request
+            .vod_copy_layout
+            .as_ref()
+            .filter(|layout| layout.encoded() && (layout.pending() || layout.split()))
+            .cloned();
         let fallback = (!prepared.split_soundtracks.is_empty()
             && matches!(
                 prepared.request.vod_copy_layout,
@@ -1296,6 +1302,30 @@ impl VodServe {
                 &fences,
             )
             .await;
+        if let Some(requested) = encoded_split.as_ref() {
+            let now = Instant::now();
+            let owner_deadline = fences
+                .serving_admission
+                .as_ref()
+                .map(|fence| fence.deadline)
+                .or_else(|| {
+                    fences
+                        .release_fence
+                        .as_ref()
+                        .and_then(|fence| fence.deadline)
+                });
+            let budget = owner_deadline.map_or(settings.block_budget, |deadline| {
+                let remaining = deadline.saturating_duration_since(now);
+                settings.block_budget.min(if requested.pending() {
+                    remaining / 2
+                } else {
+                    remaining
+                })
+            });
+            return self
+                .settle_encoded_split(requested, started?, now + budget, &fences)
+                .await;
+        }
         let Some(fallback) = fallback else {
             return started;
         };
@@ -1845,7 +1875,10 @@ impl VodServe {
         } else if current_split || matches!(req.vod_copy_layout, Some(VodCopyLayout::Muxed)) {
             Some(VodCopyLayout::Muxed)
         } else {
-            None
+            req.vod_copy_layout
+                .as_ref()
+                .filter(|layout| layout.encoded())
+                .cloned()
         };
         if matches!(req.vod_copy_layout, Some(VodCopyLayout::SplitV1 { .. }))
             && req.vod_copy_layout != vod_copy_layout
@@ -1965,6 +1998,7 @@ impl VodServe {
             children: Vec::new(),
             requested_audio_index: req.audio_index,
             vod_copy_layout: vod_copy_layout.clone(),
+            encoded_projection: None,
             root_admission,
             processed_reuse_scope,
             processed_reuse_seed: processed_reuse_scope
@@ -2261,6 +2295,7 @@ impl VodServe {
         if let Some(sink) = attachment_owner {
             *sink.lock().expect("first preparation owner") = Some(replacement.response_owner());
         }
+        let incarnation = Arc::clone(&replacement.incarnation);
         sessions.insert(session_id.clone(), replacement);
         {
             let mut observation = self
@@ -2349,6 +2384,7 @@ impl VodServe {
             "vod session attached (start entry {start_entry})"
         );
         Ok(VodStart {
+            incarnation,
             session_id,
             duration_ms,
             split,
@@ -2978,6 +3014,7 @@ impl VodServe {
             children: Vec::new(),
             requested_audio_index: req.audio_index,
             vod_copy_layout: None,
+            encoded_projection: None,
             root_admission,
             processed_reuse_scope,
             processed_reuse_seed: None,
@@ -3123,6 +3160,7 @@ impl VodServe {
         if let Some(outgoing) = sessions.get(&session_id) {
             outgoing.abort_staged_preparation();
         }
+        let incarnation = Arc::clone(&replacement.incarnation);
         sessions.insert(session_id.clone(), replacement);
         // Both reader graphs are committed, so the rendition-wide guards have
         // no further work. They used to live to the end of the function, which
@@ -3164,6 +3202,7 @@ impl VodServe {
             "vod session attached (start entry {start_entry})"
         );
         Ok(VodStart {
+            incarnation,
             session_id,
             duration_ms,
             split: false,
