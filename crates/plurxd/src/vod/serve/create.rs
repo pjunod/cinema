@@ -859,7 +859,7 @@ impl VodServe {
                             && Some(proof.source_node_id.as_str())
                                 == self.shared.cluster_node_id.as_deref()
                     })
-                    .and_then(|proof| proof.refusal.as_deref());
+                    .and_then(|proof| proof.current_refusal());
                 let mut preparation = if cluster_cache_enabled {
                     "HEVC copy needs preparation".to_owned()
                 } else {
@@ -3055,7 +3055,7 @@ impl VodServe {
                             && Some(proof.source_node_id.as_str())
                                 == self.shared.cluster_node_id.as_deref()
                     })
-                    .and_then(|proof| proof.refusal.as_deref());
+                    .and_then(|proof| proof.current_refusal());
                 let mut preparation = if cluster_cache_enabled {
                     "HEVC copy needs preparation".to_owned()
                 } else {

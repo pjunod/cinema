@@ -3794,6 +3794,7 @@ mod tests {
             stream_index: 0,
             slices: 24,
             refusal: None,
+            parser: crate::hevc_configuration::PARSER,
         });
         let first = encode_cluster_fragment_index_blob(&index, &source, &pipeline)
             .expect("HEVC regression fixture");
@@ -4307,6 +4308,7 @@ mod tests {
             stream_index: 0,
             slices: 24,
             refusal: None,
+            parser: crate::hevc_configuration::PARSER,
         });
         let output = cluster_fragment_index_output_identity(&index, &source, &digest('9'))
             .expect("identity");

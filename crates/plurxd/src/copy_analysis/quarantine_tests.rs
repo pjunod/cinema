@@ -153,6 +153,7 @@ fn sealed(init: &Init, rows: Vec<IndexRow>, slices: u64, indexed_hdr10: bool) ->
         stream_index: 0,
         slices,
         refusal: None,
+        parser: plurx_core::hevc_configuration::PARSER,
     });
     index.parameter_sets_constant = true;
     index

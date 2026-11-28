@@ -183,9 +183,12 @@ not confirm playback preparation", while an H.264 title played. The copy owner
 
 ### 6.3 Open
 
-- Index proofs written before this fix keep their refusals (`current_on_node`
-  treats a refusal as current): on the Source node, 35 `extradata lacks …` and 83
-  `parameter sets change` refusals. Re-examining refusals written by the old
-  parser needs a proof field, not a `REVISION` bump, which would re-index
-  every HEVC file.
+- Index proofs written before this fix kept their refusals: on the Source
+  node, 35 `extradata lacks …` and 83 `parameter sets change`. A proof now
+  records the reader generation that wrote it (`Proof::parser`,
+  `hevc_configuration::PARSER = 2`); a refusal from an older reader is not
+  current, so the title is analysed again and VOD answers
+  `hevc_configuration_unverified` until it is, never `unsupported`. Old
+  permits stay valid, since that reader could only refuse wrongly. `REVISION`
+  is unchanged, so no index identity moves; old proofs keep their bytes.
 - Replay Avatar and 3 Body Problem S01E01 on the M4 Air after deploy.
