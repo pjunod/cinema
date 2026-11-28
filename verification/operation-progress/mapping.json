@@ -411,7 +411,7 @@
         "anchor": "last_error_code='producer_retargeted'",
         "scope": "item",
         "item": "trigger subtitle_translation_mutate",
-        "item_sha256": "5eea831521c9739d4ad33eb75f203b3548ec635577037a34d06f40ab20acd637"
+        "item_sha256": "59ce7e092c7d09346195993d7cab0f262f3a2c2b8566d3c55bb5ca89d12d3195"
       },
       {
         "table": "caption claim-continuity effects remain kind-scoped outside selected library model",
