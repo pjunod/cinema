@@ -1,5 +1,7 @@
 # M7 Model B v2: exact composition of general P7 FEL mappings
 
+**Status:** Built. Model B composes admitted P7 FEL mappings for M7.
+
 M7 compares a title's served F+ copy against its original FEL source. The
 source arm is a software model of the FEL signal at each lattice site. Model
 B v1 defined that signal only for identity mapping (two pivots, `0 + 1·x` on
