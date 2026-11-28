@@ -268,11 +268,18 @@ pub fn whisper_language(value: &str) -> bool {
 pub enum ModelAction {
     Install,
     Verify,
+    /// Legacy: the separate translation install path that wrote per-profile
+    /// capability rows. Kept only so queued rows still deserialize; workers
+    /// cancel them and nothing enqueues or publishes them any more. One
+    /// model receipt now covers transcription and translation.
     TranslationInstall,
+    /// Legacy, see [`ModelAction::TranslationInstall`].
     TranslationVerify,
 }
 
 impl ModelAction {
+    /// Whether this is a legacy translation action that workers settle
+    /// without running.
     pub fn is_translation(self) -> bool {
         matches!(self, Self::TranslationInstall | Self::TranslationVerify)
     }
@@ -323,15 +330,7 @@ pub struct SubtitleModelReceipt {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TranslationQualification {
-    pub profile: super::subtitle_translation::TranslationProfile,
-    pub self_test_sha256: String,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PublishSubtitleModel {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub translation: Option<TranslationQualification>,
     pub token: JobToken,
     pub source: JobPayload,
     pub receipt: SubtitleModelReceipt,
@@ -383,60 +382,37 @@ pub(super) async fn publish_model<T: QueueSql>(
 ) -> Result<bool, StoreError> {
     input.token.validate()?;
     input.source.validate()?;
-    let (model_id, model_sha256, adapter_contract, target_node_id, action, translation_profile) =
-        match &input.source {
-            JobPayload::SubtitleModelOperation {
-                model_id,
-                model_sha256,
-                adapter_contract,
-                target_node_id,
-                action,
-                translation_profile,
-                ..
-            } => (
-                model_id,
-                model_sha256,
-                adapter_contract,
-                target_node_id,
-                action,
-                translation_profile.as_ref(),
-            ),
-            JobPayload::SubtitleTextModelOperation {
-                model_id,
-                model_sha256,
-                adapter_contract,
-                target_node_id,
-                action,
-                ..
-            } => (
-                model_id,
-                model_sha256,
-                adapter_contract,
-                target_node_id,
-                action,
-                None,
-            ),
-            _ => return Err(StoreError::Task("not a model operation".into())),
-        };
-    match (
-        action.is_translation(),
-        translation_profile,
-        &input.translation,
-    ) {
-        (false, None, None) => {}
-        (true, Some(profile), Some(qualification))
-            if profile == &qualification.profile
-                && profile.model_id == *model_id
-                && profile.model_sha256 == *model_sha256
-                && super::background_jobs::digest(&qualification.self_test_sha256) =>
-        {
-            profile.validate()?;
+    let (model_id, model_sha256, adapter_contract, target_node_id, action) = match &input.source {
+        JobPayload::SubtitleModelOperation {
+            model_id,
+            model_sha256,
+            adapter_contract,
+            target_node_id,
+            action,
+            ..
         }
-        _ => {
-            return Err(StoreError::Task(
-                "translation qualification does not match model action".into(),
-            ))
-        }
+        | JobPayload::SubtitleTextModelOperation {
+            model_id,
+            model_sha256,
+            adapter_contract,
+            target_node_id,
+            action,
+            ..
+        } => (
+            model_id,
+            model_sha256,
+            adapter_contract,
+            target_node_id,
+            action,
+        ),
+        _ => return Err(StoreError::Task("not a model operation".into())),
+    };
+    // One receipt per model covers every purpose; the legacy per-profile
+    // translation actions no longer publish anything.
+    if action.is_translation() {
+        return Err(StoreError::Task(
+            "legacy translation model action cannot publish".into(),
+        ));
     }
     let receipt = &input.receipt;
     if input.now_ms < 0
@@ -458,23 +434,16 @@ pub(super) async fn publish_model<T: QueueSql>(
     {
         return Err(StoreError::Task("model receipt identity mismatch".into()));
     }
-    let mut value =
-        serde_json::to_value(&input).map_err(|error| StoreError::Task(error.to_string()))?;
-    if input.translation.is_none() {
-        value["translation"] = serde_json::Value::Null;
-    }
-    if let Some(qualification) = &input.translation {
-        value["translation"]["profile_id"] = qualification.profile.id()?.into();
-    }
-    let body = encode(&value)?;
-    let owns=format!("{SUBTITLE_OWNS} AND job.kind IN ('subtitle_model_operation','subtitle_text_model_operation') AND job.payload_json=json(json_extract($1,'$.source')) AND (job.kind!='subtitle_text_model_operation' OR EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.source.admin_user_id') AND is_admin=1))");
+    let body = encode(
+        &serde_json::to_value(&input).map_err(|error| StoreError::Task(error.to_string()))?,
+    )?;
+    let owns=format!("{SUBTITLE_OWNS} AND job.kind IN ('subtitle_model_operation','subtitle_text_model_operation') AND job.payload_json=json(json_extract($1,'$.source')) AND (job.kind!='subtitle_text_model_operation' OR json_extract($1,'$.source.admin_user_id')=0 OR EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.source.admin_user_id') AND is_admin=1))");
     store.queue_transaction(vec![
-      (format!("INSERT INTO subtitle_translation_capabilities(node_id,model_id,profile_id,receipt_json) SELECT json_extract($1,'$.receipt.node_id'),json_extract($1,'$.receipt.model_id'),json_extract($1,'$.translation.profile_id'),json_object('model',json(json_extract($1,'$.receipt')),'profile',json(json_extract($1,'$.translation.profile')),'profile_id',json_extract($1,'$.translation.profile_id'),'self_test_sha256',json_extract($1,'$.translation.self_test_sha256')) WHERE json_type($1,'$.translation')='object' AND EXISTS(SELECT 1 FROM background_jobs job WHERE {owns}) ON CONFLICT(node_id,model_id,profile_id) DO UPDATE SET receipt_json=excluded.receipt_json"),body.clone()),
-      (format!("INSERT INTO subtitle_model_receipts(node_id,model_id,receipt_json) SELECT json_extract($1,'$.receipt.node_id'),json_extract($1,'$.receipt.model_id'),json(json_extract($1,'$.receipt')) WHERE json_type($1,'$.translation')='null' AND EXISTS(SELECT 1 FROM background_jobs job WHERE {owns}) ON CONFLICT(node_id,model_id) DO UPDATE SET receipt_json=excluded.receipt_json"),body.clone()),
+      (format!("INSERT INTO subtitle_model_receipts(node_id,model_id,receipt_json) SELECT json_extract($1,'$.receipt.node_id'),json_extract($1,'$.receipt.model_id'),json(json_extract($1,'$.receipt')) WHERE EXISTS(SELECT 1 FROM background_jobs job WHERE {owns}) ON CONFLICT(node_id,model_id) DO UPDATE SET receipt_json=excluded.receipt_json"),body.clone()),
       (format!("UPDATE background_jobs AS job SET state='succeeded',result_ref=json_extract($1,'$.receipt.model_sha256'),owner_node_id=NULL,owner_boot_id=NULL,claim_id=NULL,lease_expires_ms=NULL,revision=revision+1,updated_at_ms=json_extract($1,'$.now_ms') WHERE {owns}"),body.clone()),
       ("UPDATE background_job_waiters SET state=CASE WHEN deadline_ms<=json_extract($1,'$.now_ms') THEN 'cancelled' ELSE 'succeeded' END,result_ref=json_extract($1,'$.receipt.model_sha256'),updated_at_ms=json_extract($1,'$.now_ms') WHERE job_id=json_extract($1,'$.token.job_id') AND state='pending' AND EXISTS(SELECT 1 FROM background_jobs job WHERE job.id=background_job_waiters.job_id AND job.state='succeeded' AND job.result_ref=json_extract($1,'$.receipt.model_sha256'))".into(),body.clone())
     ]).await?;
-    let rows=store.queue_sql("SELECT 'true' AS result_json WHERE (json_type($1,'$.translation')='null' AND EXISTS(SELECT 1 FROM subtitle_model_receipts WHERE node_id=json_extract($1,'$.receipt.node_id') AND model_id=json_extract($1,'$.receipt.model_id') AND receipt_json=json(json_extract($1,'$.receipt')))) OR (json_type($1,'$.translation')='object' AND EXISTS(SELECT 1 FROM subtitle_translation_capabilities WHERE node_id=json_extract($1,'$.receipt.node_id') AND model_id=json_extract($1,'$.receipt.model_id') AND profile_id=json_extract($1,'$.translation.profile_id') AND json_extract(receipt_json,'$.model')=json(json_extract($1,'$.receipt'))))".into(),body,false,true).await?;
+    let rows=store.queue_sql("SELECT 'true' AS result_json WHERE EXISTS(SELECT 1 FROM subtitle_model_receipts WHERE node_id=json_extract($1,'$.receipt.node_id') AND model_id=json_extract($1,'$.receipt.model_id') AND receipt_json=json(json_extract($1,'$.receipt')))".into(),body,false,true).await?;
     Ok(!rows.is_empty())
 }
 

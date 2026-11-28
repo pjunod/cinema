@@ -5661,7 +5661,6 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
         assert!(
             !store
                 .publish_subtitle_model(PublishSubtitleModel {
-                    translation: None,
                     token,
                     source,
                     receipt,
@@ -5691,7 +5690,6 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
             verified_at_ms: now + 2,
         };
         let publication = PublishSubtitleModel {
-            translation: None,
             token: token.clone(),
             source,
             receipt,

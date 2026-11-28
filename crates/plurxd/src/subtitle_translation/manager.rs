@@ -3,8 +3,7 @@ use super::{artifacts, profile, runtime, AppState, StoreError, TranslationQuery,
 use crate::background_jobs::{ActiveBackgroundJob, JobFence};
 use plurx_core::store::{
     background_jobs::{
-        CandidateQuery, ClaimJob, EnqueueJob, EnqueueOutcome, JobKind, JobPayload, JobRequest,
-        JobSettlement,
+        CandidateQuery, ClaimJob, EnqueueJob, JobKind, JobPayload, JobRequest, JobSettlement,
     },
     subtitle_translation::{RangeRecipe, SourceRevision, TranslationProfile},
     subtitle_translation_mutation::{TranslationAction, TranslationMutation},
@@ -420,28 +419,8 @@ async fn execute(
     source: &JobPayload,
     fence: &JobFence,
     cancel: &CancellationToken,
-    admission: Option<&crate::transcode::FragmentAdmission>,
-    expected_model_identity: Option<&str>,
+    admission: &crate::transcode::FragmentAdmission,
 ) -> Result<bool, StoreError> {
-    if let JobPayload::SubtitleModelOperation { .. } = source {
-        let engine = artifacts::inspect_engine()
-            .await
-            .map_err(StoreError::Task)?;
-        let qualified = super::installer::execute(state, source, &engine, fence, cancel).await?;
-        if expected_model_identity
-            .is_some_and(|identity| identity != qualified.receipt.model_file_identity)
-        {
-            return Err(StoreError::Task("automatic_verification_obsolete".into()));
-        }
-        if cancel.is_cancelled() {
-            return Err(StoreError::Task("worker_interrupted".into()));
-        }
-        return fence
-            .publish_translation_model(source.clone(), qualified.receipt, qualified.translation)
-            .await;
-    }
-    let admission =
-        admission.ok_or_else(|| StoreError::Task("waiting_for_playback_capacity".into()))?;
     let (revision, selected) = match source {
         JobPayload::SubtitleTranslationPrepare {
             file_id,
@@ -591,142 +570,6 @@ async fn execute(
     }
 }
 
-fn memoizes_automatic(outcome: &EnqueueOutcome) -> bool {
-    matches!(
-        outcome,
-        EnqueueOutcome::Accepted { .. } | EnqueueOutcome::Existing { .. }
-    )
-}
-fn accepted_capability(
-    receipt: &super::Capability,
-    selected: &TranslationProfile,
-    sha: &str,
-    identity: &str,
-) -> bool {
-    receipt.profile == *selected
-        && receipt.profile_id == selected.id().unwrap_or_default()
-        && receipt.self_test_sha256 == profile::SELF_TEST_SHA256
-        && receipt.model.model_id == selected.model_id
-        && receipt.model.model_sha256 == sha
-        && receipt.model.model_file_identity == identity
-}
-
-async fn automatic_verification(state: &AppState) -> Result<(), StoreError> {
-    let now = crate::state::clock_ms();
-    if now
-        < state
-            .subtitle_models
-            .translation
-            .automatic_next
-            .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        return Ok(());
-    }
-    state.subtitle_models.translation.automatic_next.store(
-        now.saturating_add(15000),
-        std::sync::atomic::Ordering::Relaxed,
-    );
-
-    for selected in profile::profiles() {
-        automatic_profile_verification(state, selected).await?;
-    }
-    Ok(())
-}
-
-async fn automatic_profile_verification(
-    state: &AppState,
-    selected: TranslationProfile,
-) -> Result<(), StoreError> {
-    let spec = profile::model_spec_for(&selected)?;
-    let profile_id = selected.id()?;
-    if state
-        .subtitle_models
-        .translation
-        .failures
-        .read()
-        .await
-        .contains_key(&profile_id)
-    {
-        return Ok(());
-    }
-    let Ok(identity) = artifacts::model_identity(&state.subtitle_models.root, &spec).await else {
-        return Ok(());
-    };
-    let Ok(engine) = artifacts::inspect_engine().await else {
-        return Ok(());
-    };
-    let receipts = read(
-        state,
-        TranslationQuery::Capabilities {
-            node_id: state.node_id.clone(),
-        },
-    )
-    .await?;
-    let accepted = receipts
-        .into_iter()
-        .filter_map(|r| serde_json::from_value::<super::Capability>(r).ok())
-        .any(|r| {
-            accepted_capability(
-                &r,
-                &selected,
-                &spec.sha256,
-                &artifacts::identity_key(identity),
-            )
-        });
-    if !accepted {
-        return Ok(());
-    }
-    if super::workers_public(state)
-        .await
-        .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?
-        .iter()
-        .any(|w| {
-            w["capabilities"].as_array().is_some_and(|c| {
-                c.iter()
-                    .any(|v| v["status"] == "verified" && v["profile_id"] == profile_id)
-            })
-        })
-    {
-        return Ok(());
-    }
-    let key = plurx_core::store::subtitle_translation::digest(&serde_json::json!([
-        state.node_id,
-        state.subtitle_models.boot_id,
-        profile_id,
-        artifacts::identity_key(identity),
-        artifacts::identity_key(engine.identity)
-    ]))?;
-    if state
-        .subtitle_models
-        .translation
-        .automatic_keys
-        .read()
-        .await
-        .contains(&key)
-    {
-        return Ok(());
-    }
-    let bytes = hex::decode(&key[..32]).map_err(|e| StoreError::Task(e.to_string()))?;
-    let request_id = uuid::Uuid::from_slice(&bytes)
-        .map_err(|e| StoreError::Task(e.to_string()))?
-        .to_string();
-    let now = crate::state::clock_ms();
-    let outcome=state.store.enqueue_job(EnqueueJob{id:uuid::Uuid::new_v4().to_string(),payload:JobPayload::SubtitleModelOperation{translation_profile:Some(selected),action:plurx_core::store::background_jobs_transcription::ModelAction::TranslationVerify,model_id:spec.id,catalog_revision:crate::subtitle_models::catalog().revision.clone(),model_sha256:spec.sha256,adapter_contract:engine.adapter_contract,target_node_id:state.node_id.clone()},dedupe_key:format!("translation-auto:{key}"),priority:0,not_before_ms:now,now_ms:now,request:JobRequest{scope:"translation-auto".into(),request_id,request_digest:key.clone(),consumer_kind:"subtitle_model_operation".into(),consumer_ref:key.clone(),target_node_id:Some(state.node_id.clone()),deadline_ms:None,retain_identity:true}}).await?;
-    if memoizes_automatic(&outcome) {
-        let mut attempted = state
-            .subtitle_models
-            .translation
-            .automatic_keys
-            .write()
-            .await;
-        attempted.push_back(key);
-        while attempted.len() > 16 {
-            attempted.pop_front();
-        }
-    }
-    Ok(())
-}
-
 /// One translation pass. Returns whether translation has live work (a
 /// demanded operation or a runnable job), which keeps the loop responsive.
 pub(crate) async fn worker_pass(
@@ -747,7 +590,6 @@ pub(crate) async fn worker_pass(
             .maintenance_at
             .store(now, std::sync::atomic::Ordering::Relaxed);
     }
-    automatic_verification(state).await?;
     let demanded = schedule(state).await?;
     let authority = state.jobs.execution_authority();
     let after = state
@@ -761,8 +603,9 @@ pub(crate) async fn worker_pass(
         .store
         .job_candidates(CandidateQuery {
             node_id: state.node_id.clone(),
+            // Model operations, including queued legacy translation actions,
+            // belong to `subtitle_models::worker_pass`.
             kinds: vec![
-                JobKind::SubtitleModelOperation,
                 JobKind::SubtitleTranslationPrepare,
                 JobKind::SubtitleTranslationRange,
             ],
@@ -813,22 +656,14 @@ pub(crate) async fn worker_pass(
             }
         }
         let selected = match &source {
-            JobPayload::SubtitleModelOperation {
-                translation_profile: Some(profile),
-                ..
-            }
-            | JobPayload::SubtitleTranslationPrepare { profile, .. } => profile.clone(),
+            JobPayload::SubtitleTranslationPrepare { profile, .. } => profile.clone(),
             JobPayload::SubtitleTranslationRange { recipe, .. } => recipe.profile.clone(),
-            _ => profile::selected_profile(),
+            _ => continue,
         };
-        let model = matches!(&source,JobPayload::SubtitleModelOperation{action,..} if action.is_translation());
-        if matches!(&source, JobPayload::SubtitleModelOperation { .. }) && !model {
-            continue;
-        }
         if shutdown.is_cancelled() || !authority.may_execute_job(source.kind()).await {
             continue;
         }
-        if !model && !interested(state, &source, None).await? {
+        if !interested(state, &source, None).await? {
             state
                 .store
                 .cancel_job(plurx_core::store::background_jobs::CancelJob {
@@ -838,104 +673,24 @@ pub(crate) async fn worker_pass(
                 .await?;
             continue;
         }
-        let expected_model_identity = if model
-            && candidate.dedupe_key.starts_with("translation-auto:")
-        {
-            if state
-                .subtitle_models
-                .translation
-                .failures
-                .read()
-                .await
-                .contains_key(&selected.id()?)
-            {
-                state
-                    .store
-                    .cancel_job(plurx_core::store::background_jobs::CancelJob {
-                        job_id: candidate.id.clone(),
-                        now_ms: crate::state::clock_ms(),
-                    })
-                    .await?;
-                continue;
-            }
-            let spec = profile::model_spec_for(&selected)?;
-            let Ok(identity) = artifacts::model_identity(&state.subtitle_models.root, &spec).await
-            else {
-                continue;
-            };
-            let Ok(engine) = artifacts::inspect_engine().await else {
-                continue;
-            };
-            let accepted = read(
-                state,
-                TranslationQuery::Capabilities {
-                    node_id: state.node_id.clone(),
-                },
-            )
-            .await?
-            .into_iter()
-            .filter_map(|r| serde_json::from_value::<super::Capability>(r).ok())
-            .any(|r| {
-                accepted_capability(
-                    &r,
-                    &selected,
-                    &spec.sha256,
-                    &artifacts::identity_key(identity),
-                )
-            });
-            if !accepted {
-                state
-                    .store
-                    .cancel_job(plurx_core::store::background_jobs::CancelJob {
-                        job_id: candidate.id.clone(),
-                        now_ms: crate::state::clock_ms(),
-                    })
-                    .await?;
-                continue;
-            }
-            let key = plurx_core::store::subtitle_translation::digest(&serde_json::json!([
-                state.node_id,
-                state.subtitle_models.boot_id,
-                selected.id()?,
-                artifacts::identity_key(identity),
-                artifacts::identity_key(engine.identity)
-            ]))?;
-            if candidate.dedupe_key != format!("translation-auto:{key}") {
-                state
-                    .store
-                    .cancel_job(plurx_core::store::background_jobs::CancelJob {
-                        job_id: candidate.id.clone(),
-                        now_ms: crate::state::clock_ms(),
-                    })
-                    .await?;
-                continue;
-            }
-            Some(artifacts::identity_key(identity))
-        } else {
-            None
-        };
-        let admission = if model {
-            None
-        } else {
-            if !super::workers_public(state)
-                .await
-                .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?
-                .iter()
-                .any(|w| {
-                    w["capabilities"].as_array().is_some_and(|c| {
-                        c.iter().any(|v| {
-                            v["status"] == "verified"
-                                && v["profile_id"].as_str() == selected.id().ok().as_deref()
-                        })
+        if !super::workers_public(state)
+            .await
+            .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?
+            .iter()
+            .any(|w| {
+                w["capabilities"].as_array().is_some_and(|c| {
+                    c.iter().any(|v| {
+                        v["status"] == "verified"
+                            && v["profile_id"].as_str() == selected.id().ok().as_deref()
                     })
                 })
-            {
-                continue;
-            }
-            match state.transcode.admit_progressive_speech(shutdown).await {
-                Some(a) if state.transcode.speech_capacity_available(&a) => Some(a),
-                _ => continue,
-            }
+            })
+        {
+            continue;
+        }
+        let admission = match state.transcode.admit_progressive_speech(shutdown).await {
+            Some(a) if state.transcode.speech_capacity_available(&a) => a,
+            _ => continue,
         };
         let now = crate::state::clock_ms();
         let kind = source.kind();
@@ -972,22 +727,9 @@ pub(crate) async fn worker_pass(
         let cancel = fence.loss_token().child_token();
         let operation = plurx_core::process::bounded::cancellable(
             cancel.clone(),
-            execute(
-                state,
-                &source,
-                &fence,
-                &cancel,
-                admission.as_ref(),
-                expected_model_identity.as_deref(),
-            ),
+            execute(state, &source, &fence, &cancel, &admission),
         );
-        let operation = async {
-            if !model {
-                crate::background_jobs::budgeted(fence.source_budget(), operation).await
-            } else {
-                operation.await
-            }
-        };
+        let operation = crate::background_jobs::budgeted(fence.source_budget(), operation);
         tokio::pin!(operation);
         let result = loop {
             tokio::select! {
@@ -999,17 +741,7 @@ pub(crate) async fn worker_pass(
             }
         };
         match result {
-            Ok(true) => {
-                if model {
-                    state
-                        .subtitle_models
-                        .translation
-                        .failures
-                        .write()
-                        .await
-                        .remove(&selected.id()?);
-                }
-            }
+            Ok(true) => {}
             Ok(false) => {
                 let _ = fence
                     .settle(JobSettlement::Stop {
@@ -1019,9 +751,7 @@ pub(crate) async fn worker_pass(
             }
             Err(error) => {
                 let message = error.to_string();
-                if message.contains("demand_expired")
-                    || message.contains("automatic_verification_obsolete")
-                {
+                if message.contains("demand_expired") {
                     let _ = fence
                         .settle(JobSettlement::Stop {
                             error_code: "demand_expired".into(),
@@ -1056,15 +786,6 @@ pub(crate) async fn worker_pass(
                         .await;
                 } else {
                     let reason = safe_reason(&message);
-                    if model {
-                        state
-                            .subtitle_models
-                            .translation
-                            .failures
-                            .write()
-                            .await
-                            .insert(selected.id()?, reason.into());
-                    }
                     let _ = fence
                         .settle(JobSettlement::Fail {
                             error_code: reason.into(),
@@ -1135,115 +856,82 @@ mod tests {
 }
 
 #[cfg(test)]
-mod automatic_tests {
+mod receipt_tests {
     use super::*;
-    #[test]
-    fn automatic_receipts_cannot_cross_task_or_model_boundaries() {
-        for selected in profile::profiles() {
-            let receipt: super::super::Capability = serde_json::from_value(serde_json::json!({
-                "model":{"node_id":"worker","boot_id":"boot","model_id":selected.model_id,
-                    "model_sha256":selected.model_sha256,"adapter_contract":selected.adapter_contract,
-                    "engine_sha256":"a".repeat(64),"model_file_identity":"model-identity",
-                    "engine_file_identity":"engine-identity","job_id":"job","fence":1,"verified_at_ms":1},
-                "profile":selected,"profile_id":selected.id().expect("profile identity"),
-                "self_test_sha256":profile::SELF_TEST_SHA256
-            })).expect("receipt fixture");
-            for candidate in profile::profiles() {
-                assert_eq!(
-                    accepted_capability(
-                        &receipt,
-                        &candidate,
-                        &candidate.model_sha256,
-                        "model-identity"
-                    ),
-                    candidate == selected
-                );
-            }
-            assert!(!accepted_capability(
-                &receipt,
-                &selected,
-                &selected.model_sha256,
-                "replacement-identity"
-            ));
-            let mut mismatched = receipt.clone();
-            mismatched.model.model_id = "unregistered-model".into();
-            assert!(!accepted_capability(
-                &mismatched,
-                &selected,
-                &selected.model_sha256,
-                "model-identity"
-            ));
-        }
-    }
+    use plurx_core::{
+        fs_secure::FileIdentity, store::background_jobs_transcription::SubtitleModelReceipt,
+    };
 
+    /// Progressive translation and transcription accept the one model
+    /// receipt: a node with only a current-boot receipt for `small` (no
+    /// per-profile capability row exists any more) is verified for both
+    /// speech tasks, and the same receipt is refused after a reboot.
     #[test]
-    fn transient_enqueue_rejections_do_not_memoize_automatic_verification() {
-        for outcome in [
-            EnqueueOutcome::QueueFull,
-            EnqueueOutcome::JobCancelling {
-                retry_after_ms: 1000,
-            },
-            EnqueueOutcome::ProducerFenced,
-            EnqueueOutcome::RequestFenced,
-        ] {
-            assert!(!memoizes_automatic(&outcome));
+    fn progressive_profiles_accept_the_model_receipt_and_refuse_it_after_reboot() {
+        let spec = profile::model_spec();
+        let model = FileIdentity {
+            device: 7,
+            inode: 11,
+            size: spec.download_bytes,
+            changed_seconds: 1,
+            changed_nanoseconds: 2,
+        };
+        let engine_file = FileIdentity { inode: 12, ..model };
+        let engine = crate::subtitle_models::EngineIdentity {
+            adapter_contract: &crate::subtitle_models::catalog().adapter_contract,
+            binary_sha256: &"e".repeat(64),
+            identity: engine_file,
+        };
+        let receipt = SubtitleModelReceipt {
+            node_id: "worker".into(),
+            boot_id: "boot-one".into(),
+            model_id: spec.id.clone(),
+            model_sha256: spec.sha256.clone(),
+            adapter_contract: engine.adapter_contract.to_owned(),
+            engine_sha256: engine.binary_sha256.to_owned(),
+            model_file_identity: artifacts::identity_key(model),
+            engine_file_identity: artifacts::identity_key(engine_file),
+            job_id: "job".into(),
+            fence: 1,
+            verified_at_ms: 1234,
+        };
+        let receipts = [receipt];
+        for selected in profile::profiles() {
+            let status = |boot: &str| {
+                super::super::profile_capability(
+                    &selected,
+                    &spec,
+                    Ok(engine),
+                    &Ok(model),
+                    &receipts,
+                    false,
+                    super::super::WorkerBoot {
+                        node_id: "worker",
+                        boot_id: boot,
+                    },
+                )
+                .expect("capability")
+            };
+            let current = status("boot-one");
+            assert_eq!(current["status"], "verified", "{:?}", selected.task);
+            assert_eq!(current["verified_at_ms"], 1234);
+            let rebooted = status("boot-two");
+            assert_eq!(rebooted["status"], "unverified_cache");
+            assert_eq!(rebooted["reason"], "translation_unverified");
+            let replaced = super::super::profile_capability(
+                &selected,
+                &spec,
+                Ok(engine),
+                &Ok(FileIdentity { inode: 99, ..model }),
+                &receipts,
+                false,
+                super::super::WorkerBoot {
+                    node_id: "worker",
+                    boot_id: "boot-one",
+                },
+            )
+            .expect("capability");
+            assert_eq!(replaced["status"], "unverified_cache");
         }
-        assert!(memoizes_automatic(&EnqueueOutcome::Accepted {
-            job_id: "job".into(),
-            receipt_expires_ms: 1000
-        }));
-        assert!(memoizes_automatic(&EnqueueOutcome::Existing {
-            job_id: "job".into(),
-            receipt_expires_ms: 1000,
-            cancelled: true
-        }));
-    }
-    #[tokio::test]
-    async fn queued_automatic_verification_cannot_overwrite_current_boot_explicit_failure() {
-        let state = crate::http::source_actor_test_state();
-        let selected = profile::selected_profile();
-        let id = uuid::Uuid::new_v4().to_string();
-        state
-            .subtitle_models
-            .translation
-            .failures
-            .write()
-            .await
-            .insert(
-                selected.id().expect("profile"),
-                "model_verification_failed".into(),
-            );
-        let now = crate::state::clock_ms();
-        state.store.enqueue_job(EnqueueJob{id:id.clone(),payload:JobPayload::SubtitleModelOperation{translation_profile:Some(selected.clone()),action:plurx_core::store::background_jobs_transcription::ModelAction::TranslationVerify,model_id:selected.model_id.clone(),catalog_revision:crate::subtitle_models::catalog().revision.clone(),model_sha256:selected.model_sha256.clone(),adapter_contract:selected.adapter_contract.clone(),target_node_id:state.node_id.clone()},dedupe_key:format!("translation-auto:{}","a".repeat(64)),priority:0,not_before_ms:now,now_ms:now,request:JobRequest{scope:"translation-auto-test".into(),request_id:id.clone(),request_digest:"b".repeat(64),consumer_kind:"subtitle_model_operation".into(),consumer_ref:id.clone(),target_node_id:Some(state.node_id.clone()),deadline_ms:None,retain_identity:true}}).await.expect("queued automatic job predates failure");
-        worker_pass(&state, &CancellationToken::new())
-            .await
-            .expect("worker pass");
-        let job = state
-            .store
-            .background_job(&id)
-            .await
-            .expect("lookup")
-            .expect("retained");
-        assert_eq!(
-            job.state,
-            plurx_core::store::background_jobs::JobState::Cancelled
-        );
-        assert!(state
-            .subtitle_models
-            .translation
-            .failures
-            .read()
-            .await
-            .contains_key(&selected.id().expect("profile")));
-        assert!(read(
-            &state,
-            TranslationQuery::Capabilities {
-                node_id: state.node_id.clone()
-            }
-        )
-        .await
-        .expect("capabilities")
-        .is_empty());
-        state.shutdown.cancel();
     }
 }

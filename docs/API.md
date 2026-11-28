@@ -2706,10 +2706,12 @@ Existing model Install/Test routes also accept strict version 2 translation
 requests with request UUID, intent expiry, purpose, profile ID and named workers.
 Their version 2 responses identify `purpose: "translation"`, `model_id` and
 `profile_id` alongside per-worker `operations`, so setup can follow accepted jobs.
-Model job phases include `waiting_for_capacity` while a claimed test holds a
-FIFO place for the shared heavy-background slot; this consumes no CPU admission.
-Translation qualification does not imply that the ordinary generation self-test
-ran. Work mutations require AI subtitles authority (an admin, or any user while
+Version 1 and version 2 enqueue the same per-node model operation: one model
+receipt per node qualifies the model for whole-file transcription and for both
+speech profiles. A multilingual model's self-test is the German clip
+translated to English; an English-only model's is the English clip. Model job
+phases include `waiting_for_capacity` while a claimed test holds a FIFO place
+for the shared heavy-background slot; this consumes no CPU admission. Work mutations require AI subtitles authority (an admin, or any user while
 `who` is `everyone`) and an unexpired
 first-use intent; retained exact receipts replay without starting fresh work.
 Responses carry a fresh `X-Translation-Server-Now-Ms` even when receipt bodies
@@ -2728,7 +2730,7 @@ stay admin-only.
 
 | Method | Path | Credential | Meaning |
 |---|---|---|---|
-| GET | `/api/v1/ai-subtitles/settings` | bearer | The document and its `revision`. Before the first save it is derived from the older text translation, speech translation and managed transcription switches. |
+| GET | `/api/v1/ai-subtitles/settings` | bearer | The document, its `revision` and each node's `readiness` for it. Before the first save the document is derived from the older text translation, speech translation and managed transcription switches. |
 | PUT | `/api/v1/ai-subtitles/settings` | admin bearer | Replace the document; the body is every field plus `expected_revision`. A stale revision is `409 configuration_conflict`. |
 
 The document is `{"version":1,"download_match":bool,"translate_text":bool,
@@ -2738,6 +2740,28 @@ release a save also rewrites `subtitles.translation.config.v1` (`enabled` from
 `from_audio`) and `subtitles.text_translation.config.v1` (`enabled` from
 `translate_text`, next revision) in the same transaction, so a node on the
 previous release admits the same work during a rolling upgrade.
+
+Every node installs, by itself, what the saved document needs: with
+`from_audio` the speech model of the current `quality` (every tier uses
+`small` for now), with `translate_text` the text model. A node does so when
+its packaged engine is qualified, its model store has more than twice the
+model's size free and its memory is more than twice the model's size. The
+install is the same fenced job an admin's Install runs, so a missing,
+changed or never-accepted model file repairs itself, and only a successful
+test counts. A failed attempt is retried after 15 minutes, then 1 hour, then
+every 6 hours.
+
+The GET response's `readiness` is `{"nodes":[{"node_id","label","cores",
+"gpu","state","reason","tested_at_ms"}],"summary":{"nodes","ready",
+"downloading","failed","unsupported","unknown"}}`. `state` is `ready`,
+`downloading` (`reason` `installing`, `verifying`, `waiting_for_worker` or
+`queue_busy`), `failed` (`reason` is the last attempt's error code),
+`unsupported` (`reason` `engine_unavailable`, `insufficient_memory`,
+`insufficient_disk`, `memory_unknown` or `disk_unknown`), or `unknown` when the
+node's worker observation is unavailable (`worker_observation_unavailable`) or
+does not report readiness (`readiness_unreported`). `tested_at_ms` is when the
+node last passed a needed model's test in its current boot; `gpu` is `null`
+for now. A node whose settings need nothing is `ready`.
 
 ### Text subtitle translation and shared captions
 

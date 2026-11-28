@@ -55,9 +55,6 @@ pub enum TranslationQuery {
         expected_operation_epoch: i64,
         expected_view_revision: i64,
     },
-    Capabilities {
-        node_id: String,
-    },
     /// Worker-only lifetime check for an already-owned range attempt.
     RangeInterest {
         job_id: String,
@@ -287,13 +284,6 @@ pub(super) async fn read<T: QueueSql>(
             format!(
                 r#"SELECT json_object('core_index',r.core_index,'revision',CAST(r.range_revision AS TEXT),'state',r.state,'reason',r.reason,'retryable',json(CASE WHEN r.retryable=1 THEN 'true' ELSE 'false' END),'attempts',r.attempts) AS result_json FROM subtitle_translation_operations op JOIN subtitle_translation_ranges r ON r.operation_id=op.id AND r.operation_epoch=op.operation_epoch JOIN subtitle_translation_read_leases l ON l.asset_id=op.asset_id WHERE op.id=json_extract($1,'$.operation_id') AND op.operation_epoch=json_extract($1,'$.epoch') AND op.view_revision=json_extract($1,'$.view') AND l.id=json_extract($1,'$.lease_id') AND l.user_id=json_extract($1,'$.user_id') AND l.expires_at_ms>json_extract($1,'$.now_ms') AND {USER} AND r.state='failed' AND r.core_index>json_extract($1,'$.after') ORDER BY r.core_index LIMIT 17"#
             )
-        }
-        TranslationQuery::Capabilities { node_id } => {
-            if input.user_id != 0 || node_id.is_empty() || node_id.len() > 128 {
-                return Err(bad());
-            }
-            body["node_id"] = node_id.into();
-            "SELECT receipt_json AS result_json FROM subtitle_translation_capabilities WHERE node_id=json_extract($1,'$.node_id') ORDER BY model_id,profile_id LIMIT 16".into()
         }
         TranslationQuery::RangeInterest { job_id } => {
             if input.user_id != 0 || !uuid(&job_id) {

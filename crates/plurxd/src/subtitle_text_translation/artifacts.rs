@@ -33,6 +33,33 @@ pub(crate) fn registered_file(spec: &CatalogModel) -> bool {
     SPEC.files.iter().any(|part| part.spec == *spec)
 }
 
+/// Bytes the bundle downloads, for the self-install disk and memory check.
+pub(crate) fn bundle_download_bytes() -> u64 {
+    SPEC.files
+        .iter()
+        .map(|part| part.spec.download_bytes)
+        .fold(0, u64::saturating_add)
+}
+/// The bundle's file identity from metadata alone, in the form
+/// [`VerifiedBundle::identity`] gives once the bytes are hashed. A receipt
+/// naming it proves these exact files passed the self-test.
+pub(crate) async fn bundle_identity(root: &Path) -> Result<String, String> {
+    let mut identities = BTreeMap::new();
+    for part in &SPEC.files {
+        identities.insert(
+            part.role.clone(),
+            artifacts::model_identity(root, &part.spec).await?,
+        );
+    }
+    let mut hash = Sha256::new();
+    for (role, identity) in &identities {
+        hash.update(role.as_bytes());
+        hash.update([0]);
+        hash.update(artifacts::identity_key(*identity).as_bytes());
+        hash.update([0]);
+    }
+    Ok(hex::encode(hash.finalize()))
+}
 pub(crate) fn expected_bundle_digest() -> String {
     hex::encode(Sha256::digest(CATALOG.as_bytes()))
 }
