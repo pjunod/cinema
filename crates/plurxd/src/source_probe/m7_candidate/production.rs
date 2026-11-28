@@ -335,7 +335,7 @@ pub(in crate::source_probe) async fn prepare_authored(
                 candidate = Some((intent, encoded));
             }
             RateDecision::Inconclusive(reason) => {
-                return Err(PrepareError::RateInconclusive(reason))
+                return Err(PrepareError::RateInconclusive(reason));
             }
             RateDecision::PredictedInBand { .. } => {
                 if attempts.len() < ledger.slots.len() {
@@ -447,7 +447,7 @@ pub(in crate::source_probe) async fn prepare_authored(
         &ffmpeg,
         &source.handle,
         &authored_path,
-        true,
+        TraceRole::AuthoredCandidate,
         scratch,
     )
     .await?;
@@ -654,7 +654,11 @@ impl EncoderRun<'_, '_> {
             self.ffmpeg,
             &encoded_file,
             &trace_path,
-            control == RoiControl::Candidate,
+            if control == RoiControl::Candidate {
+                TraceRole::EncodedCandidate
+            } else {
+                TraceRole::Control
+            },
             self.scratch,
         )
         .await?;
@@ -1225,8 +1229,15 @@ async fn baseline(
         Ok((bytes, packets, file))
     })
     .await?;
-    let (trace_configuration, trace_closure) =
-        trace_clip(context, ffmpeg, &file, &trace_path, false, scratch).await?;
+    let (trace_configuration, trace_closure) = trace_clip(
+        context,
+        ffmpeg,
+        &file,
+        &trace_path,
+        TraceRole::Control,
+        scratch,
+    )
+    .await?;
     if closure != trace_closure || !source.unchanged().await {
         return Err(PrepareError::Authority(
             "independent CLI closure or held input changed",
@@ -1396,12 +1407,19 @@ fn loaded_path(line: &str) -> Option<&Path> {
     Path::new(path).is_absolute().then(|| Path::new(path))
 }
 
+#[derive(Clone, Copy)]
+enum TraceRole {
+    Control,
+    EncodedCandidate,
+    AuthoredCandidate,
+}
+
 async fn trace_clip(
     context: &TitleContext<'_>,
     ffmpeg: &EncodedExecutable,
     clip: &File,
     path: &Path,
-    enforce_qg: bool,
+    role: TraceRole,
     scratch: &TempDir,
 ) -> Result<(String, Hash)> {
     let dir = tempfile::tempdir_in(scratch.path()).map_err(execution)?;
@@ -1437,7 +1455,10 @@ async fn trace_clip(
     )
     .await?;
     let closure = loaded_closure(context.tools, &output.stderr).await?;
-    let mut trace = Trace::default();
+    let mut trace = match role {
+        TraceRole::AuthoredCandidate => Trace::for_m7_authored_clip(),
+        TraceRole::Control | TraceRole::EncodedCandidate => Trace::default(),
+    };
     trace.feed(&output.stderr);
     if trace.source_fault().is_some() {
         return Err(PrepareError::Authority("coded HEVC trace read error"));
@@ -1448,7 +1469,10 @@ async fn trace_clip(
     if exact.packets != u64::from(FRAMES) || exact.slices != u64::from(FRAMES) {
         return Err(PrepareError::Authority("complete coded HEVC trace"));
     }
-    if enforce_qg {
+    if matches!(
+        role,
+        TraceRole::EncodedCandidate | TraceRole::AuthoredCandidate
+    ) {
         validate_hevc_trace(&output.stderr)?;
     }
     Ok((exact.configuration_sha256, closure))
