@@ -733,6 +733,12 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "ai_subtitle_active_work",
+    "ai_subtitle_intent",
+    "ai_subtitle_viewer",
+    "ai_subtitle_excluded_from_schedule",
+    "delete_ai_subtitle_track",
+    "supersede_whole_file_subtitle_jobs",
     "analysis_completions_executed_by",
     "analysis_source_admission",
     // Both-backend title publication/cancellation/reprobe and priority
@@ -22050,7 +22056,10 @@ fn contract_inventory_matches_every_store_method() {
     // place. Named in BACKGROUND_JOB_METHODS and exercised on both backends by
     // dv_title_jobs::title_verdicts_carry_forward_only_where_the_successor_reproduces_them.
     // No new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 645, "review the Store method count");
+    // 645 -> 651: AI subtitle admission, exact intent and viewer checks,
+    // source-revision deletion and schedule exclusion, and fenced retirement
+    // of whole-file work. Named in BACKGROUND_JOB_METHODS.
+    assert_eq!(declared.len(), 651, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
