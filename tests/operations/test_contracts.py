@@ -3698,6 +3698,9 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("shard-timeout-minutes: 175", jobs["cluster_store_promotion_shards"])
         self.assertIn("CI_REGISTRY_PULL_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}",
                       jobs["cluster_store_promotion_shards"])
+        shard_workflow = read(".github/workflows/store-shards.yml")
+        call = shard_workflow.split("  workflow_call:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
+        self.assertNotRegex(call, r"(?m)^    secrets:")
         lineage = jobs["cluster_store_promotion_lineage"]
         self.assertIn("split_promotion_store == 'true'", lineage)
         self.assertIn("PLURX_EXPECT_TEST_NAMES: narrow_schema_lineage_bridge_preserves_and_refuses", lineage)

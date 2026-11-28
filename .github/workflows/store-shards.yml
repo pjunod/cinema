@@ -14,10 +14,7 @@ on:
         type: string
       shard-timeout-minutes:
         type: number
-        default: 40
-    secrets:
-      CI_REGISTRY_PULL_TOKEN:
-        required: true
+        default: '40'
     outputs:
       tested_sha:
         description: Commit whose complete Store inventory passed the shard union check.
@@ -39,7 +36,7 @@ on:
           - accelerated
       shard-timeout-minutes:
         type: number
-        default: 40
+        default: '40'
 
 jobs:
   shard:
