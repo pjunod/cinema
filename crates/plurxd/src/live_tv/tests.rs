@@ -7890,7 +7890,7 @@ fn a_legacy_ingress_cannot_issue_live_split_with_a_capable_client() {
     // The JSON on the old internal start route has no ingress affirmation.
     let legacy = LiveTvStartRequest::from(LiveTvStartRequestV2::from(&request));
     assert!(!legacy.allows_split());
-    assert!(!same_start(&request, &legacy));
+    assert!(same_start(&request, &legacy));
 }
 
 /// The production failure, as a test. A client mints its request id from

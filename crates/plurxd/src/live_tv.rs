@@ -1358,8 +1358,9 @@ fn same_start(a: &LiveTvStartRequest, b: &LiveTvStartRequest) -> bool {
         && a.request_id == b.request_id
         && a.channel_id == b.channel_id
         && a.config_generation == b.config_generation
+        // Ingress support is sampled for first admission. A retry keeps the
+        // existing owner's issued layout if that observation changed.
         && a.playback == b.playback
-        && a.allows_split() == b.allows_split()
 }
 
 struct LiveTvSessionState {
