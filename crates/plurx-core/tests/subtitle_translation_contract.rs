@@ -3120,7 +3120,14 @@ async fn non_admin_translation_range_is_claimable_only_when_ai_subtitles_who_is_
     assert_eq!(refused["outcome"], "forbidden", "{refused}");
     set_ai_who(&conn, "everyone");
     let recipe = prepared_from(&store, viewer(1000)).await;
-    let claimed = range(&store, &recipe, "viewer-core-0", 1300).await;
+    let claimed = range_for_consumer(
+        &store,
+        &recipe,
+        "viewer-core-0",
+        1300,
+        "subtitle_translation_range",
+    )
+    .await;
     assert!(!claimed.id.is_empty());
 
     conn.execute(
