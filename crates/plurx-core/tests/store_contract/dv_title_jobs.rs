@@ -446,12 +446,29 @@ async fn title_reprobe_and_scanner_aba_never_reuse_a_request_or_attach_old_resul
         let scanner_b = "b".repeat(64);
         let file = seed(&store, "title-aba").await;
         let (first, first_job) = active(&store, file.id, &scanner_a, 1_000).await;
-        let second = bound(&store, file.id, &scanner_b).await;
-        let third = bound(&store, file.id, &scanner_a).await;
+        let second = store
+            .bind_dv_title_demand(first.probe_revision, &scanner_b, 2, 1_001)
+            .await
+            .expect("bind successor")
+            .expect("successor revision");
+        assert_eq!(
+            store
+                .bind_dv_title_demand(second, &scanner_a, 1, 1_002)
+                .await
+                .expect("refuse downgrade"),
+            None,
+            "{backend}: the old A cannot reclaim its binding"
+        );
+        let third_revision = store
+            .bind_dv_title_demand(second, &scanner_a, 3, 1_002)
+            .await
+            .expect("bind a new release with A's bytes")
+            .expect("third revision");
+        let third = demand(&store, file.id, &scanner_a).await;
+        assert_eq!(third.probe_revision, third_revision);
         assert!(
-            first.probe_revision < second.probe_revision
-                && second.probe_revision < third.probe_revision,
-            "{backend}: scanner A->B->A needs monotonic generations"
+            first.probe_revision < second && second < third.probe_revision,
+            "{backend}: revisions increase even when scanner bytes repeat"
         );
         assert!(matches!(
             store
