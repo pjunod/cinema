@@ -1338,6 +1338,7 @@ pub(super) fn preserve_prepared_audio(
     // selection: a successor copy keeps them exactly as its predecessor did.
     candidate.split_audio = predecessor.split_audio
         && matches!(candidate.kind, crate::transcode::SessionKind::Copy { .. });
+    candidate.prepare_vod_copy_layout();
     let same_track_and_route = candidate.audio_index == predecessor.audio_index
         && candidate.audio_claim == predecessor.audio_claim
         && candidate.audio_offset_ms == predecessor.audio_offset_ms;
@@ -2953,7 +2954,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
     // again would push a viewer thirty seconds into a film that started at
     // 00:01:30 out to 00:02:30.
     let resume_ms = accepted_film_time_ms;
-    let staged_request = crate::transcode::SessionRequest {
+    let mut staged_request = crate::transcode::SessionRequest {
         dv_processing_destination: candidate.dv_processing_destination,
         retain_output: None,
         dv_refit_digest: match candidate.kind {
@@ -2975,12 +2976,26 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
         control_sequence: None,
         ..candidate.clone()
     };
+    staged_request.prepare_vod_copy_layout();
     let Some(local_user_id) = route.principal.local_user_id() else {
         return PreparationStageOutcome::refused(
             session_id,
             PreparationStageRefusal::PrincipalUnsupported,
         );
     };
+    let captures_output = successor_owner_captures_output(
+        state,
+        successor_owner,
+        staged_request.presentation,
+        prime_worker,
+    )
+    .await;
+    if !captures_output
+        && staged_request.vod_copy_layout == Some(crate::transcode::VodCopyLayout::PendingV1)
+    {
+        staged_request.split_audio = false;
+        staged_request.vod_copy_layout = None;
+    }
     let staged_recipe = RemoteStartRequest {
         retained_output: None,
         retained_output_receiver: Some(1),
@@ -3180,13 +3195,6 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
                 serde_json::Value::String(PREPARED_SINGLE_VARIANT_SHAPE.to_owned()),
             );
     }
-    let captures_output = successor_owner_captures_output(
-        state,
-        successor_owner,
-        staged_request.presentation,
-        prime_worker,
-    )
-    .await;
     if captures_output {
         response_value
             .as_object_mut()

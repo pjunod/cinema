@@ -316,6 +316,7 @@ pub(super) fn valid_start_request() -> RemoteStartRequest {
         library_channel: None,
         request: SessionRequest {
             split_audio: false,
+            vod_copy_layout: None,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -549,6 +550,7 @@ fn remote_prepare_names_only_an_exact_reserved_identity() {
 fn valid_start_response() -> RemoteStartResponse {
     let session_id = "00000000-0000-4000-8000-0000000000b1".to_owned();
     RemoteStartResponse {
+        vod_copy_layout: None,
         processed_fel: None,
         processed_dv_profile: None,
         retained_output: None,
@@ -2879,6 +2881,75 @@ fn service_vod_only_policy_survives_worker_and_durable_recipe_without_native_ide
 }
 
 #[test]
+fn split_vod_worker_seals_the_owner_layout_and_legacy_recipes_keep_their_shape() {
+    use crate::transcode::{VodCopyLayout, VodSoundtrackIdentity};
+
+    let mut request = valid_start_request();
+    request.request.kind = SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: false,
+        convert_dolby_vision: false,
+        dual_layer_as_copied: false,
+    };
+    request.request.split_audio = true;
+    let legacy_protocol = 13;
+    request.protocol_version = legacy_protocol;
+    let legacy = serde_json::to_value(&request).expect("legacy envelope");
+    assert!(legacy["request"].get("vod_copy_layout").is_none());
+    let legacy: RemoteStartRequest = serde_json::from_value(legacy).expect("legacy durable recipe");
+    assert!(legacy.request.split_audio);
+    assert_eq!(legacy.request.vod_copy_layout, None);
+    assert!(!legacy.is_valid(), "legacy worker is a different cohort");
+
+    request.protocol_version = crate::media_pool::PROTOCOL_VERSION;
+    request.request.prepare_vod_copy_layout();
+    assert_eq!(
+        request.request.vod_copy_layout,
+        Some(VodCopyLayout::PendingV1)
+    );
+    assert!(request.is_valid());
+    let mut fallback = request.request.clone();
+    assert!(fallback.seal_vod_copy_layout(Some(VodCopyLayout::Muxed), true));
+    assert!(!fallback.split_audio);
+    assert!(fallback.vod_copy_layout_valid());
+
+    let copied = VodCopyLayout::SplitV1 {
+        soundtracks: (0..4)
+            .map(|source_index| VodSoundtrackIdentity {
+                source_index,
+                rendition_id: format!("{source_index:064x}"),
+                init_id: "c".repeat(64),
+                source_copy: source_index != 0,
+            })
+            .collect(),
+    };
+    let mut response = valid_start_response();
+    response.kind = request.request.kind;
+    response.vod_copy_layout = Some(copied.clone());
+    assert!(
+        !response.is_valid(),
+        "a split receipt requires a master URL"
+    );
+    response.playlist_url = format!("/api/v1/hls/{}/master.m3u8", response.session_id);
+    assert!(response.is_valid());
+    assert!(request
+        .request
+        .seal_vod_copy_layout(response.vod_copy_layout.clone(), true));
+    assert!(request.request.split_audio);
+    let recovered: RemoteStartRequest =
+        serde_json::from_value(serde_json::to_value(&request).expect("sealed recipe JSON"))
+            .expect("sealed recipe reopens");
+    assert_eq!(recovered.request.vod_copy_layout, Some(copied));
+    assert!(!request
+        .request
+        .seal_vod_copy_layout(Some(VodCopyLayout::Muxed), true));
+    if let Some(VodCopyLayout::SplitV1 { soundtracks }) = &mut response.vod_copy_layout {
+        soundtracks.push(soundtracks[0].clone());
+    }
+    assert!(!response.is_valid(), "duplicate tracks cannot be sealed");
+}
+
+#[test]
 fn remote_start_contract_rejects_unfenced_or_noncanonical_inputs() {
     let request = valid_start_request();
     assert!(request.is_valid());
@@ -4709,6 +4780,7 @@ fn a_split_copy_route_is_reopened_not_taken_over_and_its_wire_keeps_the_split() 
             finite_bitrate_limit_bps: None,
             presentation: crate::transcode::Presentation::Vod,
             split_audio: true,
+            vod_copy_layout: None,
             ..eligible.request.clone()
         },
         ..eligible.clone()

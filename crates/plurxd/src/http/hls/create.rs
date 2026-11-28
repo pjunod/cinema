@@ -726,6 +726,7 @@ impl CreateSession {
         });
         crate::transcode::SessionRequest {
             split_audio: self.copy == Some(true) && split_requested,
+            vod_copy_layout: None,
             dv_processing_destination: None,
             // The player's per-playback choice; `SessionRequest` never
             // serializes it.
@@ -2789,6 +2790,14 @@ async fn resolve_plan_for_principal_with_local_evidence(
         )
         .await
         .map_err(ApiError::Internal)?;
+    }
+    if !passive_compatibility
+        && matches!(
+            principal,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { .. }
+        )
+    {
+        request.prepare_vod_copy_layout();
     }
     // Observational retained-output override follows the original intent hash
     // and full route/audio reconciliation. Advisory JSON cannot construct it.
@@ -5080,6 +5089,15 @@ async fn create_with_purpose_attempt(
         crate::transcode::SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
         crate::transcode::SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
     };
+    if !remote_request.request.seal_vod_copy_layout(
+        info.vod_copy_layout.clone(),
+        info.vod && matches!(info.kind, crate::transcode::SessionKind::Copy { .. }),
+    ) {
+        return Err(ApiError::ServiceUnavailable(
+            "the media worker did not seal the VOD copy layout".to_owned(),
+        ));
+    }
+    request.split_audio = remote_request.request.split_audio;
     let native_split_master = request.transport.as_deref() == Some("native")
         && request
             .candidate_context

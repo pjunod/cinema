@@ -2431,7 +2431,7 @@ impl MediaSessionStore for SqliteStore {
         &self,
         seal: &crate::store::PreparedOutputSeal,
     ) -> Result<bool, StoreError> {
-        let proof = seal.proof_json()?;
+        let (sealed_recipe, sealed_response) = seal.sealed_json()?;
         let seal = seal.clone();
         self.with_conn(move |conn| {
             Ok(conn.execute(
@@ -2439,7 +2439,6 @@ impl MediaSessionStore for SqliteStore {
                 params![
                     seal.already_complete,
                     seal.expected_recipe_json,
-                    proof,
                     seal.expected_response_json,
                     seal.incarnation_id,
                     seal.session_id,
@@ -2452,6 +2451,8 @@ impl MediaSessionStore for SqliteStore {
                     seal.predecessor_incarnation_id,
                     seal.predecessor_owner_node_id,
                     seal.predecessor_owner_epoch,
+                    sealed_recipe,
+                    sealed_response,
                 ],
             )? == 1)
         })
@@ -2467,7 +2468,7 @@ impl MediaSessionStore for SqliteStore {
                 "only a complete seal can be confirmed by a read".into(),
             ));
         }
-        let proof = seal.proof_json()?;
+        let (sealed_recipe, sealed_response) = seal.sealed_json()?;
         let seal = seal.clone();
         self.with_conn(move |conn| {
             Ok(conn.query_row(
@@ -2475,7 +2476,6 @@ impl MediaSessionStore for SqliteStore {
                 params![
                     seal.already_complete,
                     seal.expected_recipe_json,
-                    proof,
                     seal.expected_response_json,
                     seal.incarnation_id,
                     seal.session_id,
@@ -2488,6 +2488,8 @@ impl MediaSessionStore for SqliteStore {
                     seal.predecessor_incarnation_id,
                     seal.predecessor_owner_node_id,
                     seal.predecessor_owner_epoch,
+                    sealed_recipe,
+                    sealed_response,
                 ],
                 |row| row.get::<_, bool>(0),
             )?)
@@ -2979,7 +2981,10 @@ impl MediaSessionStore for SqliteStore {
                         AND preparation.deadline_ms > ?2)
                     AND EXISTS (SELECT 1 FROM media_sessions
                       WHERE incarnation_id = ?1 AND {owner_3}
-                        AND playback_id = ?4 AND state = 'active')
+                        AND playback_id = ?4 AND state = 'active'
+                        AND CASE WHEN json_valid(recipe_json) THEN
+                          COALESCE(json_extract(recipe_json, '$.request.vod_copy_layout.kind'), '') <> 'pending_v1'
+                          ELSE TRUE END)
                     -- The ask has to still be the one this successor is for.
                     -- Carried in the CAS rather than checked before it, and
                     -- that placement is the behaviour: a stale ask makes this

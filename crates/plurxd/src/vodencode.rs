@@ -346,6 +346,123 @@ pub(crate) struct HandoffClaim {
     admitted: Arc<std::sync::atomic::AtomicBool>,
 }
 
+struct SourceAudioPacketEvidence {
+    packets: Vec<([u8; 32], u32)>,
+    clock_tolerance: u32,
+}
+
+fn source_audio_packet_evidence(
+    bytes: &[u8],
+    stream_index: u32,
+    time_base: &str,
+    origin_micros: i64,
+    packet_ticks: u32,
+) -> Option<SourceAudioPacketEvidence> {
+    #[derive(serde::Deserialize)]
+    struct Packet {
+        stream_index: u32,
+        pts: i64,
+        dts: i64,
+        duration: u32,
+        data_hash: String,
+        size: String,
+        flags: String,
+        #[serde(default)]
+        side_data_list: Vec<serde::de::IgnoredAny>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Document {
+        packets: Vec<Packet>,
+    }
+    let (numerator, denominator) = time_base.split_once('/')?;
+    let numerator = i128::from(numerator.parse::<u32>().ok()?);
+    let denominator = i128::from(denominator.parse::<u32>().ok()?);
+    if numerator == 0 || denominator == 0 {
+        return None;
+    }
+    let packets = serde_json::from_slice::<Document>(bytes).ok()?.packets;
+    let rate = i128::from(plurx_core::transcode::VOD_AUDIO_RATE);
+    let width = i128::from(packet_ticks);
+    let source_tick = numerator * rate;
+    let clock_tolerance = if source_tick > denominator {
+        u32::try_from((source_tick + denominator - 1) / denominator).ok()?
+    } else {
+        0
+    };
+    if clock_tolerance > 48 {
+        return None;
+    }
+    let offset_tolerance = denominator * rate
+        + if clock_tolerance > 0 {
+            source_tick * 1_000_000
+        } else {
+            0
+        };
+    let duration_tolerance = if clock_tolerance > 0 { source_tick } else { 0 };
+    let origin = i128::from(origin_micros) * denominator;
+    let mut hashes = Vec::with_capacity(packets.len());
+    for (index, packet) in packets.into_iter().enumerate() {
+        let elapsed = (i128::from(packet.dts) * numerator * 1_000_000 - origin) * rate;
+        let expected = i128::try_from(index).ok()? * width * denominator * 1_000_000;
+        // The held format clock is reported at microsecond precision. Refuse
+        // any drift larger than its own rounding, and refuse edit side data.
+        if packet.stream_index != stream_index
+            || packet.pts != packet.dts
+            || !packet.flags.starts_with('K')
+            || !packet.flags.as_bytes()[1..]
+                .iter()
+                .all(|flag| *flag == b'_')
+            || !packet.side_data_list.is_empty()
+            || (elapsed - expected).abs() > offset_tolerance
+            || (i128::from(packet.duration) * source_tick - width * denominator).abs()
+                > duration_tolerance
+        {
+            return None;
+        }
+        let mut sha = [0; 32];
+        hex::decode_to_slice(packet.data_hash.strip_prefix("SHA256:")?, &mut sha).ok()?;
+        hashes.push((sha, packet.size.parse().ok()?));
+    }
+    (!hashes.is_empty()).then_some(SourceAudioPacketEvidence {
+        packets: hashes,
+        clock_tolerance,
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn source_audio_copy_requires_contiguous_full_packets_on_the_held_clock() {
+    let hash = format!("SHA256:{}", "12".repeat(32));
+    let packet = |pts, duration| {
+        serde_json::json!({
+            "stream_index": 2, "pts": pts, "dts": pts,
+            "duration": duration, "data_hash": hash, "size": "384", "flags": "K__",
+        })
+    };
+    let evidence = |packets| serde_json::to_vec(&serde_json::json!({"packets": packets})).unwrap();
+    let valid = evidence(vec![packet(4_800, 1_536), packet(6_336, 1_536)]);
+    assert_eq!(
+        source_audio_packet_evidence(&valid, 2, "1/48000", 100_000, 1_536)
+            .expect("exact clock")
+            .packets,
+        vec![([0x12; 32], 384); 2],
+    );
+    let quantized = evidence(vec![packet(0, 21), packet(21, 21), packet(43, 21)]);
+    assert_eq!(
+        source_audio_packet_evidence(&quantized, 2, "1/1000", 0, 1024)
+            .expect("coarse container clock")
+            .clock_tolerance,
+        48,
+    );
+    for invalid in [
+        evidence(vec![packet(4_800, 1_536), packet(6_337, 1_536)]),
+        evidence(vec![packet(4_800, 1_536), packet(6_336, 1_024)]),
+        evidence(vec![packet(4_799, 1_536)]),
+    ] {
+        assert!(source_audio_packet_evidence(&invalid, 2, "1/48000", 100_000, 1_536).is_none());
+    }
+}
+
 /// Resolved once before attachment. A restart cannot silently change encoder,
 /// grade, cadence, rate control, tracks, or burn pixels under an immutable URI.
 pub(crate) struct Encoding {
@@ -1320,11 +1437,101 @@ impl Encoding {
         self.queued.lock().expect("VOD encoder admission").is_some()
     }
 
+    pub(crate) fn is_source_copy(&self) -> bool {
+        self.shared_audio
+            .as_ref()
+            .is_some_and(plurx_core::transcode::VodSharedAudioRecipe::is_source_copy)
+    }
+
+    pub(crate) async fn prefer_split_source_audio(
+        &mut self,
+        source: &std::fs::File,
+        held_probe: &str,
+        stream: &plurx_core::domain::AudioStream,
+    ) -> bool {
+        self.probe_split_source_audio(source, held_probe, stream)
+            .await
+            .is_some()
+    }
+
+    async fn probe_split_source_audio(
+        &mut self,
+        source: &std::fs::File,
+        held_probe: &str,
+        stream: &plurx_core::domain::AudioStream,
+    ) -> Option<()> {
+        let track = self.shared_audio.as_mut()?;
+        let probe: serde_json::Value = serde_json::from_str(held_probe).ok()?;
+        let ordinal = usize::try_from(stream.index).ok()?;
+        let observed = probe
+            .get("streams")?
+            .as_array()?
+            .iter()
+            .filter(|value| {
+                value.get("codec_type").and_then(serde_json::Value::as_str) == Some("audio")
+            })
+            .nth(ordinal)?;
+        let codec = stream.codec.as_str();
+        let packet_ticks = match codec {
+            "aac"
+                if observed.get("profile")?.as_str()? == "LC"
+                    && (observed.get("codec_tag_string")?.as_str()? == "mp4a"
+                        || probe
+                            .get("format")?
+                            .get("format_name")?
+                            .as_str()?
+                            .split(',')
+                            .any(|name| name == "matroska")) =>
+            {
+                1024
+            }
+            "ac3" | "eac3" => 1536,
+            _ => return None,
+        };
+        let channels = u16::try_from(stream.channels?).ok()?;
+        if stream.sample_rate? != 48_000
+            || observed.get("codec_name")?.as_str()? != codec
+            || observed.get("sample_rate")?.as_str()? != "48000"
+            || observed.get("channels")?.as_u64()? != u64::from(channels)
+        {
+            return None;
+        }
+        let index = u32::try_from(observed.get("index")?.as_u64()?).ok()?;
+        let time_base = observed.get("time_base")?.as_str()?;
+        let bytes = crate::ffmpeg::held_source_audio_packets(
+            source,
+            index,
+            Duration::from_secs(2),
+            64 * 1024 * 1024,
+        )
+        .await
+        .ok()?;
+        let evidence = source_audio_packet_evidence(
+            &bytes,
+            index,
+            time_base,
+            self.source_clock.origin_microseconds(),
+            packet_ticks,
+        )?;
+        track
+            .select_source_copy(plurx_core::transcode::VodSourceAudio::new(
+                codec,
+                channels,
+                evidence.clock_tolerance,
+                evidence.packets,
+            )?)
+            .then_some(())
+    }
+
     pub(crate) fn resources(&self) -> TranscodeResourceEstimate {
         if self.shared_audio.is_some() {
             TranscodeResourceEstimate {
                 hardware_slot: false,
-                cpu_threads: plurx_core::transcode::VOD_SHARED_AUDIO_CPU_THREADS,
+                cpu_threads: if self.is_source_copy() {
+                    SOURCE_COPY_CPU_THREADS
+                } else {
+                    plurx_core::transcode::VOD_SHARED_AUDIO_CPU_THREADS
+                },
                 decoder_threads: Some(1),
             }
         } else {
@@ -1363,6 +1570,13 @@ impl Encoding {
         {
             return None;
         }
+        if self.is_source_copy() {
+            return self
+                .shared_audio
+                .as_ref()?
+                .source_copy_rates()
+                .map(|rates| rates.0);
+        }
         let shortest = plan
             .entries
             .iter()
@@ -1390,6 +1604,10 @@ impl Encoding {
     /// split by role. [`Self::continuous_peak_bps`] stays the publication
     /// ceiling; nothing enforces this value, and it is always below it.
     pub(crate) fn continuous_sustained_bps(&self) -> Option<u64> {
+        if self.is_source_copy() {
+            let recipe = self.shared_audio.as_ref()?;
+            return recipe.source_copy_rates().map(|rates| rates.1);
+        }
         if self.shared_audio.is_some() {
             return Some(u64::from(self.options.audio_bitrate_kbps) * 1000);
         }

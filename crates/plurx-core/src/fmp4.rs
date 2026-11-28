@@ -6428,6 +6428,7 @@ pub struct PlannedAudioSegmenter {
     next_tick: u64,
     pending: Vec<Fragment>,
     pending_bytes: usize,
+    source_copy: Option<crate::transcode::VodSourceAudio>,
 }
 
 impl PlannedAudioSegmenter {
@@ -6436,9 +6437,22 @@ impl PlannedAudioSegmenter {
         plan: crate::segplan::SegmentPlan,
         start_entry: u32,
     ) -> Result<Self, Fmp4Error> {
+        Self::with_source_copy(init, plan, start_entry, None)
+    }
+
+    pub fn with_source_copy(
+        init: Init,
+        plan: crate::segplan::SegmentPlan,
+        start_entry: u32,
+        source_copy: Option<crate::transcode::VodSourceAudio>,
+    ) -> Result<Self, Fmp4Error> {
+        let packet_ticks = source_copy.as_ref().map_or(
+            crate::transcode::VOD_AAC_FRAME_SAMPLES,
+            crate::transcode::VodSourceAudio::packet_ticks,
+        );
         let refuse = || {
             Fmp4Error::Unsupported(
-                "shared AAC requires one 48kHz track and a contiguous sample-clock plan".into(),
+                "soundtrack requires one 48 kHz track and a contiguous sample-clock plan".into(),
             )
         };
         if init.tracks.len() != 1
@@ -6457,10 +6471,11 @@ impl PlannedAudioSegmenter {
             if entry.index as usize != index
                 || entry.kind != crate::segplan::PlanEntryKind::AudioTail
                 || entry.start_ticks != next
-                || entry.start_ticks % 1_024 != 0
+                || entry.start_ticks % packet_ticks != 0
                 || entry.duration_ticks == 0
                 || entry.duration_ticks > crate::transcode::VOD_AAC_MAX_SEGMENT_TICKS
-                || (!final_entry && entry.duration_ticks % 1_024 != 0)
+                || ((!final_entry || source_copy.is_some())
+                    && entry.duration_ticks % packet_ticks != 0)
             {
                 return Err(refuse());
             }
@@ -6474,22 +6489,65 @@ impl PlannedAudioSegmenter {
             next_tick,
             pending: Vec::new(),
             pending_bytes: 0,
+            source_copy,
         })
+    }
+
+    /// A coarse container clock may quantize packet times to milliseconds.
+    /// Retain every codec packet byte and recover its exact sample duration
+    /// only inside the tolerance frozen by the held-source census.
+    fn normalize_copy_clock(&self, fragment: &mut Fragment) -> Result<(), Fmp4Error> {
+        let Some(source) = &self.source_copy else {
+            return Ok(());
+        };
+        let [track] = fragment.tracks.as_mut_slice() else {
+            return malformed("copied soundtrack has an unexpected track set");
+        };
+        let mut observed = track.base_decode_time;
+        let mut expected = self.next_tick;
+        let width = source.packet_ticks();
+        let tolerance = source.clock_tolerance();
+        for sample in track.runs.iter_mut().flat_map(|run| &mut run.samples) {
+            let duration = u64::from(sample.duration);
+            if observed.abs_diff(expected) > tolerance || duration.abs_diff(width) > tolerance {
+                return malformed("copied soundtrack packet drifted from its source clock");
+            }
+            if !sample.is_sync() {
+                return malformed("copied soundtrack packet lost its sync flag");
+            }
+            let Some(next_observed) = observed.checked_add(duration) else {
+                return malformed("copied soundtrack packet time overflows");
+            };
+            let Some(next_expected) = expected.checked_add(width) else {
+                return malformed("copied soundtrack plan time overflows");
+            };
+            observed = next_observed;
+            expected = next_expected;
+            sample.duration = width as u32;
+            // Ignore muxer-specific defaults after verifying this packet is
+            // a sync sample. Restart and continuous output use the same flags.
+            sample.flags = 0x0200_0000;
+        }
+        track.base_decode_time = self.next_tick;
+        Ok(())
     }
 
     /// Fully validate the incoming sample run before changing publication
     /// state. Gaps and overlaps are refused rather than absorbed into an AAC
     /// sample duration by the general-purpose fragment merger.
-    pub fn push(&mut self, fragment: Fragment) -> Result<Vec<Published>, Fmp4Error> {
+    pub fn push(&mut self, mut fragment: Fragment) -> Result<Vec<Published>, Fmp4Error> {
         let refuse =
-            || Fmp4Error::Malformed("shared AAC sample bounds or clock continuity failed".into());
+            || Fmp4Error::Malformed("soundtrack sample bounds or clock continuity failed".into());
         if fragment.tracks.len() != 1
             || fragment.len() > 4 * 1024 * 1024
             || fragment.tracks[0].track_id != self.init.tracks[0].id
-            || fragment.tracks[0].base_decode_time != self.next_tick
             || fragment.tracks[0].sample_count() == 0
             || fragment.tracks[0].sample_count() > 2_048
         {
+            return Err(refuse());
+        }
+        self.normalize_copy_clock(&mut fragment)?;
+        if fragment.tracks[0].base_decode_time != self.next_tick {
             return Err(refuse());
         }
         let end = self
@@ -6498,6 +6556,10 @@ impl PlannedAudioSegmenter {
             .last()
             .expect("validated plan")
             .end_ticks();
+        let packet_ticks = self.source_copy.as_ref().map_or(
+            crate::transcode::VOD_AAC_FRAME_SAMPLES,
+            crate::transcode::VodSourceAudio::packet_ticks,
+        );
         let track = &fragment.tracks[0];
         let mut tick = self.next_tick;
         let mut planned_entry = self.entry;
@@ -6510,13 +6572,14 @@ impl PlannedAudioSegmenter {
                     .checked_add(sample.size as usize)
                     .ok_or_else(refuse)?;
                 if sample.duration == 0
-                    || sample.duration > 1_024
+                    || u64::from(sample.duration) > packet_ticks
                     || sample.size == 0
                     || sample.cto != 0
                     || offset < fragment.mdat_payload.start
                     || through > fragment.mdat_payload.end
                     || through > fragment.bytes.len()
-                    || (sample.duration != 1_024 && tick + u64::from(sample.duration) != end)
+                    || (u64::from(sample.duration) != packet_ticks
+                        && (self.source_copy.is_some() || tick + u64::from(sample.duration) != end))
                 {
                     return Err(refuse());
                 }
@@ -6541,6 +6604,13 @@ impl PlannedAudioSegmenter {
                 if next == entry.end_ticks() {
                     planned_entry += 1;
                     interval_bytes = 0;
+                }
+                if self.source_copy.as_ref().is_some_and(|source| {
+                    !source.matches_packet(tick, &fragment.bytes[offset..through])
+                }) {
+                    return Err(Fmp4Error::Malformed(
+                        "copied soundtrack packet differs from its frozen source".into(),
+                    ));
                 }
                 payloads.push((tick, *sample, fragment.bytes[offset..through].to_vec()));
                 tick = next;

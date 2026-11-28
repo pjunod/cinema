@@ -1089,6 +1089,31 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                     continue;
                 }
             }
+            if let Some(encoding) = rendition
+                .recipe
+                .encoding
+                .as_ref()
+                .filter(|encoding| encoding.is_source_copy())
+            {
+                drop(manifest);
+                if matches!(step, Step::Restart { .. }) {
+                    rendition.gen_epoch.fetch_add(1, Relaxed);
+                    clear_marker_prewarm_dispatch(rendition);
+                    if perform_driver_step(shared, rendition, step).await.is_err() {
+                        return;
+                    }
+                }
+                let result = crate::vodencode::EncodePermit::try_source_copy(
+                    &encoding.admissions,
+                    shared.store.as_ref(),
+                )
+                .await;
+                if let crate::vodencode::SourceCopyPermitRead::Admitted(permit) = result {
+                    prepared_permit = Some(permit);
+                    continue;
+                }
+                return;
+            }
             if let Some(encoding) = &rendition.recipe.encoding {
                 // The old child may own this pool's only permit. Retire it before
                 // admission, but never hold the manifest over process or Store I/O:
@@ -1425,10 +1450,9 @@ pub(super) fn reader_admission_priority(
             priority = Some(purpose);
         }
     };
-    for reader in readers
-        .values()
-        .filter(|reader| !reader.authority_only && !reader.draining_after_prepared_commit)
-    {
+    for reader in readers.values().filter(|reader| {
+        !reader.authority_only && !reader.on_demand_only && !reader.draining_after_prepared_commit
+    }) {
         include(reader.admission_priority);
     }
     for request in pool.demands(&rendition.key) {
@@ -1512,7 +1536,11 @@ pub(super) fn playback_demands(
     demands.extend(
         readers
             .values()
-            .filter(|reader| !reader.authority_only && !reader.draining_after_prepared_commit)
+            .filter(|reader| {
+                !reader.authority_only
+                    && !reader.on_demand_only
+                    && !reader.draining_after_prepared_commit
+            })
             .map(|reader| match reader.preparation_frontier {
                 Some(frontier) => {
                     // Admission records an actual bounded Prepare request,

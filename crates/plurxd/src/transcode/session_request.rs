@@ -711,6 +711,8 @@ pub enum SourceTelemetry {
     Unknown,
 }
 
+pub(crate) use plurx_core::transcode::{VodCopyLayout, VodSoundtrackIdentity};
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRequest {
@@ -802,6 +804,9 @@ pub struct SessionRequest {
     /// only for indexed copy; any other route keeps the muxed presentation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub split_audio: bool,
+    /// Absent on P49 recipes, which use the original AAC grid on recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) vod_copy_layout: Option<VodCopyLayout>,
     /// The client asked for the HDR10 re-encode grade rather than the SDR
     /// ladder: it decodes and presents HEVC Main10 PQ (`hdr10t=1` at
     /// `/decision`, `CreateSession::hdr10` here).
@@ -1118,6 +1123,60 @@ impl SessionKind {
 }
 
 impl SessionRequest {
+    /// Select the current split recipe for a newly negotiated copy.
+    pub(crate) fn prepare_vod_copy_layout(&mut self) {
+        self.vod_copy_layout = (self.split_audio
+            && self.presentation == Presentation::Vod
+            && matches!(
+                self.kind,
+                SessionKind::Copy {
+                    preserve_dolby_vision: false,
+                    convert_dolby_vision: false,
+                    ..
+                }
+            )
+            && self.continuous_media.is_none()
+            && self.subtitle_burn.is_none())
+        .then_some(VodCopyLayout::PendingV1);
+    }
+
+    pub(crate) fn vod_copy_layout_valid(&self) -> bool {
+        self.vod_copy_layout.as_ref().is_none_or(|layout| {
+            self.presentation == Presentation::Vod
+                && matches!(self.kind, SessionKind::Copy { .. })
+                && self.continuous_media.is_none()
+                && self.subtitle_burn.is_none()
+                && self.split_audio != matches!(layout, VodCopyLayout::Muxed)
+                && layout.valid()
+        })
+    }
+
+    /// Freeze the owner's verdict for first activation or a replay of the
+    /// same verdict. A non-copy result can only consume a pending request.
+    pub(crate) fn seal_vod_copy_layout(
+        &mut self,
+        issued: Option<VodCopyLayout>,
+        copied_vod: bool,
+    ) -> bool {
+        match (&self.vod_copy_layout, &issued) {
+            (Some(VodCopyLayout::PendingV1), Some(layout)) if copied_vod => {
+                if !layout.valid() || matches!(layout, VodCopyLayout::PendingV1) {
+                    return false;
+                }
+                self.split_audio = matches!(layout, VodCopyLayout::SplitV1 { .. });
+                self.vod_copy_layout = issued;
+                true
+            }
+            (Some(VodCopyLayout::PendingV1), None) if !copied_vod => {
+                self.split_audio = false;
+                self.vod_copy_layout = None;
+                true
+            }
+            (Some(VodCopyLayout::PendingV1), _) => false,
+            (current, issued) => current == issued,
+        }
+    }
+
     /// The one processed-upgrade ask for this request: its Auto candidate's,
     /// or the accepted ask of a start that has none. `None` only for a start
     /// that reported no capabilities, which no processed route can serve.
@@ -1371,6 +1430,7 @@ impl SessionRequest {
 }
 
 pub struct StartInfo {
+    pub(crate) vod_copy_layout: Option<VodCopyLayout>,
     /// Profile of an admitted, prepared processed presentation. Independent
     /// of the physical transcode kind and its PQ base grade; never source tags.
     pub(crate) processed_dv_profile: Option<u8>,

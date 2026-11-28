@@ -112,6 +112,39 @@ fn shared_audio_publication_preserves_every_sample_across_fragment_and_restart_b
 }
 
 #[test]
+fn copied_audio_rejects_wrong_seek_landing_before_publishing_immutable_bytes() {
+    use sha2::{Digest, Sha256};
+
+    let hashes = (0u32..96)
+        .map(|packet| (Sha256::digest(packet.to_be_bytes()).into(), 4))
+        .collect();
+    let proof = crate::transcode::VodSourceAudio::new("aac", 2, 48, hashes).expect("source proof");
+    let init = shared_audio_init();
+    let plan = crate::transcode::vod_shared_audio_plan(2_048, 160);
+    let mut full =
+        PlannedAudioSegmenter::with_source_copy(init.clone(), plan.clone(), 0, Some(proof.clone()))
+            .expect("full soundtrack");
+    let original = full
+        .push(shared_audio_fragment(0, 96, None))
+        .expect("complete source packets");
+    assert_eq!(original.len(), 2);
+
+    let mut restart =
+        PlannedAudioSegmenter::with_source_copy(init, plan, 1, Some(proof)).expect("restart");
+    let mut misplaced = shared_audio_fragment(93, 2, None);
+    misplaced.tracks[0].base_decode_time = 94 * 1_024;
+    assert!(restart.push(misplaced).is_err());
+    assert_eq!(restart.next_tick, 94 * 1_024);
+    let mut quantized = shared_audio_fragment(94, 2, None);
+    quantized.tracks[0].runs[0].samples[0].duration += 8;
+    quantized.tracks[0].runs[0].samples[1].duration -= 16;
+    let regenerated = restart
+        .push(quantized)
+        .expect("byte-exact replay on a quantized source clock");
+    assert_eq!(regenerated[0].segment.bytes, original[1].segment.bytes);
+}
+
+#[test]
 fn shared_audio_gap_overlap_and_partial_packets_cannot_change_the_publication_frontier() {
     let mut cutter = PlannedAudioSegmenter::new(
         shared_audio_init(),

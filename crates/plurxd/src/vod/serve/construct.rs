@@ -328,6 +328,7 @@ impl VodServe {
             session_id.to_owned(),
             Session {
                 requested_audio_index: None,
+                vod_copy_layout: None,
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,

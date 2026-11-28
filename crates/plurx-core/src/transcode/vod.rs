@@ -68,7 +68,7 @@ impl VodSourceClock {
         bytes
     }
 
-    fn origin_microseconds(self) -> i64 {
+    pub fn origin_microseconds(self) -> i64 {
         match self {
             Self::ReportedOrigin(value) => value,
             Self::ProducerDefaultZero => 0,
@@ -174,11 +174,25 @@ fn shared_audio_plan_aligned_to_video(
     end_ticks: u64,
     bitrate_kbps: u32,
 ) -> Option<SegmentPlan> {
+    shared_audio_plan_aligned_to_video_with_width(
+        video,
+        end_ticks,
+        bitrate_kbps,
+        VOD_AAC_FRAME_SAMPLES,
+    )
+}
+
+fn shared_audio_plan_aligned_to_video_with_width(
+    video: &SegmentPlan,
+    end_ticks: u64,
+    bitrate_kbps: u32,
+    packet_ticks: u64,
+) -> Option<SegmentPlan> {
     let first = video.entries.first()?;
     if first.start_ticks != 0 || video.timescale == 0 || video.len() > 100_000 {
         return None;
     }
-    let frame_denominator = u128::from(video.timescale) * u128::from(VOD_AAC_FRAME_SAMPLES);
+    let frame_denominator = u128::from(video.timescale) * u128::from(packet_ticks);
     let mut plan = SegmentPlan {
         version: SEGPLAN_VERSION,
         timescale: VOD_AUDIO_RATE,
@@ -187,10 +201,10 @@ fn shared_audio_plan_aligned_to_video(
     };
     let mut start = 0_u64;
     for boundary in video.entries.iter().skip(1).map(|entry| entry.start_ticks) {
-        // Round each absolute time once. A tie goes to the later AAC frame.
+        // Round each absolute time once. A tie goes to the later packet.
         let numerator = u128::from(boundary) * u128::from(VOD_AUDIO_RATE);
         let frame = (numerator + frame_denominator / 2) / frame_denominator;
-        let end = u64::try_from(frame * u128::from(VOD_AAC_FRAME_SAMPLES)).ok()?;
+        let end = u64::try_from(frame * u128::from(packet_ticks)).ok()?;
         if end >= end_ticks {
             return None;
         }
@@ -542,7 +556,7 @@ pub struct VodSharedAudioRendition {
     init_id: String,
     recipe_id: String,
     source_object_version: String,
-    facts: crate::fmp4::AacSampleEntryFacts,
+    facts: VodAudioSampleEntryFacts,
     bitrate_kbps: u32,
     aligned_plan: Option<std::sync::Arc<SegmentPlan>>,
 }
@@ -596,7 +610,7 @@ impl VodSharedAudioRendition {
     pub fn source_object_version(&self) -> &str {
         &self.source_object_version
     }
-    pub fn facts(&self) -> &crate::fmp4::AacSampleEntryFacts {
+    pub fn facts(&self) -> &VodAudioSampleEntryFacts {
         &self.facts
     }
     pub fn bitrate_kbps(&self) -> u32 {
@@ -1298,6 +1312,103 @@ impl AudioClock {
     }
 }
 
+/// Verified configuration of a split or continuous soundtrack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VodAudioSampleEntryFacts {
+    pub codec: &'static str,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub samples_per_frame: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceAudioCodec {
+    Aac,
+    Ac3,
+    Eac3,
+}
+
+/// Complete, contiguous source packet evidence. Hashes are ordered by film
+/// sample clock so a seeked producer cannot substitute different packets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VodSourceAudio {
+    codec: SourceAudioCodec,
+    channels: u16,
+    clock_tolerance: u32,
+    packets: std::sync::Arc<[([u8; 32], u32)]>,
+}
+
+impl VodSourceAudio {
+    pub fn new(
+        codec: &str,
+        channels: u16,
+        clock_tolerance: u32,
+        packets: Vec<([u8; 32], u32)>,
+    ) -> Option<Self> {
+        let codec = match codec {
+            "aac" => SourceAudioCodec::Aac,
+            "ac3" => SourceAudioCodec::Ac3,
+            "eac3" => SourceAudioCodec::Eac3,
+            _ => return None,
+        };
+        if !(1..=8).contains(&channels)
+            || clock_tolerance > VOD_AUDIO_RATE / 1000
+            || packets.is_empty()
+            || packets.iter().any(|(_, size)| !(1..=16_384).contains(size))
+        {
+            return None;
+        }
+        Some(Self {
+            codec,
+            channels,
+            clock_tolerance,
+            packets: packets.into(),
+        })
+    }
+
+    pub fn packet_ticks(&self) -> u64 {
+        match self.codec {
+            SourceAudioCodec::Aac => VOD_AAC_FRAME_SAMPLES,
+            SourceAudioCodec::Ac3 | SourceAudioCodec::Eac3 => 1536,
+        }
+    }
+
+    pub(crate) fn clock_tolerance(&self) -> u64 {
+        u64::from(self.clock_tolerance)
+    }
+
+    pub(crate) fn matches_packet(&self, tick: u64, bytes: &[u8]) -> bool {
+        use sha2::{Digest, Sha256};
+        let index = usize::try_from(tick / self.packet_ticks()).ok();
+        index
+            .and_then(|index| self.packets.get(index))
+            .is_some_and(|(hash, size)| {
+                usize::try_from(*size).ok() == Some(bytes.len())
+                    && *hash == <[u8; 32]>::from(Sha256::digest(bytes))
+            })
+    }
+
+    fn interval_bytes(&self, start: u64, end: u64) -> Option<u64> {
+        let low = usize::try_from(start / self.packet_ticks()).ok()?;
+        let high = usize::try_from(end / self.packet_ticks()).ok()?;
+        let packets = self.packets.get(low..high)?;
+        // Packet table and fixed fragment headers, rounded above merge's
+        // serialized overhead. This cap also guides the immutable cache.
+        let bytes = 2048
+            + packets
+                .iter()
+                .map(|(_, size)| u64::from(*size) + 16)
+                .sum::<u64>();
+        (bytes <= 16 * 1024 * 1024).then_some(bytes)
+    }
+
+    fn end_ticks(&self) -> Option<u64> {
+        u64::try_from(self.packets.len())
+            .ok()?
+            .checked_mul(self.packet_ticks())
+    }
+}
+
 /// Frozen soundtrack semantics. Video shape, bitrate and encoder selection
 /// never enter this digest, so all rungs reuse one audio recipe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1307,6 +1418,7 @@ pub struct VodSharedAudioRecipe {
     audio_channels: u32,
     audio_bitrate_kbps: u32,
     alignment: Option<CopySoundtrackAlignment>,
+    source_copy: Option<VodSourceAudio>,
     digest: String,
 }
 
@@ -1314,6 +1426,7 @@ pub struct VodSharedAudioRecipe {
 struct CopySoundtrackAlignment {
     plan: std::sync::Arc<SegmentPlan>,
     digest: String,
+    source_rates: Option<(u64, u64)>,
 }
 
 /// One decoder, one filter worker and one AAC encoder worker are reserved.
@@ -1349,6 +1462,7 @@ impl VodSharedAudioRecipe {
             audio_channels: media.audio_channels,
             audio_bitrate_kbps: media.audio_bitrate_kbps,
             alignment: None,
+            source_copy: None,
             digest: hex::encode(hash.finalize()),
         })
     }
@@ -1357,6 +1471,30 @@ impl VodSharedAudioRecipe {
         self.alignment
             .as_ref()
             .map_or(&self.digest, |alignment| &alignment.digest)
+    }
+
+    pub fn source_copy(&self) -> Option<&VodSourceAudio> {
+        self.source_copy.as_ref()
+    }
+
+    pub fn is_source_copy(&self) -> bool {
+        self.source_copy.is_some()
+    }
+
+    pub fn select_source_copy(&mut self, source: VodSourceAudio) -> bool {
+        if self.audio_offset_ms != 0 || self.alignment.is_some() {
+            return false;
+        }
+        self.source_copy = Some(source);
+        true
+    }
+
+    pub fn source_copy_rates(&self) -> Option<(u64, u64)> {
+        self.alignment.as_ref()?.source_rates
+    }
+
+    pub fn discard_source_copy(&mut self) {
+        self.source_copy = None;
     }
 
     /// Freeze a copy presentation's AAC cuts without changing the shared
@@ -1369,22 +1507,62 @@ impl VodSharedAudioRecipe {
     ) -> Option<()> {
         use sha2::{Digest, Sha256};
 
-        let aligned = shared_audio_plan_aligned_to_video(
-            video,
-            grid.shared_audio_end_ticks(duration_ms),
-            self.audio_bitrate_kbps,
-        )?;
         let mut hash = Sha256::new();
-        hash.update(b"vod-copy-video-aligned-aac-v1\0");
+        let aligned = if let Some(source) = &self.source_copy {
+            let end = source.end_ticks()?;
+            let video_end = video.entries.last()?.end_ticks();
+            let clock = u128::from(video.timescale);
+            if (u128::from(end) * clock)
+                .abs_diff(u128::from(video_end) * u128::from(VOD_AUDIO_RATE))
+                > clock * 2_400
+            {
+                return None;
+            }
+            hash.update(b"vod-copy-video-aligned-source-audio-v1\0");
+            hash.update([match source.codec {
+                SourceAudioCodec::Aac => 1,
+                SourceAudioCodec::Ac3 => 2,
+                SourceAudioCodec::Eac3 => 3,
+            }]);
+            hash.update(source.channels.to_le_bytes());
+            hash.update(source.clock_tolerance.to_le_bytes());
+            for (digest, size) in source.packets.iter() {
+                hash.update(digest);
+                hash.update(size.to_le_bytes());
+            }
+            let mut aligned = shared_audio_plan_aligned_to_video_with_width(
+                video,
+                end,
+                self.audio_bitrate_kbps,
+                source.packet_ticks(),
+            )?;
+            for entry in &mut aligned.entries {
+                entry.est_bytes = source.interval_bytes(entry.start_ticks, entry.end_ticks())?;
+            }
+            aligned
+        } else {
+            hash.update(b"vod-copy-video-aligned-aac-v1\0");
+            shared_audio_plan_aligned_to_video(
+                video,
+                grid.shared_audio_end_ticks(duration_ms),
+                self.audio_bitrate_kbps,
+            )?
+        };
         hash.update(self.digest.as_bytes());
         hash.update(aligned.timescale.to_le_bytes());
         for entry in &aligned.entries {
             hash.update(entry.start_ticks.to_le_bytes());
             hash.update(entry.duration_ticks.to_le_bytes());
         }
+        let source_rates = if self.source_copy.is_some() {
+            Some(copy_soundtrack_rates(&aligned)?)
+        } else {
+            None
+        };
         self.alignment = Some(CopySoundtrackAlignment {
             plan: std::sync::Arc::new(aligned),
             digest: hex::encode(hash.finalize()),
+            source_rates,
         });
         Some(())
     }
@@ -1402,14 +1580,56 @@ impl VodSharedAudioRecipe {
     pub fn verify_init(
         &self,
         init: &crate::fmp4::Init,
-    ) -> Result<crate::fmp4::AacSampleEntryFacts, crate::fmp4::Fmp4Error> {
+    ) -> Result<VodAudioSampleEntryFacts, crate::fmp4::Fmp4Error> {
+        if let Some(source) = &self.source_copy {
+            let (codec, channels) = match source.codec {
+                SourceAudioCodec::Aac => {
+                    let facts = crate::fmp4::aac_lc_sample_entry_facts(init)?;
+                    (facts.codec, facts.channels)
+                }
+                SourceAudioCodec::Ac3 | SourceAudioCodec::Eac3 => {
+                    let facts = crate::fmp4::dolby_audio_sample_entry_facts(init)?;
+                    if facts.joc {
+                        return Err(crate::fmp4::Fmp4Error::Unsupported(
+                            "copied E-AC-3 JOC requires HLS channel signaling".into(),
+                        ));
+                    }
+                    (facts.codec, facts.channels)
+                }
+            };
+            let expected_codec = match source.codec {
+                SourceAudioCodec::Aac => "mp4a.40.2",
+                SourceAudioCodec::Ac3 => "ac-3",
+                SourceAudioCodec::Eac3 => "ec-3",
+            };
+            if codec != expected_codec
+                || channels != source.channels
+                || init.tracks[0].timescale != VOD_AUDIO_RATE
+                || init.tracks[0].has_edit_list
+            {
+                return Err(crate::fmp4::Fmp4Error::Unsupported(
+                    "copied audio init differs from its frozen source track".into(),
+                ));
+            }
+            return Ok(VodAudioSampleEntryFacts {
+                codec,
+                channels,
+                sample_rate: VOD_AUDIO_RATE,
+                samples_per_frame: source.packet_ticks() as u16,
+            });
+        }
         let facts = crate::fmp4::aac_lc_sample_entry_facts(init)?;
         if u32::from(facts.channels) != self.audio_channels {
             return Err(crate::fmp4::Fmp4Error::Unsupported(
                 "shared AAC output channels differ from the frozen recipe".into(),
             ));
         }
-        Ok(facts)
+        Ok(VodAudioSampleEntryFacts {
+            codec: facts.codec,
+            channels: facts.channels,
+            sample_rate: facts.sample_rate,
+            samples_per_frame: facts.samples_per_frame,
+        })
     }
 
     pub fn plan(&self, duration_ms: i64) -> SegmentPlan {
@@ -1459,6 +1679,52 @@ impl VodSharedAudioRecipe {
             || execution.start_seconds < 0.0
         {
             return None;
+        }
+        if let Some(source) = &self.source_copy {
+            // Select the first whole planned packet with an output seek. A
+            // small preroll lets the demuxer seek independently. The writer
+            // verifies the resulting packet against its absolute plan before
+            // restoring the muxer's zero-based decode clock.
+            let preroll = (execution.start_seconds - 2.0).max(0.0);
+            let threshold = execution.start_seconds
+                - source.packet_ticks() as f64 / (2.0 * f64::from(VOD_AUDIO_RATE));
+            let mut args = vec![
+                "-copyts".into(),
+                "-itsoffset".into(),
+                source_clock.input_offset(),
+                "-ss".into(),
+                format!("{preroll:.9}"),
+                "-threads".into(),
+                "1".into(),
+                "-i".into(),
+                execution.source_path.to_string_lossy().into_owned(),
+            ];
+            if execution.start_seconds > 0.0 {
+                args.extend(["-ss".into(), format!("{threshold:.9}")]);
+            }
+            args.extend([
+                "-map".into(),
+                format!("0:a:{}", self.audio_index),
+                "-vn".into(),
+                "-sn".into(),
+                "-dn".into(),
+                "-map_chapters".into(),
+                "-1".into(),
+                "-c:a".into(),
+                "copy".into(),
+                "-avoid_negative_ts".into(),
+                "disabled".into(),
+                "-use_editlist".into(),
+                "0".into(),
+                "-movflags".into(),
+                "+empty_moov+delay_moov+default_base_moof".into(),
+                "-frag_duration".into(),
+                "2000000".into(),
+                "-f".into(),
+                "mp4".into(),
+                "pipe:1".into(),
+            ]);
+            return Some(args);
         }
         let clock = AudioClock::new(execution.start_seconds, self.audio_offset_ms);
         let anchor = vod_audio_anchor(execution.start_seconds) as f64 / f64::from(VOD_AUDIO_RATE);
@@ -1511,6 +1777,21 @@ impl VodSharedAudioRecipe {
             "pipe:1".into(),
         ])
     }
+}
+
+fn copy_soundtrack_rates(plan: &SegmentPlan) -> Option<(u64, u64)> {
+    let end = plan.entries.last()?.end_ticks();
+    let mut total = 0_u128;
+    let mut peak = 0_u128;
+    for entry in &plan.entries {
+        let bits_scaled = u128::from(entry.est_bytes) * 8 * u128::from(plan.timescale);
+        total += bits_scaled;
+        peak = peak.max(bits_scaled.div_ceil(u128::from(entry.duration_ticks)));
+    }
+    Some((
+        u64::try_from(peak).ok()?,
+        u64::try_from(total.div_ceil(u128::from(end))).ok()?,
+    ))
 }
 
 /// Compatibility entry point for existing resolved VOD callers.
@@ -3398,7 +3679,7 @@ mod tests {
             init_id: "e".repeat(64),
             recipe_id: "c".repeat(64),
             source_object_version: "source-one".into(),
-            facts: crate::fmp4::AacSampleEntryFacts {
+            facts: VodAudioSampleEntryFacts {
                 codec: "mp4a.40.2",
                 channels: 2,
                 sample_rate: 48_000,
@@ -3734,7 +4015,7 @@ mod tests {
             init_id: init.to_string().repeat(64),
             recipe_id: "c".repeat(64),
             source_object_version: "source-one".into(),
-            facts: crate::fmp4::AacSampleEntryFacts {
+            facts: VodAudioSampleEntryFacts {
                 codec: "mp4a.40.2",
                 channels,
                 sample_rate: 48_000,

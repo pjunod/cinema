@@ -1766,6 +1766,7 @@ async fn idle_session_maintenance_skips_updates_but_still_retires_expired_sessio
 }
 async fn first_output_seal_fixture(
     rebuilt: bool,
+    issued_layout: Option<crate::transcode::VodCopyLayout>,
 ) -> (SqliteStore, crate::store::PreparedOutputSeal) {
     let store = SqliteStore::open_in_memory().expect("capture store");
     store.with_conn(move |conn| {
@@ -1780,10 +1781,22 @@ async fn first_output_seal_fixture(
             }
             Ok(())
         }).await.expect("capture predecessor");
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let mut recipe =
+        serde_json::json!({"retained_output_receiver":1,"request":{"presentation":"vod"}});
+    let mut response = serde_json::json!({"prepared_output_capture_pending":true,"height":720});
+    if issued_layout.is_some() {
+        recipe["request"]["split_audio"] = true.into();
+        recipe["request"]["vod_copy_layout"] =
+            serde_json::to_value(crate::transcode::VodCopyLayout::PendingV1).expect("layout JSON");
+        response["session_id"] = session_id.clone().into();
+        response["playlist_url"] = format!("/api/v1/hls/{session_id}/index.m3u8?native=2").into();
+        response["prepared_playlist_shape"] = "single_variant_v1".into();
+    }
     let preparation = MediaSessionPreparation {
         quality_cancellation_key: None,
         incarnation_id: uuid::Uuid::new_v4().to_string(),
-        session_id: uuid::Uuid::new_v4().to_string(),
+        session_id,
         principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
         playback_id: "capture-playback".into(),
         expected_predecessor_incarnation_id: "00000000-0000-4000-8000-000000000001".into(),
@@ -1791,8 +1804,8 @@ async fn first_output_seal_fixture(
         expected_predecessor_owner_epoch: 2,
         request_fingerprint: "b".repeat(64),
         owner_node_id: "node".into(),
-        recipe_json: r#"{"retained_output_receiver":1,"request":{"presentation":"vod"}}"#.into(),
-        response_json: r#"{"prepared_output_capture_pending":true,"height":720}"#.into(),
+        recipe_json: recipe.to_string(),
+        response_json: response.to_string(),
         media_origin_ms: 0,
         now_ms: 20,
         expected_desired_revision: None,
@@ -1818,6 +1831,7 @@ async fn first_output_seal_fixture(
         deadline_ms: 8000,
         now_ms: 21,
         already_complete: false,
+        vod_copy_layout: issued_layout,
         retained_output: Some(
             serde_json::json!({"artifact_id":uuid::Uuid::new_v4().to_string(),
                 "output_identity":"ab".repeat(32),"average_bps":8000,"peak_bps":12000}),
@@ -1830,7 +1844,7 @@ async fn first_output_seal_fixture(
 async fn first_preparation_output_seal_is_exact_and_idempotent_in_both_layouts() {
     for rebuilt in [false, true] {
         for absence in [false, true] {
-            let (store, mut seal) = first_output_seal_fixture(rebuilt).await;
+            let (store, mut seal) = first_output_seal_fixture(rebuilt, None).await;
             if absence {
                 seal.retained_output = None;
             }
@@ -1933,6 +1947,102 @@ async fn first_preparation_output_seal_is_exact_and_idempotent_in_both_layouts()
 }
 
 #[tokio::test]
+async fn prepared_vod_copy_seals_the_layout_and_url_together() {
+    use crate::transcode::{VodCopyLayout, VodSoundtrackIdentity};
+
+    let split = VodCopyLayout::SplitV1 {
+        soundtracks: vec![VodSoundtrackIdentity {
+            source_index: 3,
+            rendition_id: "d".repeat(64),
+            init_id: "c".repeat(64),
+            source_copy: true,
+        }],
+    };
+    for layout in [split, VodCopyLayout::Muxed] {
+        let (store, mut seal) = first_output_seal_fixture(true, Some(layout.clone())).await;
+        let (pending_recipe, pending_response) = (
+            seal.expected_recipe_json.clone(),
+            seal.expected_response_json.clone(),
+        );
+        let mut missing = seal.clone();
+        missing.vod_copy_layout = None;
+        assert!(store.seal_prepared_output(&missing).await.is_err());
+        assert!(store.seal_prepared_output(&seal).await.expect("first seal"));
+        let route = store
+            .media_session_route_by_incarnation(&seal.incarnation_id)
+            .await
+            .expect("read sealed route")
+            .expect("route");
+        let recipe: serde_json::Value = serde_json::from_str(&route.recipe_json).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&route.response_json).unwrap();
+        assert_eq!(
+            recipe["request"]["vod_copy_layout"],
+            serde_json::to_value(&layout).unwrap()
+        );
+        let split = matches!(layout, VodCopyLayout::SplitV1 { .. });
+        let playlist = if split {
+            "master.m3u8"
+        } else {
+            "index.m3u8?native=2"
+        };
+        assert_eq!(
+            response["playlist_url"],
+            format!("/api/v1/hls/{}/{playlist}", seal.session_id)
+        );
+        assert_eq!(recipe["request"]["split_audio"] == true, split);
+        assert_eq!(response.get("prepared_playlist_shape").is_none(), split);
+        assert!(crate::store::prepared_output::sealed_reservation_matches(
+            &pending_recipe,
+            &pending_response,
+            &route.recipe_json,
+            &route.response_json,
+        ));
+        let mut altered = response;
+        altered["height"] = 480.into();
+        assert!(!crate::store::prepared_output::sealed_reservation_matches(
+            &pending_recipe,
+            &pending_response,
+            &route.recipe_json,
+            &altered.to_string(),
+        ));
+        seal.already_complete = true;
+        seal.expected_recipe_json = route.recipe_json;
+        seal.expected_response_json = route.response_json;
+        assert!(store
+            .prepared_output_sealed(&seal)
+            .await
+            .expect("sealed read"));
+    }
+}
+
+#[tokio::test]
+async fn prepared_vod_copy_cannot_publish_a_pending_layout() {
+    let (store, seal) =
+        first_output_seal_fixture(true, Some(crate::transcode::VodCopyLayout::Muxed)).await;
+    let principal = crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
+    let request = MediaSessionPreparationCommitRequest {
+        staged_incarnation_id: seal.incarnation_id,
+        expected_predecessor_owner_node_id: seal.predecessor_owner_node_id,
+        expected_predecessor_owner_epoch: seal.predecessor_owner_epoch,
+        now_ms: seal.now_ms,
+        lease_expires_at_ms: 8_500,
+        control_receipt: None,
+        expected_desired_revision: None,
+    };
+    assert!(store
+        .commit_media_session_preparation(&principal, &seal.playback_id, &request)
+        .await
+        .expect("pending commit refusal")
+        .is_none());
+    let current = store
+        .media_session_route_for_playback(&principal, &seal.playback_id)
+        .await
+        .expect("pointer")
+        .expect("predecessor");
+    assert_eq!(current.incarnation_id, seal.predecessor_incarnation_id);
+}
+
+#[tokio::test]
 async fn first_preparation_output_seal_refuses_lost_ownership_and_legacy_absence() {
     let mutations = [
             "UPDATE media_sessions SET owner_epoch=2 WHERE incarnation_id=?1",
@@ -1950,7 +2060,7 @@ async fn first_preparation_output_seal_refuses_lost_ownership_and_legacy_absence
         ];
     for rebuilt in [false, true] {
         for mutation in mutations {
-            let (store, seal) = first_output_seal_fixture(rebuilt).await;
+            let (store, seal) = first_output_seal_fixture(rebuilt, None).await;
             let id = seal.incarnation_id.clone();
             store
                 .with_conn(move |conn| {
@@ -1978,13 +2088,13 @@ async fn first_preparation_output_seal_refuses_lost_ownership_and_legacy_absence
                 before
             );
         }
-        let (store, mut legacy) = first_output_seal_fixture(rebuilt).await;
+        let (store, mut legacy) = first_output_seal_fixture(rebuilt, None).await;
         legacy.expected_response_json = "{}".into();
         assert!(
             store.seal_prepared_output(&legacy).await.is_err(),
             "missing pending marker cannot authorize capture"
         );
-        let (store, mut stale) = first_output_seal_fixture(rebuilt).await;
+        let (store, mut stale) = first_output_seal_fixture(rebuilt, None).await;
         stale.now_ms = stale.deadline_ms;
         assert!(store.seal_prepared_output(&stale).await.is_err());
     }

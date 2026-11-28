@@ -561,6 +561,7 @@ async fn resurrect_vod_before(
         tokio::time::Instant::from_std(deadline),
         state.transcode.vod_resurrect_before(
             &route.recipe_json,
+            &route.response_json,
             session,
             local_user_id,
             adoption,

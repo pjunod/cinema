@@ -183,3 +183,25 @@ only the affinity was wrong. S5 may bump again for relay and takeover.
 - A split-predicted offer has an audio-free fingerprint, so two audio
   selections of one title rank the same peers in the same order. A worker that
   holds the video-only generation reports `cache_hit`.
+
+
+## 7. Indexed VOD copy (S3)
+
+New AVC VOD copy starts use the S3 layout when the client negotiates split
+audio. Each supported soundtrack is evaluated against the client's audio
+claim. A bounded source packet scan proves copy for supported 48 kHz AAC-LC,
+AC-3 and E-AC-3. Other tracks use AAC. The plans cut on the nearest audio
+packet boundary to each video boundary. The legacy continuous encoder
+keeps its fixed AAC grid.
+
+The owner opens the entire child group privately. It verifies each child
+init, reserves AAC capacity and checks the master before attaching a
+session. Alternate tracks use the configured resource budgets and can
+serve larger groups. Refused private preparations use the ordinary muxed
+copy before activation.
+
+Protocol 14 persists the issued layout and each soundtrack's rendition and
+init identities. Recovery of an issued split requires an exact match and
+uses the frozen per-track production mode. Older split recipes rebuild the
+P49 fixed-grid AAC layout. A historical response that issued the muxed media
+playlist rebuilds a muxed session.

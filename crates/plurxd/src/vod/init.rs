@@ -15,6 +15,66 @@ pub(super) async fn regenerate_init_head(
     slots: &Arc<Semaphore>,
     runtime_cache: &Path,
 ) -> Result<Init, HeadRegenerationError> {
+    let muxer = probe_init_head(recipe, source, slots, runtime_cache, None).await?;
+    identity
+        .served_init_for(&muxer)
+        .map_err(|refused| HeadRegenerationError::Failed(refused.to_string()))
+}
+
+/// Materialize a private init through the same bounded head producer used
+/// when an immutable rendition is restored from disk.
+pub(super) async fn prepare_init_head(
+    shared: &Shared,
+    rendition: &Arc<Rendition>,
+) -> Result<(), String> {
+    if rendition.dir.has_init().await {
+        if let Some(encoding) = rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .filter(|encoding| encoding.is_source_copy())
+        {
+            let permit = crate::vodencode::EncodePermit::try_source_copy(
+                &encoding.admissions,
+                shared.store.as_ref(),
+            )
+            .await;
+            if !matches!(permit, crate::vodencode::SourceCopyPermitRead::Admitted(_)) {
+                return Err("cached split soundtrack could not admit a copy worker".into());
+            }
+        }
+        return Ok(());
+    }
+    let source = rendition
+        .source
+        .as_ref()
+        .ok_or("split child has no held source")?;
+    let muxer = probe_init_head(
+        &rendition.recipe,
+        source,
+        &shared.head_regeneration_slots,
+        &shared.runtime_cache,
+        rendition.retained_admission.current(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    super::generation::establish_or_verify(
+        shared,
+        rendition,
+        &muxer,
+        rendition.gen_epoch.load(Relaxed),
+    )
+    .await
+    .map_err(|error| format!("establishing private split init: {error:?}"))
+}
+
+async fn probe_init_head(
+    recipe: &Recipe,
+    source: &crate::fragment_index_cluster::SourceFence,
+    slots: &Arc<Semaphore>,
+    runtime_cache: &Path,
+    reservation: Option<crate::vodencode::EncodePermit>,
+) -> Result<Init, HeadRegenerationError> {
     let _permit = Arc::clone(slots)
         .try_acquire_owned()
         .map_err(|_| HeadRegenerationError::Busy)?;
@@ -29,9 +89,32 @@ pub(super) async fn regenerate_init_head(
         ));
     }
     let permit = if let Some(encoding) = &recipe.encoding {
-        let permit = encoding.try_permit().await;
-        encoding.cancel_wait();
-        Some(permit.ok_or(HeadRegenerationError::Busy)?)
+        let permit = if let Some(reserved) = reservation {
+            Some(reserved)
+        } else if encoding
+            .shared_audio
+            .as_ref()
+            .is_some_and(|audio| audio.is_source_copy())
+        {
+            match crate::vodencode::EncodePermit::try_source_copy(
+                &encoding.admissions,
+                &*encoding.store,
+            )
+            .await
+            {
+                crate::vodencode::SourceCopyPermitRead::Admitted(permit) => Some(permit),
+                _ => None,
+            }
+        } else {
+            let permit = encoding.try_permit().await;
+            encoding.cancel_wait();
+            permit
+        };
+        Some(
+            permit
+                .and_then(crate::vodencode::EncodePermit::try_claim_worker)
+                .ok_or(HeadRegenerationError::Busy)?,
+        )
     } else {
         None
     };
@@ -71,15 +154,37 @@ pub(super) async fn regenerate_init_head(
     owner.permit = permit;
     let stdout = spawned.stdout;
     let stderr = spawned.stderr;
-    let (muxer, diagnostic) = tokio::join!(
-        read_regenerated_head_before(
-            owner,
-            stdout,
-            HEAD_REGENERATION_TIMEOUT,
-            HEAD_REGENERATION_MAX_BYTES,
-        ),
-        crate::ffmpeg::drain_diagnostics(stderr)
-    );
+    let copied = recipe.encoding.as_ref().and_then(|encoding| {
+        let source = encoding.shared_audio.as_ref()?.source_copy()?;
+        Some((
+            source.clone(),
+            encoding.media_plan(recipe.file.duration_ms.unwrap_or(0)),
+        ))
+    });
+    let head = async {
+        match copied {
+            Some(copied) => {
+                read_regenerated_head(
+                    owner,
+                    stdout,
+                    HEAD_REGENERATION_TIMEOUT,
+                    HEAD_REGENERATION_MAX_BYTES,
+                    Some(copied),
+                )
+                .await
+            }
+            None => {
+                read_regenerated_head_before(
+                    owner,
+                    stdout,
+                    HEAD_REGENERATION_TIMEOUT,
+                    HEAD_REGENERATION_MAX_BYTES,
+                )
+                .await
+            }
+        }
+    };
+    let (muxer, diagnostic) = tokio::join!(head, crate::ffmpeg::drain_diagnostics(stderr));
     let diagnostic = crate::ffmpeg::classify_diagnostic(&diagnostic);
     if !diagnostic.informational.is_empty() {
         tracing::debug!(target: "plurxd::vodserve", informational = %diagnostic.informational, "VOD head regeneration informational output");
@@ -107,9 +212,7 @@ pub(super) async fn regenerate_init_head(
             .verify_init(&muxer)
             .map_err(|error| HeadRegenerationError::Failed(error.to_string()))?;
     }
-    identity
-        .served_init_for(&muxer)
-        .map_err(|refused| HeadRegenerationError::Failed(refused.to_string()))
+    Ok(muxer)
 }
 
 /// Read exactly one regeneration child's muxer head within the supplied
@@ -121,11 +224,23 @@ pub(super) async fn read_regenerated_head_before(
     budget: Duration,
     max_bytes: usize,
 ) -> Result<Init, HeadRegenerationError> {
+    read_regenerated_head(child.into(), stdout, budget, max_bytes, None).await
+}
+
+async fn read_regenerated_head(
+    mut child: HeadChildOwner,
+    mut stdout: tokio::process::ChildStdout,
+    budget: Duration,
+    max_bytes: usize,
+    copied: Option<(plurx_core::transcode::VodSourceAudio, SegmentPlan)>,
+) -> Result<Init, HeadRegenerationError> {
     // The stdout arrives separately from the child because the owner below
     // takes the child by value, and the read needs the pipe after that move.
-    let mut child = child.into();
-    let mut stdout = stdout;
-    let head = tokio::time::timeout(budget, read_muxer_init_bounded(&mut stdout, max_bytes)).await;
+    let head = tokio::time::timeout(
+        budget,
+        read_muxer_head_bounded(&mut stdout, max_bytes, copied),
+    )
+    .await;
     // Only the head is wanted; the rest of the pipe is not read.
     drop(stdout);
     child.terminate_and_reap().await;
@@ -152,8 +267,21 @@ pub(super) async fn read_muxer_init_bounded<R: AsyncRead + Unpin>(
     src: &mut R,
     max_bytes: usize,
 ) -> io::Result<(Vec<u8>, Init)> {
+    read_muxer_head_bounded(src, max_bytes, None).await
+}
+
+async fn read_muxer_head_bounded<R: AsyncRead + Unpin>(
+    src: &mut R,
+    max_bytes: usize,
+    copied: Option<(plurx_core::transcode::VodSourceAudio, SegmentPlan)>,
+) -> io::Result<(Vec<u8>, Init)> {
     let mut consumed = Vec::new();
     let mut reader = FragmentReader::new();
+    if copied.is_some() {
+        reader.reject_reinitialization();
+    }
+    let mut copied = copied;
+    let mut copied_head = None;
     let mut buf = vec![0u8; (256 * 1024).min(max_bytes.max(1))];
     loop {
         let remaining = max_bytes.saturating_sub(consumed.len());
@@ -177,7 +305,26 @@ pub(super) async fn read_muxer_init_bounded<R: AsyncRead + Unpin>(
             match reader.next_unit() {
                 Ok(Some(Unit::Init(mut init))) => {
                     sanitize_stale_dolby_brand(&mut init);
-                    return Ok((consumed, init));
+                    if let Some((source, plan)) = copied.take() {
+                        let segmenter = plurx_core::fmp4::PlannedAudioSegmenter::with_source_copy(
+                            init.clone(),
+                            plan,
+                            0,
+                            Some(source),
+                        )
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                        copied_head = Some((init, segmenter));
+                    } else {
+                        return Ok((consumed, init));
+                    }
+                }
+                Ok(Some(Unit::Fragment(fragment))) => {
+                    if let Some((init, mut segmenter)) = copied_head.take() {
+                        segmenter
+                            .push(fragment)
+                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                        return Ok((consumed, init));
+                    }
                 }
                 Ok(Some(_)) => continue,
                 Ok(None) => break,

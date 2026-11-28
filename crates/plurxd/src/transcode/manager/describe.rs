@@ -96,6 +96,7 @@ impl TranscodeManager {
             let facts = self.vod.hls_facts(&recovered.start.session_id).await?;
             let encoding = facts.encoding.as_ref();
             return Some(StartInfo {
+                vod_copy_layout: recovered.start.vod_copy_layout,
                 processed_dv_profile: encoding
                     .filter(|encoding| encoding.preserves_processed_dv())
                     .map(|_| 8),
@@ -103,7 +104,15 @@ impl TranscodeManager {
                 degraded_processing: None,
                 retained_output: facts.response_owner.retained_output_facts(),
                 audio_delivery: facts.audio_delivery,
-                playlist_url: format!("/api/v1/hls/{}/index.m3u8", recovered.start.session_id),
+                playlist_url: format!(
+                    "/api/v1/hls/{}/{}.m3u8",
+                    recovered.start.session_id,
+                    if recovered.start.split {
+                        "master"
+                    } else {
+                        "index"
+                    },
+                ),
                 session_id: recovered.start.session_id,
                 duration_ms: Some(recovered.start.duration_ms),
                 start_seconds: 0.0,
@@ -132,6 +141,7 @@ impl TranscodeManager {
             .and_then(|f| f.duration_ms);
         let encoder = *session.encoder_label.lock().await;
         Some(StartInfo {
+            vod_copy_layout: None,
             processed_dv_profile: None,
             processed_fel: None,
             degraded_processing: None,
