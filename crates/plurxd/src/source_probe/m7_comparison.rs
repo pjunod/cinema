@@ -313,7 +313,7 @@ async fn execute_owned(
     .await?;
 
     for held in candidates {
-        if !held.unchanged_in_place().await {
+        if !held.unchanged().await {
             return Err(Error::Authority("authored clip"));
         }
     }
