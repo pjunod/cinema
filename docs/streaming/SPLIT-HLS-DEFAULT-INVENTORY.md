@@ -1,7 +1,10 @@
 # Split HLS as the default — inventory, client matrix and baseline method
 
 **Status:** qualification open. S1–S4 are merged. S5 is in promotion and
-S6–S8 are under verification. The [rendition contract](SPLIT-HLS-RENDITION-CONTRACT.md)
+S6–S8 are under verification. S7 implements client playback. The S8
+candidate advertises split support in the ordinary browser, Apple,
+Android, and Linux capabilities after qualification. Existing explicit
+split requests remain available. The [rendition contract](SPLIT-HLS-RENDITION-CONTRACT.md)
 describes the current producer and client interfaces.
 
 **Owner:** Codex · **Effort:** `E-5F2C2E9EA4` ·
