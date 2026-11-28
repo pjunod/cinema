@@ -1137,11 +1137,13 @@ async fn one_model_receipt_qualifies_and_legacy_translation_actions_publish_noth
         background_jobs::{EnqueueJob, JobPayload, JobRequest},
         background_jobs_transcription::{ModelAction, PublishSubtitleModel, SubtitleModelReceipt},
     };
-    let (_dir, store, conn) = fixture();
     for (label, action, legacy) in [
         ("translation", ModelAction::TranslationVerify, true),
         ("ordinary", ModelAction::Verify, false),
     ] {
+        // A rejected publication leaves the claim active. Give each action its
+        // own worker slot so both cases exercise publication.
+        let (_dir, store, conn) = fixture();
         let id = uuid::Uuid::new_v4().to_string();
         let selected = profile();
         let source = JobPayload::SubtitleModelOperation {
@@ -1198,7 +1200,10 @@ async fn one_model_receipt_qualifies_and_legacy_translation_actions_publish_noth
             })
             .await;
         if legacy {
-            assert!(published.is_err(), "a legacy translation action publishes nothing");
+            assert!(
+                published.is_err(),
+                "a legacy translation action publishes nothing"
+            );
         } else {
             assert!(published.expect("publish"));
         }

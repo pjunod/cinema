@@ -534,8 +534,8 @@ pub(crate) async fn model_operation(
             operations.push(json!({"node_id":node,"job_id":null,"outcome":"worker_not_current"}));
             continue;
         }
-        let outcome = crate::subtitle_models::enqueue_explicit_operation(state, model, node, action)
-            .await?;
+        let outcome =
+            crate::subtitle_models::enqueue_explicit_operation(state, model, node, action).await?;
         let job_id = match &outcome {
             EnqueueOutcome::Accepted { job_id, .. } | EnqueueOutcome::Existing { job_id, .. } => {
                 Some(job_id.clone())

@@ -696,10 +696,9 @@ impl WorkerObservation {
             && self.models.len() <= 4
             && self.waits.len() <= 32
             && self.cores.is_none_or(|cores| (1..=4096).contains(&cores))
-            && self
-                .requirements
-                .as_ref()
-                .is_none_or(|rows| rows.len() <= 4 && rows.iter().all(self_install::Requirement::bounded))
+            && self.requirements.as_ref().is_none_or(|rows| {
+                rows.len() <= 4 && rows.iter().all(self_install::Requirement::bounded)
+            })
             && self.engine.as_ref().is_none_or(|engine| {
                 engine.contract.len() <= 256
                     && engine.platform.len() <= 64
@@ -825,17 +824,21 @@ async fn refresh_local(state: &AppState) -> Result<(), StoreError> {
         });
         let verified = accepted
             && !failed
-            && opened.as_ref().ok().zip(engine).is_some_and(|(model, engine)| {
-                current_receipt(
-                    &receipts,
-                    &state.node_id,
-                    &state.subtitle_models.boot_id,
-                    spec,
-                    &EngineIdentity::of(engine),
-                    *model,
-                )
-                .is_some()
-            });
+            && opened
+                .as_ref()
+                .ok()
+                .zip(engine)
+                .is_some_and(|(model, engine)| {
+                    current_receipt(
+                        &receipts,
+                        &state.node_id,
+                        &state.subtitle_models.boot_id,
+                        spec,
+                        &EngineIdentity::of(engine),
+                        *model,
+                    )
+                    .is_some()
+                });
         let status = if opened.is_ok() && !accepted {
             "unverified_cache"
         } else if failed {
@@ -3126,7 +3129,11 @@ mod tests {
         assert_eq!(again[0].state, "downloading");
         assert_eq!(queued_model_operations(&state).await.len(), 1);
         assert_eq!(
-            state.subtitle_models.local_observation().await.and_then(|o| o.requirements),
+            state
+                .subtitle_models
+                .local_observation()
+                .await
+                .and_then(|o| o.requirements),
             Some(again),
             "the outcome reaches the worker observation"
         );
@@ -3175,7 +3182,11 @@ mod tests {
             .expect("model permissions");
         drop(cache);
         refresh_local(&state).await.expect("observe");
-        let observed = state.subtitle_models.local_observation().await.expect("observation");
+        let observed = state
+            .subtitle_models
+            .local_observation()
+            .await
+            .expect("observation");
         assert_eq!(
             observed
                 .models
@@ -3195,7 +3206,10 @@ mod tests {
         )
         .await
         .expect("pass");
-        assert_eq!(rows[0].state, "downloading", "present bytes need no new disk");
+        assert_eq!(
+            rows[0].state, "downloading",
+            "present bytes need no new disk"
+        );
         let jobs = queued_model_operations(&state).await;
         assert_eq!(jobs.len(), 1);
         assert!(matches!(
@@ -3275,10 +3289,20 @@ mod tests {
             );
         }
         assert_eq!(self_test_for(small()), SelfTest::GermanToEnglish);
-        let base_en = catalog().models.iter().find(|m| m.id == "base.en").expect("base.en");
+        let base_en = catalog()
+            .models
+            .iter()
+            .find(|m| m.id == "base.en")
+            .expect("base.en");
         assert_eq!(self_test_for(base_en), SelfTest::English);
-        assert_eq!(crate::subtitle_translation::profile::SELF_TEST_LANGUAGE, "de");
-        assert_eq!(small().sha256, crate::subtitle_translation::profile::MODEL_SHA256);
+        assert_eq!(
+            crate::subtitle_translation::profile::SELF_TEST_LANGUAGE,
+            "de"
+        );
+        assert_eq!(
+            small().sha256,
+            crate::subtitle_translation::profile::MODEL_SHA256
+        );
     }
 
     /// A queued row of the removed translation install path is settled by

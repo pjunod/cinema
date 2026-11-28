@@ -3,8 +3,7 @@ use super::{artifacts, profile, runtime, AppState, StoreError, TranslationQuery,
 use crate::background_jobs::{ActiveBackgroundJob, JobFence};
 use plurx_core::store::{
     background_jobs::{
-        CandidateQuery, ClaimJob, EnqueueJob, JobKind, JobPayload, JobRequest,
-        JobSettlement,
+        CandidateQuery, ClaimJob, EnqueueJob, JobKind, JobPayload, JobRequest, JobSettlement,
     },
     subtitle_translation::{RangeRecipe, SourceRevision, TranslationProfile},
     subtitle_translation_mutation::{TranslationAction, TranslationMutation},
@@ -860,8 +859,7 @@ mod tests {
 mod receipt_tests {
     use super::*;
     use plurx_core::{
-        fs_secure::FileIdentity,
-        store::background_jobs_transcription::SubtitleModelReceipt,
+        fs_secure::FileIdentity, store::background_jobs_transcription::SubtitleModelReceipt,
     };
 
     /// Progressive translation and transcription accept the one model

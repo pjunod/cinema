@@ -115,7 +115,15 @@ mod tests {
             keys.sort();
             assert_eq!(
                 keys,
-                ["cores", "gpu", "label", "node_id", "reason", "state", "tested_at_ms"]
+                [
+                    "cores",
+                    "gpu",
+                    "label",
+                    "node_id",
+                    "reason",
+                    "state",
+                    "tested_at_ms"
+                ]
             );
             assert!(node["gpu"].is_null());
         }

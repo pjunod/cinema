@@ -398,7 +398,13 @@ pub(super) async fn publish_model<T: QueueSql>(
             target_node_id,
             action,
             ..
-        } => (model_id, model_sha256, adapter_contract, target_node_id, action),
+        } => (
+            model_id,
+            model_sha256,
+            adapter_contract,
+            target_node_id,
+            action,
+        ),
         _ => return Err(StoreError::Task("not a model operation".into())),
     };
     // One receipt per model covers every purpose; the legacy per-profile

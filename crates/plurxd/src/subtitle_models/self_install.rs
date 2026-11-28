@@ -19,7 +19,9 @@
 use super::{catalog, enqueue_model_operation, AppState, CatalogModel, ModelAction};
 use plurx_core::{
     error::StoreError,
-    store::background_jobs::{EnqueueJob, EnqueueOutcome, JobKind, JobPayload, JobRequest, JobState},
+    store::background_jobs::{
+        EnqueueJob, EnqueueOutcome, JobKind, JobPayload, JobRequest, JobState,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -64,9 +66,9 @@ impl Requirement {
             )
             && self.reason.as_ref().is_none_or(|reason| {
                 reason.len() <= 64
-                    && reason
-                        .bytes()
-                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_' || byte.is_ascii_digit())
+                    && reason.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte == b'_' || byte.is_ascii_digit()
+                    })
             })
             && self.tested_at_ms.is_none_or(|at| at >= 0)
             && self.retry_at_ms.is_none_or(|at| at >= 0)
@@ -148,7 +150,10 @@ async fn free_disk_bytes(root: &std::path::Path) -> Option<u64> {
     }
     let mut path = root;
     for _ in 0..8 {
-        if tokio::fs::metadata(path).await.is_ok_and(|meta| meta.is_dir()) {
+        if tokio::fs::metadata(path)
+            .await
+            .is_ok_and(|meta| meta.is_dir())
+        {
             return crate::live_tv::free_space_bytes(path.to_str()?).await;
         }
         path = path.parent()?;
@@ -208,12 +213,21 @@ pub(crate) async fn pass_with(
     if settings.from_audio {
         for id in crate::ai_subtitles::required_speech_models(settings.quality) {
             let Some(spec) = catalog().models.iter().find(|model| model.id == *id) else {
-                rows.push(Requirement::new(id, "unsupported", Some("model_unregistered")));
+                rows.push(Requirement::new(
+                    id,
+                    "unsupported",
+                    Some("model_unregistered"),
+                ));
                 continue;
             };
             let (status, tested) = observation
                 .as_ref()
-                .and_then(|observation| observation.models.iter().find(|model| model.model_id == *id))
+                .and_then(|observation| {
+                    observation
+                        .models
+                        .iter()
+                        .find(|model| model.model_id == *id)
+                })
                 .map_or(("unknown", None), |model| {
                     (model.status.as_str(), model.verified_at_ms)
                 });
@@ -247,7 +261,9 @@ async fn text_status(state: &AppState) -> Result<(&'static str, Option<i64>), St
         }
         Err(_) => return Ok(("unknown", None)),
     };
-    let engine = crate::subtitle_text_translation::engine_identity().await.ok();
+    let engine = crate::subtitle_text_translation::engine_identity()
+        .await
+        .ok();
     let receipts = state.store.subtitle_model_receipts(&state.node_id).await?;
     let tested = receipts
         .iter()
@@ -300,7 +316,11 @@ async fn step(
                     JobState::Queued | JobState::Running | JobState::Cancelling
                 ) =>
             {
-                return Ok(Requirement::new(&model_id, "downloading", Some("installing")));
+                return Ok(Requirement::new(
+                    &model_id,
+                    "downloading",
+                    Some("installing"),
+                ));
             }
             Some(job) if job.state == JobState::Succeeded => *attempt = Attempt::default(),
             Some(job) => {
@@ -327,12 +347,24 @@ async fn step(
     if status == "installed" {
         // An accepted install from an earlier boot: the automatic per-boot
         // re-test qualifies it, not a reinstall.
-        return Ok(Requirement::new(&model_id, "downloading", Some("verifying")));
+        return Ok(Requirement::new(
+            &model_id,
+            "downloading",
+            Some("verifying"),
+        ));
     }
     if !engine {
-        return Ok(Requirement::new(&model_id, "unsupported", Some("engine_unavailable")));
+        return Ok(Requirement::new(
+            &model_id,
+            "unsupported",
+            Some("engine_unavailable"),
+        ));
     }
-    if let Err(reason) = fits(download_bytes, matches!(status, "missing" | "unknown"), facts) {
+    if let Err(reason) = fits(
+        download_bytes,
+        matches!(status, "missing" | "unknown"),
+        facts,
+    ) {
         return Ok(Requirement::new(&model_id, "unsupported", Some(reason)));
     }
     if attempt.failures > 0 && now_ms < attempt.retry_at_ms {
@@ -341,7 +373,11 @@ async fn step(
         return Ok(failed);
     }
     if !may_execute {
-        return Ok(Requirement::new(&model_id, "downloading", Some("waiting_for_worker")));
+        return Ok(Requirement::new(
+            &model_id,
+            "downloading",
+            Some("waiting_for_worker"),
+        ));
     }
     let suffix = format!(
         "{KEY_PREFIX}{}:{}",
@@ -350,8 +386,14 @@ async fn step(
     );
     let outcome = match target {
         Target::Speech(spec) => {
-            enqueue_model_operation(state, spec, &state.node_id, ModelAction::Install, Some(&suffix))
-                .await?
+            enqueue_model_operation(
+                state,
+                spec,
+                &state.node_id,
+                ModelAction::Install,
+                Some(&suffix),
+            )
+            .await?
         }
         Target::Text => enqueue_text_install(state, &suffix, now_ms).await?,
     };

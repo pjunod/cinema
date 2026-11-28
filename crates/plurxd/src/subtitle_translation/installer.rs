@@ -12,25 +12,19 @@
 mod qualification {
     use super::super::profile;
     use crate::{
-        state::AppState,
-        subtitle_models::artifacts,
-    };
-    use plurx_core::store::background_jobs_transcription::ModelAction;
-    use std::time::Duration;
-    use tokio_util::sync::CancellationToken;
-    use crate::{
         http::extract::{AdminUser, AuthUser},
         subtitle_translation::{api, config},
     };
+    use crate::{state::AppState, subtitle_models::artifacts};
     use axum::{
         extract::{Path, Query, State},
         http::{HeaderMap, HeaderValue},
         Json,
     };
+    use plurx_core::store::background_jobs_transcription::ModelAction;
     use plurx_core::store::{
         background_jobs::{JobPayload, JobState},
-        keys,
-        BackgroundJobStore, SqliteStore, Store,
+        keys, BackgroundJobStore, SqliteStore, Store,
     };
     use plurx_core::{
         domain::{ItemKind, LibraryKind, NewItem, NewLibrary},
@@ -42,7 +36,9 @@ mod qualification {
     use serde_json::json;
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::MetadataExt;
+    use std::time::Duration;
     use std::{os::unix::fs::DirBuilderExt, path::PathBuf, sync::Arc};
+    use tokio_util::sync::CancellationToken;
 
     fn required_path(name: &str) -> PathBuf {
         let path = std::env::var_os(name)
@@ -135,7 +131,10 @@ mod qualification {
             .await
             .expect("queued job read")
             .expect("queued job");
-        assert!(matches!(queued.state, JobState::Queued | JobState::Succeeded));
+        assert!(matches!(
+            queued.state,
+            JobState::Queued | JobState::Succeeded
+        ));
         assert!(
             matches!(queued.supported_payload().expect("typed model payload"),
             JobPayload::SubtitleModelOperation { translation_profile:None, action:accepted_action, .. }
@@ -216,9 +215,11 @@ mod qualification {
             .await
             .expect("durable model receipts");
         assert!(
-            receipts.iter().any(|receipt| receipt.model_sha256 == spec.sha256
-                && receipt.engine_sha256 == engine.binary_sha256
-                && receipt.boot_id == state.subtitle_models.boot_id),
+            receipts
+                .iter()
+                .any(|receipt| receipt.model_sha256 == spec.sha256
+                    && receipt.engine_sha256 == engine.binary_sha256
+                    && receipt.boot_id == state.subtitle_models.boot_id),
             "the one model receipt must survive reopening private SQLite"
         );
         state.shutdown.cancel();
