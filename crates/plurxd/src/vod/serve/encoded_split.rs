@@ -791,13 +791,19 @@ impl VodServe {
             }
             Ok(Some(ready))
         };
-        let result =
-            match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), result).await {
-                Ok(result) => result,
-                Err(_) => Err(VodError::Pending {
-                    retry_after: PENDING_RETRY_AFTER,
-                }),
-            };
+        // The HTTP child request already carries the custody and response
+        // fences. Poll the projection on the same task with its own frame.
+        let result = match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            Box::pin(result),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(VodError::Pending {
+                retry_after: PENDING_RETRY_AFTER,
+            }),
+        };
         Some(VodPublication { result, owner })
     }
 }
