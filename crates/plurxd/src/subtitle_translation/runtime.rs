@@ -5,6 +5,7 @@
 //! fenced operation here. Every exit awaits its hash/child before scratch and
 //! the caller's admission can retire.
 
+use super::artifacts;
 use crate::{
     background_jobs::JobFence,
     fragment_index_cluster::{open_source_playback_fence, SourceFence},
@@ -1174,6 +1175,154 @@ async fn decode_window(
         clock,
         has_signal,
     })
+}
+
+#[cfg(unix)]
+fn detected_language(output: &[u8]) -> Option<(&str, f32)> {
+    std::str::from_utf8(output).ok()?.lines().find_map(|line| {
+        let (_, detected) = line.split_once("detected language:")?;
+        let (language, probability) = detected.trim().split_once("(p")?;
+        let language = language.trim();
+        let probability = probability
+            .trim_start()
+            .strip_prefix('=')?
+            .trim_end()
+            .strip_suffix(')')?
+            .trim()
+            .parse::<f32>()
+            .ok()?;
+        (plurx_core::store::background_jobs_transcription::whisper_language(language)
+            && (0.0..=1.0).contains(&probability))
+        .then_some((language, probability))
+    })
+}
+
+#[cfg(unix)]
+pub(crate) async fn detect_spoken_language(
+    state: &AppState,
+    file: &MediaFile,
+    source: &VerifiedSource,
+    audio_index: i64,
+    spec: &artifacts::CatalogModel,
+    fence: &JobFence,
+    cancel: &CancellationToken,
+) -> Result<String, StoreError> {
+    use plurx_core::store::background_jobs_transcription::{whisper_language, SubtitlePhase};
+    let hint = file
+        .audio_streams
+        .iter()
+        .find(|audio| audio.index == audio_index)
+        .and_then(|audio| audio.language.as_deref())
+        .map(crate::subtitle_transcription::normalized_language)
+        .filter(|language| whisper_language(language));
+    let engine = artifacts::inspect_engine()
+        .await
+        .map_err(StoreError::Task)?;
+    let model = artifacts::open_model_cancellable(&state.subtitle_models.root, spec, cancel)
+        .await
+        .map_err(StoreError::Task)?;
+    let clock = selected_clock(
+        source,
+        audio_index,
+        file.duration_ms
+            .ok_or_else(|| failure("source_clock_unsupported"))?,
+        cancel,
+    )
+    .await?;
+    let root = state.runtime_cache_dir.join("subtitle-translation");
+    let _reservation = crate::playback_cache::reserve(&root, scratch_allowance(&engine, 0))
+        .await
+        .map_err(|_| failure("output_invalid"))?;
+    tokio::fs::create_dir_all(&root)
+        .await
+        .map_err(|_| failure("output_invalid"))?;
+    let scratch = crate::subtitle_transcription::private_attempt(&root)
+        .map_err(|_| failure("output_invalid"))?;
+    let invocation =
+        crate::subtitle_transcription::engine_invocation(&engine, scratch.path(), cancel).await?;
+    let mut best = None;
+    let start = (clock.audio_start_samples / 16).max(0);
+    for begin in (start..clock.duration_ms.min(start.saturating_add(90_000))).step_by(30_000) {
+        let end = (begin + 30_000).min(clock.duration_ms);
+        source.recheck(state, file, cancel).await?;
+        phase(fence, SubtitlePhase::Decoding, cancel).await?;
+        let decoded = decode_window(
+            &source.fence.handle,
+            Window {
+                purpose: Purpose::Range,
+                core_begin_ms: begin,
+                core_end_ms: end,
+                begin_ms: begin,
+                end_ms: end,
+                audio_index,
+                audio_start_samples: clock.audio_start_samples,
+            },
+            scratch.path(),
+            &crate::ffmpeg::ffmpeg_bin(),
+            cancel,
+        )
+        .await?;
+        if !decoded.has_signal {
+            continue;
+        }
+        phase(fence, SubtitlePhase::Transcribing, cancel).await?;
+        crate::subtitle_transcription::managed_artifacts_unchanged(&engine, &model)?;
+        rewind(&decoded.file)?;
+        rewind(&model.handle)?;
+        let mut command = tokio::process::Command::new(&invocation.program);
+        command.args([
+            "--detect-language",
+            "--language",
+            "auto",
+            "--threads",
+            "2",
+            "--no-gpu",
+            "--model",
+            "/dev/fd/5",
+            "--file",
+            "/dev/fd/3",
+        ]);
+        crate::ffmpeg::inherit_file_descriptors(
+            &mut command,
+            &[(&decoded.file, 3), (&model.handle, 5), (&engine.handle, 7)],
+        );
+        let output = child_output(&mut command, Duration::from_secs(45), 64 * 1024, true).await?;
+        if !invocation.unchanged()
+            || std_file_identity(&decoded.file).ok() != Some(decoded.identity)
+        {
+            return Err(failure("artifact_changed"));
+        }
+        crate::subtitle_transcription::managed_artifacts_unchanged(&engine, &model)?;
+        source.recheck(state, file, cancel).await?;
+        if let Some((language, probability)) =
+            detected_language(&output.stderr).or_else(|| detected_language(&output.stdout))
+        {
+            if probability >= 0.7 {
+                return Ok(language.to_owned());
+            }
+            if best
+                .as_ref()
+                .is_none_or(|(_, previous)| probability > *previous)
+            {
+                best = Some((language.to_owned(), probability));
+            }
+        }
+    }
+    hint.or_else(|| best.map(|(language, _)| language))
+        .ok_or_else(|| failure("spoken_language_unknown"))
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn detect_spoken_language(
+    _state: &AppState,
+    _file: &MediaFile,
+    _source: &VerifiedSource,
+    _audio_index: i64,
+    _spec: &artifacts::CatalogModel,
+    _fence: &JobFence,
+    _cancel: &CancellationToken,
+) -> Result<String, StoreError> {
+    Err(failure("engine_unavailable"))
 }
 
 #[cfg(unix)]

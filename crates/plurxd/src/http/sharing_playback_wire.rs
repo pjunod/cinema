@@ -553,6 +553,7 @@ mod tests {
             subtitles: vec![super::super::stream::SubTrackDto {
                 source: "embedded",
                 downloaded_subtitle_id: None,
+                ai: false,
                 index: 3,
                 codec: "hdmv_pgs_subtitle".into(),
                 language: Some("eng".into()),

@@ -445,6 +445,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/subtitles/search"
         | "/api/v1/files/{id}/subtitles/download"
         | "/api/v1/files/{id}/subtitles/transcribe"
+        | "/api/v1/files/{id}/ai-subtitles"
         | "/api/v1/files/{id}/subtitle-text-translation/options"
         | "/api/v1/files/{id}/subtitle-translation/options"
         | "/api/v1/files/{id}/subtitle-translation/assets"
@@ -558,6 +559,10 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/hls/startup-decision"
         | "/api/v1/files/{id}/subtitle-translation"
         | "/api/v1/subtitle-translation/operations/{id}"
+        | "/api/v1/ai-subtitles/operations/{id}/cues"
+        | "/api/v1/ai-subtitles/operations/{id}/viewer"
+        | "/api/v1/ai-subtitles/operations/{id}/stop"
+        | "/api/v1/files/{id}/subtitles/{index}"
         | "/api/v1/subtitle-translation/operations/{id}/demands/{demand}"
         | "/api/v1/subtitle-translation/operations/{id}/stop"
         | "/api/v1/subtitle-translation/operations/{id}/retry"
@@ -2051,6 +2056,27 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/files/{id}/subtitle-translation/options",
             get(crate::subtitle_translation::api::options),
+        )
+        .route(
+            "/files/{id}/ai-subtitles",
+            get(crate::ai_subtitles::routes::describe).post(crate::ai_subtitles::routes::start),
+        )
+        .route(
+            "/ai-subtitles/operations/{id}/cues",
+            get(crate::ai_subtitles::routes::cues),
+        )
+        .route(
+            "/ai-subtitles/operations/{id}/viewer",
+            put(crate::ai_subtitles::routes::update_viewer)
+                .delete(crate::ai_subtitles::routes::release_viewer),
+        )
+        .route(
+            "/ai-subtitles/operations/{id}/stop",
+            post(crate::ai_subtitles::routes::release_viewer),
+        )
+        .route(
+            "/files/{id}/subtitles/{index}",
+            axum::routing::delete(crate::ai_subtitles::routes::delete_track),
         )
         .route(
             "/files/{id}/subtitle-translation",

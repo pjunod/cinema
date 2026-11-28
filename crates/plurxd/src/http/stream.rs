@@ -403,6 +403,8 @@ pub struct SubTrackDto {
     pub source: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub downloaded_subtitle_id: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ai: bool,
     /// Position among subtitle streams (`s:{index}`).
     pub index: i64,
     pub codec: String,
@@ -1159,6 +1161,9 @@ fn sub_tracks(file: &MediaFile, overlay_enabled: bool) -> Vec<SubTrackDto> {
         .iter()
         .enumerate()
         .map(|(i, s)| SubTrackDto {
+            ai: file
+                .downloaded_subtitle(i as i64)
+                .is_some_and(|caption| caption.is_ai()),
             source: if file.downloaded_subtitle(i as i64).is_some() {
                 "downloaded"
             } else {
@@ -1170,7 +1175,14 @@ fn sub_tracks(file: &MediaFile, overlay_enabled: bool) -> Vec<SubTrackDto> {
             index: i as i64,
             codec: s.codec.clone(),
             language: s.language.clone(),
-            title: s.title.clone(),
+            title: if file
+                .downloaded_subtitle(i as i64)
+                .is_some_and(|caption| caption.is_ai())
+            {
+                Some(super::hls::subtitle_names::language_name(s.language.as_deref()).to_owned())
+            } else {
+                s.title.clone()
+            },
             default: s.default,
             forced: s.forced,
             text: !is_bitmap_subtitle(&s.codec),

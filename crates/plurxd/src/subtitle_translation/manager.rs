@@ -572,12 +572,38 @@ async fn execute(
         return Err(StoreError::Task("demand_expired".into()));
     }
     match source {
-        JobPayload::SubtitleTranslationPrepare { .. } => {
+        JobPayload::SubtitleTranslationPrepare {
+            spoken_language, ..
+        } => {
+            let resolved_language = if spoken_language == "auto" {
+                let spec = profile::model_spec_for(selected)?;
+                let detection = runtime::detect_spoken_language(
+                    state,
+                    &file,
+                    &held,
+                    audio_index,
+                    &spec,
+                    fence,
+                    cancel,
+                );
+                tokio::pin!(detection);
+                Some(tokio::select! {
+                    result = &mut detection => result?,
+                    () = crate::subtitle_transcription::watch_speech_capacity(&state.transcode, admission) => {
+                        cancel.cancel();
+                        let _ = detection.await;
+                        return Err(StoreError::Task("waiting_for_playback_capacity".into()));
+                    }
+                })
+            } else {
+                None
+            };
             fence
                 .bind_translation_source(
                     source.clone(),
                     held.sha256().into(),
                     artifacts::identity_key(held.identity()),
+                    resolved_language,
                 )
                 .await
         }
@@ -895,6 +921,7 @@ fn safe_reason(message: &str) -> &'static str {
     [
         "source_changed",
         "source_clock_unsupported",
+        "spoken_language_unknown",
         "worker_source_unavailable",
         "translation_profile_unavailable",
         "translation_unverified",

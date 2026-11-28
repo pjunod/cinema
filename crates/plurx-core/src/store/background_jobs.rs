@@ -2120,7 +2120,8 @@ impl JobPayload {
                     && *operation_epoch > 0
                     && profile.validate().is_ok()
                     && (0..=255).contains(audio_index)
-                    && super::background_jobs_transcription::whisper_language(spoken_language)
+                    && (super::background_jobs_transcription::whisper_language(spoken_language)
+                        || (spoken_language == "auto" && profile.task.is_translation()))
                     && (1..=super::subtitle_translation::MAX_TRANSLATION_DURATION_MS)
                         .contains(duration_ms)
                     && identifier(target_node_id)
@@ -2909,6 +2910,21 @@ pub trait BackgroundJobStore: Send + Sync {
         exclude_operation_id: Option<&str>,
         now_ms: i64,
     ) -> Result<i64, StoreError>;
+    async fn ai_subtitle_intent(
+        &self,
+        user_id: i64,
+        now_ms: i64,
+        access: super::ai_subtitles::IntentAccess,
+    ) -> Result<Option<super::ai_subtitles::Intent>, StoreError>;
+    async fn ai_subtitle_viewer(
+        &self,
+        viewer: super::ai_subtitles::Viewer,
+    ) -> Result<bool, StoreError>;
+    async fn delete_ai_subtitle_track(
+        &self,
+        source: super::subtitle_translation::SourceRevision,
+        track_id: &str,
+    ) -> Result<(), StoreError>;
     async fn text_translation_request_receipt(
         &self,
         user_id: i64,
@@ -3864,6 +3880,27 @@ impl<T: QueueSql> BackgroundJobStore for T {
         now_ms: i64,
     ) -> Result<i64, StoreError> {
         super::ai_subtitles::active_work(self, user_id, exclude_operation_id, now_ms).await
+    }
+    async fn ai_subtitle_intent(
+        &self,
+        user_id: i64,
+        now_ms: i64,
+        access: super::ai_subtitles::IntentAccess,
+    ) -> Result<Option<super::ai_subtitles::Intent>, StoreError> {
+        super::ai_subtitles::intent(self, user_id, now_ms, access).await
+    }
+    async fn ai_subtitle_viewer(
+        &self,
+        viewer: super::ai_subtitles::Viewer,
+    ) -> Result<bool, StoreError> {
+        super::ai_subtitles::viewer(self, viewer).await
+    }
+    async fn delete_ai_subtitle_track(
+        &self,
+        source: super::subtitle_translation::SourceRevision,
+        track_id: &str,
+    ) -> Result<(), StoreError> {
+        super::ai_subtitles::delete_track(self, source, track_id).await
     }
     async fn text_translation_request_receipt(
         &self,

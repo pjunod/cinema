@@ -4,7 +4,7 @@ use super::*;
 /// concern, so they live here rather than in core — but the set is kept in
 /// step with the alias table `language_tag` reads, so a language that matches
 /// never renders as a bare three-letter code.
-pub(super) fn language_name(raw: Option<&str>) -> &str {
+pub(crate) fn language_name(raw: Option<&str>) -> &str {
     match language_tag(raw) {
         "en" => "English",
         "it" => "Italian",
@@ -96,7 +96,7 @@ fn negated_before(prefix: &str) -> bool {
     matches!(word, "non" | "not" | "no" | "never")
 }
 
-pub(super) fn track_is_forced(track: &SubtitleStream) -> bool {
+pub(crate) fn track_is_forced(track: &SubtitleStream) -> bool {
     track.forced || track.title.as_deref().is_some_and(title_marks_forced)
 }
 
@@ -109,7 +109,7 @@ pub(super) fn track_is_forced(track: &SubtitleStream) -> bool {
 /// The title sniff stays as the fallback, because a library probed before
 /// plurx read that disposition has nothing else to go on and re-probing is
 /// manual — so the naming convention keeps working exactly as it did.
-pub(super) fn subtitle_characteristics(track: &SubtitleStream) -> Option<&'static str> {
+pub(crate) fn subtitle_characteristics(track: &SubtitleStream) -> Option<&'static str> {
     const ACCESSIBILITY: &str =
         "public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound";
     if track.hearing_impaired {

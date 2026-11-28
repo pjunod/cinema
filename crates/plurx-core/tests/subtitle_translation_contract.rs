@@ -64,6 +64,89 @@ fn mutate(action: TranslationAction, now: i64) -> TranslationMutation {
         action,
     }
 }
+
+#[tokio::test]
+async fn automatic_language_is_resolved_by_fenced_preparation_before_asset_publication() {
+    use plurx_core::store::{
+        subtitle_translation_publication::BindTranslationSource,
+        subtitle_translation_read::{TranslationQuery, TranslationRead},
+    };
+    let (_dir, store, _) = fixture();
+    let mut request = create(1000);
+    let TranslationAction::Create { finish, spoken_language, .. } = &mut request.action else {
+        unreachable!()
+    };
+    *finish = true;
+    *spoken_language = "auto".into();
+    let receipt = store.mutate_subtitle_translation(request).await.expect("auto start");
+    let job = claim(&store, receipt["job_id"].as_str().expect("prepare job"), JobKind::SubtitleTranslationPrepare, 1100).await;
+    let proof = BindTranslationSource {
+        token: job.token.clone().expect("attempt"),
+        source: job.supported_payload().expect("auto prepare"),
+        source_sha256: "c".repeat(64),
+        local_identity: "held-model-and-source".into(),
+        resolved_language: Some("en".into()),
+        now_ms: 1200,
+    };
+    assert!(store.bind_translation_source(proof.clone()).await.expect("fenced source binding"));
+    assert!(store.bind_translation_source(proof).await.expect("exact retry"));
+    let rows = store.read_subtitle_translation(TranslationRead {
+        user_id: 1,
+        now_ms: 1300,
+        query: TranslationQuery::Operation { operation_id: receipt["operation_id"].as_str().unwrap().into() },
+    }).await.unwrap();
+    assert_eq!(rows[0]["spoken_language"], "en");
+    assert_eq!(rows[0]["output_language"], "en");
+    assert_eq!(rows[0]["task"], "transcribe");
+    assert!(rows[0]["asset_id"].is_string());
+}
+
+#[tokio::test]
+async fn ai_intent_pins_the_route_and_viewer_release_is_scoped_to_its_playback() {
+    use plurx_core::store::ai_subtitles::{Intent, IntentAccess, IntentRoute, Viewer};
+    use plurx_core::store::subtitle_translation_read::{TranslationQuery, TranslationRead};
+    let (_dir, store, _) = fixture();
+    let mut request = create(1000);
+    let TranslationAction::Create { finish, .. } = &mut request.action else {
+        unreachable!()
+    };
+    *finish = true;
+    let recipe = prepared_from(&store, request).await;
+    let first = uuid::Uuid::new_v4().to_string();
+    let second = uuid::Uuid::new_v4().to_string();
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let initial = Intent {
+        id: uuid::Uuid::new_v4().to_string(), digest: "f".repeat(64),
+        source: recipe.source.clone(), route: IntentRoute::Audio, track_index: 0,
+        language: None, playback_id: Some(first.clone()), position_ms: 0,
+        issued_at_ms: 20_000, producer_id: None,
+    };
+    let reserved = store.ai_subtitle_intent(1, 20_000, IntentAccess::Reserve {
+        request_id: request_id.clone(), intent: initial.clone(),
+    }).await.unwrap().expect("reserved intent");
+    assert_eq!(reserved.route, IntentRoute::Audio);
+    let replayed = store.ai_subtitle_intent(1, 20_000, IntentAccess::Reserve {
+        request_id: request_id.clone(),
+        intent: Intent { route: IntentRoute::Text, id: uuid::Uuid::new_v4().to_string(), ..initial.clone() },
+    }).await.unwrap().expect("original intent");
+    assert_eq!(replayed.id, initial.id);
+    assert_eq!(replayed.route, IntentRoute::Audio);
+    assert!(store.ai_subtitle_intent(2, 20_000, IntentAccess::Operation { id: initial.id }).await.unwrap().is_none());
+    let update = |playback_id: String, time, window| Viewer {
+        operation_id: recipe.operation_id.clone(), playback_id, user_id: 1,
+        now_ms: time, window,
+    };
+    for playback in [&first, &second] {
+        assert!(store.ai_subtitle_viewer(update(playback.clone(), 20_000, Some((0, 1.0)))).await.unwrap());
+    }
+    assert!(store.ai_subtitle_viewer(update(first, 20_001, None)).await.unwrap());
+    let demands = store.read_subtitle_translation(TranslationRead {
+        user_id: 0, now_ms: 20_002,
+        query: TranslationQuery::LiveDemands { operation_id: recipe.operation_id, operation_epoch: recipe.operation_epoch },
+    }).await.unwrap();
+    assert_eq!(demands.len(), 1);
+    assert_eq!(demands[0]["playback_id"], second);
+}
 #[tokio::test]
 async fn durable_preparation_stop_and_exact_replay_never_resurrect_work() {
     let (_dir, store, conn) = fixture();
@@ -445,6 +528,7 @@ async fn source_bind_cannot_replace_same_epoch_bytes_and_retry_can_revive_verifi
             token: token.clone(),
             source: source.clone(),
             source_sha256: b,
+            resolved_language: None,
             local_identity: "held-B".into(),
             now_ms: 1200
         })
@@ -455,6 +539,7 @@ async fn source_bind_cannot_replace_same_epoch_bytes_and_retry_can_revive_verifi
             token,
             source,
             source_sha256: a,
+            resolved_language: None,
             local_identity: "held-A".into(),
             now_ms: 1250
         })
@@ -516,6 +601,7 @@ async fn source_bind_cannot_replace_same_epoch_bytes_and_retry_can_revive_verifi
             token: job.token.expect("token"),
             source: serde_json::from_value(job.payload).expect("payload"),
             source_sha256: "c".repeat(64),
+            resolved_language: None,
             local_identity: "fresh-held-A".into(),
             now_ms: 1700
         })
@@ -835,6 +921,7 @@ async fn prepared_from(
             token: job.token.expect("token"),
             source,
             source_sha256: recipe.source_sha256.clone(),
+            resolved_language: None,
             local_identity: "verified-held-source".into(),
             now_ms: 1200
         })
@@ -1249,6 +1336,7 @@ async fn expired_preparation_and_existing_asset_can_acquire_fresh_owned_preparat
             token: owned.token.clone().expect("new boot claim"),
             source: owned.supported_payload().expect("owned payload"),
             source_sha256: recipe.source_sha256.clone(),
+            resolved_language: None,
             local_identity: "new-boot-held-source".into(),
             now_ms: 1800,
         })
@@ -2123,6 +2211,7 @@ async fn final_readable_core_completes_without_gaps_or_loser_downgrade_and_cache
             token: prep.token.clone().expect("new claim"),
             source: prep.supported_payload().expect("new preparation"),
             source_sha256: recipe.source_sha256.clone(),
+            resolved_language: None,
             local_identity: "fresh owned source attestation".into(),
             now_ms: 2800
         })

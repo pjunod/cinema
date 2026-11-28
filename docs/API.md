@@ -2732,6 +2732,12 @@ stay admin-only.
 |---|---|---|---|
 | GET | `/api/v1/ai-subtitles/settings` | bearer | The document, its `revision` and each node's `readiness` for it. Before the first save the document is derived from the older text translation, speech translation and managed transcription switches. |
 | PUT | `/api/v1/ai-subtitles/settings` | admin bearer | Replace the document; the body is every field plus `expected_revision`. A stale revision is `409 configuration_conflict`. |
+| GET | `/api/v1/files/{id}/ai-subtitles` | bearer | Describe the existing English track or the available AI route for this file. The optional `target` defaults to `en`. |
+| POST | `/api/v1/files/{id}/ai-subtitles` | bearer; `who` | Start or join English AI subtitles with a stable `request_id`. The route is automatic unless explicitly set to `text` or `audio`. Audio accepts a spoken-language override and an optional playback position. |
+| GET | `/api/v1/ai-subtitles/operations/{id}/cues` | bearer | Read up to 90 seconds of accepted cues and report the contiguous coverage around the requested position. |
+| PUT, DELETE | `/api/v1/ai-subtitles/operations/{id}/viewer` | bearer | Update or release this account's playback demand. PUT takes `position_ms`, `playback_rate`, and optional `playback_id`. DELETE takes optional `playback_id` as a query parameter. |
+| POST | `/api/v1/ai-subtitles/operations/{id}/stop` | bearer | Release the viewer's playback demand. Other viewers and the saved-track finish demand are independent. |
+| DELETE | `/api/v1/files/{id}/subtitles/{index}` | bearer; `who` | Delete the AI track at the displayed index when the required `track_id` query parameter matches its stable identity. |
 
 The document is `{"version":1,"download_match":bool,"translate_text":bool,
 "from_audio":bool,"ahead_of_time":bool,"who":"everyone"|"admins",

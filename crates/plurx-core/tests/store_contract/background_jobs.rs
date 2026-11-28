@@ -6161,6 +6161,7 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
                     token: job.token.expect("token"),
                     source: prep.supported_payload().expect("payload"),
                     source_sha256: "b".repeat(64),
+                    resolved_language: None,
                     local_identity: "held-current-boot".into(),
                     now_ms: 1300
                 })
