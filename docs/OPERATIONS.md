@@ -3374,20 +3374,13 @@ available encoder and egress. Build skew alone permits placement.
 Strict envelope changes require a `PROTOCOL_VERSION` bump and a dated note
 here. Newest first:
 
-- 2026-11-28: protocol 16 — seals the issued rolling HLS layout and its video
-  and audio identities on remote starts and durable takeover. A new sequence
-  epoch distinguishes resumed rolling objects. Upgrade worker and ingress
-  nodes in exact protocol cohorts. Keep protocol 15 capacity until protocol 16
-  capacity can take over qualified sessions.
-- 2026-11-28: protocol 15 — seals the selected encoded VOD layout and
-  projected child identities. Keep one eligible owner per active ingress
-  cohort until its sessions drain. [Rendition contract](streaming/SPLIT-HLS-RENDITION-CONTRACT.md).
-- 2026-11-27: protocol 14 — records the issued VOD copy layout and soundtrack
-  URLs at activation. Drain by cohort before removing the last old owner.
-- 2026-11-27: protocol 13 — an offer for a predicted split copy carries
-  `output_contract` `hls-split-fmp4-v1` and no soundtrack, so every language
-  places on and reuses one shared video. Drain by cohort as above.
-  [Detail](streaming/SPLIT-HLS-RENDITION-CONTRACT.md#4-the-offer-names-its-artifact-protocol-13).
+- 2026-11-28: protocol 16 — rolling HLS layout, child IDs and takeover
+  sequence epochs. Drain by cohort.
+- 2026-11-28: protocol 15 — sealed encoded VOD layout and projected child IDs.
+  [Contract](streaming/SPLIT-HLS-RENDITION-CONTRACT.md).
+- 2026-11-27: protocol 14 — sealed VOD copy layout and soundtrack URLs.
+- 2026-11-27: protocol 13 — the `hls-split-fmp4-v1` copy offer omits its
+  soundtrack so languages reuse video. [Detail](streaming/SPLIT-HLS-RENDITION-CONTRACT.md#4-the-offer-names-its-artifact-protocol-13).
 - 2026-11-22: protocol 12 — `split_audio` on the strict `SessionRequest`
   (one shared video, soundtracks as alternates); protocol 11 refuses it, so
   drain by cohort. [Detail](streaming/SHARED-VIDEO-MULTILINGUAL-VOD.md).
