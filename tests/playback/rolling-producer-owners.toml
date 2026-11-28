@@ -2754,6 +2754,8 @@ pattern = "REMOTE_ABORT_CAPACITY"
 
 [[module_symbols]]
 id = "m4-keyed-vod-build-owner"
+# Cross-rendition reclaim takes the existing donor key gate before reading
+# continuous reservations and touching its manifest.
 # Main PR915: +1 existing recipe-key gate acquisition in the retirement regression;
 # it holds the publication lock while confirming actual writer/child settlement.
 pattern = "rendition_build_gate"
@@ -2783,7 +2785,7 @@ pattern = "rendition_build_gate"
 "crates/plurxd/src/vod/serve/delivery.rs" = 3
 "crates/plurxd/src/vod/serve/quality.rs" = 1
 "crates/plurxd/src/vod/serve/serve.rs" = 1
-"crates/plurxd/src/vod/shared.rs" = 4
+"crates/plurxd/src/vod/shared.rs" = 5
 "crates/plurxd/src/vod/tests/chunk_02.rs" = 11
 "crates/plurxd/src/vod/tests/chunk_03.rs" = 1
 
@@ -2978,6 +2980,8 @@ pattern = "purge_if_dormant"
 
 [[module_structures]]
 id = "namespaced-task-spawn"
+# One node-owned VOD pressure sweep drains the pending request inbox under
+# its single-flight guard. No individual waiter owns a donor cleanup.
 # Source-budget audit (8ab61a779 -> bbc5c1664): +3 owned spawns. The existing
 # capture blocking owner moves to capture_at (zero net). QualificationStage
 # retains group_close's JoinHandle; Drop joins it before closing the broker.
@@ -3250,7 +3254,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 "crates/plurxd/src/vod/serve/quality.rs" = 1
 "crates/plurxd/src/vod/serve/serve.rs" = 1
 "crates/plurxd/src/vod/session.rs" = 3
-"crates/plurxd/src/vod/shared.rs" = 6
+"crates/plurxd/src/vod/shared.rs" = 7
 "crates/plurxd/src/vod/startup_prediction.rs" = 1
 "crates/plurxd/src/vod/tests/chunk_01.rs" = 1
 "crates/plurxd/src/vod/tests/chunk_02.rs" = 12
@@ -4762,6 +4766,8 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# The VOD pressure sweep retries temporarily busy donors once. Five fixture
+# timeouts bound settlement and wake checks without supplying a production timer.
 # Cinema chapter enrichment: two deadline branches bound one worker-owned
 # child before and after spawn. One obsolete state-layer deadline wait was
 # removed, and the affected regression waits have no net change.
@@ -5109,11 +5115,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 "crates/plurxd/src/vod/serve/end.rs" = 4
 "crates/plurxd/src/vod/serve/quality.rs" = 3
 "crates/plurxd/src/vod/serve/serve.rs" = 3
-"crates/plurxd/src/vod/shared.rs" = 4
+"crates/plurxd/src/vod/shared.rs" = 5
 "crates/plurxd/src/vod/startup_prediction.rs" = 3
 "crates/plurxd/src/vod/tests/chunk_01.rs" = 4
 "crates/plurxd/src/vod/tests/chunk_02.rs" = 22
-"crates/plurxd/src/vod/tests/chunk_03.rs" = 40
+"crates/plurxd/src/vod/tests/chunk_03.rs" = 45
 "crates/plurxd/src/vod/tests/copy_preparation.rs" = 12
 "crates/plurxd/src/vod/tests/encoded_preparation.rs" = 1
 "crates/plurxd/src/vod/tests/preparation_storage.rs" = 4

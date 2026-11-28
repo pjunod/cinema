@@ -489,6 +489,8 @@ impl VodServe {
                 head_regeneration_slots: Arc::new(Semaphore::new(HEAD_REGENERATION_CAPACITY)),
                 pool: WaitPool::new(DEFAULT_GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
                 working_set: AtomicU64::new(0),
+                working_set_reclaim: Arc::new(Mutex::new(())),
+                working_set_requests: StdMutex::new(HashMap::new()),
                 preparation_media: AtomicU64::new(0),
                 preparation_storage: preparation_storage::StorageRegistry::default(),
                 preparation_attachment: StdMutex::new(0),

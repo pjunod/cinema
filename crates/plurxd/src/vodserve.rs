@@ -1458,6 +1458,9 @@ struct Shared {
     pool: WaitPool,
     /// Node-wide un-admitted materialized bytes — `prodsched`'s working set.
     working_set: AtomicU64,
+    /// One foreground pressure sweep at a time; ordinary production never waits for it.
+    working_set_reclaim: Arc<Mutex<()>>,
+    working_set_requests: StdMutex<HashMap<String, u64>>,
     /// Private media, never ordinary playback pressure, until physical cleanup.
     preparation_media: AtomicU64,
     preparation_storage: preparation_storage::StorageRegistry,
